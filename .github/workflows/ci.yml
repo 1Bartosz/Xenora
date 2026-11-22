@@ -38,6 +38,7 @@ jobs:
           cargo test --locked --workspace
           scripts/audit/dependencies.sh
           scripts/audit/claims.sh
+          python3 scripts/audit/status.py --check
       - name: Inspect native CLI
         run: |
           cargo build --locked -p xenora

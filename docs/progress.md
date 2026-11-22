@@ -1,6 +1,6 @@
 # Phase 01 checkpoint
 
-**NOT RELEASE-READY.** The three-fixture demo checkpoint was pushed at `96cff7c66e55f1e4693ace19577c207795258d5c` and its [Native Rust checks](https://github.com/ranveersoni98/Xenora/actions/runs/45001680455) passed. See the [engineering report](testing/phase01-checkpoint.md) for gate status and subsequent assurance evidence.
+**NOT RELEASE-READY.** The three-fixture demo checkpoint was pushed at `96cff7c66e55f1e4693ace19577c207795258d5c` and its [Native Rust checks](https://github.com/ranveersoni98/Xenora/actions/runs/45001680455) passed. See the [current assurance report](testing/phase01-assurance.md) for candidate evidence and the [historical engineering report](testing/phase01-checkpoint.md) for the initial checkpoint.
 
 ## Reproduce
 
@@ -25,8 +25,8 @@ The independent CPU validation tests are part of the workspace. The native suite
 
 ## Remaining work
 
-1. G7 is the immediate priority. The historical source campaign at `a34dadc` reported 387 mutants. The targeted rerun and accounting rules are in [mutation testing](testing/mutation.md). Run the complete source campaign against the clean candidate, then run the separate semantic and oracle campaigns with R2.
-2. G5–G6 require independent R2 validation against the candidate. The automated three-way comparison covers all 15 decoded forms. Reproduce with the LLVM command above.
-3. G9 has three successful historical 601-second transcripts in `artifacts/g9/`. Record candidate scope, nightly version and individual process exit codes on the confirmation run. Run `scripts/fuzz.sh instruction_stream`, `scripts/fuzz.sh fixture` and `scripts/fuzz.sh reference` serially.
-4. G10 has a tracked [battery run](../benchmarks/results/apple-m5/run-1795338391/report.md). A second exploratory run used AC power. [Benchmark protocol and outstanding coverage](testing/benchmarks.md#exploratory-ac-run).
-5. G11 remains open for objc2 SDK-derived binding redistribution and the pinned license inventory audit. See the [runtime redistribution review](licenses.md#runtime-redistribution-review). R1 also owns the claims, history and status audits. Both reviewers must review the final candidate.
+1. Finish G7 independent oracle assurance. The complete source campaign at `aff46b0` killed 359 of 361 non-equivalent eligible mutants. The native semantic campaign killed all 12. The separate 44-case oracle campaign exposed seven independent-test gaps. R2’s witness tests are integrated. Rerun the [mutation commands](testing/mutation.md) against the resulting candidate.
+2. Preserve the G6 R2 sign-off. The G5 form-by-form report is in `tests/validation/README.md`. Confirm independent-oracle sensitivity on the integrated candidate. Run `cargo test --locked -p xenora-semantic-review` before candidate regression and mutation runs.
+3. Complete the affected candidate fixture fuzz run and record exit, duration, counts and log hash. `CARGO_BUILD_JOBS=2 scripts/fuzz.sh fixture 600`. Decoder and reference historical transcripts are under `artifacts/g9/`.
+4. Finish benchmark corpus and protocol coverage before rerunning on AC and an idle system. Preserve the [exploratory battery and AC records](testing/benchmarks.md).
+5. Close independent claims, status, history and review findings against the integrated candidate. Verify the [runtime redistribution blockers](licenses.md#runtime-redistribution-review) before claiming G11.

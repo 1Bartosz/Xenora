@@ -60,3 +60,85 @@ R2 identified diagnostic, scalar and vector selector, fixture limit, transfer
 ordering, reserved register and exact FP32 verifier regressions for the
 remaining survivors. The targeted rerun records which tests actually
 distinguish each mutant.
+
+## Complete source campaign at aff46b0
+
+Run from the clean candidate on 2026-11-22 with native ARM64 cargo-mutants
+27.1.0 and two workers.
+
+```sh
+CARGO_BUILD_JOBS=2 scripts/mutation.sh artifacts/mutation/source-aff46b0
+```
+
+The 399-entry inventory and finished outcomes contain the same identities.
+The baseline passed. Cargo-mutants exited 3 after reporting 360 caught,
+13 missed, 25 unviable, and one timeout. Independent R2 review inspected
+every survivor, every unviable compilation and each raw caught log.
+The conservative count credits named behavioral test failures only.
+
+| Module | Generated | Raw caught | Verified kills | Raw misses | Equivalent | Invalid | Timeout | Other non-progress | Non-equivalent score |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Decoder | 116 | 102 | 102 | 1 | 1 | 12 | 1 | 0 | 102/103 (99.03%) |
+| Reference | 171 | 161 | 160 | 5 | 5 | 5 | 0 | 1 | 160/161 (99.38%) |
+| Shader parser, verification and lowering | 112 | 97 | 97 | 7 | 7 | 8 | 0 | 0 | 97/97 (100%) |
+| **Total** | **399** | **360** | **359** | **13** | **13** | **25** | **1** | **1** | **359/361 (99.45%)** |
+
+The 13 raw misses were all independently reviewed as equivalent. The
+historical location table above applies except for the two shader branch
+guards moved during the whole-stream verification fix.
+
+- Shader `279:20`, entire guard replaced with false. `lift` is private and
+  receives decoder output only. The decoder rejects negative displacements
+  and targets outside instruction boundaries. The guard's original predicate
+  is always false.
+- Shader `280:21`, OR changed to AND. The same input contract makes both
+  components false, so the combined predicate is still false.
+- The 25 invalid entries are 22 missing `Default` implementations, one
+  ambiguous trait call, and two unsupported OR operators in a let chain.
+  The ledger maps every entry to the compiler log and mutation diff.
+- Decoder `120:16`, `+=` changed to `*=`, built successfully and explicitly
+  timed out after 300 seconds. A successfully decoded instruction leaves
+  the initially zero byte offset at zero, so the loop repeats.
+- Reference `235:16` applies the same change to the independent byte
+  offset. The test process received SIGKILL after about 183 seconds, with
+  no assertion failure. The mutant repeatedly appends the same instruction
+  at offset zero. The signal's origin was not recorded. This entry remains
+  in the denominator, separate from the explicit timeout.
+
+The ignored `artifacts/mutation/source-aff46b0/` directory contains
+`environment.log`, `exit-code`, `ledger.tsv`, `ledger-summary.txt`, and
+the original `mutants.out/` reports with per-mutant logs and diffs.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `mutants.out/mutants.json` | `1776e2a91e91f0e451ef6a24c483cda6251e2ae8561222bae665564d2edbe8a6` |
+| `mutants.out/outcomes.json` | `ff258c717976d1f9cb74ce776413200418fff04ffe5f81fad30f8932a6335d24` |
+| `ledger.tsv` | `fabd5488d0954f8778d118708f55e3818902d60788dcf4b877b108639513ae05` |
+
+## Semantic and oracle campaigns at aff46b0
+
+The [native semantic suite](../../tests/mutation/README.md) killed all 12
+enumerated mutations with both Metal validation layers enabled on Apple M5.
+Every unmodified GPU readback matched six hand-derived words and the CPU
+reference. Each deliberately changed shader then ran successfully and
+returned different words. R1 independently verified the scope, output and
+30-second child process cutoff. Raw log
+`artifacts/assurance-aff46b0/semantic.log` and exit 0.
+
+The oracle-only campaign mutated all generated `vector_alu` and
+`execute_lane` entries and ran the independent validation package alone.
+
+```sh
+CARGO_BUILD_JOBS=2 cargo mutants --file crates/ref/src/lib.rs \
+  --re ' in (vector_alu|execute_lane)$|replace (vector_alu|execute_lane) ->' \
+  --test-package xenora-semantic-review --jobs 2 --timeout 60 \
+  --output artifacts/mutation/oracle-aff46b0
+```
+
+Of 44 mutations, 37 were caught and seven survived. The survivors were the
+three changed operators in the FP32 operand guard at 287, the load or index
+guard at 339, the output write check at 350, the resource SGPR test at 367,
+and the outstanding transfer check at 392. They remain test gaps in the
+independent oracle package. Source and native semantic evidence are
+complete for the reviewed candidate. G7 remains open pending independent
+oracle follow-up.

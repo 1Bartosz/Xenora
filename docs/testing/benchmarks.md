@@ -1,7 +1,7 @@
 # Benchmark protocol
 
-The benchmark harness measures every shader in the correctness corpus that passes
-its correctness test in the same run. It never reports a number for a shader that
+The benchmark harness measures each fixture in its manifest that passes its
+correctness test in the same run. It never reports a number for a shader that
 failed or was skipped.
 
 ## Corpus
@@ -87,7 +87,8 @@ with AC power confirmed before and after, 30 seconds between the build and
 timing, two warmups, 21 measured repetitions per size and Metal validation
 off. Neither thermal nor performance warnings were recorded by
 `pmset -g therm`. All three declared translated fixtures passed their
-correctness checks. G10 remains open for the full correctness corpus,
+correctness checks. The recorded 1-, 5- and 15-minute load averages were
+8.12, 8.68 and 6.31, so an idle environment was not established. G10 remains open for the full correctness corpus,
 individual compiler stages and cold/warm timing, tool and capability metadata,
 and noise-based variability reporting. See the
 [generated report](../../benchmarks/results/apple-m5/run-1795352394/report.md).

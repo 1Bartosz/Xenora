@@ -33,8 +33,8 @@ enum Insn {
     VXor(u8, u8, u8),
     VAddF(u8, u8, u8),
     VMulF(u8, u8, u8),
-    Load { data: u8, index: u8, resource: u8 },
-    Store { data: u8, index: u8, resource: u8 },
+    Load(u8),
+    Store(u8),
     WaitRead,
     WaitWrite,
     End,
@@ -82,27 +82,13 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
         };
 
         match insn {
-            Insn::Load {
-                data,
-                index,
-                resource,
-            } => {
-                if index != 0 || resource != 0 {
-                    return Err(format!("{offset:#x}: load outside synthetic ABI"));
-                }
+            Insn::Load(data) => {
                 if data == 0 || pending_read.is_some() {
                     return Err(format!("{offset:#x}: invalid or overlapping load"));
                 }
                 pending_read = Some(data);
             }
-            Insn::Store {
-                data,
-                index,
-                resource,
-            } => {
-                if index != 0 || resource != 4 {
-                    return Err(format!("{offset:#x}: store outside synthetic ABI"));
-                }
+            Insn::Store(data) => {
                 let value = read_v(data)?;
                 if pending_write.is_some() || written.is_some() {
                     return Err(format!("{offset:#x}: multiple output writes"));
@@ -124,28 +110,31 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
                     Src::Imm(value) => value,
                     Src::Reg(reg) => read_v(reg)?,
                 };
-                if dst == 0 {
-                    return Err(format!("{offset:#x}: move writes v0"));
-                }
+                check_destination(dst, pending_read, offset)?;
                 vgpr[dst as usize] = Some(value);
             }
             Insn::VAddNc(dst, a, b) => {
-                let value = read_v(a)?.wrapping_add(read_v(b)?);
-                vgpr[dst as usize] = Some(value);
+                check_destination(dst, pending_read, offset)?;
+                let sum = u64::from(read_v(a)?) + u64::from(read_v(b)?);
+                vgpr[dst as usize] = Some(sum as u32);
             }
             Insn::VAnd(dst, a, b) => {
+                check_destination(dst, pending_read, offset)?;
                 let value = read_v(a)? & read_v(b)?;
                 vgpr[dst as usize] = Some(value);
             }
             Insn::VXor(dst, a, b) => {
+                check_destination(dst, pending_read, offset)?;
                 let value = read_v(a)? ^ read_v(b)?;
                 vgpr[dst as usize] = Some(value);
             }
             Insn::VAddF(dst, a, b) => {
+                check_destination(dst, pending_read, offset)?;
                 let value = exact_float(true, read_v(a)?, read_v(b)?, offset)?;
                 vgpr[dst as usize] = Some(value);
             }
             Insn::VMulF(dst, a, b) => {
+                check_destination(dst, pending_read, offset)?;
                 let value = exact_float(false, read_v(a)?, read_v(b)?, offset)?;
                 vgpr[dst as usize] = Some(value);
             }
@@ -173,15 +162,19 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
                 if pending_read.is_some() || pending_write.is_some() {
                     return Err(format!("{offset:#x}: outstanding transfer at end"));
                 }
-                if pc + 1 != program.len() {
-                    return Err(format!("{offset:#x}: code after s_endpgm"));
-                }
                 return written.ok_or_else(|| format!("{offset:#x}: missing output store"));
             }
         }
         pc += 1;
     }
     Err("stream ended without s_endpgm".to_string())
+}
+
+fn check_destination(dst: u8, load: Option<u8>, offset: usize) -> Result<(), String> {
+    if dst == 0 || load == Some(dst) {
+        return Err(format!("{offset:#x}: write to the index or pending VGPR"));
+    }
+    Ok(())
 }
 
 fn index_of(program: &[(usize, Insn)], target: usize, offset: usize) -> Result<usize, String> {
@@ -192,17 +185,41 @@ fn index_of(program: &[(usize, Insn)], target: usize, offset: usize) -> Result<u
 }
 
 fn exact_float(add: bool, a_bits: u32, b_bits: u32, offset: usize) -> Result<u32, String> {
-    let (a, b) = (f32::from_bits(a_bits), f32::from_bits(b_bits));
-    if !a.is_normal() || !b.is_normal() || a.is_sign_negative() || b.is_sign_negative() {
-        return Err(format!("{offset:#x}: float outside positive normal domain"));
+    fn unpack(bits: u32) -> Option<(u64, i32)> {
+        let biased = ((bits >> 23) & 0xff) as i32;
+        if bits >> 31 != 0 || !(1..=254).contains(&biased) {
+            return None;
+        }
+        let significand = (1 << 23) | (bits & 0x007f_ffff);
+        Some((u64::from(significand), biased - 127 - 23))
     }
-    let (a, b) = (f64::from(a), f64::from(b));
-    let exact = if add { a + b } else { a * b };
-    let result = exact as f32;
-    if !result.is_normal() || f64::from(result) != exact {
-        return Err(format!("{offset:#x}: float result not exact binary32"));
+
+    let operand_error = || format!("{offset:#x}: float outside positive normal domain");
+    let (a, scale_a) = unpack(a_bits).ok_or_else(operand_error)?;
+    let (b, scale_b) = unpack(b_bits).ok_or_else(operand_error)?;
+    let result_error = || format!("{offset:#x}: float result not exact normal binary32");
+    let (integer, scale) = if add {
+        let scale = scale_a.min(scale_b);
+        // A nonzero operand at least 24 exponents lower is strictly
+        // less than one ULP of the larger operand and cannot sum exactly.
+        if scale_a.abs_diff(scale_b) >= 24 {
+            return Err(result_error());
+        }
+        ((a << (scale_a - scale)) + (b << (scale_b - scale)), scale)
+    } else {
+        // Two 24-bit significands multiply exactly in an unsigned 64-bit word.
+        (a * b, scale_a + scale_b)
+    };
+
+    let leading = integer.ilog2();
+    let trailing = integer.trailing_zeros();
+    let exponent = scale + leading as i32;
+    let significant_width = leading - trailing + 1;
+    if significant_width > 24 || !(-126..=127).contains(&exponent) {
+        return Err(result_error());
     }
-    Ok(result.to_bits())
+    let normalized = ((integer >> trailing) << (24 - significant_width)) as u32;
+    Ok((((exponent + 127) as u32) << 23) | (normalized & 0x007f_ffff))
 }
 
 fn decode(code: &[u8]) -> Result<Vec<(usize, Insn)>, String> {
@@ -210,6 +227,9 @@ fn decode(code: &[u8]) -> Result<Vec<(usize, Insn)>, String> {
     let mut offset = 0;
     while offset < code.len() {
         let (insn, len) = decode_one(code, offset)?;
+        if matches!(insn, Insn::End) && offset + len != code.len() {
+            return Err(format!("{offset:#x}: code after s_endpgm"));
+        }
         program.push((offset, insn));
         offset += len;
     }
@@ -229,27 +249,21 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
     let first = word(code, offset)?;
     let fail = |detail: &str| format!("{offset:#x}: {detail}");
 
-    // Opcode masks and values are the AMD RDNA 2 ISA encoding fields.
-    if first & 0xfffc_0000 == 0xe030_0000 {
+    // The synthetic ABI permits only idxen with zero offsets. Only the
+    // data VGPR varies across each complete eight-byte encoding.
+    if matches!(first, 0xe030_2000 | 0xe070_2000) {
+        let load = first == 0xe030_2000;
+        let expected = if load { 0x8000_0000 } else { 0x8001_0000 };
         let second = word(code, offset + 4)?;
-        let (data, index, resource) = mubuf(second).ok_or_else(|| fail("bad MUBUF load form"))?;
+        if second & 0xffff_00ff != expected {
+            return Err(fail("buffer operand outside synthetic ABI"));
+        }
+        let data = (second >> 8) as u8;
         return Ok((
-            Insn::Load {
-                data,
-                index,
-                resource,
-            },
-            8,
-        ));
-    }
-    if first & 0xfffc_0000 == 0xe070_0000 {
-        let second = word(code, offset + 4)?;
-        let (data, index, resource) = mubuf(second).ok_or_else(|| fail("bad MUBUF store form"))?;
-        return Ok((
-            Insn::Store {
-                data,
-                index,
-                resource,
+            if load {
+                Insn::Load(data)
+            } else {
+                Insn::Store(data)
             },
             8,
         ));
@@ -278,6 +292,9 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
     }
     if first & 0xff80_ff00 == 0xbe80_0300 {
         let dst = ((first >> 16) & 0x7f) as u8;
+        if dst > 105 {
+            return Err(fail("SOP1 destination is outside the normal SGPR bank"));
+        }
         let (src, len) = scalar_source(code, offset, first as u8)?;
         return Ok((Insn::SMov(dst, src), len));
     }
@@ -338,16 +355,6 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         return Ok((Insn::End, 4));
     }
     Err(fail("unsupported opcode"))
-}
-
-fn mubuf(second: u32) -> Option<(u8, u8, u8)> {
-    if second & 0xffe0_0000 != 0x8000_0000 {
-        return None;
-    }
-    let index = second as u8;
-    let data = (second >> 8) as u8;
-    let resource = ((second >> 16) & 0x1f) as u8 * 4;
-    (resource <= 102).then_some((data, index, resource))
 }
 
 fn vector_source(selector: u32) -> Option<Src> {

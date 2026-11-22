@@ -181,10 +181,11 @@ uncertainty = "Availability of the feature does not establish Xenora correctness
 [[claim]]
 id = "CLAIM-METAL-NATIVE-CONTRACTS"
 class = "B"
-claim = "Metal dispatchThreads specifies an exact grid subject to supported dispatch and pipeline limits. Shared storage is accessible to CPU and GPU, and waitUntilCompleted waits for command-buffer completion."
+claim = "Metal dispatchThreads specifies an exact grid subject to supported dispatch and pipeline limits. Shared storage is accessible to CPU and GPU, makeBuffer(bytes:length:options:) copies initialization bytes, and waitUntilCompleted waits for command-buffer completion."
 sources = [
     "https://developer.apple.com/documentation/metal/calculating-threadgroup-and-grid-sizes",
     "https://developer.apple.com/documentation/metal/choosing-a-resource-storage-mode-for-apple-gpus",
+    "https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytes:length:options:)",
     "https://developer.apple.com/documentation/metal/mtlcommandbuffer/waituntilcompleted()",
 ]
 retrieved = "2026-11-22"
@@ -201,3 +202,23 @@ retrieved = "2026-11-22"
 architecture = "AMD RDNA 2, document 70648"
 test = "Reviewed the wait and program-termination descriptions. Workspace tests exercise the stricter synthetic wait rule."
 uncertainty = "The fixture requires explicit waits and does not establish console behavior."
+
+[[claim]]
+id = "CLAIM-MSL-COMPUTE-TYPES"
+class = "B"
+claim = "MSL defines uint as a 32-bit unsigned integer, the device address space for device-allocated buffers, and thread_position_in_grid for compute invocation coordinates."
+sources = ["https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf"]
+retrieved = "2026-11-22"
+architecture = "Metal Shading Language scalar types, address spaces and compute attributes"
+test = "Reviewed the scalar type table, section 4.1 and compute function declarations. The checked native fixtures use these interfaces."
+uncertainty = "These language rules do not establish a console resource ABI."
+
+[[claim]]
+id = "CLAIM-XBOX-SERIES-X-DCU"
+class = "D"
+claim = "Microsoft's Hot Chips 32 presentation describes the Series X GPU as 26 active Dual Compute Units and labels LDS within its Dual Compute Unit diagram."
+sources = ["https://hc32.hotchips.org/assets/program/conference/day1/HotChips2020_GPU_Microsoft_Jeff_Andrews_v2.pdf"]
+retrieved = "2026-11-22"
+architecture = "Xbox Series X, Hot Chips 32 architectural presentation"
+test = "Read slides 12 and 13. No console execution."
+uncertainty = "The slides do not specify opcode semantics, an ABI or a command packet layout."

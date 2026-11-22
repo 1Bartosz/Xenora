@@ -5,16 +5,28 @@ stream under the [synthetic memory ABI](../adr/0003-demo-memory-model.md).
 Recognition means that the opcode mask matches. Decode additionally checks
 operands, flags, instruction width and any literal word. Register
 initialization and memory safety require verification after decoding.
+CPU and GPU entries refer to the original synthetic fixture workloads.
+The wider LLVM operand matrix exercises decoding only.
 
-| Form | Accepted encoding and operands | Size | Recognized | Decoded | LLVM fixture comparison |
-| --- | --- | --- | --- | --- | --- |
-| `buffer_load_dword` | MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags | 8 B | yes | yes | pass |
-| `s_waitcnt vmcnt(0)` | SOPP, exact immediate `0x3f70`; other counters disabled by their maximum values | 4 B | yes | yes | pass |
-| `v_mov_b32_e32` | VOP1, VGPR destination, VGPR or inline integer or literal source, plus the inline bit pattern for +1.0f | 4 or 8 B | yes | yes | pass for literal, inline zero and inline +1.0f |
-| `v_add_nc_u32_e64` | VOP3, VGPR destination and two VGPR inputs, modifier fields clear, third source field encoded as inline zero | 8 B | yes | yes | pass |
-| `buffer_store_dword` | MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags | 8 B | yes | yes | pass |
-| `s_waitcnt_vscnt null, 0` | SOPK, exact null source and zero immediate | 4 B | yes | yes | pass |
-| `s_endpgm` | SOPP, zero immediate | 4 B | yes | yes | pass |
+<!-- status:instructions:start -->
+| Form | Operands | Size or word | Recognized | Decoded | LLVM | Lowering | Reference | CPU | GPU |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `buffer_load_dword` | MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags | 8 B | yes | yes | three-way passed | MSL load | implemented | fixture verified | fixture verified |
+| `s_waitcnt vmcnt(0)` | SOPP, exact immediate `0x3f70`; other counters disabled by their maximum values | 4 B | yes | yes | three-way passed | verified load wait | implemented | fixture verified | fixture verified |
+| `v_mov_b32_e32` | VOP1, VGPR destination, VGPR or inline integer or literal source, plus the inline bit pattern for +1.0f | 4 or 8 B | yes | yes | three-way passed | constant or register value | implemented | fixture verified | fixture verified |
+| `v_add_nc_u32_e64` | VOP3, VGPR destination and two VGPR inputs, modifier fields clear, third source field encoded as inline zero | 8 B | yes | yes | three-way passed | MSL unsigned add | implemented | fixture verified | fixture verified |
+| `buffer_store_dword` | MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags | 8 B | yes | yes | three-way passed | MSL store | implemented | fixture verified | fixture verified |
+| `s_waitcnt_vscnt null, 0` | SOPK, exact null source and zero immediate | 4 B | yes | yes | three-way passed | verified store wait | implemented | fixture verified | fixture verified |
+| `s_endpgm` | SOPP, zero immediate | 4 B | yes | yes | three-way passed | verified termination | implemented | fixture verified | fixture verified |
+| `s_mov_b32` | Normal SGPR destination and normal SGPR, inline integer or literal source | `BE880387` | yes | yes | three-way passed | resolved scalar state | implemented | fixture verified | fixture verified |
+| `s_cmp_eq_u32` | Normal SGPR or integer operands, with at most one source selecting a literal | `BF068708` | yes | yes | three-way passed | resolved SCC | implemented | fixture verified | fixture verified |
+| `s_cbranch_scc0` | Nonnegative signed dword displacement | `BF840002` | yes | yes | three-way passed | resolved conditional branch | implemented | fixture verified | fixture verified |
+| `s_branch` | Nonnegative signed dword displacement | `BF820001` | yes | yes | three-way passed | resolved branch | implemented | fixture verified | fixture verified |
+| `v_and_b32_e32` | Two VGPR sources and one VGPR destination | `36020702` | yes | yes | three-way passed | MSL bitwise AND | implemented | fixture verified | fixture verified |
+| `v_xor_b32_e32` | Two VGPR sources and one VGPR destination | `3A020702` | yes | yes | three-way passed | MSL bitwise XOR | implemented | fixture verified | fixture verified |
+| `v_add_f32_e32` | Two VGPR sources and one VGPR destination | `06020702` | yes | yes | three-way passed | MSL FP32 add | implemented | fixture verified | fixture verified |
+| `v_mul_f32_e32` | Two VGPR sources and one VGPR destination | `10020702` | yes | yes | three-way passed | MSL FP32 multiply | implemented | fixture verified | fixture verified |
+<!-- status:instructions:end -->
 
 ## Automated three-way comparison
 
@@ -56,23 +68,12 @@ scripts/demo.sh
 
 The [source notes](../research/rdna2.md) record the XML revision and license.
 
-## Expansion variants
+## Operand and execution notes
 
-AMD RDNA 2 ISA §§12.3–12.5 and 12.7 define these forms. AMD's pinned XML
+AMD RDNA 2 ISA §§12.3–12.5 and 12.7 define the scalar and vector forms. AMD's pinned XML
 and native LLVM 23.1.6 agree on the representative words. The target of each
 branch is the byte offset after its four-byte instruction plus four times the
 sign-extended 16-bit displacement. This subset requires forward targets at
 instruction boundaries. The vector forms carry two VGPR sources and no
 modifiers. Floating-point arithmetic and its mode constraints are execution
 requirements outside the decoder.
-
-| Form | Operands | Representative LLVM encoding | Recognized | Decoded | LLVM fixture comparison |
-| --- | --- | --- | --- | --- | --- |
-| `s_mov_b32` | Normal SGPR destination and normal SGPR, inline integer or literal source | `BE880387` | yes | yes | pass |
-| `s_cmp_eq_u32` | Normal SGPR or integer operands, with at most one source selecting a literal | `BF068708` | yes | yes | pass |
-| `s_cbranch_scc0` | Nonnegative signed dword displacement | `BF840002` | yes | yes | pass |
-| `s_branch` | Nonnegative signed dword displacement | `BF820001` | yes | yes | pass |
-| `v_and_b32_e32` | Two VGPR sources and one VGPR destination | `36020702` | yes | yes | pass |
-| `v_xor_b32_e32` | Two VGPR sources and one VGPR destination | `3A020702` | yes | yes | pass |
-| `v_add_f32_e32` | Two VGPR sources and one VGPR destination | `06020702` | yes | yes | pass |
-| `v_mul_f32_e32` | Two VGPR sources and one VGPR destination | `10020702` | yes | yes | pass |

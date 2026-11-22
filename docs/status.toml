@@ -7,8 +7,11 @@ id = "native-compute"
 implementation = "implemented"
 correctness = "initial-native-suite-passed"
 hardware_verification = "verified"
+hardware_target = "Apple M5"
 claims = ["CLAIM-METAL-M5-NATIVE-SUITE"]
 architecture = "arm64 macOS"
+semantics = "Native Metal work submissions with bounded resources"
+metal_mapping = "Native compute kernels and an original offscreen render test"
 limitations = "Trusted MSL with bounded word buffers and an original native offscreen rendering test on Apple M5."
 test = "scripts/test-gpu.sh"
 
@@ -17,8 +20,11 @@ id = "synthetic-gfx1030"
 implementation = "three-fixture-demo-implemented"
 correctness = "three-way-output-passed"
 hardware_verification = "verified"
+hardware_target = "Apple M5"
 claims = ["CLAIM-METAL-M5-RDNA-DEMO", "CLAIM-RDNA2-ADD-NO-CARRY"]
 architecture = "gfx1030 Wave32"
+semantics = "Original gfx1030 compute code under the synthetic fixture ABI"
+metal_mapping = "One lane-indexed MSL compute invocation per word"
 limitations = "Synthetic memory contract, statically resolved forward control flow, exact positive normal FP32 only."
 test = "scripts/demo.sh"
 
@@ -29,4 +35,186 @@ correctness = "untested"
 hardware_verification = "unverified"
 claims = ["CLAIM-XBOX-ISA-ABI"]
 architecture = "Xbox Series X|S"
+semantics = "Console-specific GPU and guest execution contracts remain unknown"
+metal_mapping = "Unresolved"
 limitations = "Game execution, proprietary guest containers and full guest execution-mask divergence are unsupported. The console launch ABI is unknown."
+
+[[instruction]]
+form = "buffer_load_dword"
+encoding = "MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags"
+representation = "8 B"
+lowering = "MSL load"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_waitcnt vmcnt(0)"
+encoding = "SOPP, exact immediate `0x3f70`; other counters disabled by their maximum values"
+representation = "4 B"
+lowering = "verified load wait"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_mov_b32_e32"
+encoding = "VOP1, VGPR destination, VGPR or inline integer or literal source, plus the inline bit pattern for +1.0f"
+representation = "4 or 8 B"
+lowering = "constant or register value"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_add_nc_u32_e64"
+encoding = "VOP3, VGPR destination and two VGPR inputs, modifier fields clear, third source field encoded as inline zero"
+representation = "8 B"
+lowering = "MSL unsigned add"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "buffer_store_dword"
+encoding = "MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags"
+representation = "8 B"
+lowering = "MSL store"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_waitcnt_vscnt null, 0"
+encoding = "SOPK, exact null source and zero immediate"
+representation = "4 B"
+lowering = "verified store wait"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_endpgm"
+encoding = "SOPP, zero immediate"
+representation = "4 B"
+lowering = "verified termination"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_mov_b32"
+encoding = "Normal SGPR destination and normal SGPR, inline integer or literal source"
+representation = "`BE880387`"
+lowering = "resolved scalar state"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_cmp_eq_u32"
+encoding = "Normal SGPR or integer operands, with at most one source selecting a literal"
+representation = "`BF068708`"
+lowering = "resolved SCC"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_cbranch_scc0"
+encoding = "Nonnegative signed dword displacement"
+representation = "`BF840002`"
+lowering = "resolved conditional branch"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_branch"
+encoding = "Nonnegative signed dword displacement"
+representation = "`BF820001`"
+lowering = "resolved branch"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_and_b32_e32"
+encoding = "Two VGPR sources and one VGPR destination"
+representation = "`36020702`"
+lowering = "MSL bitwise AND"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_xor_b32_e32"
+encoding = "Two VGPR sources and one VGPR destination"
+representation = "`3A020702`"
+lowering = "MSL bitwise XOR"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_add_f32_e32"
+encoding = "Two VGPR sources and one VGPR destination"
+representation = "`06020702`"
+lowering = "MSL FP32 add"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_mul_f32_e32"
+encoding = "Two VGPR sources and one VGPR destination"
+representation = "`10020702`"
+lowering = "MSL FP32 multiply"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"

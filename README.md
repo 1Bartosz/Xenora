@@ -29,6 +29,16 @@ flowchart TD
 
 Run `scripts/demo.sh` to execute three original gfx1030 compute fixtures on Apple Silicon. Integer addition, bitwise and scalar branch, and restricted FP32 outputs matched the independent CPU reference and hand-derived values on Apple M5 (class A, CLAIM-METAL-M5-RDNA-DEMO). Run `scripts/test-gpu.sh` for native Metal correctness, including offscreen rendering with original MSL (class A, CLAIM-METAL-M5-NATIVE-SUITE). The [status file](docs/status.toml) records the verified scope. SPIR-V may be used as an optional compiler intermediate representation without introducing a Vulkan runtime dependency.
 
+## Host and guest compatibility
+
+<!-- status:features:start -->
+| Feature | Target | Implementation | Correctness | Hardware | Evidence | Limits |
+| --- | --- | --- | --- | --- | --- | --- |
+| native-compute | arm64 macOS | implemented | initial-native-suite-passed | verified on Apple M5 | A | Trusted MSL with bounded word buffers and an original native offscreen rendering test on Apple M5. |
+| synthetic-gfx1030 | gfx1030 Wave32 | three-fixture-demo-implemented | three-way-output-passed | verified on Apple M5 | A, B | Synthetic memory contract, statically resolved forward control flow, exact positive normal FP32 only. |
+| xbox-execution | Xbox Series X\|S | unsupported | untested | unverified | U | Game execution, proprietary guest containers and full guest execution-mask divergence are unsupported. The console launch ABI is unknown. |
+<!-- status:features:end -->
+
 ## Development roadmap
 
 The following describes the project's intended development stages, not a claim that the features are already implemented.

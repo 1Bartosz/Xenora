@@ -4,7 +4,7 @@ The compiler accepts explicitly tagged raw gfx1030 code up to 1,024 bytes and re
 
 Verification maps each initialized register to its latest typed temporary. Reads after a load require a load wait. Because generated memory accesses are synchronous expressions within a thread and buffers are disjoint, waits can be discharged during verification. Metal completion is still required before host readback. Store and load aliases between lanes are excluded by the [fixture ABI](../adr/0003-demo-memory-model.md). The output buffer uses Metal index 1 and the read-only input uses index 0.
 
-Apple documents `uint`, device address space and the scalar compute grid-position attribute used here. Class B applies to those MSL language features. [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
+Apple documents `uint`, device address space and the scalar compute grid-position attribute used here. These MSL language features are class B (CLAIM-MSL-COMPUTE-TYPES). [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
 
 The integer emitter uses unsigned addition, bitwise AND and bitwise XOR. Scalar moves and compares are evaluated at translation time using known SGPR initializers. Forward branches must target instruction boundaries, and a conditional branch requires initialized SCC. The IR records the statically selected path. Scalar values can originate only from constants and initialized SGPRs, and SGPR 0–7 remain reserved for synthetic descriptors. The generated kernel executes the selected path without physical GPU branching.
 
