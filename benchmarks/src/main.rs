@@ -436,6 +436,8 @@ struct Metadata {
     profile: String,
     api_validation: String,
     shader_validation: String,
+    power: String,
+    thermal: String,
     reps: usize,
     warmup: usize,
 }
@@ -472,6 +474,8 @@ impl Metadata {
             .to_string(),
             api_validation: env_or("MTL_DEBUG_LAYER"),
             shader_validation: env_or("MTL_SHADER_VALIDATION"),
+            power: power_source(),
+            thermal: thermal_state(),
             reps,
             warmup: WARMUP_REPS,
         }
@@ -479,7 +483,7 @@ impl Metadata {
 
     fn to_json(&self) -> String {
         format!(
-            "{{\n  \"run_id\": {},\n  \"timestamp\": {},\n  \"device\": {},\n  \"host_arch\": {},\n  \"os_version\": {},\n  \"os_build\": {},\n  \"rustc\": {},\n  \"xcode\": {},\n  \"commit\": {},\n  \"profile\": {},\n  \"api_validation\": {},\n  \"shader_validation\": {},\n  \"reps\": {},\n  \"warmup\": {}\n}}\n",
+            "{{\n  \"run_id\": {},\n  \"timestamp\": {},\n  \"device\": {},\n  \"host_arch\": {},\n  \"os_version\": {},\n  \"os_build\": {},\n  \"rustc\": {},\n  \"xcode\": {},\n  \"commit\": {},\n  \"profile\": {},\n  \"api_validation\": {},\n  \"shader_validation\": {},\n  \"power\": {},\n  \"thermal\": {},\n  \"reps\": {},\n  \"warmup\": {}\n}}\n",
             json_str(&self.run_id),
             json_str(&self.timestamp),
             json_str(&self.device),
@@ -492,6 +496,8 @@ impl Metadata {
             json_str(&self.profile),
             json_str(&self.api_validation),
             json_str(&self.shader_validation),
+            json_str(&self.power),
+            json_str(&self.thermal),
             self.reps,
             self.warmup
         )
@@ -509,6 +515,42 @@ fn command_line(program: &str, args: &[&str]) -> String {
 
 fn env_or(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| "unset".to_string())
+}
+
+/// Report the power source line from `pmset`, or `unavailable` off macOS.
+fn power_source() -> String {
+    let output = command_line("pmset", &["-g", "batt"]);
+    for line in output.lines() {
+        let line = line.trim();
+        if line.contains("AC Power") {
+            return "AC Power".to_string();
+        }
+        if line.contains("Battery Power") {
+            return "Battery Power".to_string();
+        }
+    }
+    "unavailable".to_string()
+}
+
+/// Report the CPU thermal and speed limits from `pmset`, compactly.
+fn thermal_state() -> String {
+    let output = command_line("pmset", &["-g", "therm"]);
+    let mut parts = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        for key in ["CPU_Scheduler_Limit", "CPU_Speed_Limit"] {
+            if let Some(value) = line.strip_prefix(key) {
+                parts.push(format!("{key}{}", value.trim()));
+            }
+        }
+    }
+    if !parts.is_empty() {
+        parts.join(", ")
+    } else if output.contains("No thermal warning level has been recorded") {
+        "no warnings recorded".to_string()
+    } else {
+        "unavailable".to_string()
+    }
 }
 
 fn slug(device: &str) -> String {
@@ -618,6 +660,8 @@ fn report_markdown(metadata: &Metadata, results: &[FixtureResult]) -> String {
         ("Profile", metadata.profile.as_str()),
         ("API validation", metadata.api_validation.as_str()),
         ("Shader validation", metadata.shader_validation.as_str()),
+        ("Power source", metadata.power.as_str()),
+        ("Thermal", metadata.thermal.as_str()),
     ] {
         let _ = writeln!(out, "| {key} | {} |", value.replace('|', "\\|"));
     }
@@ -626,6 +670,15 @@ fn report_markdown(metadata: &Metadata, results: &[FixtureResult]) -> String {
         "| Repetitions | {} measured, {} warm-up |",
         metadata.reps, metadata.warmup
     );
+    if metadata.power != "AC Power" {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "> **Protocol note.** The machine was not confirmed on AC power. \
+             The [benchmark protocol](../../docs/testing/benchmarks.md) requires AC power, \
+             so these timings are not protocol-compliant release evidence."
+        );
+    }
 
     let _ = writeln!(out);
     let _ = writeln!(out, "## Coverage");
