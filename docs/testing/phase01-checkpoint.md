@@ -9,7 +9,7 @@
 | G3 | `scripts/test-gpu.sh` passed 12 tests with zero failures or skips on Apple M5. The runtime reported Metal API and GPU validation enabled. Includes original offscreen vertex and fragment MSL with 48 checked RGBA8 pixels. Candidate rerun required. Log `artifacts/phase01/native-gpu-final.log`. |
 | G4 | `scripts/demo.sh` passed all three original fixtures with both validation layers on. Exact readbacks are below. Confirm the command from the final candidate checkout. Log `artifacts/phase01/demo-final.log`. |
 | G5 | R2 passed four independent CPU tests across widened integer known answers, both SCC outcomes, malformed branch rejection and exact FP32 boundaries. Full independent reference-interpreter assurance and candidate certification remain open. |
-| G6 | LLVM 23.1.6 matched production decoding for 34 fixture instructions spanning 15 forms. Automatic comparison with the independent reference decoder is pending. Log `artifacts/phase01/llvm-oracle.log`. |
+| G6 | Automated form coverage is complete. LLVM 23.1.6 and both Xenora decoders matched 303 instructions across all 15 supported forms. Candidate-commit and independent reviewer sign-off remain open. See the [coverage matrix](../shaders/instruction-coverage.md#automated-three-way-comparison). |
 | G7 | `cargo mutants --workspace --list --json` restricted to the decoder, compiler and reference sources enumerated 373 source mutants. The source, semantic and oracle campaigns and survivor triage remain pending. No kill rate is available. |
 | G8 | `scripts/audit/claims.sh` passed for 15 entries (A=4, B=2, D=6, E=2, U=1). The lint checks registered references and verification state. The audit of all hardware claims in prose remains open. |
 | G9 | An earlier compiler campaign was interrupted after 74,020,192 reported executions. The latest decoder campaign was interrupted after 106,796,894 reported executions, about 212 seconds, exit 130. Neither log reports a crash before interruption. Latest compiler and reference campaigns were not started. The required 600 seconds per target remain pending. |
@@ -43,3 +43,20 @@ The published baseline `96cff7c66e55f1e4693ace19577c207795258d5c` passed its [Na
 **G11 remains open.** The locked runtime dependency declarations are MIT-compatible selections. The three pinned upstream objc2 licensing explanations match the repository copy byte for byte. The full upstream MIT text is now included with its revision. The sufficiency of copyright notices for locked versions and the Apple SDK terms for a linked distributable remain unresolved. See the [runtime redistribution review](../licenses.md#runtime-redistribution-review).
 
 Sprint verification passed `cargo fmt --all -- --check`, all-features workspace Clippy with warnings denied, and 17 tests across decoder, reference and semantic review. The opt-in LLVM test passed separately with 37 instruction comparisons. Claims and dependency-direction checks passed. Both lockfiles passed `cargo audit --no-fetch` against the local advisory database. Local LLVM output is in ignored `artifacts/licensing/llvm.log`.
+
+
+## Three-way decoder assurance, 2026-11-22
+
+G6 now has automated three-way coverage for the supported gfx1030 subset. The
+LLVM-enabled run passed 8 tests, including 303 successful instruction
+comparisons across all 15 forms, 3 malformed LLVM probes, and 6 LLVM-decodable
+cases rejected by both Xenora decoders. The reference decoder previously
+rejected non-fixture MUBUF operands at decode time. It now reports the full
+supported MUBUF encoding while retaining the original synthetic ABI guard
+in execution. It still has no production decoder or ISA dependency.
+
+Formatting, all-features Clippy, the 24 default workspace tests, fixture
+reproduction, claims and dependency checks, 12 native tests, and all three
+validated GPU demos passed. The two LLVM tests excluded from the default
+workspace run passed in the explicit LLVM run. Logs are under ignored
+`artifacts/g6/`. G11 and the other open release requirements are unchanged.

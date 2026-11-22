@@ -9,5 +9,8 @@ publish = false
 [dependencies]
 xenora-isa = { path = "../isa" }
 
+[dev-dependencies]
+xenora-ref = { path = "../ref" }
+
 [lints]
 workspace = true

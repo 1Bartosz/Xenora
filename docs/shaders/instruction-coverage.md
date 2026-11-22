@@ -16,15 +16,42 @@ initialization and memory safety require verification after decoding.
 | `s_waitcnt_vscnt null, 0` | SOPK, exact null source and zero immediate | 4 B | yes | yes | pass |
 | `s_endpgm` | SOPP, zero immediate | 4 B | yes | yes | pass |
 
-The production decoder matched all three fixture streams with LLVM 23.1.6.
-The comparison checks instruction order, byte offsets, lengths, re-encoded
-bytes, mnemonics and operands. It normalizes LLVM's spelling of zero in
-`s_waitcnt_vscnt`. This comparison covers the production decoder and LLVM.
-The independent decoder and execution stages require their own evidence.
+## Automated three-way comparison
+
+LLVM 23.1.6, the production decoder and the independent reference decoder
+matched 303 instructions across five streams. These include three fixtures,
+a high-register sequence and a 266-instruction matrix assembled by LLVM.
+The harness checks byte offsets, widths, encoded bytes from LLVM, mnemonic
+and operands, and the typed reference operation against the production
+operation. It covers all 15 forms in this document.
+
+The matrix checks the 81 inline integer selectors in VOP1, SOP1 and SOPC,
+forced literals that could otherwise be inline, literal selection in either
+SOPC operand, high SGPR and VGPR indices, MUBUF descriptor and index
+operands, and zero and nonzero forward branch displacements. The decoder
+trace exposes MUBUF operands independently of the synthetic execution ABI,
+which still requires the original index and resource bindings.
+
+Three malformed LLVM probes produced diagnostics, and six valid encodings
+or disassemblable branch sequences were deliberately rejected by both Xenora
+decoders. Both Xenora decoders also reject all 37 interior truncation offsets
+in the add fixture and all 18 existing unsupported-encoding cases.
+These case counts overlap where the same bytes are used in distinct tests.
+The truncated VOP1 literal is checked in Xenora only. LLVM 23.1.6's direct
+literal-truncation probe crashed, so it is outside the automated LLVM
+negative matrix.
+
+This is form and operand-class coverage. The matrix does not enumerate
+every register combination, literal value or forward displacement. LLVM
+supplies encoding and disassembly evidence. The reference and semantic
+review tests exercise execution, including both SCC outcomes and the exact
+FP32 domain. The native GPU demo verifies the three executable fixtures.
 
 ```sh
-LLVM_BIN="$(brew --prefix llvm)/bin" scripts/assemble-fixture.sh --check
-LLVM_BIN="$(brew --prefix llvm)/bin" cargo test -p xenora-decoder --test gfx1030 -- --ignored --nocapture
+scripts/assemble-fixture.sh --check
+LLVM_BIN="$(brew --prefix llvm)/bin" cargo test --locked -p xenora-decoder --test gfx1030 -- --include-ignored --nocapture
+cargo test --locked -p xenora-ref -p xenora-semantic-review
+scripts/demo.sh
 ```
 
 The [source notes](../research/rdna2.md) record the XML revision and license.

@@ -58,6 +58,7 @@ name = "xenora-decoder"
 version = "0.1.0"
 dependencies = [
  "xenora-isa",
+ "xenora-ref",
 ]
 
 [[package]]

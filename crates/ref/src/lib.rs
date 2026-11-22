@@ -21,16 +21,18 @@ impl fmt::Display for ReferenceError {
 
 impl std::error::Error for ReferenceError {}
 
+/// Register index or immediate bits. The opcode determines the register bank.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Source {
+pub enum Source {
     Register(u8),
     Immediate(u32),
 }
 
+/// Operations decoded independently by the reference interpreter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Op {
-    Load(u8),
-    Store(u8),
+pub enum Op {
+    Load { data: u8, index: u8, resource: u8 },
+    Store { data: u8, index: u8, resource: u8 },
     WaitRead,
     WaitWrite,
     Move(u8, Source),
@@ -42,8 +44,9 @@ enum Op {
     End,
 }
 
+/// VOP2 operations decoded by the reference interpreter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum VectorAlu {
+pub enum VectorAlu {
     And,
     Xor,
     FloatAdd,
@@ -58,7 +61,43 @@ pub fn execute(code: &[u8], input: &[u32]) -> Result<Vec<u32>, ReferenceError> {
     if input.is_empty() || input.len() > MAX_INPUT_WORDS {
         return Err(error(0, "input word count outside reference limits"));
     }
+    if code.len() > MAX_CODE_BYTES {
+        return Err(error(0, "instruction stream exceeds reference limit"));
+    }
     let program = decode(code)?;
+    for instruction in &program {
+        match instruction.op {
+            Op::End if instruction.offset + instruction.byte_len != code.len() => {
+                return Err(error(
+                    instruction.offset + instruction.byte_len,
+                    "trailing code after s_endpgm",
+                ));
+            }
+            Op::Load {
+                index, resource, ..
+            } if (index, resource) != (0, 0) => {
+                return Err(error(
+                    instruction.offset,
+                    "load outside synthetic binding ABI",
+                ));
+            }
+            Op::Store {
+                index, resource, ..
+            } if (index, resource) != (0, 4) => {
+                return Err(error(
+                    instruction.offset,
+                    "store outside synthetic binding ABI",
+                ));
+            }
+            _ => {}
+        }
+    }
+    if !program
+        .last()
+        .is_some_and(|instruction| instruction.op == Op::End)
+    {
+        return Err(error(code.len(), "missing s_endpgm"));
+    }
     input
         .iter()
         .map(|&word| execute_lane(&program, word))
@@ -69,18 +108,55 @@ fn error(offset: usize, detail: &'static str) -> ReferenceError {
     ReferenceError { offset, detail }
 }
 
-// AMD RDNA 2 ISA guide, Instruction Encoding: identify the fixture forms by
-// bytes first, and independently extract the few variable fields they accept.
-fn decode(code: &[u8]) -> Result<Vec<(usize, Op)>, ReferenceError> {
-    if code.len() > MAX_CODE_BYTES {
-        return Err(error(0, "instruction stream exceeds reference limit"));
-    }
+/// An operation and its span in the original byte stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodedInstruction {
+    pub offset: usize,
+    pub byte_len: usize,
+    pub op: Op,
+}
+
+/// Decode the supported gfx1030 subset without applying the execution ABI.
+///
+/// AMD RDNA 2 ISA guide, Instruction Encoding. Identify the forms by bytes
+/// and independently extract their variable fields.
+///
+/// # Errors
+///
+/// Returns the failing byte offset for an unsupported, truncated
+/// or invalid instruction stream.
+pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
     let mut program = Vec::new();
     let mut offset = 0;
     while let Some(bytes) = code.get(offset..).filter(|bytes| !bytes.is_empty()) {
         let (op, length) = match bytes {
-            [0x00, 0x20, 0x30, 0xe0, 0, data, 0, 0x80, ..] => (Op::Load(*data), 8),
-            [0x00, 0x20, 0x70, 0xe0, 0, data, 1, 0x80, ..] => (Op::Store(*data), 8),
+            [
+                0,
+                0x20,
+                opcode @ (0x30 | 0x70),
+                0xe0,
+                index,
+                data,
+                group @ 0..=25,
+                0x80,
+                ..,
+            ] => {
+                let (data, index, resource) = (*data, *index, *group * 4);
+                let op = if *opcode == 0x30 {
+                    Op::Load {
+                        data,
+                        index,
+                        resource,
+                    }
+                } else {
+                    Op::Store {
+                        data,
+                        index,
+                        resource,
+                    }
+                };
+                (op, 8)
+            }
             [0x70, 0x3f, 0x8c, 0xbf, ..] => (Op::WaitRead, 4),
             [0x00, 0x00, 0xfd, 0xbb, ..] => (Op::WaitWrite, 4),
             [0x00, 0x00, 0x81, 0xbf, ..] => (Op::End, 4),
@@ -151,28 +227,26 @@ fn decode(code: &[u8]) -> Result<Vec<(usize, Op)>, ReferenceError> {
                 ));
             }
         };
-        program.push((offset, op));
+        program.push(DecodedInstruction {
+            offset,
+            byte_len: length,
+            op,
+        });
         offset += length;
-        if op == Op::End {
-            if offset != code.len() {
-                return Err(error(offset, "trailing code after s_endpgm"));
-            }
-            for &(offset, op) in &program {
-                if let Op::Branch { target, .. } = op
-                    && program
-                        .binary_search_by_key(&target, |&(offset, _)| offset)
-                        .is_err()
-                {
-                    return Err(error(
-                        offset,
-                        "branch target is not an instruction boundary",
-                    ));
-                }
-            }
-            return Ok(program);
+    }
+    for instruction in &program {
+        if let Op::Branch { target, .. } = instruction.op
+            && program
+                .binary_search_by_key(&target, |item| item.offset)
+                .is_err()
+        {
+            return Err(error(
+                instruction.offset,
+                "branch target is not an instruction boundary",
+            ));
         }
     }
-    Err(error(offset, "missing s_endpgm"))
+    Ok(program)
 }
 
 fn decode_scalar(
@@ -233,7 +307,7 @@ fn vector_alu(op: VectorAlu, a: u32, b: u32, offset: usize) -> Result<u32, Refer
     Ok(result.to_bits())
 }
 
-fn execute_lane(program: &[(usize, Op)], input: u32) -> Result<u32, ReferenceError> {
+fn execute_lane(program: &[DecodedInstruction], input: u32) -> Result<u32, ReferenceError> {
     let mut registers = [None; 256];
     let mut scalars = [None; 106];
     let mut scc = None;
@@ -241,7 +315,7 @@ fn execute_lane(program: &[(usize, Op)], input: u32) -> Result<u32, ReferenceErr
     let mut pending_read = None;
     let mut pending_write = None;
     let mut output = None;
-    for &(offset, op) in program {
+    for &DecodedInstruction { offset, op, .. } in program {
         if offset < target {
             continue;
         }
@@ -261,7 +335,7 @@ fn execute_lane(program: &[(usize, Op)], input: u32) -> Result<u32, ReferenceErr
                 .ok_or_else(|| error(offset, "read from uninitialized VGPR"))
         };
         let set = match op {
-            Op::Load(dst) => {
+            Op::Load { data: dst, .. } => {
                 if dst == 0 || pending_read.is_some() {
                     return Err(error(
                         offset,
@@ -271,7 +345,7 @@ fn execute_lane(program: &[(usize, Op)], input: u32) -> Result<u32, ReferenceErr
                 pending_read = Some(dst);
                 None
             }
-            Op::Store(src) => {
+            Op::Store { data: src, .. } => {
                 let value = read(src)?;
                 if pending_write.is_some() || output.is_some() {
                     return Err(error(offset, "multiple writes to the output"));
@@ -427,9 +501,21 @@ mod tests {
         assert_eq!(
             decode(&code),
             Ok(vec![
-                (0, Op::Move(255, Source::Register(254))),
-                (4, Op::Add(255, 128, 255)),
-                (12, Op::End),
+                DecodedInstruction {
+                    offset: 0,
+                    byte_len: 4,
+                    op: Op::Move(255, Source::Register(254))
+                },
+                DecodedInstruction {
+                    offset: 4,
+                    byte_len: 8,
+                    op: Op::Add(255, 128, 255)
+                },
+                DecodedInstruction {
+                    offset: 12,
+                    byte_len: 4,
+                    op: Op::End
+                },
             ])
         );
     }
