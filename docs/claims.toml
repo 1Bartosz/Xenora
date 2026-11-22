@@ -1,0 +1,169 @@
+# Source review is distinct from a Xenora test run.
+schema_version = 1
+
+[[claim]]
+id = "CLAIM-XBOX-GDK-ACCESS"
+class = "D"
+claim = "Microsoft distinguishes Xbox Extensions from the public GDK, and the GDK Xbox graphics documentation topic requires NDA-program authorization."
+sources = [
+    "https://github.com/microsoft/GDK/blob/d773744074fb757ef27b2356c9aef5497b14623b/README.MD",
+    "https://learn.microsoft.com/en-us/gaming/gdk/docs/features/graphics/gc-graphics-toc?view=gdk-2610",
+]
+retrieved = "2026-11-22"
+architecture = "Microsoft GDK and Xbox Series X|S development"
+test = "Read the public GDK README and the public graphics topic access notice."
+uncertainty = "The restricted documentation was not accessed."
+
+[[claim]]
+id = "CLAIM-XBOX-DEVICE-SAMPLE"
+class = "D"
+claim = "Microsoft's Xbox device sample calls D3D12XboxCreateDevice and uses PresentX to present."
+sources = ["https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/IntroGraphics/SimpleDeviceAndSwapChain/SimpleDeviceAndSwapChain.cpp"]
+retrieved = "2026-11-22"
+architecture = "Xbox GDK sample, Xbox One and Series X|S"
+test = "Static inspection of calls in the sample source."
+uncertainty = "Sample runtime behavior and binary interfaces were not verified."
+
+[[claim]]
+id = "CLAIM-XBOX-COMPUTE-SAMPLE"
+class = "D"
+claim = "Microsoft's SimpleCompute sample demonstrates compute submission on graphics and asynchronous compute command lists."
+sources = ["https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/IntroGraphics/SimpleCompute/readme.md"]
+retrieved = "2026-11-22"
+architecture = "Xbox GDK sample, Xbox One and Series X|S"
+test = "Read the Description and Implementation notes; no console execution."
+uncertainty = "The sample documentation does not establish command packet or scheduler semantics."
+
+[[claim]]
+id = "CLAIM-XBOX-ACO-SAMPLE"
+class = "D"
+claim = "Microsoft's HlslCompile sample documents ACO offline pipeline serialization for Series X|S on GDK 2610 or later. The runtime sample allocates shader instruction memory and calls DeserializeGraphicsPipelineStateX."
+sources = [
+    "https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/HlslCompile/readme.md#aco-shader-compiler-xbox-series-xs-only",
+    "https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/HlslCompile/AcoPipelineState.cpp",
+]
+retrieved = "2026-11-22"
+architecture = "Series X|S, Xbox GDK sample ACO path"
+test = "Read the public description and inspected its runtime source; no console execution."
+uncertainty = "No public version-independent serialized format, ISA contract, or ABI is established by the sample."
+
+[[claim]]
+id = "CLAIM-XBOX-RDNA2"
+class = "D"
+claim = "Microsoft identifies the Xbox Series X and Series S GPUs as custom RDNA 2 designs."
+sources = [
+    "https://news.xbox.com/en-us/2020/07/14/a-closer-look-at-xbox-velocity-architecture/",
+    "https://www.xbox.com/en-US/consoles/xbox-series-s#specs",
+    "https://hc32.hotchips.org/assets/program/conference/day1/HotChips2020_GPU_Microsoft_Jeff_Andrews_v2.pdf",
+]
+retrieved = "2026-11-22"
+architecture = "Xbox Series X and Xbox Series S"
+test = "Read Microsoft public product information and Series X architecture slides."
+uncertainty = "The category does not establish encoding, register or feature equivalence with any desktop gfx1030 GPU."
+
+[[claim]]
+id = "CLAIM-XBOX-ISA-ABI"
+class = "U"
+claim = "The public sources reviewed do not establish console-native shader container layout, shader entry register state, descriptor encoding, GPU address translation or command packet encoding."
+sources = [
+    "https://learn.microsoft.com/en-us/gaming/gdk/docs/features/graphics/gc-graphics-toc?view=gdk-2610",
+    "https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/HlslCompile/readme.md",
+    "https://hc32.hotchips.org/assets/program/conference/day1/HotChips2020_GPU_Microsoft_Jeff_Andrews_v2.pdf",
+]
+retrieved = "2026-11-22"
+architecture = "Xbox Series X and Series S"
+test = "Reviewed available public documentation and sample source; console validation unavailable."
+uncertainty = "This is a statement about the reviewed evidence, not the existence of all possible authorized sources."
+
+[[claim]]
+id = "CLAIM-LLVM-GFX1030"
+class = "E"
+claim = "LLVM documents gfx1030 under its GFX10.3 RDNA 2 desktop targets and separately documents the AMDHSA code object ABI."
+sources = ["https://llvm.org/docs/AMDGPUUsage.html"]
+retrieved = "2026-11-22"
+architecture = "LLVM AMDGPU backend, gfx1030 and AMDHSA"
+test = "Read the Processors table and AMDHSA code object sections."
+uncertainty = "This entry is scoped to LLVM's software target. Exact fixture encodings require running the pinned tool."
+
+[[claim]]
+id = "CLAIM-D3D12-BINDING"
+class = "B"
+claim = "Public D3D12 descriptor tables identify ranges in heaps, root signatures map resource bindings, and a supported direct root descriptor carries a GPU virtual address without a view size."
+sources = ["https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html"]
+retrieved = "2026-11-22"
+architecture = "Public Windows D3D12, Resource Binding Functional Spec v1.24"
+test = "Read Descriptor Tables, Root Signature and Using Descriptors Directly in the Root Arguments."
+uncertainty = "Xbox descriptor bytes and guest-address interpretation are outside the reviewed specification."
+
+[[claim]]
+id = "CLAIM-DXCONTAINER-PAYLOAD"
+class = "E"
+claim = "LLVM's DXContainer documentation describes the DXBC outer magic and a DXIL part that carries bitcode. The Microsoft DXIL format notes describe the same part structure."
+sources = [
+    "https://llvm.org/docs/DirectX/DXContainer.html",
+    "https://github.com/microsoft/DirectXShaderCompiler/blob/915bf4f93a254d920b4bcab75b6b1c622eacd816/docs/DXIL.rst#dxil-container-format",
+]
+retrieved = "2026-11-22"
+architecture = "Public DirectX shader tooling, DXContainer"
+test = "Read the file-header and DXIL-part descriptions; no parser execution."
+uncertainty = "The Microsoft container description is in the non-normative Additional Notes section. Neither source identifies a console-native ISA container."
+
+[[claim]]
+id = "CLAIM-MSC-DXIL"
+class = "D"
+claim = "Apple's Metal Shader Converter product documentation shows a DXIL input producing a Metal library."
+sources = ["https://developer.apple.com/metal/shader-converter/#your-first-conversion"]
+retrieved = "2026-11-22"
+architecture = "Apple Metal Shader Converter documented product interface"
+test = "Read Your first conversion; the converter was not executed."
+uncertainty = "No support for native RDNA code is established by this documentation."
+
+[[claim]]
+id = "CLAIM-METAL-M5-WORD-SMOKE"
+class = "A"
+claim = "The native word kernel matched 131 CPU-computed output words with Metal API and shader validation enabled."
+sources = ["scripts/test-gpu.sh", "crates/metal/tests/native_compute.rs"]
+retrieved = "2026-11-22"
+architecture = "Apple M5, macOS 27.3, Xcode 27.2"
+test = "scripts/test-gpu.sh"
+uncertainty = "One bounded compute workload on one device."
+
+[[claim]]
+id = "CLAIM-METAL-M5-RDNA-ADD"
+class = "A"
+claim = "The generated MSL for the original gfx1030 add fixture compiled and produced four words matching the independent CPU reference and hand-derived outputs."
+sources = ["scripts/demo.sh", "fixtures/manifest.toml"]
+retrieved = "2026-11-22"
+architecture = "Apple M5, macOS 27.3, Xcode 27.2"
+test = "scripts/demo.sh"
+uncertainty = "Synthetic fixture ABI and seven narrow instruction forms. No console hardware observation."
+
+[[claim]]
+id = "CLAIM-RDNA2-ADD-NO-CARRY"
+class = "B"
+claim = "The RDNA 2 no-carry unsigned vector add produces a 32-bit sum without carry input or output."
+sources = ["https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture", "docs/research/rdna2.md"]
+retrieved = "2026-11-22"
+architecture = "AMD RDNA 2 as described by AMD document 70648"
+test = "cargo test --manifest-path tests/validation/Cargo.toml --locked"
+uncertainty = "The synthetic compute fixture does not establish Xbox applicability."
+
+[[claim]]
+id = "CLAIM-METAL-M5-NATIVE-SUITE"
+class = "A"
+claim = "The 12 native Metal correctness cases passed with API and shader validation, including 48 checked RGBA8 pixels."
+sources = ["scripts/test-gpu.sh", "docs/research/apple-gpu.md"]
+retrieved = "2026-11-22"
+architecture = "Apple M5, macOS 27.3, Xcode 27.2"
+test = "scripts/test-gpu.sh"
+uncertainty = "Original native workloads on one Apple GPU. No guest graphics-stage translation."
+
+[[claim]]
+id = "CLAIM-METAL-M5-RDNA-DEMO"
+class = "A"
+claim = "Metal readback matched the CPU reference and hand-derived answers for all three synthetic gfx1030 fixtures with API and shader validation enabled."
+sources = ["scripts/demo.sh", "fixtures/manifest.toml"]
+retrieved = "2026-11-22"
+architecture = "Apple M5, macOS 27.3, Xcode 27.2"
+test = "scripts/demo.sh"
+uncertainty = "Synthetic binding ABI, statically resolved scalar control flow, and exact positive normal FP32."

@@ -1,0 +1,16 @@
+[package]
+name = "xenora-semantic-review"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "known_answers.rs"
+
+
+[dev-dependencies]
+xenora-ref = { path = "../../crates/ref" }
+xenora-shader = { path = "../../crates/shader" }
+
+[lints]
+workspace = true

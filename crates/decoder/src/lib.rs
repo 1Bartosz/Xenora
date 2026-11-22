@@ -1,0 +1,418 @@
+//! Decoder for Xenora's bounded little-endian gfx1030 instruction stream.
+
+use std::fmt;
+
+pub use xenora_isa::{Architecture, Instruction, ScalarSource, VectorSource};
+use xenora_isa::{
+    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, S_BRANCH, S_CBRANCH_SCC0, S_CMP_EQ_U32, S_ENDPGM,
+    S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_MOV_B32,
+    V_MUL_F32, V_XOR_B32,
+};
+
+/// A successfully decoded instruction and its location in the input stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodedInstruction {
+    /// Byte offset from the start of the stream.
+    pub offset: usize,
+    /// Total size in bytes, including any literal word.
+    pub byte_len: u8,
+    /// The decoded instruction and operand fields.
+    pub instruction: Instruction,
+}
+
+impl fmt::Display for DecodedInstruction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:04x}: {}", self.offset, self.instruction)
+    }
+}
+
+/// Decoder failures classified for callers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecodeErrorKind {
+    /// An instruction, second word or literal extends past the available input.
+    Truncated {
+        /// Number of bytes required at the instruction start.
+        needed: u8,
+        /// Number of bytes available at the instruction start.
+        available: usize,
+    },
+    /// No supported opcode pattern matches the first word.
+    UnsupportedOpcode {
+        /// First instruction word in host integer order.
+        word: u32,
+    },
+    /// A supported opcode uses an operand or modifier outside the subset.
+    UnsupportedForm {
+        /// Opcode mnemonic.
+        mnemonic: &'static str,
+        /// Details of the unsupported or reserved fields.
+        detail: &'static str,
+    },
+    /// A forward branch leaves the stream or lands inside an instruction.
+    InvalidBranchTarget {
+        /// Destination byte offset from the start of the stream.
+        target: usize,
+    },
+}
+
+/// A decoder error and the offset of the offending instruction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodeError {
+    /// Byte offset from the start of the stream.
+    pub offset: usize,
+    /// Decoder-specific failure.
+    pub kind: DecodeErrorKind,
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "gfx1030 decode at byte 0x{:x}: ", self.offset)?;
+        match self.kind {
+            DecodeErrorKind::Truncated { needed, available } => {
+                write!(
+                    formatter,
+                    "instruction requires {needed} bytes, found {available}"
+                )
+            }
+            DecodeErrorKind::UnsupportedOpcode { word } => {
+                write!(formatter, "unsupported opcode in 0x{word:08x}")
+            }
+            DecodeErrorKind::UnsupportedForm { mnemonic, detail } => {
+                write!(formatter, "unsupported {mnemonic} form: {detail}")
+            }
+            DecodeErrorKind::InvalidBranchTarget { target } => {
+                write!(
+                    formatter,
+                    "branch target 0x{target:x} is outside instruction boundaries"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Decodes a stream of instructions. Program termination, memory hazards and
+/// register initialization are checked by later stages.
+///
+/// # Errors
+///
+/// Returns the failing byte offset for a truncated instruction, unsupported
+/// opcode, unsupported form or invalid branch target. An empty stream
+/// decodes to an empty list.
+pub fn decode(
+    architecture: Architecture,
+    bytes: &[u8],
+) -> Result<Vec<DecodedInstruction>, DecodeError> {
+    let decode_instruction = match architecture {
+        Architecture::Gfx1030 => decode_gfx1030,
+    };
+    let mut result = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let (instruction, byte_len) = decode_instruction(&bytes[offset..], offset)
+            .map_err(|kind| DecodeError { offset, kind })?;
+        result.push(DecodedInstruction {
+            offset,
+            byte_len,
+            instruction,
+        });
+        offset += usize::from(byte_len);
+    }
+    for decoded in &result {
+        if let Instruction::Branch { target } | Instruction::BranchSccZero { target } =
+            decoded.instruction
+            && result
+                .binary_search_by_key(&target, |item| item.offset)
+                .is_err()
+        {
+            return Err(DecodeError {
+                offset: decoded.offset,
+                kind: DecodeErrorKind::InvalidBranchTarget { target },
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn word(bytes: &[u8], end: u8) -> Result<u32, DecodeErrorKind> {
+    let end_index = usize::from(end);
+    let Some(word) = bytes
+        .get(end_index - 4..end_index)
+        .and_then(|word| <[u8; 4]>::try_from(word).ok())
+    else {
+        return Err(DecodeErrorKind::Truncated {
+            needed: end,
+            available: bytes.len(),
+        });
+    };
+    Ok(u32::from_le_bytes(word))
+}
+
+fn unsupported(mnemonic: &'static str, detail: &'static str) -> DecodeErrorKind {
+    DecodeErrorKind::UnsupportedForm { mnemonic, detail }
+}
+
+fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), DecodeErrorKind> {
+    let first = word(bytes, 4)?;
+
+    if BUFFER_LOAD_DWORD.matches(first) {
+        let len = BUFFER_LOAD_DWORD.byte_len();
+        let second = word(bytes, len)?;
+        let (data, index, resource) = buffer_operands(first, second, "buffer_load_dword")?;
+        return Ok((
+            Instruction::BufferLoadDword {
+                data,
+                index,
+                resource,
+            },
+            len,
+        ));
+    }
+    if BUFFER_STORE_DWORD.matches(first) {
+        let len = BUFFER_STORE_DWORD.byte_len();
+        let second = word(bytes, len)?;
+        let (data, index, resource) = buffer_operands(first, second, "buffer_store_dword")?;
+        return Ok((
+            Instruction::BufferStoreDword {
+                data,
+                index,
+                resource,
+            },
+            len,
+        ));
+    }
+    if V_MOV_B32.matches(first) {
+        return move_b32(first, bytes);
+    }
+    if V_ADD_NC_U32.matches(first) {
+        let len = V_ADD_NC_U32.byte_len();
+        let second = word(bytes, len)?;
+        return Ok((add_u32(first, second)?, len));
+    }
+    if S_MOV_B32.matches(first) {
+        let dst = ((first >> 16) & 0x7f) as u8;
+        if dst > 105 {
+            return Err(unsupported(
+                "s_mov_b32",
+                "expected a normal SGPR destination",
+            ));
+        }
+        let (src, len) = scalar_source(first as u8, bytes, "s_mov_b32")?;
+        return Ok((Instruction::ScalarMoveB32 { dst, src }, len));
+    }
+    if S_CMP_EQ_U32.matches(first) {
+        let src0_bits = first as u8;
+        let src1_bits = (first >> 8) as u8;
+        if src0_bits == 255 && src1_bits == 255 {
+            return Err(unsupported(
+                "s_cmp_eq_u32",
+                "only one source may select a literal",
+            ));
+        }
+        let (src0, len0) = scalar_source(src0_bits, bytes, "s_cmp_eq_u32")?;
+        let (src1, len1) = scalar_source(src1_bits, bytes, "s_cmp_eq_u32")?;
+        return Ok((
+            Instruction::ScalarCompareEqU32 { src0, src1 },
+            len0.max(len1),
+        ));
+    }
+    if S_BRANCH.matches(first) {
+        let target = branch_target(first, offset, "s_branch")?;
+        return Ok((Instruction::Branch { target }, S_BRANCH.byte_len()));
+    }
+    if S_CBRANCH_SCC0.matches(first) {
+        let target = branch_target(first, offset, "s_cbranch_scc0")?;
+        return Ok((
+            Instruction::BranchSccZero { target },
+            S_CBRANCH_SCC0.byte_len(),
+        ));
+    }
+    if V_AND_B32.matches(first) {
+        let (dst, src0, src1) = vop2_registers(first, "v_and_b32_e32")?;
+        return Ok((
+            Instruction::VectorAndB32 { dst, src0, src1 },
+            V_AND_B32.byte_len(),
+        ));
+    }
+    if V_XOR_B32.matches(first) {
+        let (dst, src0, src1) = vop2_registers(first, "v_xor_b32_e32")?;
+        return Ok((
+            Instruction::VectorXorB32 { dst, src0, src1 },
+            V_XOR_B32.byte_len(),
+        ));
+    }
+    if V_ADD_F32.matches(first) {
+        let (dst, src0, src1) = vop2_registers(first, "v_add_f32_e32")?;
+        return Ok((
+            Instruction::VectorAddF32 { dst, src0, src1 },
+            V_ADD_F32.byte_len(),
+        ));
+    }
+    if V_MUL_F32.matches(first) {
+        let (dst, src0, src1) = vop2_registers(first, "v_mul_f32_e32")?;
+        return Ok((
+            Instruction::VectorMulF32 { dst, src0, src1 },
+            V_MUL_F32.byte_len(),
+        ));
+    }
+    if S_WAITCNT.matches(first) {
+        return scalar_form(
+            first,
+            S_WAITCNT.byte_len(),
+            0xbf8c_3f70,
+            Instruction::WaitLoad,
+            "expected vmcnt(0) alone",
+        );
+    }
+    if S_WAITCNT_VSCNT.matches(first) {
+        return scalar_form(
+            first,
+            S_WAITCNT_VSCNT.byte_len(),
+            0xbbfd_0000,
+            Instruction::WaitStore,
+            "expected null, 0",
+        );
+    }
+    if S_ENDPGM.matches(first) {
+        return scalar_form(
+            first,
+            S_ENDPGM.byte_len(),
+            0xbf81_0000,
+            Instruction::EndProgram,
+            "expected zero immediate",
+        );
+    }
+
+    Err(DecodeErrorKind::UnsupportedOpcode { word: first })
+}
+
+fn scalar_source(
+    bits: u8,
+    bytes: &[u8],
+    mnemonic: &'static str,
+) -> Result<(ScalarSource, u8), DecodeErrorKind> {
+    let value = u32::from(bits);
+    match bits {
+        0..=105 => Ok((ScalarSource::Register(bits), 4)),
+        128..=192 => Ok((ScalarSource::Immediate(value - 128), 4)),
+        193..=208 => Ok((ScalarSource::Immediate(192u32.wrapping_sub(value)), 4)),
+        255 => Ok((ScalarSource::Immediate(word(bytes, 8)?), 8)),
+        _ => Err(unsupported(
+            mnemonic,
+            "expected a normal SGPR, inline integer or literal",
+        )),
+    }
+}
+
+fn branch_target(
+    first: u32,
+    offset: usize,
+    mnemonic: &'static str,
+) -> Result<usize, DecodeErrorKind> {
+    let displacement = first as u16 as i16;
+    let words = usize::try_from(displacement)
+        .map_err(|_| unsupported(mnemonic, "expected a forward branch"))?;
+    offset
+        .checked_add(4 + words * 4)
+        .ok_or_else(|| unsupported(mnemonic, "target byte offset overflowed"))
+}
+
+fn vop2_registers(first: u32, mnemonic: &'static str) -> Result<(u8, u8, u8), DecodeErrorKind> {
+    if first & 0x100 == 0 {
+        return Err(unsupported(
+            mnemonic,
+            "expected two unmodified VGPR sources",
+        ));
+    }
+    Ok(((first >> 17) as u8, first as u8, (first >> 9) as u8))
+}
+
+fn buffer_operands(
+    first: u32,
+    second: u32,
+    mnemonic: &'static str,
+) -> Result<(u8, u8, u8), DecodeErrorKind> {
+    // OFFSET, OFFEN, IDXEN, GLC, DLC, LDS and the reserved bit before OP.
+    const ADDRESS_MODE_MASK: u32 = 0x0003_ffff;
+    const IDXEN: u32 = 1 << 13;
+
+    // SOFFSET is inline zero. TFE, SLC and the reserved high operand bit are zero.
+    if first & ADDRESS_MODE_MASK != IDXEN || second & 0xffe0_0000 != 0x8000_0000 {
+        return Err(unsupported(
+            mnemonic,
+            "expected idxen alone with zero offsets",
+        ));
+    }
+
+    let index = second as u8;
+    let data = (second >> 8) as u8;
+    let resource = ((second >> 16) & 0x1f) as u8 * 4;
+    // AMD RDNA 2 ISA §3.6.2. A resource descriptor requires four normal SGPRs.
+    if resource > 102 {
+        return Err(unsupported(
+            mnemonic,
+            "resource descriptor must fit in normal SGPRs",
+        ));
+    }
+    Ok((data, index, resource))
+}
+
+fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKind> {
+    let dst = (first >> 17) as u8;
+    let source = first & 0x1ff;
+    let base_len = V_MOV_B32.byte_len();
+    let (src, len) = match source {
+        128..=192 => (VectorSource::Immediate(source - 128), base_len),
+        193..=208 => (
+            VectorSource::Immediate(192u32.wrapping_sub(source)),
+            base_len,
+        ),
+        // AMD RDNA 2 ISA Table 77: VOP1 source selector 242 supplies +1.0f.
+        242 => (VectorSource::Immediate(0x3f80_0000), base_len),
+        255 => {
+            let len = base_len + 4;
+            (VectorSource::Immediate(word(bytes, len)?), len)
+        }
+        256..=511 => (VectorSource::Register(source as u8), base_len),
+        _ => {
+            return Err(unsupported(
+                "v_mov_b32_e32",
+                "expected a VGPR, inline integer, inline +1.0f or literal",
+            ));
+        }
+    };
+    Ok((Instruction::MoveB32 { dst, src }, len))
+}
+
+fn add_u32(first: u32, second: u32) -> Result<Instruction, DecodeErrorKind> {
+    let src0 = second & 0x1ff;
+    let src1 = (second >> 9) & 0x1ff;
+    // All output and input modifiers are clear. The unused third source uses
+    // the gfx1030 assembler's inline-zero operand encoding.
+    if first & 0xff00 != 0 || second >> 18 != 128 || src0 < 256 || src1 < 256 {
+        return Err(unsupported(
+            "v_add_nc_u32_e64",
+            "expected two VGPR sources and no modifiers",
+        ));
+    }
+    Ok(Instruction::AddNoCarryU32 {
+        dst: first as u8,
+        src0: src0 as u8,
+        src1: src1 as u8,
+    })
+}
+
+fn scalar_form(
+    word: u32,
+    byte_len: u8,
+    expected: u32,
+    instruction: Instruction,
+    detail: &'static str,
+) -> Result<(Instruction, u8), DecodeErrorKind> {
+    if word == expected {
+        Ok((instruction, byte_len))
+    } else {
+        Err(unsupported(instruction.mnemonic(), detail))
+    }
+}

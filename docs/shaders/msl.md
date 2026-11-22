@@ -1,0 +1,13 @@
+# Synthetic compute lowering
+
+The compiler accepts explicitly tagged raw gfx1030 code up to 1,024 bytes and requires a whole number of 32-bit words. The verifier checks source initialization, exact resource slots and address operands, immutability of VGPR 0, memory ordering, one completed output store and program termination. VGPR 0 is reserved for resource indexing. Keeping it out of arithmetic means the host's grid position is never exposed as a guest register value.
+
+Verification maps each initialized register to its latest typed temporary. Reads after a load require a load wait. Because generated memory accesses are synchronous expressions within a thread and buffers are disjoint, waits can be discharged during verification. Metal completion is still required before host readback. Store and load aliases between lanes are excluded by the [fixture ABI](../adr/0003-demo-memory-model.md). The output buffer uses Metal index 1 and the read-only input uses index 0.
+
+Apple documents `uint`, device address space and the scalar compute grid-position attribute used here. Class B applies to those MSL language features. [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
+
+The integer emitter uses unsigned addition, bitwise AND and bitwise XOR. Scalar moves and compares are evaluated at translation time using known SGPR initializers. Forward branches must target instruction boundaries, and a conditional branch requires initialized SCC. The IR records the statically selected path. Scalar values can originate only from constants and initialized SGPRs, and SGPR 0–7 remain reserved for synthetic descriptors. The generated kernel executes the selected path without physical GPU branching.
+
+The float subset accepts addition and multiplication only when every possible operand is a positive normal binary32 value and the exact result is itself representable as a normal binary32 value. A known-bit analysis propagates the effect of masks and XOR. It enumerates up to two candidate bit patterns per operand, proves the result for each pair, and retains at most two unique results for an ensuing operation. No rounding mode, signed-zero behavior, subnormal mode, NaN handling or infinity policy is required for this restricted domain. Unknown or inexact cases fail verification.
+
+The generated MSL uses unsigned words for register bits and `as_type` for reinterpretation at individual float operations. It disables contraction and reassociation for these kernels. The compiler tests compare all three fixture outputs against tracked IR and MSL goldens. The [native demonstration](../../scripts/demo.sh) checks executed results.

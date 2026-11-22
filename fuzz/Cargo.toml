@@ -1,0 +1,35 @@
+[package]
+name = "xenora-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+xenora-decoder = { path = "../crates/decoder" }
+xenora-ref = { path = "../crates/ref" }
+xenora-shader = { path = "../crates/shader" }
+
+[workspace]
+
+[[bin]]
+name = "instruction_stream"
+path = "fuzz_targets/instruction_stream.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fixture"
+path = "fuzz_targets/fixture.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "reference"
+path = "fuzz_targets/reference.rs"
+test = false
+doc = false

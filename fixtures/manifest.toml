@@ -1,0 +1,50 @@
+[[fixture]]
+id = "gfx1030-wave32-add"
+path = "fixtures/rdna2/add.bin"
+source = "fixtures/rdna2/add.s"
+sha256 = "3ff942fb79a189b4d3d917fc6e6f0af3b5d81787b4b60f7b78eaca9999881dca"
+source_sha256 = "7b66334a054bc8fd63d2d4f30db43bd7e1db09536e2872b53cdb22e674a7f7d5"
+origin = "Original Xenora synthetic compute fixture"
+license = "GPL-3.0-or-later"
+architecture = "gfx1030 Wave32"
+generator = "LLVM 23.1.6 llvm-mc and llvm-objcopy"
+regenerate = "scripts/assemble-fixture.sh"
+verify = "scripts/assemble-fixture.sh --check"
+input = [0, 1, 4294967295, 3989547400]
+expected = [305419896, 305419897, 305419895, 0]
+derivation = "Each lane loads its input, adds 0x12345678 modulo 2^32 and stores to the same index in the output. The last input is 2^32 minus the literal."
+limitation = "Synthetic input/output binding contract. No AMDHSA or Xbox ABI."
+
+[[fixture]]
+id = "gfx1030-wave32-float-exact"
+path = "fixtures/rdna2/float-exact.bin"
+source = "fixtures/rdna2/float-exact.s"
+sha256 = "57f8417a9fb8e03f84de2118e547e06c352ec2a7b6071805b43f09bb9977dd82"
+source_sha256 = "49c9057026784902e3b321a2c4bea0b716d7cf964253b76422fb22a8a4fc4530"
+origin = "Original Xenora synthetic compute fixture"
+license = "GPL-3.0-or-later"
+architecture = "gfx1030 Wave32"
+generator = "LLVM 23.1.6 llvm-mc and llvm-objcopy"
+regenerate = "scripts/assemble-fixture.sh"
+verify = "scripts/assemble-fixture.sh --check"
+input = [0, 1, 4294967295, 3989547400]
+expected = [1091305472, 1091305472, 1092616192, 1092616192]
+derivation = "Input bit 22 selects FP32 1.0 or 1.5. Adding 2.5 yields exactly 3.5 or 4.0. Multiplying by 2.5 gives exactly 8.75 (0x410c0000) or 10.0 (0x41200000)."
+limitation = "Synthetic binding ABI and restricted finite exact binary32 domain."
+
+[[fixture]]
+id = "gfx1030-wave32-bitwise-branch"
+path = "fixtures/rdna2/bitwise-branch.bin"
+source = "fixtures/rdna2/bitwise-branch.s"
+sha256 = "3af5aa917dbb0c9fb2643fb7836f6765a57f90f94a68fe8168245946f7b4491a"
+source_sha256 = "eafca780a9ccf891f229141e451a68feb4c5d7ba2c1467fead61dbb9293de081"
+origin = "Original Xenora synthetic compute fixture"
+license = "GPL-3.0-or-later"
+architecture = "gfx1030 Wave32"
+generator = "LLVM 23.1.6 llvm-mc and llvm-objcopy"
+regenerate = "scripts/assemble-fixture.sh"
+verify = "scripts/assemble-fixture.sh --check"
+input = [0, 1, 4294967295, 3989547400]
+expected = [305419896, 305419897, 315315847, 318723824]
+derivation = "Comparing 7 with 6 clears SCC. The taken edge computes (input AND 0x00ff00ff) XOR 0x12345678."
+limitation = "Synthetic binding ABI and uniform forward branches."

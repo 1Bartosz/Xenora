@@ -27,3 +27,7 @@
 .codex/
 .cursor/
 .gemini/
+
+# Local gate evidence and intermediate fixture objects
+/artifacts/
+/tests/validation/target/

@@ -1,0 +1,31 @@
+schema_version = 1
+phase = 1
+release_ready = false
+
+[[feature]]
+id = "native-compute"
+implementation = "implemented"
+correctness = "initial-native-suite-passed"
+hardware_verification = "verified"
+claims = ["CLAIM-METAL-M5-NATIVE-SUITE"]
+architecture = "arm64 macOS"
+limitations = "Trusted MSL with bounded word buffers and an original native offscreen rendering test on Apple M5."
+test = "scripts/test-gpu.sh"
+
+[[feature]]
+id = "synthetic-gfx1030"
+implementation = "three-fixture-demo-implemented"
+correctness = "three-way-output-passed"
+hardware_verification = "verified"
+claims = ["CLAIM-METAL-M5-RDNA-DEMO", "CLAIM-RDNA2-ADD-NO-CARRY"]
+architecture = "gfx1030 Wave32"
+limitations = "Synthetic memory contract, statically resolved forward control flow, exact positive normal FP32 only."
+test = "scripts/demo.sh"
+
+[[feature]]
+id = "xbox-execution"
+implementation = "unsupported"
+correctness = "untested"
+hardware_verification = "unverified"
+architecture = "Xbox Series X|S"
+limitations = "The console shader container and launch ABI are unknown."

@@ -14,19 +14,19 @@ Xenora takes a Metal-first approach rather than relying on a Vulkan runtime, Mol
 
 XenoMetal is the graphics translation subsystem of Xenora. Its intended scope includes shader decoding, recompilation, GPU resource translation and native Metal execution.
 
-The primary compilation pipeline is designed as follows:
+The first working compute fixture passes through the following pipeline:
 
 ```mermaid
 flowchart TD
     A[RDNA shader machine code] --> B[Instruction decoder]
     B --> C[Shader IR]
-    C --> D[Semantic validation and optimization]
+    C --> D[Semantic validation]
     D --> E[Metal Shading Language]
     E --> F[Native Metal backend]
     F --> G[Apple GPU]
 ```
 
-An independent CPU reference interpreter is intended to validate supported instruction semantics against known-answer tests and actual GPU output. SPIR-V may be used as an optional compiler intermediate representation without introducing a Vulkan runtime dependency.
+Run `scripts/demo.sh` to execute three original gfx1030 compute fixtures on Apple Silicon. Integer addition, bitwise and scalar branch, and restricted FP32 outputs matched the independent CPU reference and hand-derived values on Apple M5. Run `scripts/test-gpu.sh` for native Metal correctness, including offscreen rendering with original MSL. The [status file](docs/status.toml) records the verified scope. SPIR-V may be used as an optional compiler intermediate representation without introducing a Vulkan runtime dependency.
 
 ## Development roadmap
 
@@ -46,7 +46,7 @@ The following describes the project's intended development stages, not a claim t
 
 Xenora targets the native Rust `aarch64-apple-darwin` toolchain and Apple's Xcode and Metal development tools. LLVM's AMDGPU tools are intended to serve as an independent instruction encoding and decoding reference where applicable.
 
-Once the Cargo workspace and build configuration are available, the standard Rust checks are:
+Run the standard Rust checks from the workspace root:
 
 ```sh
 cargo fmt --all -- --check
@@ -54,7 +54,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-These commands are the intended baseline; they do not substitute for real Metal GPU execution tests. Consult the repository's current build and testing documentation for supported toolchain versions and hardware-specific commands.
+Run `scripts/bootstrap.sh` to check the native toolchain and `scripts/assemble-fixture.sh --check` to verify the synthetic gfx1030 fixture with LLVM. The [Phase 01 checkpoint](docs/progress.md) records the implementation and validation status.
 
 ## Research and documentation
 
@@ -78,7 +78,7 @@ Changes should include a clear technical rationale, relevant specification refer
 
 ## License
 
-Xenora is intended to be distributed under the GNU General Public License, version 3 ([GPL-3.0](LICENSE)). Third-party components retain their applicable licenses and copyright notices.
+Xenora is licensed under the [GNU General Public License, version 3 or later](LICENSE). Third-party components retain their applicable licenses and copyright notices.
 
 Xenora does not distribute proprietary game binaries, console firmware, encryption keys or restricted Xbox SDK material. The project does not aim to circumvent DRM or console security mechanisms.
 

@@ -1,0 +1,43 @@
+[package]
+name = "xenora-metal"
+description = "Bounded native Metal execution for Xenora compute fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+gpu-tests = [
+    "objc2-metal/MTLPixelFormat",
+    "objc2-metal/MTLRenderCommandEncoder",
+    "objc2-metal/MTLRenderPass",
+    "objc2-metal/MTLRenderPipeline",
+    "objc2-metal/MTLTexture",
+]
+
+[[test]]
+name = "native_compute"
+path = "tests/native_compute.rs"
+required-features = ["gpu-tests"]
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "macos"))'.dependencies]
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSError", "NSString"] }
+objc2-metal = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLDevice",
+    "MTLLibrary",
+    "MTLPipeline",
+    "MTLResource",
+    "MTLTypes",
+] }

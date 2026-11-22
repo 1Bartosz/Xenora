@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+llvm_bin=${LLVM_BIN:-$(brew --prefix llvm)/bin}
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+case "${1:-}" in
+  --check|"") ;;
+  *) printf '%s\n' 'usage: scripts/assemble-fixture.sh [--check]' >&2; exit 2 ;;
+esac
+
+for name in add bitwise-branch float-exact; do
+    "$llvm_bin/llvm-mc" -triple=amdgcn-amd-amdhsa -mcpu=gfx1030 -mattr=+wavefrontsize32 \
+        -filetype=obj "fixtures/rdna2/$name.s" -o "$scratch/$name.o"
+    "$llvm_bin/llvm-objcopy" -O binary --only-section=.text "$scratch/$name.o" "$scratch/$name.bin"
+    if [ "${1:-}" = --check ]; then
+        cmp "$scratch/$name.bin" "fixtures/rdna2/$name.bin"
+    else
+        cp "$scratch/$name.bin" "fixtures/rdna2/$name.bin"
+    fi
+done
