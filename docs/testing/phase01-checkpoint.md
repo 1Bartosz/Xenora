@@ -33,3 +33,13 @@
 These fixtures use an explicit synthetic binding ABI, statically resolved forward scalar control flow and the verified exact positive normal FP32 domain. Console containers, guest graphics stages and execution-mask divergence remain unsupported. See [fixture hashes and derivations](../../fixtures/manifest.toml), [supported instruction forms](../shaders/instruction-coverage.md) and [subnormal risks](../risk-register.md).
 
 Eight agents performed the requested research, implementation and review assignments in waves. The [R1 review log](review-log.md) and [R2 validation report](../../tests/validation/README.md) retain findings and commands. Runtime and fuzz lockfiles passed RustSec advisory checks in this session. The hosted workflow was created and has yet to run. The 89/92 historical laboratory count is tracked separately in the [lab intake](../research/host-lab.md).
+
+## Assurance sprint, 2026-11-22
+
+The published baseline `96cff7c66e55f1e4693ace19577c207795258d5c` passed its [Native Rust workflow](https://github.com/ranveersoni98/Xenora/actions/runs/45001680455). The local results above remain historical checkpoint evidence.
+
+**G6 remains open.** The LLVM oracle also compares the high-VGPR sequence covered by the independent reference decoder test. This adds three instructions to the LLVM comparison across four streams. The reference decoder still needs automated form-wide comparison of decoded operands, instruction lengths and offsets. Production and reference semantics are unchanged.
+
+**G11 remains open.** The locked runtime dependency declarations are MIT-compatible selections. The three pinned upstream objc2 licensing explanations match the repository copy byte for byte. The full upstream MIT text is now included with its revision. The sufficiency of copyright notices for locked versions and the Apple SDK terms for a linked distributable remain unresolved. See the [runtime redistribution review](../licenses.md#runtime-redistribution-review).
+
+Sprint verification passed `cargo fmt --all -- --check`, all-features workspace Clippy with warnings denied, and 17 tests across decoder, reference and semantic review. The opt-in LLVM test passed separately with 37 instruction comparisons. Claims and dependency-direction checks passed. Both lockfiles passed `cargo audit --no-fetch` against the local advisory database. Local LLVM output is in ignored `artifacts/licensing/llvm.log`.

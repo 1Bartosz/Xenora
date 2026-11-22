@@ -9,7 +9,7 @@
 | objc2-foundation | 0.3.2 | MIT | [Upstream revision](https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b), [upstream licensing notice](licenses/objc2-LICENSE.md). |
 | objc2-metal | 0.3.2 | MIT selected | [Upstream revision](https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b), [upstream licensing notice](licenses/objc2-LICENSE.md). |
 
-Cargo resolves the Rust packages from crates.io at the source checksums in [Cargo.lock](Cargo.lock). The upstream objc2 notice discusses the derivation of bindings from Apple SDKs and an open question about redistribution. No Apple SDK files ship in this repository.
+Cargo resolves the Rust packages from crates.io at the source checksums in [Cargo.lock](Cargo.lock). The upstream objc2 notice discusses the derivation of bindings from Apple SDKs and an open question about redistribution. No Apple SDK files or dependency crate archives ship in this repository. The [upstream MIT text](licenses/objc2-LICENSE-MIT.txt) is an unmodified copy from [objc2 commit ee9a7ad](https://github.com/madsmtm/objc2/blob/ee9a7ada2131f5944b8750428e265c15632f2a19/LICENSE-MIT.txt), added after the locked source revisions. Preserve it and the pinned licensing notice. See the [G11 review](docs/licenses.md#runtime-redistribution-review) for unresolved attribution and SDK questions.
 
 [LLVM 23.1.6](https://github.com/llvm/llvm-project/tree/5b10d2d74929eae78912771222c9855af97496f4) is used as an external fixture tool under Apache-2.0 WITH LLVM-exception. Xcode and Metal are separate Apple tools under Apple's license terms.
 

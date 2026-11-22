@@ -177,7 +177,11 @@ fn scalar_sources_keep_literal_width_and_register_class() {
 #[test]
 #[ignore = "requires LLVM with the gfx1030 AMDGPU target"]
 fn compares_fixture_instructions_against_llvm() {
-    for fixture in [FIXTURE, BITWISE_FIXTURE, FLOAT_FIXTURE] {
+    // Also covered by the independent reference decoder's high-register test.
+    let high_registers: &[u8] = &[
+        0xfe, 0x03, 0xfe, 0x7f, 0xff, 0, 0x25, 0xd5, 0x80, 0xff, 0x03, 0x02, 0, 0, 0x81, 0xbf,
+    ];
+    for fixture in [FIXTURE, BITWISE_FIXTURE, FLOAT_FIXTURE, high_registers] {
         compare_against_llvm(fixture);
     }
 }

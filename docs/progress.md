@@ -1,6 +1,6 @@
 # Phase 01 checkpoint
 
-**NOT RELEASE-READY.** The local working tree builds and runs the three-fixture demo. Its base is `9ab5bf9`. Candidate-commit evidence and the remaining gate work are listed in the [engineering report](testing/phase01-checkpoint.md). Changes are local. No commit, push, tag, release or Phase 02 work was performed.
+**NOT RELEASE-READY.** The three-fixture demo checkpoint was pushed at `96cff7c66e55f1e4693ace19577c207795258d5c` and its [Native Rust checks](https://github.com/ranveersoni98/Xenora/actions/runs/45001680455) passed. See the [engineering report](testing/phase01-checkpoint.md) for gate status and subsequent assurance evidence.
 
 ## Reproduce
 
@@ -29,4 +29,4 @@ The independent CPU validation tests are part of the workspace. The native suite
 2. Run `scripts/fuzz.sh instruction_stream`, `scripts/fuzz.sh fixture` and `scripts/fuzz.sh reference` serially. Each defaults to 600 seconds. The interrupted corpus is retained under ignored `artifacts/fuzz/` and no campaign remains running.
 3. R2 owns source, semantic and oracle mutation execution and survivor triage. Recreate the source population with `cargo mutants --workspace --list --json --file 'crates/decoder/src/**' --file 'crates/shader/src/**' --file 'crates/ref/src/**'` before executing it. The first inventory has 373 entries. Resolve any new tests and reassess the denominator before reporting a gate result.
 4. Implement benchmark coverage across the correctness corpus and execute on AC power with the machine idle. The checkout has verified correctness results and no benchmark measurements.
-5. R1 owns the license, history, claim coverage and status audits. Resolve the objc2 redistribution concern and repeat both reviewer passes against the final candidate commit.
+5. R1 owns the license, history, claim coverage and status audits. Confirm attribution completeness and the Apple SDK terms for the proposed linked distributable using the [runtime redistribution review](licenses.md#runtime-redistribution-review). Repeat both reviewer passes against the final candidate commit.
