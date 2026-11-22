@@ -25,8 +25,8 @@ The independent CPU validation tests are part of the workspace. The native suite
 
 ## Remaining work
 
-1. The automated G6 check covers all 15 decoded forms. R2 still needs to sign off on the [three-way evidence](shaders/instruction-coverage.md#automated-three-way-comparison) at the final candidate and finish G5 interpreter assurance.
-2. Run `scripts/fuzz.sh instruction_stream`, `scripts/fuzz.sh fixture` and `scripts/fuzz.sh reference` serially. Each defaults to 600 seconds. The interrupted corpus is retained under ignored `artifacts/fuzz/` and no campaign remains running.
-3. R2 owns source, semantic and oracle mutation execution and survivor triage. Recreate the source population with `cargo mutants --workspace --list --json --file 'crates/decoder/src/**' --file 'crates/shader/src/**' --file 'crates/ref/src/**'` before executing it. The first inventory has 373 entries. Resolve any new tests and reassess the denominator before reporting a gate result.
-4. Implement benchmark coverage across the correctness corpus and execute on AC power with the machine idle. The checkout has verified correctness results and no benchmark measurements.
-5. R1 owns the license, history, claim coverage and status audits. Confirm attribution completeness and the Apple SDK terms for the proposed linked distributable using the [runtime redistribution review](licenses.md#runtime-redistribution-review). Repeat both reviewer passes against the final candidate commit.
+1. G7 is the immediate priority. The historical source campaign at `a34dadc` reported 387 mutants. The targeted rerun and accounting rules are in [mutation testing](testing/mutation.md). Run the complete source campaign after survivor triage, then complete the semantic and oracle campaigns with R2.
+2. G5–G6 require independent R2 validation against the candidate. The automated three-way comparison covers all 15 decoded forms. Reproduce with the LLVM command above.
+3. G9 has three successful historical 601-second transcripts in `artifacts/g9/`. Record candidate scope, nightly version and individual process exit codes on the confirmation run. Run `scripts/fuzz.sh instruction_stream`, `scripts/fuzz.sh fixture` and `scripts/fuzz.sh reference` serially.
+4. G10 has a tracked [battery run](../benchmarks/results/apple-m5/run-1795338391/report.md). AC measurements and full corpus and protocol coverage remain open.
+5. G11 remains open for objc2 SDK-derived binding redistribution and the pinned license inventory audit. See the [runtime redistribution review](licenses.md#runtime-redistribution-review). R1 also owns the claims, history and status audits. Both reviewers must review the final candidate.

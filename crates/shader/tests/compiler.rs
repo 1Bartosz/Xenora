@@ -94,3 +94,129 @@ fn compiles_only_proven_exact_float_operations() {
         Err(CompileError::Verify { offset: 40, .. })
     ));
 }
+
+#[test]
+fn enforces_the_fixture_size_limit_before_decoding() {
+    assert!(matches!(
+        compile(Architecture::Gfx1030, &[]),
+        Err(CompileError::InvalidLength { bytes: 0 })
+    ));
+    let mut code = FIXTURE.to_vec();
+    // Prepend redundant s_waitcnt vmcnt(0) instructions to reach 1024 bytes.
+    code.splice(
+        ..0,
+        [0x70, 0x3f, 0x8c, 0xbf].repeat((1024 - FIXTURE.len()) / 4),
+    );
+    assert!(compile(Architecture::Gfx1030, &code).is_ok());
+    code.extend_from_slice(&[0; 4]);
+    assert!(matches!(
+        compile(Architecture::Gfx1030, &code),
+        Err(CompileError::InvalidLength { bytes: 1028 })
+    ));
+}
+
+#[test]
+fn preserves_the_decoder_diagnostic_and_error_source() {
+    let error = compile(Architecture::Gfx1030, &[0xff; 4]).unwrap_err();
+    let expected = "gfx1030 decode at byte 0x0: unsupported opcode in 0xffffffff";
+    assert_eq!(error.to_string(), expected);
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        expected
+    );
+}
+
+#[test]
+fn rejects_register_moves_into_index_and_outstanding_load_destinations() {
+    for (offset, instruction) in [
+        (12, [0x01, 0x03, 0x00, 0x7e]), // v_mov_b32_e32 v0, v1
+        (24, [0x02, 0x03, 0x02, 0x7e]), // v_mov_b32_e32 v1, v2
+    ] {
+        let mut code = FIXTURE.to_vec();
+        if offset == 24 {
+            // Move the load wait after the register move. v2 is initialized.
+            code.drain(8..12);
+            code.splice(16..16, instruction);
+        } else {
+            code.splice(offset..offset, instruction);
+        }
+        let expected_offset = if offset == 24 { 16 } else { offset };
+        assert!(matches!(
+            compile(Architecture::Gfx1030, &code),
+            Err(CompileError::Verify {
+                offset,
+                reason: "move writes the index register or replaces a pending load",
+            }) if offset == expected_offset
+        ));
+    }
+}
+
+#[test]
+fn refuses_to_terminate_with_an_outstanding_load() {
+    let mut code = FIXTURE.to_vec();
+    // Add a second input load after the completed store. An output exists,
+    // but the new load still needs its own wait.
+    code.splice(40..40, FIXTURE[..8].iter().copied());
+    assert!(matches!(
+        compile(Architecture::Gfx1030, &code),
+        Err(CompileError::Verify {
+            offset: 48,
+            reason: "termination requires one completed store and no pending loads",
+        })
+    ));
+}
+
+#[test]
+fn protects_reserved_scalar_resource_registers() {
+    let mut code = FIXTURE.to_vec();
+    code.splice(..0, 0xbe87_0380u32.to_le_bytes()); // s_mov_b32 s7, 0
+    assert!(matches!(
+        compile(Architecture::Gfx1030, &code),
+        Err(CompileError::Verify {
+            offset: 0,
+            reason: "scalar move would modify a resource descriptor",
+        })
+    ));
+    code[2] = 0x88; // s8 is outside both resource descriptors.
+    assert!(compile(Architecture::Gfx1030, &code).is_ok());
+}
+
+#[test]
+fn proves_a_float_product_using_multiplication() {
+    let mut code: Vec<_> = [
+        0x7e02_02ffu32, // v_mov_b32_e32 v1, 0x4e800000 (2^30)
+        0x4e80_0000,
+        0x7e04_02ff, // v_mov_b32_e32 v2, 0x40000000 (2.0)
+        0x4000_0000,
+        0x1006_0501, // v_mul_f32_e32 v3, v1, v2
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect();
+    code.extend_from_slice(&FIXTURE[28..]);
+    code[25] = 3; // Store v3.
+    // The product 2^31 is exact, while 2^30 + 2 is not representable.
+    let shader = compile(Architecture::Gfx1030, &code).unwrap();
+    assert!(shader.ir.contains("mul.f32 t0, t1"));
+    assert!(
+        shader
+            .msl
+            .contains("as_type<float>(t0) * as_type<float>(t1)")
+    );
+}
+
+#[test]
+fn rejects_load_into_index_or_before_waiting_on_previous_load() {
+    let mut code = FIXTURE.to_vec();
+    code[5] = 0; // Load into reserved v0.
+    assert!(matches!(
+        compile(Architecture::Gfx1030, &code),
+        Err(CompileError::Verify { offset: 0, .. })
+    ));
+    let mut code = FIXTURE.to_vec();
+    code.splice(8..8, FIXTURE[..8].iter().copied());
+    assert!(matches!(
+        compile(Architecture::Gfx1030, &code),
+        Err(CompileError::Verify { offset: 8, .. })
+    ));
+}

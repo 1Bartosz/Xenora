@@ -458,3 +458,48 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         reason: "missing program termination",
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Binary, KnownBits, exact_float_result};
+
+    #[test]
+    fn propagates_known_bits_through_integer_operators() {
+        let left = KnownBits::constant(0b1100);
+        let right = KnownBits::constant(0b1010);
+        let and = left.and(right);
+        assert_eq!((and.zero, and.one), (!0b1000, 0b1000));
+        let xor = left.xor(right);
+        assert_eq!((xor.zero, xor.one), (!0b0110, 0b0110));
+    }
+
+    #[test]
+    fn rejects_unbounded_or_invalid_float_operands() {
+        let one = KnownBits::constant(1.0f32.to_bits());
+        let varying = KnownBits::UNKNOWN
+            .and(KnownBits::constant(0x0040_0000))
+            .xor(one);
+        assert_eq!(varying.positive_normal_candidates(), Some([1.0, 1.5]));
+        assert_eq!(one.and(one).positive_normal_candidates(), Some([1.0; 2]));
+        assert!(KnownBits::UNKNOWN.positive_normal_candidates().is_none());
+        for invalid in [0x8000_0000, 0xbf80_0000, 1, 0x7f80_0000] {
+            assert!(
+                KnownBits::constant(invalid)
+                    .positive_normal_candidates()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_only_bits_shared_by_every_exact_result() {
+        let operand = KnownBits::UNKNOWN
+            .and(KnownBits::constant(0x0040_0000))
+            .xor(KnownBits::constant(1.0f32.to_bits()));
+        let sum = exact_float_result(Binary::FloatAdd, operand, operand).unwrap();
+        // The sums 2, 2.5 and 3 differ only in the two highest fraction bits.
+        assert_eq!(sum.zero, 0xbf9f_ffff);
+        assert_eq!(sum.one, 0x4000_0000);
+        assert!(sum.values.is_none());
+    }
+}
