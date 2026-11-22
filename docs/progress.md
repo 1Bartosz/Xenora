@@ -25,8 +25,10 @@ The independent CPU validation tests are part of the workspace. The native suite
 
 ## Remaining work
 
+Use the [copy-ready continuation handoff](testing/phase01-continuation.md) for exact evidence, gate statuses and commands.
+
 1. Finish G7 independent oracle assurance. The complete source campaign at `aff46b0` killed 359 of 361 non-equivalent eligible mutants. The native semantic campaign killed all 12. The separate 44-case oracle campaign exposed seven independent-test gaps. R2’s witness tests are integrated. Rerun the [mutation commands](testing/mutation.md) against the resulting candidate.
 2. Preserve the G6 R2 sign-off. The G5 form-by-form report is in `tests/validation/README.md`. Confirm independent-oracle sensitivity on the integrated candidate. Run `cargo test --locked -p xenora-semantic-review` before candidate regression and mutation runs.
-3. Complete the affected candidate fixture fuzz run and record exit, duration, counts and log hash. `CARGO_BUILD_JOBS=2 scripts/fuzz.sh fixture 600`. Decoder and reference historical transcripts are under `artifacts/g9/`.
+3. The affected fixture run passed 244,422,168 executions in 601 seconds. Confirm the remaining candidate provenance. `CARGO_BUILD_JOBS=2 scripts/fuzz.sh fixture 600`. Decoder and reference historical transcripts are under `artifacts/g9/`.
 4. Finish benchmark corpus and protocol coverage before rerunning on AC and an idle system. Preserve the [exploratory battery and AC records](testing/benchmarks.md).
 5. Close independent claims, status, history and review findings against the integrated candidate. Verify the [runtime redistribution blockers](licenses.md#runtime-redistribution-review) before claiming G11.

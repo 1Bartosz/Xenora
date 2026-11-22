@@ -51,3 +51,41 @@ The implementation was still in the working tree at review start. Results below 
 The runtime lockfile resolves five third-party packages and the standalone validation lockfile has none. The separate fuzz lockfile resolves arbitrary 1.5.0, cc 1.11.3, cfg-if 1.0.5, find-msvc-tools 0.1.15, getrandom 0.4.3, jobserver 0.1.35, libc 0.2.191, libfuzzer-sys 0.4.13, r-efi 6.0.0, and shlex 2.0.1. The root advisory report showed no known advisories. R1 independently ran `cargo audit --no-fetch --json --file fuzz/Cargo.lock`, which exited 0. Its database revision and scope appear in local `artifacts/r1-fuzz-audit.json`.
 
 Compared the preserved runtime notices against pinned upstream license files. The selected license expressions are compatible with GPL-3.0-or-later; this finding does not resolve the upstream SDK-derived-code distribution question. [objc2 0.6.5 notice](https://raw.githubusercontent.com/madsmtm/objc2/d7d2fa23ceaa5e6096c923b081040e5d81b3b9df/LICENSE.md), [objc2-encode 4.1.0 notice](https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md), [Foundation and Metal bindings notice](https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md), [bitflags MIT license](https://raw.githubusercontent.com/bitflags/bitflags/80ce9b545acb0bd42150695fc351889cac1d8eb4/LICENSE-MIT)
+## Phase 01 assurance review, 2026-11-22
+
+R2 independently reviewed all 399 source mutations at `aff46b0`.
+The audited numerator is 359 named test failures. All 13 raw misses have
+individual equivalence proofs. The 25 invalid mutations all failed Rust
+compilation, and the two non-progress outcomes remain in the denominator.
+The conservative score is 359/361 (99.45%). The full ledger and exact
+commands are in the [mutation report](mutation.md).
+
+R1 independently reviewed the 12 native semantic mutations. Every
+unmodified GPU workload matched its known answers. The mutated
+submissions completed with both validation layers active and differed
+from those answers, as required by the negative test. No invalid
+dispatch, compiler error, crash or timeout was counted as a kill.
+
+R2 rederived arithmetic, register and memory behaviors for the bounded
+gfx1030 scope. R1 independently rederived the 20 FP32 boundary answers
+from rational arithmetic and reviewed the independent integer oracle.
+The report maps all 15 forms to their evidence. See the
+[reference validation report](../../tests/validation/README.md).
+
+R1 ran the claims and generated status checks at `5c47900`. Both passed,
+with 20 registered claims and all 15 instruction forms represented.
+The signed, next-PC-relative dword branch displacement description needs
+an explicit claim ID. Scope the interpreter prose to documented desktop
+RDNA2 and unknown Xbox applicability. The generated status and supported
+feature descriptions passed review.
+
+R1's strict Git integrity and pattern scans across 20 reachable commits
+found no matching credentials, private home paths or tracked build
+artifacts. Missing post-policy DCO attestations remain unresolved.
+Preserve the historical commit objects and use authentic attestations.
+
+R1 confirmed that the preserved AC report files match the acquisition
+copies byte for byte. The logged CPU load leaves replay idleness
+unestablished. G10 and G11 remain open. More protocol and corpus work is
+required for the former, and linked SDK-derived rights and attribution
+remain unresolved for the latter.
