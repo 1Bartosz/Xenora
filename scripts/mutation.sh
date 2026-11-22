@@ -15,6 +15,7 @@ cargo mutants --workspace \
     --file 'crates/decoder/src/**' \
     --file 'crates/shader/src/**' \
     --file 'crates/ref/src/**' \
+    --test-workspace true \
     --jobs 2 \
-    --timeout 60 \
+    --timeout 300 \
     --output "$out"
