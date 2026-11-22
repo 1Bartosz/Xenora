@@ -25,8 +25,8 @@ The independent CPU validation tests are part of the workspace. The native suite
 
 ## Remaining work
 
-1. G7 is the immediate priority. The historical source campaign at `a34dadc` reported 387 mutants. The targeted rerun and accounting rules are in [mutation testing](testing/mutation.md). Run the complete source campaign after survivor triage, then complete the semantic and oracle campaigns with R2.
+1. G7 is the immediate priority. The historical source campaign at `a34dadc` reported 387 mutants. The targeted rerun and accounting rules are in [mutation testing](testing/mutation.md). Run the complete source campaign against the clean candidate, then run the separate semantic and oracle campaigns with R2.
 2. G5–G6 require independent R2 validation against the candidate. The automated three-way comparison covers all 15 decoded forms. Reproduce with the LLVM command above.
 3. G9 has three successful historical 601-second transcripts in `artifacts/g9/`. Record candidate scope, nightly version and individual process exit codes on the confirmation run. Run `scripts/fuzz.sh instruction_stream`, `scripts/fuzz.sh fixture` and `scripts/fuzz.sh reference` serially.
-4. G10 has a tracked [battery run](../benchmarks/results/apple-m5/run-1795338391/report.md). AC measurements and full corpus and protocol coverage remain open.
+4. G10 has a tracked [battery run](../benchmarks/results/apple-m5/run-1795338391/report.md). A second exploratory run used AC power. [Benchmark protocol and outstanding coverage](testing/benchmarks.md#exploratory-ac-run).
 5. G11 remains open for objc2 SDK-derived binding redistribution and the pinned license inventory audit. See the [runtime redistribution review](licenses.md#runtime-redistribution-review). R1 also owns the claims, history and status audits. Both reviewers must review the final candidate.

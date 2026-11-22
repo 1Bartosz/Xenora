@@ -79,3 +79,15 @@ The corpus currently covers three synthetic gfx1030 compute fixtures under the
 graphics stages, guest containers, Wave64 or divergence. Translation-versus-native
 baseline ratios are not reported because no hand-written native MSL baseline exists
 yet for these fixtures.
+
+## Exploratory AC run
+
+Run `1795352394` used the release harness built at `cc0daa7` on Apple M5,
+with AC power confirmed before and after, 30 seconds between the build and
+timing, two warmups, 21 measured repetitions per size and Metal validation
+off. Neither thermal nor performance warnings were recorded by
+`pmset -g therm`. All three declared translated fixtures passed their
+correctness checks. G10 remains open for the full correctness corpus,
+individual compiler stages and cold/warm timing, tool and capability metadata,
+and noise-based variability reporting. See the
+[generated report](../../benchmarks/results/apple-m5/run-1795352394/report.md).

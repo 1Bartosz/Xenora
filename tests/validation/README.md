@@ -5,7 +5,7 @@ AMD's RDNA2 ISA reference §8.1 defines indexed buffer addressing and the four-S
 LLVM 23.1.6 and the production decoder agreed on all seven fixture instructions, including their bytes, lengths, offsets and printed operands. AMD defines hardware semantics. LLVM is class E evidence for the tool's encoding and decoding behavior.
 
 ```sh
-LLVM_BIN=/opt/homebrew/opt/llvm/bin cargo test -p xenora-decoder --test gfx1030 -- --ignored --nocapture
+LLVM_BIN="$(brew --prefix llvm)/bin" cargo test -p xenora-decoder --test gfx1030 -- --ignored --nocapture
 CARGO_TARGET_DIR=target/semantic-review cargo test --manifest-path tests/validation/Cargo.toml
 ```
 
