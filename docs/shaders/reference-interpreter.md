@@ -17,3 +17,8 @@
 The encoding and instruction semantics are based on AMD's RDNA 2 ISA reference guide 70648, dated 30 November 2020, sections “Instruction Encoding” and “Microcode Formats.” Evidence is class C for applicability to Xbox hardware. The exact gfx1030 encodings, including VGPR 255 and VOP3 source-field crossings, were checked with LLVM 23.1.6 `llvm-mc` (class E). The project uses the document as a specification reference and distributes no specification text or LLVM code. [AMD RDNA 2 ISA reference](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf)
 
 Run `cargo test -p xenora-ref` for fixture results, both conditional paths, invalid targets, the exact FP32 domain, truncation, wait enforcement and register-index boundaries. This author-run suite is development evidence. Independent validation and three-way decode agreement are separately tracked release gates.
+
+## Second independent interpreter (semantic review)
+
+`tests/validation/independent_ref.rs` is a second interpreter for the same subset, written for the semantic-review suite. It imports neither `xenora-decoder`, `xenora-isa` nor `xenora-ref`; it re-decodes the RDNA 2 encoding fields and executes a program-counter machine. The review test `second_interpreter_agrees_with_reference_on_boundary_and_random_inputs` compares the two interpreters on all three demo fixtures over boundary-dense and pseudorandom inputs (about 3,268 inputs per fixture, including the 2^32 addition wrap, the FP32 selection bit and signed/unsigned extremes). Agreement here is spec-derived evidence (class B/C), not Xbox hardware observation. This is R2-owned validation and is distinct from the production reference.
+

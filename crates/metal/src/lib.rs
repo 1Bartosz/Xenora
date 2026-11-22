@@ -7,4 +7,4 @@ compile_error!("Xenora's Metal backend requires ARM64 macOS");
 mod compute;
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-pub use compute::{MetalError, NativeCompute};
+pub use compute::{MetalError, NativeCompute, RunProfile};

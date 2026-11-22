@@ -40,4 +40,5 @@ objc2-metal = { version = "=0.3.2", default-features = false, features = [
     "MTLPipeline",
     "MTLResource",
     "MTLTypes",
+    "objc2-core-foundation",
 ] }

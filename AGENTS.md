@@ -52,6 +52,8 @@ Read docs/interfaces.md and docs/progress.md before implementation.
 - Run native GPU correctness: `scripts/test-gpu.sh`
 - Run the three RDNA-to-Metal fixtures: `scripts/demo.sh`
 - Run independent CPU validation: `cargo test --locked -p xenora-semantic-review`
+- Run the correctness-gated benchmark suite: `scripts/benchmark.sh` (idle machine, release, validation off)
+- Run source mutation on decoder/shader/ref: `scripts/mutation.sh` (R2 owns triage)
 - Check claims and dependency direction: `scripts/audit/claims.sh` and `scripts/audit/dependencies.sh`
 - Fuzz one CPU-only parser at a time: `scripts/fuzz.sh <instruction_stream|fixture|reference>` (600 seconds by default).
 

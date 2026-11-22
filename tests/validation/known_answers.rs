@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #[cfg(test)]
+mod independent_ref;
+
+#[cfg(test)]
 mod review {
     use xenora_shader::{Architecture, compile};
 
@@ -120,6 +123,54 @@ mod review {
                 xenora_ref::execute(&changed, &[0]).is_err(),
                 "{rejected_literal:08x}"
             );
+        }
+    }
+
+    #[test]
+    fn second_interpreter_agrees_with_reference_on_boundary_and_random_inputs() {
+        use super::independent_ref;
+        let fixtures: [(&[u8], &str); 3] = [
+            (include_bytes!("../../fixtures/rdna2/add.bin"), "add"),
+            (
+                include_bytes!("../../fixtures/rdna2/bitwise-branch.bin"),
+                "bitwise-branch",
+            ),
+            (
+                include_bytes!("../../fixtures/rdna2/float-exact.bin"),
+                "float-exact",
+            ),
+        ];
+        let mut inputs: Vec<u32> = vec![
+            0,
+            1,
+            u32::MAX,
+            0x8000_0000,
+            0x7fff_ffff,
+            0xedcb_a988,
+            0x0040_0000,
+            0x0040_0001,
+            0x007f_ffff,
+            0x0080_0000,
+            0x00ff_00ff,
+            0xff00_ff00,
+        ];
+        for base in [
+            0xedcb_a988u32.wrapping_sub(64),
+            0x0040_0000u32.wrapping_sub(64),
+        ] {
+            inputs.extend((0..128).map(|i| base.wrapping_add(i)));
+        }
+        let mut seed = 0x9e37_79b9u32;
+        inputs.extend((0..3000).map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        }));
+        for (code, name) in fixtures {
+            let expected = xenora_ref::execute(code, &inputs).unwrap();
+            let actual = independent_ref::execute(code, &inputs).unwrap();
+            assert_eq!(actual, expected, "fixture {name}");
         }
     }
 }

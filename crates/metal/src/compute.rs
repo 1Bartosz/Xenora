@@ -2,6 +2,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::mem::size_of_val;
 use std::ptr::{NonNull, copy_nonoverlapping};
+use std::time::Instant;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
@@ -42,6 +43,20 @@ impl fmt::Display for MetalError {
 }
 
 impl std::error::Error for MetalError {}
+
+/// One compiled-and-dispatched kernel with its measured stage timings.
+///
+/// Durations come from monotonic host clocks for the compiler stages and from
+/// the command buffer's GPU start and end timestamps for `gpu_seconds`. They
+/// measure a single submission and are not a benchmark distribution.
+#[derive(Debug, Clone)]
+pub struct RunProfile {
+    pub library_seconds: f64,
+    pub pipeline_seconds: f64,
+    pub gpu_seconds: f64,
+    pub host_seconds: f64,
+    pub output: Vec<u32>,
+}
 
 /// A native Metal device and its command queue for the Phase 01 fixture ABI.
 pub struct NativeCompute {
@@ -96,6 +111,24 @@ impl NativeCompute {
         entry: &str,
         input: &[u32],
     ) -> Result<Vec<u32>, MetalError> {
+        self.run_words_profiled(source, entry, input)
+            .map(|profile| profile.output)
+    }
+
+    /// Run trusted MSL and report the measured compilation and execution stages.
+    ///
+    /// Applies the same bounds and completion checks as [`Self::run_words`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for out-of-policy input sizes, compilation, resource setup,
+    /// dispatch or completion failure.
+    pub fn run_words_profiled(
+        &self,
+        source: &str,
+        entry: &str,
+        input: &[u32],
+    ) -> Result<RunProfile, MetalError> {
         if !(1..=MAX_GRID_WORDS).contains(&input.len()) {
             return Err(MetalError::new(
                 "dispatch bounds",
@@ -112,7 +145,8 @@ impl NativeCompute {
         autoreleasepool(|_| self.run(source, entry, input))
     }
 
-    fn run(&self, source: &str, entry: &str, input: &[u32]) -> Result<Vec<u32>, MetalError> {
+    fn run(&self, source: &str, entry: &str, input: &[u32]) -> Result<RunProfile, MetalError> {
+        let host_start = Instant::now();
         let options = MTLCompileOptions::new();
         if !options.respondsToSelector(sel!(setMathMode:))
             || !options.respondsToSelector(sel!(setMathFloatingPointFunctions:))
@@ -124,6 +158,7 @@ impl NativeCompute {
         }
         options.setMathMode(MTLMathMode::Safe);
         options.setMathFloatingPointFunctions(MTLMathFloatingPointFunctions::Precise);
+        let library_start = Instant::now();
         let library = self
             .device
             .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&options))
@@ -133,11 +168,13 @@ impl NativeCompute {
                     error.localizedDescription().to_string(),
                 )
             })?;
+        let library_seconds = library_start.elapsed().as_secs_f64();
         let function = library
             .newFunctionWithName(&NSString::from_str(entry))
             .ok_or_else(|| {
                 MetalError::new("newFunctionWithName", format!("missing entry {entry}"))
             })?;
+        let pipeline_start = Instant::now();
         let pipeline = self
             .device
             .newComputePipelineStateWithFunction_error(&function)
@@ -147,6 +184,7 @@ impl NativeCompute {
                     error.localizedDescription().to_string(),
                 )
             })?;
+        let pipeline_seconds = pipeline_start.elapsed().as_secs_f64();
         verify_shader_validation(&pipeline)?;
 
         let width = MAX_THREADS_PER_GROUP
@@ -197,6 +235,8 @@ impl NativeCompute {
             );
             return Err(MetalError::new("waitUntilCompleted", error));
         }
+        let gpu_seconds = command.GPUEndTime() - command.GPUStartTime();
+        let host_seconds = host_start.elapsed().as_secs_f64();
         // SAFETY: Metal copied the initialized words into distinct shared storage.
         // The GPU finished before the CPU touches that storage. Both ranges are
         // valid for byte_len bytes and don't overlap. A byte copy requires no
@@ -208,7 +248,13 @@ impl NativeCompute {
                 byte_len,
             );
         }
-        Ok(words)
+        Ok(RunProfile {
+            library_seconds,
+            pipeline_seconds,
+            gpu_seconds,
+            host_seconds,
+            output: words,
+        })
     }
 
     fn new_buffer(
