@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible defect in Xenora or XenoMetal.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic or authorized inputs only. For vulnerabilities, follow SECURITY.md. Remove personal paths, credentials and private data from logs.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What went wrong? Identify the affected subsystem and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include exact commands and a minimal, legally distributable input if applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Commit, macOS, Apple GPU, RAM, Rust, Xcode and relevant tool versions. Include sanitized doctor output if available.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Actual output and diagnostics
+      description: Include expected versus actual results, validation-layer messages and relevant logs.
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched for existing reports and have not included sensitive or unauthorized material.
+          required: true

@@ -28,15 +28,6 @@ flowchart TD
 
 An independent CPU reference interpreter is intended to validate supported instruction semantics against known-answer tests and actual GPU output. SPIR-V may be used as an optional compiler intermediate representation without introducing a Vulkan runtime dependency.
 
-## Design principles
-
-- **Native ARM64:** target Apple Silicon directly, without Rosetta.
-- **Metal-first graphics:** build around native Metal capabilities rather than recreating another graphics API unnecessarily.
-- **Correctness before performance:** validate instruction semantics and observable shader results before optimizing.
-- **Evidence-driven development:** distinguish public specifications, implementation assumptions and measured hardware behavior.
-- **Independent verification:** use reference implementations, differential tests, fuzzing and mutation testing to detect semantic errors.
-- **Clean-room research:** rely on public documentation, original fixtures and legally reusable upstream software.
-
 ## Development roadmap
 
 The following describes the project's intended development stages, not a claim that the features are already implemented.
@@ -50,21 +41,6 @@ The following describes the project's intended development stages, not a claim t
 | 05 | Native x86-64 to ARM64 CPU recompilation |
 | 06 | Guest runtime and publicly documented system interfaces |
 | 07 | Integrated execution and compatibility validation using authorized test programs |
-
-## Target platform
-
-| Component | Target |
-| --- | --- |
-| Guest architecture | Xbox Series X\|S (x86-64 CPU, RDNA 2-derived GPU) |
-| Host operating system | macOS |
-| Host architecture | ARM64 / AArch64 |
-| Host hardware | Apple Silicon |
-| Graphics subsystem | XenoMetal |
-| Graphics API | Metal |
-| Primary language | Rust |
-| Supporting languages | C++, Metal Shading Language |
-
-The development target spans Apple Silicon generations, but hardware compatibility must be established through actual testing. Features are not considered supported solely because they compile.
 
 ## Development and testing
 
@@ -102,7 +78,7 @@ Changes should include a clear technical rationale, relevant specification refer
 
 ## License
 
-Xenora is intended to be distributed under the GNU General Public License, version 3 or later ([GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html)). Third-party components retain their applicable licenses and copyright notices.
+Xenora is intended to be distributed under the GNU General Public License, version 3 ([GPL-3.0](LICENSE)). Third-party components retain their applicable licenses and copyright notices.
 
 Xenora does not distribute proprietary game binaries, console firmware, encryption keys or restricted Xbox SDK material. The project does not aim to circumvent DRM or console security mechanisms.
 

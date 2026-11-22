@@ -1,0 +1,42 @@
+name: Technical research
+description: Record an ISA, Metal or publicly documented graphics research finding.
+title: "research: "
+labels: [research]
+body:
+  - type: markdown
+    attributes:
+      value: Use only public, authorized sources. Do not link to leaked SDKs, private documentation or unauthorized game content.
+  - type: textarea
+    id: question
+    attributes:
+      label: Research question or finding
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Sources and applicability
+      description: URLs, specification sections or revision, exact architecture and license/provenance if relevant.
+    validations:
+      required: true
+  - type: dropdown
+    id: evidence
+    attributes:
+      label: Evidence class (highest applicable)
+      options:
+        - A - Measured on named hardware
+        - B - Normative source for exact target
+        - C - Normative source for related target
+        - D - Non-normative official material
+        - E - Independent software behavior
+        - F - Uncorroborated community claim
+        - U - Unknown or assumption
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation, limitations and proposed next steps
+      description: Distinguish Apple or desktop RDNA observations from Xbox behavior.
+    validations:
+      required: true

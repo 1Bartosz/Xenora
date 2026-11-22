@@ -1,0 +1,29 @@
+# Rust and local builds
+/target/
+/build/
+/cmake-build-*/
+/fuzz/target/
+/fuzz/artifacts/
+
+# macOS / Xcode local state
+.DS_Store
+**/xcuserdata/
+*.xcuserstate
+/DerivedData/
+
+# Local environment and diagnostics
+.env
+.env.*
+!.env.example
+*.log
+*.profraw
+*.profdata
+
+# Keep Cargo.lock, source fixtures, reviewed golden files and documentation tracked.
+
+# Local AI agent tooling
+.agents/
+.claude/
+.codex/
+.cursor/
+.gemini/
