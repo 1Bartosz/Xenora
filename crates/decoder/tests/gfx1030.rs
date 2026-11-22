@@ -498,3 +498,135 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
         _ => assembly.to_owned(),
     }
 }
+
+#[test]
+fn displays_decoded_instructions_and_decode_errors() {
+    let decoded = DecodedInstruction {
+        offset: 0x1a,
+        byte_len: 4,
+        instruction: Instruction::EndProgram,
+    };
+    assert_eq!(decoded.to_string(), "001a: s_endpgm");
+    for (error, expected) in [
+        (
+            DecodeError {
+                offset: 0x10,
+                kind: DecodeErrorKind::Truncated {
+                    needed: 8,
+                    available: 4,
+                },
+            },
+            "gfx1030 decode at byte 0x10: instruction requires 8 bytes, found 4",
+        ),
+        (
+            DecodeError {
+                offset: 0,
+                kind: DecodeErrorKind::UnsupportedOpcode { word: 0xdead_beef },
+            },
+            "gfx1030 decode at byte 0x0: unsupported opcode in 0xdeadbeef",
+        ),
+        (
+            DecodeError {
+                offset: 0,
+                kind: DecodeErrorKind::UnsupportedForm {
+                    mnemonic: "s_mov_b32",
+                    detail: "expected a normal SGPR destination",
+                },
+            },
+            "gfx1030 decode at byte 0x0: unsupported s_mov_b32 form: expected a normal SGPR destination",
+        ),
+        (
+            DecodeError {
+                offset: 0,
+                kind: DecodeErrorKind::InvalidBranchTarget { target: 0x20 },
+            },
+            "gfx1030 decode at byte 0x0: branch target 0x20 is outside instruction boundaries",
+        ),
+    ] {
+        assert_eq!(error.to_string(), expected);
+    }
+}
+
+#[test]
+fn decodes_inline_negative_and_register_sources() {
+    // s_mov_b32 s10, 5; s_mov_b32 s11, -3; v_mov_b32_e32 v2, 5;
+    // v_mov_b32_e32 v2, -3; v_mov_b32_e32 v2, v1.
+    let words = [
+        0xbe8a_0385u32,
+        0xbe8b_03c3,
+        0x7e04_0285,
+        0x7e04_02c3,
+        0x7e04_0301,
+    ];
+    let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let decoded = decode(Architecture::Gfx1030, &bytes).unwrap();
+    assert_eq!(
+        decoded[0].instruction,
+        Instruction::ScalarMoveB32 {
+            dst: 10,
+            src: ScalarSource::Immediate(5)
+        }
+    );
+    assert_eq!(
+        decoded[1].instruction,
+        Instruction::ScalarMoveB32 {
+            dst: 11,
+            src: ScalarSource::Immediate(0xffff_fffd)
+        }
+    );
+    assert_eq!(
+        decoded[2].instruction,
+        Instruction::MoveB32 {
+            dst: 2,
+            src: VectorSource::Immediate(5)
+        }
+    );
+    assert_eq!(
+        decoded[3].instruction,
+        Instruction::MoveB32 {
+            dst: 2,
+            src: VectorSource::Immediate(0xffff_fffd)
+        }
+    );
+    assert_eq!(
+        decoded[4].instruction,
+        Instruction::MoveB32 {
+            dst: 2,
+            src: VectorSource::Register(1)
+        }
+    );
+}
+
+#[test]
+fn accepts_scalar_destination_105_and_vgpr_zero_add_sources() {
+    // s_mov_b32 s105, 0 is the highest normal SGPR destination.
+    let valid = 0xbee9_0380u32.to_le_bytes();
+    assert_eq!(
+        decode(Architecture::Gfx1030, &valid).unwrap()[0].instruction,
+        Instruction::ScalarMoveB32 {
+            dst: 105,
+            src: ScalarSource::Immediate(0)
+        }
+    );
+    // s_mov_b32 s106, 0 does not fit the normal SGPR range.
+    let invalid = 0xbeea_0380u32.to_le_bytes();
+    assert_eq!(
+        decode(Architecture::Gfx1030, &invalid).unwrap_err().kind,
+        DecodeErrorKind::UnsupportedForm {
+            mnemonic: "s_mov_b32",
+            detail: "expected a normal SGPR destination",
+        }
+    );
+
+    // v_add_nc_u32_e64 v1, v0, v0 uses selector 256 (V0) for both sources.
+    let words = [0xd525_0001u32, 0x0202_0100];
+    let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    assert_eq!(
+        decode(Architecture::Gfx1030, &bytes).unwrap()[0].instruction,
+        Instruction::AddNoCarryU32 {
+            dst: 1,
+            src0: 0,
+            src1: 0
+        }
+    );
+}
