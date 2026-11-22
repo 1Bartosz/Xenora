@@ -16,7 +16,7 @@ AMD §8.1 describes the index, stride, offsets and bounds rules of a hardware
 descriptor. Xenora's fixture supplies two bindings in advance under [ADR
 0003](../adr/0003-demo-memory-model.md). It does not decode descriptors. AMD
 §12.5 defines separate vector-load and vector-store accounting and describes
-implicit waits at termination. The accepted wait operands are chosen narrowly
+implicit waits at termination (class B, CLAIM-RDNA2-TRANSFER-WAITS). The accepted wait operands are chosen narrowly
 for the fixture. AMD §12.7 specifies a uint32 sum with no carry. The VOP3
 encoding for this VOP2 operation is described in §12.7.1 and is identified
 separately in AMD's XML.

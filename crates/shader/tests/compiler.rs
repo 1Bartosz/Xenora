@@ -220,3 +220,48 @@ fn rejects_load_into_index_or_before_waiting_on_previous_load() {
         Err(CompileError::Verify { offset: 8, .. })
     ));
 }
+
+#[test]
+fn checks_fixture_layout_and_bindings_even_in_skipped_code() {
+    for (prefix, expected_offset, expected_reason) in [
+        (
+            &[0xbf82_0001u32, 0xbf81_0000][..], // Skip an early s_endpgm.
+            8,
+            "instruction follows program termination",
+        ),
+        (
+            &[0xbf82_0002, 0xe030_2000, 0x8001_0100], // Skip load from s[4:7].
+            4,
+            "unsupported resource or buffer index",
+        ),
+        (
+            &[0xbf82_0002, 0xe070_2000, 0x8000_0100], // Skip store to s[0:3].
+            4,
+            "unsupported resource or buffer index",
+        ),
+    ] {
+        let code: Vec<_> = prefix
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .chain(FIXTURE.iter().copied())
+            .collect();
+        assert!(matches!(
+            compile(Architecture::Gfx1030, &code),
+            Err(CompileError::Verify { offset, reason })
+                if offset == expected_offset && reason == expected_reason
+        ));
+    }
+
+    // A structurally valid instruction on the skipped path need not read an
+    // initialized register. Here v_mov_b32_e32 v1, v255 never runs.
+    let code: Vec<_> = [0xbf82_0001u32, 0x7e02_03ff]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .chain(FIXTURE.iter().copied())
+        .collect();
+    let compiled = compile(Architecture::Gfx1030, &code).unwrap();
+    assert!(compiled.ir.contains("branch.uniform 0x0008 taken=true"));
+    assert!(compiled.msl.contains("uint t1 = input[index];"));
+    assert!(compiled.msl.contains("output[index] = t3;"));
+}

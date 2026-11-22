@@ -167,3 +167,37 @@ retrieved = "2026-11-22"
 architecture = "Apple M5, macOS 27.3, Xcode 27.2"
 test = "scripts/demo.sh"
 uncertainty = "Synthetic binding ABI, statically resolved scalar control flow, and exact positive normal FP32."
+
+[[claim]]
+id = "CLAIM-METAL-APPLE-FAMILIES"
+class = "B"
+claim = "Apple lists nonuniform threadgroups from Apple4, SIMD permutes from Apple6, and SIMD reductions from Apple7. M1 maps to Apple7."
+sources = ["https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf"]
+retrieved = "2026-11-22"
+architecture = "Apple GPU families, feature tables revision 2026-10-23"
+test = "Independent R1 checked the GPU families and features tables."
+uncertainty = "Availability of the feature does not establish Xenora correctness on each device."
+
+[[claim]]
+id = "CLAIM-METAL-NATIVE-CONTRACTS"
+class = "B"
+claim = "Metal dispatchThreads specifies an exact grid subject to supported dispatch and pipeline limits. Shared storage is accessible to CPU and GPU, and waitUntilCompleted waits for command-buffer completion."
+sources = [
+    "https://developer.apple.com/documentation/metal/calculating-threadgroup-and-grid-sizes",
+    "https://developer.apple.com/documentation/metal/choosing-a-resource-storage-mode-for-apple-gpus",
+    "https://developer.apple.com/documentation/metal/mtlcommandbuffer/waituntilcompleted()",
+]
+retrieved = "2026-11-22"
+architecture = "Native Metal on Apple GPUs"
+test = "The backend applies the documented rules and scripts/test-gpu.sh exercises the bounded submission."
+uncertainty = "The API contracts do not establish guest memory ordering."
+
+[[claim]]
+id = "CLAIM-RDNA2-TRANSFER-WAITS"
+class = "B"
+claim = "AMD RDNA 2 distinguishes vector loads and stores in wait accounting and specifies implicit waits at program termination."
+sources = ["https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture"]
+retrieved = "2026-11-22"
+architecture = "AMD RDNA 2, document 70648"
+test = "Reviewed the wait and program-termination descriptions. Workspace tests exercise the stricter synthetic wait rule."
+uncertainty = "The fixture requires explicit waits and does not establish console behavior."

@@ -8,17 +8,18 @@ Xenora is an experimental, open-source recompilation framework for Xbox Series X
 Xenora takes a Metal-first approach rather than relying on a Vulkan runtime, MoltenVK, Rosetta 2 or a Windows compatibility layer.
 
 > [!IMPORTANT]
-> Xenora is an early-stage research and development project, not a game-ready emulator. Commercial game compatibility, Xbox hardware equivalence and performance superiority have not been established.
+> Xenora is an early-stage research project. Game execution, proprietary Xbox containers and full guest execution-mask divergence are unsupported.
 
 ## XenoMetal
 
 XenoMetal is the graphics translation subsystem of Xenora. Its intended scope includes shader decoding, recompilation, GPU resource translation and native Metal execution.
 
-The first working compute fixture passes through the following pipeline:
+The synthetic compute fixtures run through this pipeline. An independent CPU interpreter executes the original binary for comparison.
 
 ```mermaid
 flowchart TD
-    A[RDNA shader machine code] --> B[Instruction decoder]
+    A[RDNA shader machine code] --> P[Fixture parser]
+    P --> B[Instruction decoder]
     B --> C[Shader IR]
     C --> D[Semantic validation]
     D --> E[Metal Shading Language]
@@ -26,7 +27,7 @@ flowchart TD
     F --> G[Apple GPU]
 ```
 
-Run `scripts/demo.sh` to execute three original gfx1030 compute fixtures on Apple Silicon. Integer addition, bitwise and scalar branch, and restricted FP32 outputs matched the independent CPU reference and hand-derived values on Apple M5. Run `scripts/test-gpu.sh` for native Metal correctness, including offscreen rendering with original MSL. The [status file](docs/status.toml) records the verified scope. SPIR-V may be used as an optional compiler intermediate representation without introducing a Vulkan runtime dependency.
+Run `scripts/demo.sh` to execute three original gfx1030 compute fixtures on Apple Silicon. Integer addition, bitwise and scalar branch, and restricted FP32 outputs matched the independent CPU reference and hand-derived values on Apple M5 (class A, CLAIM-METAL-M5-RDNA-DEMO). Run `scripts/test-gpu.sh` for native Metal correctness, including offscreen rendering with original MSL (class A, CLAIM-METAL-M5-NATIVE-SUITE). The [status file](docs/status.toml) records the verified scope. SPIR-V may be used as an optional compiler intermediate representation without introducing a Vulkan runtime dependency.
 
 ## Development roadmap
 
@@ -44,7 +45,7 @@ The following describes the project's intended development stages, not a claim t
 
 ## Development and testing
 
-Xenora targets the native Rust `aarch64-apple-darwin` toolchain and Apple's Xcode and Metal development tools. LLVM's AMDGPU tools are intended to serve as an independent instruction encoding and decoding reference where applicable.
+Xenora targets the native Rust `aarch64-apple-darwin` toolchain and Apple's Xcode and Metal development tools. The gfx1030 oracle tests check the production and reference decoders against Homebrew LLVM AMDGPU.
 
 Run the standard Rust checks from the workspace root:
 

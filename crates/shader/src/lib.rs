@@ -270,24 +270,37 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
     let mut scc = None;
     let mut skip_before = 0;
 
-    for instruction in decoded {
-        let target = match instruction.instruction {
-            Instruction::Branch { target } | Instruction::BranchSccZero { target } => target,
+    // Every decoded instruction must satisfy the fixture layout and binding
+    // contract, even when a known branch skips it.
+    for (index, instruction) in decoded.iter().enumerate() {
+        let offset = instruction.offset;
+        let reason = match instruction.instruction {
+            Instruction::Branch { target } | Instruction::BranchSccZero { target }
+                if target <= offset
+                    || decoded
+                        .binary_search_by_key(&target, |instruction| instruction.offset)
+                        .is_err() =>
+            {
+                "branch target must be a forward instruction boundary"
+            }
+            Instruction::BufferLoadDword {
+                index, resource, ..
+            } if (index, resource) != (0, 0) => "unsupported resource or buffer index",
+            Instruction::BufferStoreDword {
+                index, resource, ..
+            } if (index, resource) != (0, 4) => "unsupported resource or buffer index",
+            Instruction::EndProgram if index + 1 != decoded.len() => {
+                return Err(CompileError::Verify {
+                    offset: decoded[index + 1].offset,
+                    reason: "instruction follows program termination",
+                });
+            }
             _ => continue,
         };
-        if target <= instruction.offset
-            || decoded
-                .binary_search_by_key(&target, |instruction| instruction.offset)
-                .is_err()
-        {
-            return Err(CompileError::Verify {
-                offset: instruction.offset,
-                reason: "branch target must be a forward instruction boundary",
-            });
-        }
+        return Err(CompileError::Verify { offset, reason });
     }
 
-    for (index, instruction) in decoded.iter().enumerate() {
+    for instruction in decoded {
         let offset = instruction.offset;
         let error = |reason| CompileError::Verify { offset, reason };
         let read = |register: u8| {
@@ -308,11 +321,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         };
         let next = Value(operations.len());
         let (dest, operation) = match instruction.instruction {
-            Instruction::BufferLoadDword {
-                data,
-                index: 0,
-                resource: 0,
-            } => {
+            Instruction::BufferLoadDword { data, .. } => {
                 let slot = usize::from(data);
                 if data == 0 || pending_load.is_some() {
                     return Err(error(
@@ -323,20 +332,13 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 pending_load = Some((slot, next));
                 (None, Op::Load)
             }
-            Instruction::BufferStoreDword {
-                data,
-                index: 0,
-                resource: 4,
-            } => {
+            Instruction::BufferStoreDword { data, .. } => {
                 if stored {
                     return Err(error("only one output store is supported"));
                 }
                 stored = true;
                 store_pending = true;
                 (None, Op::Store(read(data)?))
-            }
-            Instruction::BufferLoadDword { .. } | Instruction::BufferStoreDword { .. } => {
-                return Err(error("unsupported resource or buffer index"));
             }
             Instruction::WaitLoad => {
                 if let Some((register, value)) = pending_load.take() {
@@ -421,12 +423,6 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     return Err(error(
                         "termination requires one completed store and no pending loads",
                     ));
-                }
-                if let Some(next) = decoded.get(index + 1) {
-                    return Err(CompileError::Verify {
-                        offset: next.offset,
-                        reason: "instruction follows program termination",
-                    });
                 }
                 return Ok(operations);
             }

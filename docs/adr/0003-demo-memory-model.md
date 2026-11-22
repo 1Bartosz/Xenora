@@ -4,4 +4,4 @@ For the synthetic compute fixture, the resource beginning at SGPR 0 denotes the 
 
 The compiler must reject descriptor forms, offsets, index changes and control flow outside this contract. Both engines must honor the load dependency and completion order. The host reads output after command completion. Supporting shared writable buffers will require a new ordering and aliasing contract.
 
-AMD RDNA 2 specifies implicit outstanding memory waits at program termination. This fixture policy requires explicit corresponding wait instructions before termination to keep the bounded execution model auditable. See the [RDNA 2 source notes](../research/rdna2.md).
+AMD RDNA 2 specifies implicit outstanding memory waits at program termination (class B, CLAIM-RDNA2-TRANSFER-WAITS). This fixture policy requires explicit corresponding wait instructions before termination to keep the bounded execution model auditable. See the [RDNA 2 source notes](../research/rdna2.md).

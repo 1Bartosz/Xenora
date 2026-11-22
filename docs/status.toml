@@ -27,5 +27,6 @@ id = "xbox-execution"
 implementation = "unsupported"
 correctness = "untested"
 hardware_verification = "unverified"
+claims = ["CLAIM-XBOX-ISA-ABI"]
 architecture = "Xbox Series X|S"
-limitations = "The console shader container and launch ABI are unknown."
+limitations = "Game execution, proprietary guest containers and full guest execution-mask divergence are unsupported. The console launch ABI is unknown."
