@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Independent CPU execution of the synthetic gfx1030 fixture subset.
+//! Independent CPU execution of the synthetic gfx1030 fixture subset and reference sampling.
+
+pub mod texture_sampling;
 
 use std::fmt;
 

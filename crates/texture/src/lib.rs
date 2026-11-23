@@ -7,7 +7,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod sampler;
 mod upload;
+pub use sampler::{AddressMode, FilterMode, SamplerDesc, SamplerError, TextureMetadata};
 pub use upload::{Bc1Subresource, Bc1Upload, Bc1UploadDesc};
 
 const BLOCK_BYTES: usize = 8;
