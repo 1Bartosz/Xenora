@@ -1073,7 +1073,7 @@ mod tests {
             &[0x49, 0x83, 0xEC, 8][..],       // SUB R12, 8
             &[0x49, 0x89, 0x07][..],          // MOV [R15], RAX
             &[0x4A, 0x8B, 0x04, 0x24][..],    // MOV RAX, [RSP + R12]
-            &[0x48, 0x8B, 0x44, 0x24, 8][..], // MOV RAX, [RSP + 8]
+            &[0x48, 0x8B, 0x44, 0x2C, 8][..], // MOV RAX, [RSP + RBP + 8] — unsupported indexed SIB
         ] {
             assert_eq!(
                 run_code(code, 1),
