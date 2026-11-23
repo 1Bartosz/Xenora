@@ -49,7 +49,7 @@ control, replace only the literal word at offset `0x10` with `0x7fffffff`
 and use +2147483647 in the derivation. The destination aliases the signed
 source to exercise the old register value.
 
-After the review slot clears, run the CPU test and the native readback in a
+To reproduce the local result, run the CPU test and the native readback in a
 bounded process:
 
 ```sh
@@ -60,4 +60,8 @@ MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR
   -- --ignored --nocapture --test-threads=1
 ```
 
-Native execution is pending. This fixture cannot establish Xbox behavior.
+The repository overhaul checkout based on `6ccb23d` passed the CPU
+known-answer test and the opt-in native readback test on Apple M5 with
+Metal API and shader validation enabled (class A). Local logs are in
+`artifacts/repo-overhaul/`. Independent acceptance remains open in
+[issue #19](https://github.com/ranveersoni98/Xenora/issues/19).

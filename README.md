@@ -1,96 +1,75 @@
-
 # Xenora
 
-**Xbox architecture. Apple Silicon. Native Metal.**
+**Xbox Series X|S emulation research for Apple Silicon**
 
-Xenora is an experimental, open-source recompilation framework for Xbox Series X|S targeting native ARM64 execution on macOS. Its graphics subsystem, **XenoMetal**, is designed to translate RDNA shader machine code into Metal Shading Language (MSL) for execution on Apple GPUs.
+Xenora is an original Rust project targeting native ARM64 macOS. It runs small x86-64 guest programs written for testing and translates a bounded subset of AMD RDNA 2 compute shaders for the desktop gfx1030 target to Metal Shading Language (MSL). Commercial game execution and proprietary Xbox containers are unsupported.
 
-Xenora takes a Metal-first approach rather than relying on a Vulkan runtime, MoltenVK, Rosetta 2 or a Windows compatibility layer.
+[![Native Rust checks](https://github.com/ranveersoni98/Xenora/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ranveersoni98/Xenora/actions/workflows/ci.yml)
 
-> [!IMPORTANT]
-> Xenora is an early-stage research project. Game execution, proprietary Xbox containers and full guest execution-mask divergence are unsupported.
 
-## XenoMetal
+## Current status
 
-XenoMetal is the graphics translation subsystem of Xenora. Its intended scope includes shader decoding, recompilation, GPU resource translation and native Metal execution.
+| Milestone | Demonstrated with original fixtures |
+| --- | --- |
+| Native guest instruction execution (X1) | Bounded x86-64 interpreter on ARM64 macOS, with checked register, flag and memory results. |
+| Executable loading (X2) | Loads fixed-base 64-bit Portable Executable (PE32+) test images and dispatches an experimental add-one service. |
+| Guest-to-GPU command submission (X3) | An interpreted guest program submits a validated synthetic compute command to the native Metal backend. Three output words and guest completion were checked. |
+| Guest-driven Metal rendering (X4) | An original guest command renders an offscreen 8×8 RGBA8 target on Apple M5. For fixture parameters 17 and 93, independent review checked every pixel against `[x, y, parameter, 255]`. |
 
-The synthetic compute fixtures run through this pipeline. An independent CPU interpreter executes the original binary for comparison.
+The [guest execution baseline](docs/testing/phase-02-baseline.md#implementation-checkpoint) records independent acceptance of X1–X4 and class A native evidence for X3 and X4 on Apple M5.
+
+The [gfx1030 form inventory](docs/shaders/instruction-coverage.md) tracks decoding, lowering, reference execution, CPU tests and Metal readback separately. The verified compute fixtures cover restricted operand forms, including vector-register-only `v_or_b32_e32`, `v_lshlrev_b32_e32` and `v_lshrrev_b32_e32` (class A, Apple M5). Arithmetic right shift (`v_ashrrev_i32_e32`) passed local CPU and Apple M5 readback checks (class A). Independent acceptance remains open.
+
+Per-lane control flow and handling of the execution and vector condition masks (EXEC and VCC) and authentic Xbox command and service interfaces remain open. The recorded Apple M5 runs establish behavior for the tested fixtures on that host.
+
+## Architecture
 
 ```mermaid
 flowchart TD
-    A[RDNA shader machine code] --> P[Fixture parser]
-    P --> B[Instruction decoder]
-    B --> C[Shader IR]
-    C --> D[Semantic validation]
-    D --> E[Metal Shading Language]
-    E --> F[Native Metal backend]
-    F --> G[Apple GPU]
+    subgraph CPU["Guest Execution"]
+        A["Synthetic PE32+ Executable"] --> B["Bounded x86-64 Interpreter"]
+        B --> C["Synthetic Service Dispatch"]
+        C --> D["Typed GPU Command"]
+    end
+
+    subgraph GPU["Native Metal Execution"]
+        D --> E["Apple Metal"]
+        E --> F["GPU Readback"]
+    end
+
+    subgraph SHADER["RDNA2 Shader Translation"]
+        G["gfx1030 Fixture"] --> H["RDNA Decoder"]
+        H --> I["Validated Shader IR"]
+        I --> J["MSL Generation"]
+        J --> E
+    end
+
+    subgraph VERIFY["Independent Verification"]
+        G --> K["Separate CPU Reference"]
+        K --> L["Expected Results"]
+        F --> M{"Results Match?"}
+        L --> M
+    end
 ```
 
-Run `scripts/demo.sh` to execute three original gfx1030 compute fixtures on Apple Silicon. Integer addition, bitwise and scalar branch, and restricted FP32 outputs matched the independent CPU reference and hand-derived values on Apple M5 (class A, CLAIM-METAL-M5-RDNA-DEMO). Run `scripts/test-gpu.sh` for native Metal correctness, including offscreen rendering with original MSL (class A, CLAIM-METAL-M5-NATIVE-SUITE). The [status file](docs/status.toml) records the verified scope. SPIR-V may be used as an optional compiler intermediate representation without introducing a Vulkan runtime dependency.
+The guest fixtures submit compute or draw commands with project-defined resource and argument layouts. The gfx1030 fixtures exercise a separate shader translation path. The offscreen render uses an original Metal shader. Xenora runs natively without Rosetta, Wine, CrossOver, MoltenVK or a Vulkan runtime. See the [interface contracts](docs/interfaces.md).
 
-## Host and guest compatibility
+## Build and test
 
-<!-- status:features:start -->
-| Feature | Target | Implementation | Correctness | Hardware | Evidence | Limits |
-| --- | --- | --- | --- | --- | --- | --- |
-| native-compute | arm64 macOS | implemented | initial-native-suite-passed | verified on Apple M5 | A | Trusted MSL with bounded word buffers and an original native offscreen rendering test on Apple M5. |
-| synthetic-gfx1030 | gfx1030 Wave32 | three-fixture-demo-implemented | three-way-output-passed | verified on Apple M5 | A, B | Synthetic memory contract, statically resolved forward control flow, exact positive normal FP32 only. |
-| xbox-execution | Xbox Series X\|S | unsupported | untested | unverified | U | Game execution, proprietary guest containers and full guest execution-mask divergence are unsupported. The console launch ABI is unknown. |
-<!-- status:features:end -->
-
-## Development roadmap
-
-The following describes the project's intended development stages, not a claim that the features are already implemented.
-
-| Phase | Focus |
-| --- | --- |
-| 01 | Native Metal foundations, RDNA decoding, shader IR, MSL generation and reference validation |
-| 02 | Upstream research, selective integration and expanded instruction coverage |
-| 03 | Graphics pipelines, texture addressing, resource binding and wave semantics |
-| 04 | Shader optimization, pipeline caching and Apple Silicon performance |
-| 05 | Native x86-64 to ARM64 CPU recompilation |
-| 06 | Guest runtime and publicly documented system interfaces |
-| 07 | Integrated execution and compatibility validation using authorized test programs |
-
-## Development and testing
-
-Xenora targets the native Rust `aarch64-apple-darwin` toolchain and Apple's Xcode and Metal development tools. The gfx1030 oracle tests check the production and reference decoders against Homebrew LLVM AMDGPU.
-
-Run the standard Rust checks from the workspace root:
+Use native Apple Silicon macOS, Rust 1.100.0 for `aarch64-apple-darwin`, Xcode with Metal tools, and Python 3.11 or later. Native Homebrew LLVM is needed for fixture reassembly.
 
 ```sh
+scripts/bootstrap.sh
+cargo build --locked -p xenora
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo test --locked --manifest-path experiments/x1/Cargo.toml
+scripts/assemble-fixture.sh --check
 ```
 
-Run `scripts/bootstrap.sh` to check the native toolchain and `scripts/assemble-fixture.sh --check` to verify the synthetic gfx1030 fixture with LLVM. The [Phase 01 checkpoint](docs/progress.md) records the implementation and validation status.
+On a Metal-capable Apple Silicon host, run `scripts/test-gpu.sh` for native correctness and `scripts/demo.sh` for the three baseline shader fixtures. The [guest experiment guide](experiments/x1/README.md) covers X1–X4 reproduction. The CI badge covers the hosted Rust and repository checks. Hardware results are recorded in the [validation evidence](tests/validation/README.md).
 
-## Research and documentation
+## Contributing and license
 
-Xenora draws on publicly available technical specifications and documentation, including:
-
-- [AMD GPU architecture programming documentation](https://gpuopen.com/amd-gpu-architecture-programming-documentation/)
-- [AMD machine-readable ISA](https://gpuopen.com/machine-readable-isa/)
-- [Apple Metal documentation](https://developer.apple.com/documentation/metal/)
-- [Metal resources and specifications](https://developer.apple.com/metal/resources/)
-- [Microsoft Game Development Kit](https://learn.microsoft.com/en-us/gaming/gdk/)
-- [DirectX specifications](https://microsoft.github.io/DirectX-Specs/)
-- [LLVM AMDGPU documentation](https://llvm.org/docs/AMDGPUUsage.html)
-
-Public RDNA 2 specifications do not establish every Xbox-specific GPU behavior. Unknown or undocumented semantics must remain explicitly identified rather than assumed to be equivalent.
-
-## Contributing
-
-Contributions in GPU architecture research, Rust systems programming, shader compilers, Metal development, independent testing and technical documentation are welcome.
-
-Changes should include a clear technical rationale, relevant specification references, meaningful tests and accurate documentation. Upstream code and fixtures must have verified provenance and compatible licensing. AI-assisted contributions are subject to the same review, correctness and attribution requirements as other contributions.
-
-## License
-
-Xenora is licensed under the [GNU General Public License, version 3 or later](LICENSE). Third-party components retain their applicable licenses and copyright notices.
-
-Xenora does not distribute proprietary game binaries, console firmware, encryption keys or restricted Xbox SDK material. The project does not aim to circumvent DRM or console security mechanisms.
-
-Xenora is an independent project and is not affiliated with or endorsed by Microsoft, Xbox, AMD or Apple. All third-party trademarks belong to their respective owners.
+See the [contribution guide](CONTRIBUTING.md) for Developer Certificate of Origin (DCO) sign-off and public-source requirements, and the [legal policy](docs/legal.md) for permitted inputs. Xenora is licensed under the [GNU GPL v3 or later](LICENSE). Third-party notices are listed separately in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,12 +1,12 @@
 # gfx1030 instruction coverage
 
 The decoder accepts an explicitly tagged, little-endian gfx1030 Wave32
-stream under the [synthetic memory ABI](../adr/0003-demo-memory-model.md).
+stream with 32 lanes per wave under the [synthetic memory ABI](../adr/0003-demo-memory-model.md).
 Recognition means that the opcode mask matches. Decode additionally checks
 operands, flags, instruction width and any literal word. Register
 initialization and memory safety require verification after decoding.
 CPU and GPU entries refer to the original synthetic fixture workloads.
-The wider LLVM operand matrix exercises decoding only.
+The wider LLVM operand matrix exercises decoding only. ABI means application binary interface. VGPRs are vector general-purpose registers and SGPRs are scalar general-purpose registers.
 
 <!-- status:instructions:start -->
 | Form | Operands | Size or word | Recognized | Decoded | LLVM | Lowering | Reference | CPU | GPU |
@@ -29,6 +29,7 @@ The wider LLVM operand matrix exercises decoding only.
 | `v_or_b32_e32` | Two VGPR sources and one VGPR destination | `3803FF01` | yes | yes | three-way passed | MSL bitwise OR | implemented | fixture verified | fixture verified on Apple M5 |
 | `v_lshlrev_b32_e32` | Two VGPR sources and one VGPR destination | `34020501` | yes | yes | three-way passed | MSL logical left shift with a five-bit count | implemented | fixture verified | fixture verified on Apple M5 |
 | `v_lshrrev_b32_e32` | Two VGPR sources and one VGPR destination | `2DFFFF01` | yes | yes | three-way passed | MSL logical right shift with a five-bit count | implemented | fixture verified | fixture verified on Apple M5 |
+| `v_ashrrev_i32_e32` | Two VGPR sources and one VGPR destination | `31FFFF01` | yes | yes | fixture reproduced | MSL signed right shift with a five-bit count | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
 <!-- status:instructions:end -->
 
 ## Automated three-way comparison

@@ -14,10 +14,10 @@ xcodebuild -version
 xcrun --find metal
 xcrun metal --version
 
-if command -v brew >/dev/null 2>&1; then
-    llvm_bin=${LLVM_BIN:-$(brew --prefix llvm)/bin}
-else
-    llvm_bin=${LLVM_BIN:-}
+llvm_bin=${LLVM_BIN:-}
+if [ -z "$llvm_bin" ] && command -v brew >/dev/null 2>&1 &&
+   llvm_prefix=$(brew --prefix llvm 2>/dev/null); then
+    llvm_bin="$llvm_prefix/bin"
 fi
 for tool in llvm-mc llvm-objcopy llvm-objdump; do
     if [ -n "$llvm_bin" ] && [ -x "$llvm_bin/$tool" ]; then

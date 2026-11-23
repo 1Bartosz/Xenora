@@ -1,0 +1,46 @@
+# Xenora documentation
+
+## Getting started
+
+Start with the [project README](../README.md) for scope and build commands,
+then read the [interface contracts](interfaces.md). Reproduce an
+[original guest test program](../experiments/x1/README.md) or run the
+[independent validation suite](../tests/validation/README.md) before changing
+either path. The [changelog](../CHANGELOG.md) records notable changes.
+
+## Architecture and technical design
+
+- [Interface contracts](interfaces.md) — Shader inputs, guest services, and native command submission.
+- [Fixture memory model](adr/0003-demo-memory-model.md) and [CPU boundary](adr/0004-cpu-boundary.md) — Buffer bindings, guest address translation, and dependency direction.
+
+## RDNA 2 decoding and shader translation
+
+- [Instruction coverage](shaders/instruction-coverage.md) — Desktop gfx1030 instruction forms, operand limits, and CPU and GPU results.
+- [Metal Shading Language generation](shaders/msl.md) and [independent CPU reference](shaders/reference-interpreter.md) — Translation rules and separate CPU execution models.
+
+## Native Metal backend
+
+- [Compute interface](interfaces.md#gfx1030-compute-fixtures) — Resource limits, dispatch, completion, and profiling.
+- [Apple GPU evidence](research/apple-gpu.md) and [host lab record](research/host-lab.md) — Observed behavior and historical floating-point results.
+
+## Guest CPU and runtime experiments
+
+- [Guest experiment guide](../experiments/x1/README.md) — Bounded x86-64 execution, executable loading, experimental services, native compute, and offscreen rendering.
+- [Guest CPU research](research/cpu-boundary.md) — Public specifications and unresolved console requirements.
+
+## Testing, validation, and benchmarks
+
+- [Engineering progress](progress.md) — Verification commands, metric definitions, and open release gates.
+- [Baseline acceptance](testing/phase-02-baseline.md), [Phase 01 assurance](testing/phase01-assurance.md), and [independent reviews](testing/review-log.md) — Candidate-specific results and release findings.
+- [Mutation testing](testing/mutation.md) and [benchmark protocol](testing/benchmarks.md) — Test sensitivity, benchmark inputs, and timing requirements.
+
+## Research and engineering decisions
+
+- [Public sources](research/sources.md), [RDNA 2 notes](research/rdna2.md), and [Xbox GPU evidence](research/xbox-gpu.md) — Specifications, evidence scope, and unknown console behavior.
+- [Shader inputs](research/shader-containers.md) and [risk register](risk-register.md) — Input provenance and unresolved engineering risks.
+
+## Security, licensing, and contributions
+
+- [Threat model](threat-model.md) and [security reporting](../SECURITY.md) — Execution limits and disclosure instructions.
+- [Legal scope](legal.md), [dependency licensing](licenses.md), and [third-party notices](../THIRD_PARTY_NOTICES.md) — Input policy, attribution, and redistribution findings.
+- [Contribution guidelines](../CONTRIBUTING.md) — Original authorship, Developer Certificate of Origin sign-off, and evidence requirements.

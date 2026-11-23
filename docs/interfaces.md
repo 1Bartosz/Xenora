@@ -1,4 +1,6 @@
-# Phase 01 interfaces
+# Interfaces
+
+## gfx1030 compute fixtures
 
 The first input is little-endian gfx1030 machine code for a compute fixture with optional statically resolved forward scalar branches. The synthetic ABI starts with full Wave32 EXEC and binds VGPR 0 to the lane index. Resource operands select documented synthetic bindings. The parser must require explicit target identification and validate all lengths before allocating. Console containers and AMDHSA initialization require separate contracts.
 
@@ -8,4 +10,12 @@ The compiler lifts decoded instructions to typed operations and verifies registe
 
 The native backend exposes `NativeCompute::new()` and `run_words(source, entry, input)` for trusted MSL. It binds input at index 0 and output at index 1, dispatches one invocation per word and returns owned readback after completion. `run_words_profiled` returns the same output plus measured library, pipeline, GPU and host durations for the benchmark harness; those timings are single submissions, not distributions. The caller runs generated MSL in a bounded child process. Raw MSL is a trusted developer input. Errors report the operation and backend detail. Across other stages, diagnostics carry a stage, error kind, optional byte offset and human-readable context.
 
-A future guest command stream must submit validated resource handles and ranges through an explicit address translation boundary. The graphics side owns mappings and the lifetime of in-flight views. Completion and fence signaling flow back across the command boundary. Guest addresses are never host pointers.
+## Synthetic guest experiment
+
+The separate [X1–X4 driver](../experiments/x1/README.md) loads fixed-base
+PE32+ fixtures, interprets a bounded x86-64 subset and dispatches synthetic
+services. X3 and X4 validate fixed-size command records from read-only
+guest bytes before issuing compute or draw work. Their command formats and
+Metal shaders are authored for the experiment.
+
+A general guest command stream must submit validated resource handles and ranges through an explicit address translation boundary. The graphics side owns mappings and the lifetime of in-flight views. Completion and fence signaling flow back across the command boundary. Guest addresses are never host pointers.

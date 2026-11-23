@@ -1,5 +1,6 @@
 # Rust and local builds
 /target/
+/experiments/x1/target/
 /build/
 /cmake-build-*/
 /fuzz/target/

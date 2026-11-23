@@ -677,7 +677,7 @@ fn report_markdown(metadata: &Metadata, results: &[FixtureResult]) -> String {
         let _ = writeln!(
             out,
             "> **Protocol note.** The machine was not confirmed on AC power. \
-             The [benchmark protocol](../../docs/testing/benchmarks.md) requires AC power, \
+             The benchmark protocol in `docs/testing/benchmarks.md` requires AC power, \
              so these timings are not protocol-compliant release evidence."
         );
     }

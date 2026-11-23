@@ -1,12 +1,12 @@
-# Dual-track baseline
+# GPU and guest execution evidence
 
 The resumed checkout started clean on main at
 `4b9a4cecf35c8d4d90d8ecdb9c1510e7bd260102`, tracking origin/main.
 The diff since `5c479005b0e0631a608a369b9e41327da61bb61e` contains three
 documentation files. The baseline reuses the implementation evidence from
 that commit and retains the original attribution for every run. The
-[Phase 01 continuation](phase01-continuation.md) records G1–G15 individually.
-R1 has also [signed off G8 for Phase 01](review-log.md#phase-01-evidence-recheck-at-4b9a4ce). G9 passed for the Phase 01 candidate. G10–G12 and G15 remain open. Phase 01 is not release-ready.
+[Phase 01 assurance checkpoint](phase01-assurance.md) records the original release-gate definitions and results.
+The [independent claims audit (G8)](review-log.md#phase-01-evidence-recheck-at-4b9a4ce) and parser fuzzing (G9) passed for the Phase 01 candidate. Controlled benchmarks (G10), redistribution rights (G11), repository hygiene and contributor attestations (G12), and final independent acceptance (G15) remain open. Phase 01 is not release-ready.
 
 The resumed host reported arm64, 16 GiB RAM, 276 GiB available disk,
 macOS 27.3 (26C5047e), Xcode 27.2 (27B52) and Rust 1.100.0.
@@ -22,64 +22,26 @@ closes G5 and G7 for the Phase 01 candidate.
 
 ## Track A — GPU engineering
 
-The [status manifest](../status.toml) enumerates 15 recognized and
-decoded gfx1030 forms. All 15 contribute to the verified fixture path.
+At the Phase 01 baseline, 15 recognized and decoded gfx1030 forms
+contributed to the verified fixture path. See the [current inventory](../shaders/instruction-coverage.md) for later additions.
 Forward scalar control is resolved when lifting to IR. The generated MSL
 embodies that resolution without emitting a dynamic GPU branch. The
 translated stage is compute, with lane-indexed 32-bit reads and writes to
 two disjoint buffers. The original native offscreen render test provides
-separate backend evidence. Preserve the [FP32 host evidence](../research/host-lab.md)
-and the exact positive normal FP32 subset.
-
-Candidate first slice, pending Phase 01 decoder/compiler assurance:
-add the desktop gfx1030 VGPR-only integer OR form to the existing compute
-path. An original fixture can take inputs
-`[0x00000000, 0xffffffff, 0xaaaaaaaa, 0x80000000]`, OR each with
-`0x55555555`, and expect
-`[0x55555555, 0xffffffff, 0xffffffff, 0xd5555555]`.
-Homebrew LLVM 23.1.6 `llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1030
--show-encoding` assembled `v_or_b32_e32 v1, v2, v3` to bytes
-`02 07 02 38` and the all-`v255` form to `ff ff ff 39`. This is
-class E tool evidence. Before implementation, ISA and R2 must check the
-AMD definition and independently derive encoding and operand expectations.
-Use existing buffer bindings and negative operand tests. Acceptance
-requires decoder/IR/MSL integration, independent CPU and GPU readback,
-original regressions, changed-code assurance and matched measurements.
-Keep the work in a reversible patch with the baseline fixtures available
-unchanged. See the implementation checkpoint below for the resulting verification.
+separate backend evidence. The [host evidence](../research/host-lab.md) records why translation is limited to the documented subset of 32-bit floating-point operations (FP32).
 
 ## Track B — guest execution
 
 | Milestone | Baseline status |
 | --- | --- |
-| X0 Native host bootstrap | Native host and Metal capability evidence exists in Phase 01. A standalone guest runtime driver is proposed. |
-| X1 First x86-64 instruction | Demonstrated on ARM64 macOS with both known-answer traces and six fault tests. |
-| X2 Executable and synthetic service | Independently demonstrated on ARM64 with the original fixed-base PE32+ fixture and synthetic add-one service. |
-| X3 Guest GPU command | Independently verified from the original PE through the shared loader, interpreter and native Metal. |
-| X4 Guest-driven Metal frame | Independently verified on Apple M5 from original guest PE through RGBA8 texture readback. |
-| X5 Authentic Xbox boundaries | Blocked on public or authorized interfaces and test inputs. |
-| X6 First real-title validation | Blocked on X5 and suitable project test inputs. User import follows the [game file policy](../legal.md#user-provided-game-files). |
-| X7 Genuine GTA VI intro/title screen | Blocked. The runtime path and suitable project test inputs are unavailable. |
-
-Track B research can proceed while Phase 01 gates remain open. The
-[CPU feasibility report](../research/phase02-cpu-feasibility.md) proposes
-an original interpreter with a 16-instruction budget, two branch paths
-and exact register, flag and memory expectations. Keep the original
-CPU test independent of graphics crates until the CPU, loader and
-synthetic service contracts are verified.
-
-The [KyTx and Leonida review](../research/phase02-collaboration.md)
-pins the inspected sources and proposes an original Wave64/EXEC
-fixture as the first collaboration. It is a separate fixture proposal
-from the initial Track A OR slice. Acceptance requires file-level
-provenance and independent lane expectations. Leonida's decoder and
-loader are design references. No upstream component was adopted.
-
-The [ecosystem shortlist](../research/phase02-ecosystem.md) screens
-eight additional upstream repositories and ranks five original
-experiments. Its highest-ranked differential compute experiment can
-use the selected OR slice with a bitwise mutation and independently
-derived lane outputs. Emulator code, ports, tables and internal metadata are outside scope.
+| Native host bootstrap (X0) | Phase 01 recorded native host and Metal capability evidence. |
+| Native guest instruction execution (X1) | Demonstrated on ARM64 macOS with both known-answer traces and six fault tests. |
+| Executable loading and synthetic service dispatch (X2) | Independently demonstrated on ARM64 with the original fixed-base PE32+ fixture and synthetic add-one service. |
+| Guest-to-GPU command submission (X3) | Independently verified from the original PE through the shared loader, interpreter and native Metal. |
+| Guest-driven Metal rendering (X4) | Independently verified on Apple M5 from original guest PE through RGBA8 texture readback. |
+| Authentic Xbox interfaces (X5) | Blocked on public or authorized interfaces and test inputs. |
+| Commercial title validation (X6) | Blocked on authentic Xbox interfaces and suitable project test inputs. User import follows the [game file policy](../legal.md#user-provided-game-files). |
+| Historical stretch goal for a commercial title (X7) | Blocked. The runtime path and suitable project test inputs are unavailable. |
 
 ## Phase 02 acceptance
 

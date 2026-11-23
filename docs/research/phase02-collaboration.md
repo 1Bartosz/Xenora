@@ -17,18 +17,6 @@ At KyTx `10f50d3eff0c0df36ee5d7007848a7b0b15072eb`, `Wave64Pair`, the emitter's 
 
 Request original gfx1030 Wave64 assembly, a mask/lane design note and per-lane expected outputs. Specify an isolated 64-lane synthetic ABI with full initial EXEC, lane-indexed output and a sentinel for inactive writes. Cover full, empty, alternating and asymmetric masks, lanes 0/31/32/63, and nested save, modify and restore of EXEC. Use observable scalar results to catch accidental duplicate scalar effects. Identify encodings with the pinned LLVM oracle (class E) and have R2 derive expected results independently from AMD's public ISA (class B for documented desktop RDNA 2, with Xbox applicability unknown). Require explicit rejection outside the supported subset. Keep the first PR fixture-only. Any later native lowering needs its own exact readback and validation evidence, including the measured pipeline execution width. [AMD RDNA 2 ISA](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf), [Xenora interface](../interfaces.md)
 
-Five questions for a human follow-up after the existing reply:
-
-1. Which original compute fixture best distinguishes the low and high EXEC halves?
-2. How are EXEC and VCC saved and restored across nested divergence, and which corner cases have output checks?
-3. How is a scalar side effect executed once when the vector instruction stream is emitted twice?
-4. Where do lane reads, shuffles or LDS communication cross halves, and which cases require separate validation?
-5. Which pipeline width, dispatch geometry and Metal validation settings were recorded for a reproducible synthetic case?
-
-Optional follow-up for maintainer review:
-
-> Thanks, Tx. Could we start with a small, independently authored gfx1030 Wave64 compute fixture that exercises both EXEC halves and save/restore? A short note on expected lane outputs and the public ISA sections you used would help us validate it independently. Please include provenance and a DCO sign-off, and confirm the terms for the specific files you contribute.
-
 KyTx declares GPL-2.0. Tx's conditional GPL-2.0-or-later offer covers only material they own and can license. Require file-level authorship, explicit compatible terms (GPL-3.0-or-later preferred for new Xenora fixtures), preserved notices and DCO. Inherited GPL-2.0-only code cannot enter the GPL-3.0-or-later combined work under those terms. The separate Kyty MIT notice does not settle a derived file's full provenance. No KyTx submodule is justified for the fixture. [KyTx license and notices](https://github.com/TxCsOffc/KyTx/tree/10f50d3eff0c0df36ee5d7007848a7b0b15072eb/LICENSES), [KyTx license](https://github.com/TxCsOffc/KyTx/blob/10f50d3eff0c0df36ee5d7007848a7b0b15072eb/LICENSE)
 
 ## Leonida

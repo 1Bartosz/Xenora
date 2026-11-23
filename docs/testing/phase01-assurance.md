@@ -68,3 +68,21 @@ shaders and required a completed output mismatch after a matching unmodified
 baseline. Compile errors, crashes, validation failures and timeouts cannot
 count as semantic kills. Game execution, proprietary console containers,
 full guest execution-mask divergence and a guest CPU runtime are unsupported.
+
+## Follow-up evidence at 5c47900
+
+The affected campaign finished with exit 0 after 601 seconds and
+244,422,168 executions. No crash, hang or sanitizer failure was recorded.
+It used native nightly Rust and cargo-fuzz 0.13.2. The transcript SHA-256
+is `ea81caf9495b57fc617d6470d3cac0488e59d1d727f16bbe8eda470987333a28`. It ran at aff46b0 with the same fuzz inputs as 5c47900.
+
+### Integrated candidate checks
+
+All commands in `artifacts/assurance-5c47900/commands.log` completed with
+exit 0. This includes 54 workspace tests, the separate LLVM oracle, 12
+validated GPU tests, three end-to-end demos, 12 semantic mutant kills,
+native and dependency audits, and claims and generated status checks.
+The oracle-only campaign killed 44/44 in 23 seconds. Each outcome has
+a named Rust test failure. All seven prior oracle survivors were killed.
+This closes the observed oracle test gaps. The full source score stays
+attached to aff46b0 and G7 was open at this checkpoint. The later [integrated campaign](mutation.md#integrated-source-campaign-at-4b9a4ce) records its closure.

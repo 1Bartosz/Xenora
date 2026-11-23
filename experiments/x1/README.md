@@ -1,4 +1,6 @@
-# X1 bounded x86-64 interpreter
+# Synthetic guest execution experiments
+
+The bounded x86-64 guest interpreter (X1) runs on native ARM64 macOS.
 
 This isolated Cargo workspace implements the two original fixtures in the
 [Phase 02 feasibility study](../../docs/research/phase02-cpu-feasibility.md).
@@ -39,7 +41,7 @@ driver="$CARGO_TARGET_DIR/aarch64-apple-darwin/debug/xenora-x1"
   2>&1 | tee artifacts/x1/native.log
 ```
 
-## X2 fixed-base PE32+ experiment
+## Fixed-base 64-bit Portable Executable loading (X2)
 
 X2 interprets an original synthetic AMD64 guest image. The loader uses the
 header, directory and section layouts from the [Microsoft PE format specification](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format).
@@ -77,7 +79,7 @@ cargo test --manifest-path experiments/x1/Cargo.toml --locked --target aarch64-a
 cargo run --manifest-path experiments/x1/Cargo.toml --locked --target aarch64-apple-darwin -- x2
 ```
 
-## X3 fixed-base guest compute experiment
+## Guest-to-GPU command submission (X3)
 
 X3 uses an original AMD64 PE32+ fixture with fixed image base `0x400000`.
 The shared X2 loader validates the PE entry and maps the declared virtual
@@ -129,7 +131,7 @@ env MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_ST
   "$CARGO_TARGET_DIR/$target/debug/xenora-x1" x3
 ```
 
-## X4 fixed-base guest render experiment
+## Guest-driven Metal rendering (X4)
 
 Two original PE fixtures use the X3 image layout and the X1 trap path.
 Each carries a 32-byte command followed by 16 read-only parameter bytes.

@@ -34,6 +34,8 @@ Never introduce Rosetta 2, x86-64 host executables, MoltenVK, Vulkan runtime dep
 - Contributors who have seen leaked or confidential Xbox materials must not contribute. State this in CONTRIBUTING.md and require a DCO sign-off (Signed-off-by) on contributions.
 - Include a plain statement in docs/legal.md: Xenora does not circumvent console security or DRM, does not load encrypted or protected content, and is a research project built from public documentation. Add a note that this is not legal advice and that contributors should know their local laws, including anti-circumvention provisions such as DMCA section 1201.
 - Before copying or adapting any upstream code: verify the exact license of that file (not just the repo), check GPL-3.0-or-later compatibility, preserve copyright notices, record source repository and exact commit, document modifications, include required attribution. Never remove upstream copyright notices. If licensing is uncertain, stop using that code until resolved.
+- Keep Xenora's emulator implementation original. Never copy, port, translate or adapt emulator source from Leonida, KyTx, AnyPS5 or similar projects.
+- Validate the technical compatibility and safety of user-provided files. Do not ask for ownership receipts, accounts or acquisition provenance as part of file loading. Contributor provenance and licensing obligations still apply.
 - Never place restricted material in the repository or its Git history.
 - Do not push, publish, or change remote visibility without explicit user authorization. Prepare locally and report readiness.
 
@@ -42,6 +44,26 @@ Never introduce Rosetta 2, x86-64 host executables, MoltenVK, Vulkan runtime dep
 No AI slop (section 29).
 
 Read docs/interfaces.md and docs/progress.md before implementation.
+
+## Changelog maintenance
+
+- At the start of every engineering task, read `CHANGELOG.md` alongside the relevant project documentation. Review the existing `[Unreleased]` entries before implementation to avoid duplicating completed work.
+- Update the changelog in the same task for every meaningful addition, modification, fix, removal or security change, including work implemented by another agent. Use `Added`, `Changed`, `Fixed`, `Removed` or `Security` as appropriate.
+- Write concise entries that explain the effect for users or contributors. Distinguish implemented behavior, local verification and independent acceptance. Never invent release dates, versions, benchmark results, passing tests or compatibility claims.
+- Omit trivial formatting and intermediate steps unless they materially affect maintainability. Keep unreleased changes under `[Unreleased]` until a release is authorized.
+- Before concluding the task, check whether the changelog needs an update and make it when warranted. Rewrite historical entries only to correct factual errors. Preserve existing content when tightening the prose.
+
+## Public documentation and terminology
+
+- Write public documentation so readers can understand it without earlier agent conversations. Keep `README.md` and `docs/README.md` accessible to new contributors.
+- Introduce descriptive names before internal identifiers such as X1, G10 or P2-04. Define specialist abbreviations on first meaningful use.
+- Write changelog entries around actual behavior and its effect on users or contributors. Distinguish implementation, synthetic demonstrations, independent verification and real Xbox execution.
+- Review terminology whenever editing documentation. Use concise, precise explanations and preserve evidence scope.
+- Update `docs/README.md` whenever you add, remove, rename or substantially reorganize documentation.
+
+## Subagent reasoning
+
+**Every spawned subagent must use LOW reasoning effort.** Explicitly select LOW and verify the resolved configuration. Never use Medium, High or Extra High. If LOW cannot be guaranteed, proceed without that subagent. The lead agent may use the user-selected reasoning setting.
 
 ## Checkout commands
 
