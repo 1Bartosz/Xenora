@@ -32,3 +32,6 @@
 # Local gate evidence and intermediate fixture objects
 /artifacts/
 /tests/validation/target/
+
+__pycache__/
+*.pyc
