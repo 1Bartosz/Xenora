@@ -41,6 +41,11 @@ kernel void read_bc1(texture2d<float, access::read> image [[texture(0)]],
 enum ComputeInput<'a> {
     Words(&'a [u32]),
     Texture(&'a ProtocolObject<dyn MTLTexture>, usize),
+    SampledTexture {
+        texture: &'a ProtocolObject<dyn MTLTexture>,
+        sampler: &'a ProtocolObject<dyn objc2_metal::MTLSamplerState>,
+        coords: &'a [u32],
+    },
 }
 
 impl ComputeInput<'_> {
@@ -48,6 +53,7 @@ impl ComputeInput<'_> {
         match self {
             Self::Words(words) => words.len(),
             Self::Texture(_, pixels) => *pixels,
+            Self::SampledTexture { coords, .. } => coords.len() / 2,
         }
     }
 }
@@ -82,7 +88,7 @@ pub struct MetalError {
 }
 
 impl MetalError {
-    fn new(operation: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(operation: &'static str, detail: impl Into<String>) -> Self {
         Self {
             operation,
             detail: detail.into(),
@@ -148,6 +154,18 @@ impl NativeCompute {
         autoreleasepool(|_| self.device.name().to_string())
     }
 
+    /// Access the underlying native Metal device protocol object.
+    #[inline]
+    pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> {
+        &self.device
+    }
+
+    /// Access the underlying native Metal command queue protocol object.
+    #[inline]
+    pub fn queue(&self) -> &ProtocolObject<dyn MTLCommandQueue> {
+        &self.queue
+    }
+
     /// Read an original synthetic BC1 subresource with a native Metal texture.
     ///
     /// The fixed compute kernel returns row-major RGBA8 texels. Each returned
@@ -171,6 +189,66 @@ impl NativeCompute {
             .linearize(layer, mip)
             .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
         self.read_bc1_blocks(&blocks, width.div_ceil(4) * 8, width, height, pixels)
+    }
+
+    /// Sample a native Metal RGBA8 texture using a native Metal sampler on Apple Silicon GPU.
+    ///
+    /// Accepts normalized float UV coordinates.
+    /// Executes an authored compute fixture sampling the texture at `[[texture(0)]]` using
+    /// the sampler at `[[sampler(0)]]`, reading coordinates from `[[buffer(0)]]`, and writing
+    /// row-major RGBA8 texels to `[[buffer(1)]]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the number of sample points exceeds maximum allowable limits,
+    /// or if Metal compilation, dispatch or completion fails.
+    pub fn sample_rgba8(
+        &self,
+        texture: &crate::texture_pipeline::MetalRgba8Texture,
+        sampler: &crate::sampler::MetalSampler,
+        uv_coords: &[[f32; 2]],
+    ) -> Result<Vec<u32>, MetalError> {
+        const SAMPLER_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
+                         sampler s [[sampler(0)]],
+                         device const float2 *coords [[buffer(0)]],
+                         device uint *output [[buffer(1)]],
+                         uint id [[thread_position_in_grid]]) {
+    float4 color = tex.sample(s, coords[id], level(0.0f));
+    uint4 channels = uint4(round(color * 255.0f));
+    output[id] = channels.r | (channels.g << 8u) | (channels.b << 16u) | (channels.a << 24u);
+}
+"#;
+        if uv_coords.is_empty() || uv_coords.len() > MAX_GRID_WORDS {
+            return Err(MetalError::new(
+                "sample bounds",
+                format!(
+                    "expected 1..={MAX_GRID_WORDS} sample points, got {}",
+                    uv_coords.len()
+                ),
+            ));
+        }
+
+        let words: Vec<u32> = uv_coords
+            .iter()
+            .flat_map(|[u, v]| [u.to_bits(), v.to_bits()])
+            .collect();
+
+        validate_source(SAMPLER_KERNEL, &["sample_rgba8"])?;
+        autoreleasepool(|_| {
+            self.run(
+                SAMPLER_KERNEL,
+                "sample_rgba8",
+                ComputeInput::SampledTexture {
+                    texture: texture.raw(),
+                    sampler: sampler.raw(),
+                    coords: &words,
+                },
+            )
+            .map(|profile| profile.output)
+        })
     }
 
     /// Read a selected subresource from a validated pitched BC1 upload.
@@ -416,6 +494,7 @@ impl NativeCompute {
         }
         let input_buffer = match input {
             ComputeInput::Words(words) => Some(self.new_buffer(words)?),
+            ComputeInput::SampledTexture { coords, .. } => Some(self.new_buffer(coords)?),
             ComputeInput::Texture(..) => None,
         };
         let mut words = vec![0xA5A5_A5A5; input.len()];
@@ -432,8 +511,17 @@ impl NativeCompute {
         // this device. The kernel uses one input at index zero and writes the
         // separate output buffer at index one. Both buffer offsets are zero.
         unsafe {
-            if let ComputeInput::Texture(texture, _) = input {
-                encoder.setTexture_atIndex(Some(texture), 0);
+            match input {
+                ComputeInput::Texture(texture, _) => {
+                    encoder.setTexture_atIndex(Some(texture), 0);
+                }
+                ComputeInput::SampledTexture {
+                    texture, sampler, ..
+                } => {
+                    encoder.setTexture_atIndex(Some(texture), 0);
+                    encoder.setSamplerState_atIndex(Some(sampler), 0);
+                }
+                ComputeInput::Words(..) => {}
             }
             if let Some(buffer) = input_buffer.as_deref() {
                 encoder.setBuffer_offset_atIndex(Some(buffer), 0, 0);
@@ -511,7 +599,7 @@ fn validate_source(source: &str, entries: &[&str]) -> Result<(), MetalError> {
     Ok(())
 }
 
-fn compile_options() -> Result<Retained<MTLCompileOptions>, MetalError> {
+pub(crate) fn compile_options() -> Result<Retained<MTLCompileOptions>, MetalError> {
     let options = MTLCompileOptions::new();
     if !options.respondsToSelector(sel!(setMathMode:))
         || !options.respondsToSelector(sel!(setMathFloatingPointFunctions:))

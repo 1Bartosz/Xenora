@@ -11,6 +11,10 @@ remains unsupported.
 
 ### Added
 
+- Added native Metal sampler abstraction (`MetalSampler`) supporting nearest-neighbor minification/magnification filtering, clamp-to-edge addressing, normalized coordinates, validated LOD bounds, and explicit `SamplerDesc` mapping.
+- Added native Metal RGBA8 2D texture allocation, mip upload validation (`MetalRgba8Texture`, `Rgba8MipLevel`, `Rgba8TextureDesc`), and texture/sampler pipeline binding definitions (`BoundSampledTexture`, `BindingSlot`) for future translated shader stages.
+- Added an independent pure-Rust CPU texture sampling reference for deterministic RGBA8 2D textures with nearest-neighbor filtering, normalized UV coordinates, clamp-to-edge addressing, explicit mip selection, and bounds validation.
+- Added typed texture sampler descriptors and texture metadata validation supporting nearest filtering and clamp-to-edge modes for future pipeline integration.
 - Added a persistent resource service for original fixed-base PE32+ fixtures. Generation-checked handles support buffer updates, checked submission views, and native Metal readback. Queued work captures its input across updates and slot reuse.
 - Added translated gfx1030 vertex and pixel stages for a bounded graphics subset. Original shaders exercise position export, a vertex transform, constant color and perspective interpolation in offscreen Metal pixel comparisons on Apple M5.
 - Added immutable guest texture handles for validated pitched BC1 uploads and native Metal readback. Tests cover mip levels, layers, partial edge blocks and transparency.

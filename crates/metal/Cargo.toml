@@ -17,6 +17,10 @@ name = "native_compute"
 path = "tests/native_compute.rs"
 required-features = ["gpu-tests"]
 
+[[test]]
+name = "sampler_texture"
+path = "tests/sampler_texture.rs"
+
 [dev-dependencies]
 xenora-shader = { path = "../shader" }
 
@@ -41,6 +45,7 @@ objc2-metal = { version = "=0.3.2", default-features = false, features = [
     "MTLRenderPass",
     "MTLRenderPipeline",
     "MTLResource",
+    "MTLSampler",
     "MTLTexture",
     "MTLTypes",
     "objc2-core-foundation",

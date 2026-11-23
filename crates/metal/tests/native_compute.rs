@@ -6,6 +6,8 @@ mod guest_buffer;
 mod offscreen;
 #[path = "native/texture.rs"]
 mod texture;
+#[path = "native/texture_sampling.rs"]
+mod texture_sampling;
 #[path = "native/translated_render.rs"]
 mod translated_render;
 
