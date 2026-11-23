@@ -11,6 +11,7 @@ pub mod dbt;
 pub mod jit;
 pub mod memory;
 pub mod pe;
+pub mod probe;
 pub mod triage;
 
 pub use arm64::Arm64Assembler;
@@ -19,4 +20,8 @@ pub use dbt::{DbtEngine, DbtMetrics};
 pub use jit::{JitError, JitMemory};
 pub use memory::{GuestMemory, MemoryError, MemoryPermissions};
 pub use pe::{LoadedImage, ParsedPe, PeError, PeSection};
+pub use probe::{
+    ImportedSymbol, InstructionRecord, ProbeConfig, ProbeReport, RelocationCensus, TlsCensus,
+    probe_pe_bytes, run_probe_and_export,
+};
 pub use triage::{TriageReport, triage_bytes, triage_file};
