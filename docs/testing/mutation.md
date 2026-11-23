@@ -1,6 +1,6 @@
 # Phase 01 mutation testing
 
-G7 remains open. The source campaign covers the decoder, fixture parser,
+The source campaign covers the decoder, fixture parser,
 verifier, lowering and reference interpreter through the default CPU workspace
 tests. The independent semantic and oracle campaigns are separate requirements.
 
@@ -142,3 +142,26 @@ and the outstanding transfer check at 392. They remain test gaps in the
 independent oracle package. Source and native semantic evidence are
 complete for the reviewed candidate. G7 remains open pending independent
 oracle follow-up.
+
+
+## Integrated source campaign at 4b9a4ce
+
+R2 independently reviewed the full campaign at
+`4b9a4cecf35c8d4d90d8ecdb9c1510e7bd260102`. Native ARM64 cargo-mutants
+27.1.0 ran 399 mutations with two workers. The result matched the
+historical per-module counts above: 359 behavioral kills out of 361
+eligible non-equivalent mutants (99.45%), with 13 proven equivalents
+and 25 invalid builds. The decoder timeout and the reference SIGKILL
+remain in the denominator. No mutant was unexecuted.
+
+The shell wrapper could not capture the raw child exit because it
+assigned a read-only zsh variable. The completed console transcript
+and full inventory and outcomes remain available. See
+`artifacts/mutation/source-4b9a4ce/` for the raw campaign log, ledger,
+exit capture note and independent G5 and G7 reports.
+
+The implementation, tests, fixtures and scripts match `5c47900`, whose
+separate integrated campaigns killed all 44 oracle-only and all 12
+native semantic mutants. R2 also ran all 13 locked independent
+validation tests successfully at `4b9a4ce`. G5 and G7 pass for
+the bounded Phase 01 candidate.

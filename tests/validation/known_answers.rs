@@ -10,6 +10,188 @@ mod review {
 
     const FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/add.bin");
 
+    const OR_FIXTURE: &[u8; 40] = include_bytes!("../../fixtures/rdna2/or.bin");
+    const OR_INPUT: [u32; 7] = [
+        0,
+        1,
+        u32::MAX,
+        0x8055_00aa,
+        0x7faa_ff55,
+        0x8000_0000,
+        0x0055_00aa,
+    ];
+    const OR_EXPECTED: [u32; 7] = [
+        0x8055_00aa,
+        0x8055_00ab,
+        u32::MAX,
+        0x8055_00aa,
+        u32::MAX,
+        0x8055_00aa,
+        0x8055_00aa,
+    ];
+
+    #[test]
+    fn vector_or_matches_known_answers_and_preserves_unmasked_bits() {
+        verify(OR_FIXTURE, &OR_INPUT, Some(&OR_EXPECTED));
+        let input: Vec<_> = (0..32).map(|bit| 1_u32 << bit).collect();
+        let expected: Vec<_> = input
+            .iter()
+            .map(|word| 0x8055_00aa + (word & 0x7faa_ff55))
+            .collect();
+        verify(OR_FIXTURE, &input, Some(&expected));
+
+        let mut renamed = *OR_FIXTURE;
+        // Reuse v255 as both destination and the second source.
+        renamed[20..24].copy_from_slice(&0x39ff_ff01_u32.to_le_bytes());
+        renamed[29] = 255;
+        verify(&renamed, &OR_INPUT, Some(&OR_EXPECTED));
+    }
+
+    #[test]
+    fn vector_or_rejects_invalid_operands_and_incomplete_streams() {
+        for instruction in [
+            0x3803_ff03_u32, // Uninitialized v3 in SRC0.
+            0x3802_0701,     // Uninitialized v3 in VSRC1.
+            0x3801_ff01,     // Write to synthetic index v0.
+            0x3803_fe80,     // Inline SRC0 outside the supported subset.
+        ] {
+            let mut code = *OR_FIXTURE;
+            code[20..24].copy_from_slice(&instruction.to_le_bytes());
+            verify(&code, &OR_INPUT, None);
+        }
+        for end in 0..OR_FIXTURE.len() {
+            verify(&OR_FIXTURE[..end], &OR_INPUT, None);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a native Metal device with API and shader validation"]
+    fn vector_or_native_metal_known_answers() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
+        let compiled = compile(Architecture::Gfx1030, OR_FIXTURE).unwrap();
+        let input: Vec<_> = OR_INPUT.into_iter().cycle().take(131).collect();
+        let expected: Vec<_> = OR_EXPECTED.into_iter().cycle().take(input.len()).collect();
+        let actual = xenora_metal::NativeCompute::new()
+            .unwrap()
+            .run_words(&compiled.msl, xenora_shader::ENTRY_POINT, &input)
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    const ASHR_FIXTURE: &[u8; 40] = include_bytes!("../../fixtures/rdna2/ashr.bin");
+
+    fn arithmetic_right_shift_words() -> (Vec<u32>, Vec<u32>) {
+        let input: Vec<u32> = (0..64).chain([0x8000_0000, u32::MAX]).collect();
+        let expected = input
+            .iter()
+            .map(|&count| (-2_147_483_647_i64).div_euclid(1_i64 << (count % 32)) as u32)
+            .collect();
+        (input, expected)
+    }
+
+    #[test]
+    fn arithmetic_right_shift_preserves_sign_and_wraps_counts() {
+        let (input, expected) = arithmetic_right_shift_words();
+        assert_eq!(xenora_ref::execute(ASHR_FIXTURE, &input).unwrap(), expected);
+        let compiled = compile(Architecture::Gfx1030, ASHR_FIXTURE).unwrap();
+        assert!(compiled.ir.contains("ashr.i32 t1, t0"));
+        assert!(
+            compiled
+                .msl
+                .contains("as_type<uint>(as_type<int>(t1) >> (t0 & 31u))")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a native Metal device with API and shader validation"]
+    fn arithmetic_right_shift_native_metal_known_answers() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
+        let (input, expected) = arithmetic_right_shift_words();
+        let compiled = compile(Architecture::Gfx1030, ASHR_FIXTURE).unwrap();
+        let actual = xenora_metal::NativeCompute::new()
+            .unwrap()
+            .run_words(&compiled.msl, xenora_shader::ENTRY_POINT, &input)
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    const SHIFT_FIXTURE: &[u8; 56] = include_bytes!("../../fixtures/rdna2/shifts.bin");
+    const SHIFT_INPUT: [u32; 12] = [
+        0,
+        1,
+        2,
+        30,
+        31,
+        32,
+        33,
+        63,
+        64,
+        0x8000_0000,
+        0x8000_0021,
+        u32::MAX,
+    ];
+    const SHIFT_EXPECTED: [u32; 12] = [
+        2,
+        0x4000_0006,
+        0x2000_000c,
+        0xc000_0002,
+        0x8000_0001,
+        2,
+        0x4000_0006,
+        0x8000_0001,
+        2,
+        2,
+        0x4000_0006,
+        0x8000_0001,
+    ];
+
+    #[test]
+    fn vector_shifts_match_known_answers_with_aliased_operands() {
+        verify(SHIFT_FIXTURE, &SHIFT_INPUT, Some(&SHIFT_EXPECTED));
+    }
+
+    #[test]
+    fn vector_shifts_reject_invalid_operands_and_incomplete_streams() {
+        for (offset, instruction) in [
+            (28, 0x2dff_ff03_u32), // Uninitialized count.
+            (28, 0x2dfe_0701),     // Uninitialized value.
+            (28, 0x2c01_ff01),     // Write to synthetic index.
+            (28, 0x2dff_fe08),     // SGPR count.
+            (32, 0x3402_0503),     // Uninitialized count.
+            (32, 0x3402_0701),     // Uninitialized value.
+            (32, 0x3400_0501),     // Write to synthetic index.
+            (32, 0x3402_0480),     // Inline count.
+        ] {
+            let mut code = *SHIFT_FIXTURE;
+            code[offset..offset + 4].copy_from_slice(&instruction.to_le_bytes());
+            verify(&code, &SHIFT_INPUT, None);
+        }
+        for end in 28..SHIFT_FIXTURE.len() {
+            verify(&SHIFT_FIXTURE[..end], &SHIFT_INPUT, None);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a native Metal device with API and shader validation"]
+    fn vector_shifts_native_metal_known_answers() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
+        let compiled = compile(Architecture::Gfx1030, SHIFT_FIXTURE).unwrap();
+        let input: Vec<_> = SHIFT_INPUT.into_iter().cycle().take(131).collect();
+        let expected: Vec<_> = SHIFT_EXPECTED
+            .into_iter()
+            .cycle()
+            .take(input.len())
+            .collect();
+        let actual = xenora_metal::NativeCompute::new()
+            .unwrap()
+            .run_words(&compiled.msl, xenora_shader::ENTRY_POINT, &input)
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
     fn words(code: &[u32]) -> Vec<u8> {
         code.iter().copied().flat_map(u32::to_le_bytes).collect()
     }

@@ -89,3 +89,24 @@ copies byte for byte. The logged CPU load leaves replay idleness
 unestablished. G10 and G11 remain open. More protocol and corpus work is
 required for the former, and linked SDK-derived rights and attribution
 remain unresolved for the latter.
+
+## Phase 01 evidence recheck at 4b9a4ce
+
+R1 signed off G8 for the Phase 01 documentation after checking the
+desktop RDNA 2 branch and wait evidence, interpreter scope and
+Microsoft's CPU disclosure. The claims audit passed with 22 entries
+and generated status matched. Phase 02 claims require separate review.
+
+G12 remains blocked. Of 13 contributions after the policy commit
+`9ab5bf9f9e812685883f3239319c10aa2a19f7d5` through `4b9a4ce`, seven
+have matching author trailers and six lack sign-off:
+
+- `79df1194ebd5c076370d2814adecd7869e6d48a2`
+- `095ec65aee69998b48d67c1f84c60d6b3224d9fe`
+- `cc0daa79e63c468e748f0333bd1314224752893a`
+- `aff46b0904a0182a6f0543125e4491ab67270f64`
+- `5c479005b0e0631a608a369b9e41327da61bb61e`
+- `4b9a4cecf35c8d4d90d8ecdb9c1510e7bd260102`
+
+The recorded contributor must personally review and attest to each
+change. The full recheck is in `artifacts/r1-phase01-g8-g12.md`.

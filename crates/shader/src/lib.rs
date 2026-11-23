@@ -73,20 +73,28 @@ enum Op {
 #[derive(Clone, Copy)]
 enum Binary {
     Add,
+    ShiftLeft,
+    ShiftRight,
+    ArithmeticShiftRight,
     And,
+    Or,
     Xor,
     FloatAdd,
     FloatMul,
 }
 
 impl Binary {
-    fn operator(self) -> (&'static str, char) {
+    fn operator(self) -> (&'static str, &'static str) {
         match self {
-            Self::Add => ("add.u32", '+'),
-            Self::And => ("and.b32", '&'),
-            Self::Xor => ("xor.b32", '^'),
-            Self::FloatAdd => ("add.f32", '+'),
-            Self::FloatMul => ("mul.f32", '*'),
+            Self::Add => ("add.u32", "+"),
+            Self::ShiftLeft => ("lshl.b32", "<<"),
+            Self::ShiftRight => ("lshr.b32", ">>"),
+            Self::ArithmeticShiftRight => ("ashr.i32", ">>"),
+            Self::And => ("and.b32", "&"),
+            Self::Or => ("or.b32", "|"),
+            Self::Xor => ("xor.b32", "^"),
+            Self::FloatAdd => ("add.f32", "+"),
+            Self::FloatMul => ("mul.f32", "*"),
         }
     }
 }
@@ -118,6 +126,14 @@ impl KnownBits {
         Self {
             zero: self.zero | other.zero,
             one: self.one & other.one,
+            values: None,
+        }
+    }
+
+    fn or(self, other: Self) -> Self {
+        Self {
+            zero: self.zero & other.zero,
+            one: self.one | other.one,
             values: None,
         }
     }
@@ -228,6 +244,12 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
                     Binary::FloatAdd | Binary::FloatMul => format!(
                         "as_type<uint>(as_type<float>({left}) {symbol} as_type<float>({right}))"
                     ),
+                    Binary::ArithmeticShiftRight => {
+                        format!("as_type<uint>(as_type<int>({left}) {symbol} ({right} & 31u))")
+                    }
+                    Binary::ShiftLeft | Binary::ShiftRight => {
+                        format!("{left} {symbol} ({right} & 31u)")
+                    }
                     _ => format!("{left} {symbol} {right}"),
                 };
                 (
@@ -371,8 +393,23 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             Instruction::AddNoCarryU32 { dst, src0, src1 } => {
                 (Some(dst), Op::Binary(Binary::Add, read(src0)?, read(src1)?))
             }
+            Instruction::VectorLshlrevB32 { dst, src0, src1 } => (
+                Some(dst),
+                Op::Binary(Binary::ShiftLeft, read(src1)?, read(src0)?),
+            ),
+            Instruction::VectorAshrrevI32 { dst, src0, src1 } => (
+                Some(dst),
+                Op::Binary(Binary::ArithmeticShiftRight, read(src1)?, read(src0)?),
+            ),
+            Instruction::VectorLshrrevB32 { dst, src0, src1 } => (
+                Some(dst),
+                Op::Binary(Binary::ShiftRight, read(src1)?, read(src0)?),
+            ),
             Instruction::VectorAndB32 { dst, src0, src1 } => {
                 (Some(dst), Op::Binary(Binary::And, read(src0)?, read(src1)?))
+            }
+            Instruction::VectorOrB32 { dst, src0, src1 } => {
+                (Some(dst), Op::Binary(Binary::Or, read(src0)?, read(src1)?))
             }
             Instruction::VectorXorB32 { dst, src0, src1 } => {
                 (Some(dst), Op::Binary(Binary::Xor, read(src0)?, read(src1)?))
@@ -439,6 +476,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         let value_bits = match operation {
             Op::Constant(bits) => KnownBits::constant(bits),
             Op::Binary(Binary::And, left, right) => facts[left.0].and(facts[right.0]),
+            Op::Binary(Binary::Or, left, right) => facts[left.0].or(facts[right.0]),
             Op::Binary(Binary::Xor, left, right) => facts[left.0].xor(facts[right.0]),
             Op::Binary(operator @ (Binary::FloatAdd | Binary::FloatMul), left, right) => {
                 exact_float_result(operator, facts[left.0], facts[right.0])

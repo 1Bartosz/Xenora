@@ -62,6 +62,16 @@ test = "Read Microsoft public product information and Series X architecture slid
 uncertainty = "The category does not establish encoding, register or feature equivalence with any desktop gfx1030 GPU."
 
 [[claim]]
+id = "CLAIM-XBOX-SERIES-X-CPU"
+class = "D"
+claim = "Microsoft identifies the Xbox Series X CPU as custom AMD Zen 2."
+sources = ["https://news.xbox.com/en-us/2020/03/16/xbox-series-x-tech/"]
+retrieved = "2026-11-23"
+architecture = "Xbox Series X public hardware disclosure"
+test = "Read Microsoft's public hardware specification."
+uncertainty = "The disclosure leaves the executable format, calling convention and memory rules unspecified."
+
+[[claim]]
 id = "CLAIM-XBOX-ISA-ABI"
 class = "U"
 claim = "The public sources reviewed do not establish console-native shader container layout, shader entry register state, descriptor encoding, GPU address translation or command packet encoding."
@@ -192,6 +202,16 @@ retrieved = "2026-11-22"
 architecture = "Native Metal on Apple GPUs"
 test = "The backend applies the documented rules and scripts/test-gpu.sh exercises the bounded submission."
 uncertainty = "The API contracts do not establish guest memory ordering."
+
+[[claim]]
+id = "CLAIM-RDNA2-SOPP-BRANCH-DISPLACEMENT"
+class = "B"
+claim = "AMD RDNA 2 SOPP S_BRANCH and S_CBRANCH_SCC0 use a signed 16-bit displacement in dwords relative to the next instruction."
+sources = ["https://docs.amd.com/api/khub/documents/Et~wpu9g~Ffl7d9q0QZ~Og/content"]
+retrieved = "2026-11-22"
+architecture = "Desktop AMD RDNA 2, document 70648, §12.5"
+test = "Specification semantics are exercised by the gfx1030 branch fixtures and the independent interpreter."
+uncertainty = "Xenora accepts only forward targets in the synthetic subset. Xbox applicability is unknown."
 
 [[claim]]
 id = "CLAIM-RDNA2-TRANSFER-WAITS"

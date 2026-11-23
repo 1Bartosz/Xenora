@@ -47,7 +47,11 @@ pub enum Op {
 /// VOP2 operations decoded by the reference interpreter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VectorAlu {
+    ShiftLeft,
+    ShiftRight,
+    ArithmeticShiftRight,
     And,
+    Or,
     Xor,
     FloatAdd,
     FloatMultiply,
@@ -181,12 +185,19 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 )
             }
             [first, second, third, opcode, ..]
-                if matches!(opcode & 0xfe, 0x06 | 0x10 | 0x36 | 0x3a) && second & 1 != 0 =>
+                if matches!(
+                    opcode & 0xfe,
+                    0x06 | 0x10 | 0x2c | 0x30 | 0x34 | 0x36 | 0x38 | 0x3a
+                ) && second & 1 != 0 =>
             {
                 let kind = match opcode & 0xfe {
                     0x06 => VectorAlu::FloatAdd,
                     0x10 => VectorAlu::FloatMultiply,
+                    0x34 => VectorAlu::ShiftLeft,
+                    0x2c => VectorAlu::ShiftRight,
+                    0x30 => VectorAlu::ArithmeticShiftRight,
                     0x36 => VectorAlu::And,
+                    0x38 => VectorAlu::Or,
                     _ => VectorAlu::Xor,
                 };
                 let dst = (third >> 1) | ((opcode & 1) << 7);
@@ -279,7 +290,11 @@ fn vector_alu(op: VectorAlu, a: u32, b: u32, offset: usize) -> Result<u32, Refer
         )
     };
     match op {
+        VectorAlu::ShiftLeft => return Ok(b << (a & 31)),
+        VectorAlu::ShiftRight => return Ok(b >> (a & 31)),
+        VectorAlu::ArithmeticShiftRight => return Ok(((b as i32) >> (a & 31)) as u32),
         VectorAlu::And => return Ok(a & b),
+        VectorAlu::Or => return Ok(a | b),
         VectorAlu::Xor => return Ok(a ^ b),
         _ => {}
     }
@@ -298,7 +313,12 @@ fn vector_alu(op: VectorAlu, a: u32, b: u32, offset: usize) -> Result<u32, Refer
             sum
         }
         VectorAlu::FloatMultiply => a * b, // Two 24-bit significands fit in binary64.
-        VectorAlu::And | VectorAlu::Xor => unreachable!(),
+        VectorAlu::ShiftLeft
+        | VectorAlu::ShiftRight
+        | VectorAlu::ArithmeticShiftRight
+        | VectorAlu::And
+        | VectorAlu::Or
+        | VectorAlu::Xor => unreachable!(),
     };
     let result = exact as f32;
     if !result.is_normal() || f64::from(result) != exact {

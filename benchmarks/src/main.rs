@@ -233,6 +233,7 @@ fn run_fixture(metal: &NativeCompute, fixture: &Fixture, reps: usize) -> Fixture
         }
     }
 
+    let mut sizes = Vec::with_capacity(fixture.sizes.len());
     for &words in &fixture.sizes {
         let input = expand(&fixture.input, words);
         let expected = expand(&fixture.expected, words);
@@ -286,7 +287,7 @@ fn run_fixture(metal: &NativeCompute, fixture: &Fixture, reps: usize) -> Fixture
         }
 
         let measured = gpu_samples.len();
-        result.sizes.push(SizeResult {
+        sizes.push(SizeResult {
             words,
             compile: Stats::from_samples(compile_samples),
             library: Stats::from_samples(library_samples),
@@ -301,6 +302,7 @@ fn run_fixture(metal: &NativeCompute, fixture: &Fixture, reps: usize) -> Fixture
         });
     }
 
+    result.sizes = sizes;
     result.status = "benchmarked".to_string();
     result
 }

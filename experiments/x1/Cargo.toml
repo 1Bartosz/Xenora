@@ -1,0 +1,19 @@
+[package]
+name = "xenora-x1"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+metal = ["dep:xenora-metal", "dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
+
+[dependencies]
+xenora-metal = { path = "../../crates/metal", optional = true }
+objc2 = { version = "=0.6.5", optional = true }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString"], optional = true }
+objc2-metal = { version = "=0.3.2", default-features = false, features = [
+    "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass",
+    "MTLRenderPipeline", "MTLTexture",
+], optional = true }

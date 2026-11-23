@@ -10,6 +10,8 @@ use xenora_ref::{Op, Source, VectorAlu};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
 const BITWISE_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/bitwise-branch.bin");
+const SHIFT_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/shifts.bin");
+const OR_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/or.bin");
 const FLOAT_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/float-exact.bin");
 
 #[test]
@@ -106,6 +108,16 @@ fn rejects_other_opcodes_and_noncanonical_operands() {
         (&[0xbf82_ffff], "s_branch"),
         (&[0xbf84_fffe], "s_cbranch_scc0"),
         (&[0x3602_0680], "v_and_b32_e32"),
+        (&[0x3803_fe80], "v_or_b32_e32"),
+        (&[0x3803_fe08], "v_or_b32_e32"),
+        (&[0x3803_feff, 0xdead_beef], "v_or_b32_e32"),
+        (&[0x3803_fefa, 0xff00_e401], "v_or_b32_e32"),
+        (&[0x3803_fef9, 0x0606_0601], "v_or_b32_e32"),
+        (&[0x3402_0480], "v_lshlrev_b32_e32"),
+        (&[0x2dff_fe08], "v_lshrrev_b32_e32"),
+        (&[0x3402_04ff, 0xdead_beef], "v_lshlrev_b32_e32"),
+        (&[0x2dff_fefa, 0xff00_e401], "v_lshrrev_b32_e32"),
+        (&[0x3402_04f9, 0x0606_0601], "v_lshlrev_b32_e32"),
         (&[0x1002_06f2], "v_mul_f32_e32"),
     ];
     for (words, mnemonic) in cases {
@@ -231,6 +243,16 @@ fn reference_op(instruction: Instruction) -> Op {
         Instruction::VectorAndB32 { dst, src0, src1 } => {
             Op::Vector(VectorAlu::And, dst, src0, src1)
         }
+        Instruction::VectorLshlrevB32 { dst, src0, src1 } => {
+            Op::Vector(VectorAlu::ShiftLeft, dst, src0, src1)
+        }
+        Instruction::VectorAshrrevI32 { dst, src0, src1 } => {
+            Op::Vector(VectorAlu::ArithmeticShiftRight, dst, src0, src1)
+        }
+        Instruction::VectorLshrrevB32 { dst, src0, src1 } => {
+            Op::Vector(VectorAlu::ShiftRight, dst, src0, src1)
+        }
+        Instruction::VectorOrB32 { dst, src0, src1 } => Op::Vector(VectorAlu::Or, dst, src0, src1),
         Instruction::VectorXorB32 { dst, src0, src1 } => {
             Op::Vector(VectorAlu::Xor, dst, src0, src1)
         }
@@ -257,12 +279,15 @@ fn compares_fixture_instructions_against_llvm() {
         FIXTURE,
         BITWISE_FIXTURE,
         FLOAT_FIXTURE,
+        OR_FIXTURE,
+        SHIFT_FIXTURE,
+        include_bytes!("../../../fixtures/rdna2/ashr.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 15, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 19, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -278,6 +303,11 @@ fn assemble_matrix() -> Vec<u8> {
         buffer_store_dword v128, v255, s[96:99], 0 idxen
         v_and_b32_e32 v255, v128, v254
         v_xor_b32_e32 v128, v255, v127
+        v_or_b32_e32 v255, v255, v255
+        v_or_b32_e32 v0, v0, v0
+        v_lshlrev_b32_e32 v255, v128, v0
+        v_lshrrev_b32_e32 v0, v255, v128
+        v_ashrrev_i32_e32 v255, v0, v1
         v_add_f32_e32 v255, v254, v128
         v_mul_f32_e32 v128, v127, v255
         s_mov_b32 s105, s104
@@ -418,9 +448,28 @@ fn llvm_disassemble(fixture: &[u8]) -> std::process::Output {
 #[test]
 #[ignore = "requires LLVM with the gfx1030 AMDGPU target"]
 fn distinguishes_llvm_invalid_encodings_from_xenora_subset_rejections() {
-    let malformed: &[&[u32]] = &[&[0xffff_ffff], &[0xe030_2000], &[0xd525_0001]];
+    let malformed: &[&[u32]] = &[
+        &[0xffff_ffff],
+        &[0xe030_2000],
+        &[0xd525_0001],
+        &[0xd51a_0001],
+        &[0xd516_0001],
+    ];
     let outside_subset: &[&[u32]] = &[
         &[0x7e04_0200],                                        // VOP1 SGPR source
+        &[0x3803_fe80],                                        // OR with an inline SRC0
+        &[0x3803_fe08],                                        // OR with an SGPR SRC0
+        &[0x3803_feff, 0xdead_beef],                           // OR with a literal SRC0
+        &[0x3803_fefa, 0xff00_e401],                           // OR DPP
+        &[0x3803_fef9, 0x0606_0601],                           // OR SDWA
+        &[0xd51c_0001, 0x0203_ff01],                           // OR e64
+        &[0x3402_0480],                                        // Shift with inline SRC0
+        &[0x2dff_fe08],                                        // Shift with SGPR SRC0
+        &[0x3402_04ff, 0xdead_beef],                           // Shift with literal SRC0
+        &[0x2dff_fefa, 0xff00_e401],                           // Shift DPP
+        &[0x3402_04f9, 0x0606_0601],                           // Shift SDWA
+        &[0xd51a_0001, 0x0202_0501],                           // Left shift e64
+        &[0xd516_0001, 0x0202_0501],                           // Right shift e64
         &[0x3602_0680],                                        // VOP2 inline source
         &[0xbf8c_3f71],                                        // Different wait counter
         &[0xbf82_ffff],                                        // Backward branch

@@ -5,8 +5,8 @@ use std::fmt;
 pub use xenora_isa::{Architecture, Instruction, ScalarSource, VectorSource};
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, S_BRANCH, S_CBRANCH_SCC0, S_CMP_EQ_U32, S_ENDPGM,
-    S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_MOV_B32,
-    V_MUL_F32, V_XOR_B32,
+    S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32,
+    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 
 /// A successfully decoded instruction and its location in the input stream.
@@ -228,11 +228,39 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
             S_CBRANCH_SCC0.byte_len(),
         ));
     }
+    if V_LSHLREV_B32.matches(first) {
+        let (dst, src0, src1) = vop2_registers(first, "v_lshlrev_b32_e32")?;
+        return Ok((
+            Instruction::VectorLshlrevB32 { dst, src0, src1 },
+            V_LSHLREV_B32.byte_len(),
+        ));
+    }
+    if V_ASHRREV_I32.matches(first) {
+        let (dst, src0, src1) = vop2_registers(first, "v_ashrrev_i32_e32")?;
+        return Ok((
+            Instruction::VectorAshrrevI32 { dst, src0, src1 },
+            V_ASHRREV_I32.byte_len(),
+        ));
+    }
+    if V_LSHRREV_B32.matches(first) {
+        let (dst, src0, src1) = vop2_registers(first, "v_lshrrev_b32_e32")?;
+        return Ok((
+            Instruction::VectorLshrrevB32 { dst, src0, src1 },
+            V_LSHRREV_B32.byte_len(),
+        ));
+    }
     if V_AND_B32.matches(first) {
         let (dst, src0, src1) = vop2_registers(first, "v_and_b32_e32")?;
         return Ok((
             Instruction::VectorAndB32 { dst, src0, src1 },
             V_AND_B32.byte_len(),
+        ));
+    }
+    if V_OR_B32.matches(first) {
+        let (dst, src0, src1) = vop2_registers(first, "v_or_b32_e32")?;
+        return Ok((
+            Instruction::VectorOrB32 { dst, src0, src1 },
+            V_OR_B32.byte_len(),
         ));
     }
     if V_XOR_B32.matches(first) {

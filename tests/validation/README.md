@@ -57,3 +57,67 @@ survivors and passes 13 locked tests. The high-register and alias cases
 compare both interpreters' readbacks and compiler acceptance. Native GPU
 evidence continues to cover the three original fixtures. See the
 [mutation report](../../docs/testing/mutation.md) for sensitivity results.
+
+## gfx1030 register-form vector OR
+
+AMD's RDNA 2 ISA §12.7 specifies VOP2 opcode 28 and a 32-bit bitwise OR
+for each active lane. The compact encoding has bit 31 clear, opcode in
+bits 30:25, VDST in 24:17, VSRC1 in 16:9, and SRC0 in 8:0. For this
+subset SRC0 is a VGPR selector in 256..511. For example,
+`v_or_b32_e32 v1, v1, v255` is word `0x3803ff01`, stored as bytes
+`01 ff 03 38`. LLVM 23.1.6 assembled that word and decoded the SGPR,
+inline, literal, SDWA, DPP, and e64 probes in the decoder test. Those
+forms are outside this Xenora fixture subset.
+
+Sources: [AMD RDNA 2 ISA reference][rdna2-or-isa] and
+[LLVM gfx1030 assembly syntax][gfx1030-or-syntax].
+
+[rdna2-or-isa]: https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf
+[gfx1030-or-syntax]: https://rocmdocs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/AMDGPU/AMDGPUAsmGFX1030.html
+
+Reassemble the original fixture and compare it byte for byte:
+
+```sh
+llvm_bin="${LLVM_BIN:-$(brew --prefix llvm)/bin}"
+scratch=$(mktemp -d)
+"$llvm_bin/llvm-mc" -triple=amdgcn-amd-amdhsa -mcpu=gfx1030 -mattr=+wavefrontsize32 \
+    -filetype=obj fixtures/rdna2/or.s -o "$scratch/or.o"
+"$llvm_bin/llvm-objcopy" -O binary --only-section=.text "$scratch/or.o" "$scratch/or.bin"
+cmp "$scratch/or.bin" fixtures/rdna2/or.bin
+```
+
+After the G9 fuzz refresh, run the LLVM oracle, CPU known answers, and
+native Metal dispatch with validation:
+
+```sh
+export CARGO_BUILD_JOBS=2
+LLVM_BIN="$(brew --prefix llvm)/bin" cargo test --locked -p xenora-decoder \
+    --test gfx1030 -- --include-ignored --nocapture
+cargo test --locked -p xenora-semantic-review vector_or
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 \
+    MTL_SHADER_VALIDATION_ABORT_ON_FAULT=1 timeout 30s \
+    cargo test --locked -p xenora-semantic-review review::vector_or_native_metal_known_answers \
+    -- --ignored --exact --nocapture
+```
+
+The native test compiles the same original guest bytes through Xenora and
+compares Apple GPU readback against hand-derived words for 131 invocations.
+These tests provide spec-derived evidence and require no Xbox hardware.
+
+### VGPR-only reversed logical shifts
+
+The original `shifts.bin` fixture covers low-five-bit count selection,
+count/value operand order, unsigned right shift of a word with bit 31 set,
+left-shift truncation, and destination aliasing the count and value registers.
+AMD's [RDNA 2 ISA guide, section 12.7](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf)
+defines the semantics. The independent interpreter derives results with unsigned
+multiplication and division by powers of two. The LLVM decoder oracle checks
+register extrema and distinguishes truncated e64 encodings from valid forms
+outside Xenora's subset. The native test uses the same fixed known answers
+over 131 lanes.
+
+```sh
+cargo test --locked -p xenora-semantic-review vector_shifts
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_ABORT_ON_FAULT=1 \
+  cargo test --locked -p xenora-semantic-review vector_shifts_native_metal_known_answers -- --ignored --test-threads=1
+```

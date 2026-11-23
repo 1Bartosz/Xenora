@@ -31,3 +31,21 @@ path = "fixtures/rdna2/float-exact.bin"
 input = [0, 1, 4294967295, 3989547400]
 expected = [1091305472, 1091305472, 1092616192, 1092616192]
 sizes = [4, 64, 256, 1024, 4096]
+
+[[fixture]]
+name = "or"
+stage = "compute"
+source = "translated-rdna"
+path = "fixtures/rdna2/or.bin"
+input = [0, 1, 4294967295, 2153054378, 2141912917, 2147483648, 5570730]
+expected = [2153054378, 2153054379, 4294967295, 2153054378, 4294967295, 2153054378, 2153054378]
+sizes = [7, 64, 256, 1024, 4096]
+
+[[fixture]]
+name = "shifts"
+stage = "compute"
+source = "translated-rdna"
+path = "fixtures/rdna2/shifts.bin"
+input = [0, 1, 2, 30, 31, 32, 33, 63, 64, 2147483648, 2147483681, 4294967295]
+expected = [2, 1073741830, 536870924, 3221225474, 2147483649, 2, 1073741830, 2147483649, 2, 2, 1073741830, 2147483649]
+sizes = [12, 64, 256, 1024, 4096]

@@ -1,5 +1,9 @@
 # Xenora Phase 01 continuation for Sol
 
+This historical handoff records Phase 01 at the prior checkpoint. The
+[dual-track baseline](phase-02-baseline.md) records the active scheduling
+and preserves the gates below. See the [integrated R2 review](mutation.md#integrated-source-campaign-at-4b9a4ce) for the subsequent G5 and G7 closure.
+
 Continue Phase 01 only in `~/Developer/Xenora`. Read the current AGENTS.md,
 the Master Engineering Prompt V3 including section 40, and the
 [assurance record](phase01-assurance.md). Preserve local commits and ignored

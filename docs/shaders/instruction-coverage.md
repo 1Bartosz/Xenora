@@ -26,6 +26,9 @@ The wider LLVM operand matrix exercises decoding only.
 | `v_xor_b32_e32` | Two VGPR sources and one VGPR destination | `3A020702` | yes | yes | three-way passed | MSL bitwise XOR | implemented | fixture verified | fixture verified |
 | `v_add_f32_e32` | Two VGPR sources and one VGPR destination | `06020702` | yes | yes | three-way passed | MSL FP32 add | implemented | fixture verified | fixture verified |
 | `v_mul_f32_e32` | Two VGPR sources and one VGPR destination | `10020702` | yes | yes | three-way passed | MSL FP32 multiply | implemented | fixture verified | fixture verified |
+| `v_or_b32_e32` | Two VGPR sources and one VGPR destination | `3803FF01` | yes | yes | three-way passed | MSL bitwise OR | implemented | fixture verified | fixture verified on Apple M5 |
+| `v_lshlrev_b32_e32` | Two VGPR sources and one VGPR destination | `34020501` | yes | yes | three-way passed | MSL logical left shift with a five-bit count | implemented | fixture verified | fixture verified on Apple M5 |
+| `v_lshrrev_b32_e32` | Two VGPR sources and one VGPR destination | `2DFFFF01` | yes | yes | three-way passed | MSL logical right shift with a five-bit count | implemented | fixture verified | fixture verified on Apple M5 |
 <!-- status:instructions:end -->
 
 ## Automated three-way comparison

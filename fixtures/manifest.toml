@@ -48,3 +48,37 @@ input = [0, 1, 4294967295, 3989547400]
 expected = [305419896, 305419897, 315315847, 318723824]
 derivation = "Comparing 7 with 6 clears SCC. The taken edge computes (input AND 0x00ff00ff) XOR 0x12345678."
 limitation = "Synthetic binding ABI and uniform forward branches."
+
+[[fixture]]
+id = "gfx1030-wave32-or"
+path = "fixtures/rdna2/or.bin"
+source = "fixtures/rdna2/or.s"
+sha256 = "9923aa9baea20813da59c55a2de2544fdfe0f80fc1ced821a1a8c5c1ea4ddf0b"
+source_sha256 = "f6ac00e35173168987fe5413563d33bd21496a47e0cf00b520f978d50c809c6b"
+origin = "Original Xenora synthetic compute fixture"
+license = "GPL-3.0-or-later"
+architecture = "gfx1030 Wave32"
+generator = "LLVM 23.1.6 llvm-mc and llvm-objcopy"
+regenerate = 'llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1030 -mattr=+wavefrontsize32 -filetype=obj fixtures/rdna2/or.s -o "$scratch/or.o" && llvm-objcopy -O binary --only-section=.text "$scratch/or.o" fixtures/rdna2/or.bin'
+verify = "Reassemble to a temporary binary and compare with cmp."
+input = [0, 1, 4294967295, 2153054378, 2141912917, 2147483648, 5570730]
+expected = [2153054378, 2153054379, 4294967295, 2153054378, 4294967295, 2153054378, 2153054378]
+derivation = "Each lane sets the bits selected by 0x805500aa in its input word and preserves the other bits."
+limitation = "Synthetic input/output binding contract. No AMDHSA or Xbox ABI."
+
+[[fixture]]
+id = "gfx1030-wave32-shifts"
+path = "fixtures/rdna2/shifts.bin"
+source = "fixtures/rdna2/shifts.s"
+sha256 = "5e72181d95f4bfdb52d1779be9097c9fb05c6326fad46db7dfb43b4d149a98c6"
+source_sha256 = "08f0b6b06e73e70ee7a7845818e4970a2c041ace876a0c304ca861a441e83534"
+origin = "Original Xenora synthetic compute fixture"
+license = "GPL-3.0-or-later"
+architecture = "gfx1030 Wave32"
+generator = "LLVM 23.1.6 llvm-mc and llvm-objcopy"
+regenerate = 'llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1030 -mattr=+wavefrontsize32 -filetype=obj fixtures/rdna2/shifts.s -o "$scratch/shifts.o" && llvm-objcopy -O binary --only-section=.text "$scratch/shifts.o" fixtures/rdna2/shifts.bin'
+verify = "Reassemble to a temporary binary and compare with cmp."
+input = [0, 1, 2, 30, 31, 32, 33, 63, 64, 2147483648, 2147483681, 4294967295]
+expected = [2, 1073741830, 536870924, 3221225474, 2147483649, 2, 1073741830, 2147483649, 2, 2, 1073741830, 2147483649]
+derivation = "Each lane uses its input modulo 32 as the common count. XOR the low 32 bits of 0x80000003 multiplied by two to that power with the unsigned quotient of 0x80000001 divided by the same power. The left shift overwrites its count register and the right shift overwrites its value register."
+limitation = "Synthetic input/output binding contract. No AMDHSA or Xbox ABI."

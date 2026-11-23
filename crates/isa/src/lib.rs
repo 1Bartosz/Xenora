@@ -5,8 +5,8 @@ use std::fmt;
 mod rdna2;
 pub use rdna2::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, S_BRANCH, S_CBRANCH_SCC0, S_CMP_EQ_U32, S_ENDPGM,
-    S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_MOV_B32,
-    V_MUL_F32, V_XOR_B32,
+    S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32,
+    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 
 /// Selects the instruction encoding independently of the container and execution ABI.
@@ -105,8 +105,16 @@ pub enum Instruction {
     BranchSccZero { target: usize },
     /// SOPP unconditional jump to a stream byte offset.
     Branch { target: usize },
+    /// VOP2 logical left shift with the count in src0.
+    VectorLshlrevB32 { dst: u8, src0: u8, src1: u8 },
+    /// VOP2 logical right shift with the count in src0.
+    VectorLshrrevB32 { dst: u8, src0: u8, src1: u8 },
+    /// VOP2 arithmetic right shift with the count in src0.
+    VectorAshrrevI32 { dst: u8, src0: u8, src1: u8 },
     /// VOP2 bitwise AND.
     VectorAndB32 { dst: u8, src0: u8, src1: u8 },
+    /// VOP2 bitwise OR.
+    VectorOrB32 { dst: u8, src0: u8, src1: u8 },
     /// VOP2 bitwise XOR.
     VectorXorB32 { dst: u8, src0: u8, src1: u8 },
     /// VOP2 single-precision addition. Execution requires an explicit FP mode.
@@ -131,7 +139,11 @@ impl Instruction {
             Self::ScalarCompareEqU32 { .. } => "s_cmp_eq_u32",
             Self::BranchSccZero { .. } => "s_cbranch_scc0",
             Self::Branch { .. } => "s_branch",
+            Self::VectorLshlrevB32 { .. } => "v_lshlrev_b32_e32",
+            Self::VectorLshrrevB32 { .. } => "v_lshrrev_b32_e32",
+            Self::VectorAshrrevI32 { .. } => "v_ashrrev_i32_e32",
             Self::VectorAndB32 { .. } => "v_and_b32_e32",
+            Self::VectorOrB32 { .. } => "v_or_b32_e32",
             Self::VectorXorB32 { .. } => "v_xor_b32_e32",
             Self::VectorAddF32 { .. } => "v_add_f32_e32",
             Self::VectorMulF32 { .. } => "v_mul_f32_e32",
@@ -164,7 +176,11 @@ impl fmt::Display for Instruction {
             Self::WaitStore => formatter.write_str(" null, 0"),
             Self::MoveB32 { dst, src } => write!(formatter, " v{dst}, {src}"),
             Self::AddNoCarryU32 { dst, src0, src1 }
+            | Self::VectorLshlrevB32 { dst, src0, src1 }
+            | Self::VectorLshrrevB32 { dst, src0, src1 }
+            | Self::VectorAshrrevI32 { dst, src0, src1 }
             | Self::VectorAndB32 { dst, src0, src1 }
+            | Self::VectorOrB32 { dst, src0, src1 }
             | Self::VectorXorB32 { dst, src0, src1 }
             | Self::VectorAddF32 { dst, src0, src1 }
             | Self::VectorMulF32 { dst, src0, src1 } => {

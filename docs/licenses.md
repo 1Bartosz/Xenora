@@ -22,11 +22,80 @@ The declared MIT terms are compatible with GPL-3.0-or-later for code the upstrea
 
 The supplied objc2 MIT text comes from upstream commit `ee9a7ada2131f5944b8750428e265c15632f2a19`. Upstream confirms that the older crate versions use the license declared in their manifests, but did not confirm that the added copyright notice covers all earlier contributions. The text is preserved as upstream supplied it. Attribution completeness for the locked releases still requires review of applicable earlier notices. [Upstream MIT text](https://github.com/madsmtm/objc2/blob/ee9a7ada2131f5944b8750428e265c15632f2a19/LICENSE-MIT.txt) · [Maintainer discussion](https://github.com/madsmtm/objc2/issues/826)
 
-The source checkout references the crates through Cargo and contains no dependency archives or Apple SDK files. A linked macOS build can incorporate generated Rust binding code even when Apple frameworks are linked dynamically. Apple's Xcode agreement §2.4 permits distribution of macOS applications and libraries subject to the agreement. §2.7 restricts redistribution and derivative works of Apple Software, with stated exceptions. The pinned objc2 notice and maintainer clarification leave open how those terms apply to generated bindings in redistributed source or linked binaries. G11 remains open pending review of that question for the actual distributable and independent confirmation of attribution. [Apple's Xcode agreement](https://www.apple.com/legal/sla/docs/xcode.pdf) · [Pinned objc2 notice](https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md) · [Maintainer clarification](https://github.com/madsmtm/objc2/issues/895)
+### What the maintainer resolved
 
-The lockfile also lists optional dispatch2 0.3.1 (revision `8852b424193ca41602281b3d7540d7c8ed51e49a`, MIT selected). It is absent from the native normal/build graph, including with all workspace features enabled.
+In issue #895, the maintainer confirmed that the published terms cover
+generated bindings to the extent upstream can license them and that
+upstream imposes no additional downstream obligations. Normal license
+notice conditions still apply. In the reply specific to Xenora, the
+maintainer explained that generated Foundation bindings are inline
+wrappers around calls into the Apple framework. The response resolves
+upstream's licensing position and explains where the Apple
+implementation executes. The maintainer identified no Apple guidance
+for this case and left Apple-specific rights to the applicable terms.
+[Issue #895](https://github.com/madsmtm/objc2/issues/895)
+· [Xenora-specific reply](https://github.com/madsmtm/objc2/issues/895#issuecomment-7079277040)
 
-On 2026-11-22 the objc2 maintainer explained that in their view the SDK-derived Foundation wrappers inline and leave calls to Apple functions in the final binary. Applicability to the linked Xenora artifact and downstream redistribution rights remain open. [Maintainer follow-up](https://github.com/madsmtm/objc2/issues/895#issuecomment-7079277040)
+### Pinned attribution findings
+
+The 2026-11-23 audit matched all six runtime package versions, source
+revisions and declared licenses to the locked native build graph and
+each crate's registry metadata. The three pinned objc2 root licensing
+notices and the later supplied MIT text match the preserved copies
+byte for byte. The bitflags MIT notice matches its packaged file. A
+search of the shipped Rust source for copyright and SPDX markers found
+no additional notices. Keep both supplied objc2 texts. Issue #826
+confirms the older manifest declarations, while the completeness of
+the later copyright line for earlier contributions remains unconfirmed.
+The audit records the available notices for the exact pins and leaves
+that specific release attribution question open.
+[Maintainer attribution discussion](https://github.com/madsmtm/objc2/issues/826)
+
+### Content of the native release build
+
+Built the locked CLI with
+`cargo build --locked --release --target aarch64-apple-darwin -p xenora`
+at `4b9a4cecf35c8d4d90d8ecdb9c1510e7bd260102`, with CLI and dependency
+inputs unchanged. The inspected artifact was the standalone ARM64
+Mach-O executable, SHA-256
+`341c4d0c2835c82a1b199b2c9079b8ee3113657b2ca418f0214c569bb2a1b184`.
+It imports Metal, Foundation and CoreFoundation from macOS system
+framework paths, plus libobjc and libSystem. No Apple frameworks
+were bundled with the inspected executable.
+
+The executable retains more than a list of dynamic imports.
+`nm` and disassembly show generated `NSError::localizedDescription`
+and `MTLCompileOptions::setMathMode` wrapper code, which dispatches via
+`objc_msgSend` and includes selector caching or return-value handling.
+It also contains generated binding symbol names and selector strings,
+and release location strings name generated Rust source files. No
+embedded DWARF section was found. These observations distinguish retained
+Rust glue and metadata from the Apple framework implementations called
+at runtime. They do not establish the provenance of every byte or
+the result for another link or packaging configuration. Reproduce with
+`file`, `lipo -archs`, `otool -L`, `otool -l`, `otool -tvV`,
+`nm -m` and `strings -a`. Raw records are under `artifacts/g11/`.
+
+### Remaining release question
+
+G11 remains open for redistribution. Xcode agreement §2.4 addresses
+distribution of qualifying macOS applications and libraries. §2.7
+restricts redistribution and derivative works of Apple Software
+subject to stated exceptions. The remaining question is whether the
+applicable terms cover any Apple-derived expression actually conveyed
+in retained wrappers or metadata, and the SDK-derived Rust declarations
+conveyed in any matching or vendored source bundle. Confirm the terms
+for the actual distribution, its pinned attribution and GPLv3 §6
+Corresponding Source scope. The local binary inspection does not
+qualify a future release archive, symbols package or source offer.
+This release question leaves local clean-room research and Phase 02
+implementation under their existing engineering gates.
+[Apple Xcode and SDKs Agreement](https://www.apple.com/legal/sla/docs/xcode.pdf)
+
+The lockfile also lists optional dispatch2 0.3.1 (revision
+`8852b424193ca41602281b3d7540d7c8ed51e49a`, MIT selected). It is absent
+from the native normal/build graph, including with all workspace
+features enabled.
 
 ## Fuzz development dependencies
 

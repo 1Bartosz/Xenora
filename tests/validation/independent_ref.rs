@@ -30,6 +30,9 @@ enum Insn {
     VMov(u8, Src),
     VAddNc(u8, u8, u8),
     VAnd(u8, u8, u8),
+    VOr(u8, u8, u8),
+    VShiftLeft(u8, u8, u8),
+    VShiftRight(u8, u8, u8),
     VXor(u8, u8, u8),
     VAddF(u8, u8, u8),
     VMulF(u8, u8, u8),
@@ -122,6 +125,22 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
                 check_destination(dst, pending_read, offset)?;
                 let value = read_v(a)? & read_v(b)?;
                 vgpr[dst as usize] = Some(value);
+            }
+            Insn::VOr(dst, a, b) => {
+                check_destination(dst, pending_read, offset)?;
+                let value = read_v(a)? | read_v(b)?;
+                vgpr[dst as usize] = Some(value);
+            }
+            Insn::VShiftLeft(dst, count, value) => {
+                check_destination(dst, pending_read, offset)?;
+                let factor = 2_u64.pow(read_v(count)? % 32);
+                let product = u64::from(read_v(value)?) * factor;
+                vgpr[dst as usize] = Some((product % (1_u64 << 32)) as u32);
+            }
+            Insn::VShiftRight(dst, count, value) => {
+                check_destination(dst, pending_read, offset)?;
+                let divisor = 2_u32.pow(read_v(count)? % 32);
+                vgpr[dst as usize] = Some(read_v(value)? / divisor);
             }
             Insn::VXor(dst, a, b) => {
                 check_destination(dst, pending_read, offset)?;
@@ -319,6 +338,9 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         (0xfe00_0000, 0x3a00_0000, 1),
         (0xfe00_0000, 0x0600_0000, 2),
         (0xfe00_0000, 0x1000_0000, 3),
+        (0xfe00_0000, 0x3800_0000, 4),
+        (0xfe00_0000, 26 << 25, 5),
+        (0xfe00_0000, 22 << 25, 6),
     ] {
         if first & mask == value {
             if first & 0x100 == 0 {
@@ -331,7 +353,10 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
                 0 => Insn::VAnd(dst, a, b),
                 1 => Insn::VXor(dst, a, b),
                 2 => Insn::VAddF(dst, a, b),
-                _ => Insn::VMulF(dst, a, b),
+                3 => Insn::VMulF(dst, a, b),
+                4 => Insn::VOr(dst, a, b),
+                5 => Insn::VShiftLeft(dst, a, b),
+                _ => Insn::VShiftRight(dst, a, b),
             };
             return Ok((insn, 4));
         }

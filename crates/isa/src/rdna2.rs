@@ -60,9 +60,29 @@ pub const S_BRANCH: Opcode = Opcode {
     bits: 0xbf820000,
     bytes: 4,
 };
+pub const V_LSHLREV_B32: Opcode = Opcode {
+    mask: 0xfe000000,
+    bits: 0x34000000,
+    bytes: 4,
+};
+pub const V_LSHRREV_B32: Opcode = Opcode {
+    mask: 0xfe000000,
+    bits: 0x2c000000,
+    bytes: 4,
+};
+pub const V_ASHRREV_I32: Opcode = Opcode {
+    mask: 0xfe000000,
+    bits: 0x30000000,
+    bytes: 4,
+};
 pub const V_AND_B32: Opcode = Opcode {
     mask: 0xfe000000,
     bits: 0x36000000,
+    bytes: 4,
+};
+pub const V_OR_B32: Opcode = Opcode {
+    mask: 0xfe000000,
+    bits: 0x38000000,
     bytes: 4,
 };
 pub const V_XOR_B32: Opcode = Opcode {

@@ -26,7 +26,11 @@ Before any timing, the harness requires all of the following for each fixture:
 
 If any step fails the fixture is marked `excluded` with a reason, listed in the
 coverage table, and not timed. A nonempty exclusion set makes the harness exit
-nonzero.
+nonzero. Measurements are included only after all sizes for a fixture
+pass. A debug smoke run using a temporary manifest with sizes 4 and
+4097 for the add fixture verified that rejection at 4097 produces an
+empty timing list for that fixture while the other two fixtures retain
+all five sizes. The smoke run is a correctness check for reporting.
 
 ## What is measured
 

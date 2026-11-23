@@ -31,6 +31,13 @@ Use publicly accessible specifications and authorized materials only. Do not sub
 
 Distinguish desktop RDNA behavior from Xbox-specific behavior. Cite primary sources with exact applicable architectures and record uncertainties using the project's evidence classification when available. Tests on Apple GPUs do not establish verification on Xbox hardware.
 
+Xenora implements its own Rust guest runtime, decoder, typed IR, shader
+compiler and native Metal backend from public technical specifications
+and independently derived tests. Contributions must not copy, port or
+adapt code, decoder tables, internal metadata or implementation
+architecture from other emulators. External results can inform test
+selection. Author the resulting code and fixtures independently.
+
 Before incorporating third-party code, verify per-file license compatibility with GPL-3.0-or-later, record the exact upstream revision and original paths, preserve copyright notices and document changes. Update applicable attribution records. Public visibility alone is not proof of authorization or license compatibility.
 
 ## Pull requests

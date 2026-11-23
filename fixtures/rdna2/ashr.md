@@ -1,0 +1,63 @@
+# gfx1030 Wave32 arithmetic right shift
+
+Leonida revision `2d3369a4c82e6f36c5190c4c534d3df600e135ec`,
+[`tools/rdna2spirv.py:200`](https://github.com/ItsNotRexed/Leonida/blob/2d3369a4c82e6f36c5190c4c534d3df600e135ec/tools/rdna2spirv.py#L200),
+identified the arithmetic shift as a candidate. Xenora uses the public
+[AMD RDNA 2 ISA](https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture)
+and its existing pinned AMD XML generator for the VOP2 encoding. The lowering
+uses signed integer shift from the
+[Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification).
+The implementation and fixture were authored in Xenora. No Leonida code, tables,
+dependencies or game material were imported.
+
+The decoder accepts the VOP2 VGPR/VGPR form. The shader lifter retains the synthetic
+buffer ABI and emits a signed shift with an explicit five-bit count mask. The
+production CPU reference extracts the operands directly from bytes. Neither
+register reads nor writes add access to the reserved index register.
+
+## Reproduce the encoding
+
+From the repository root with native ARM64 LLVM 23.1.6:
+
+```sh
+llvm_bin="$(brew --prefix llvm)/bin"
+evidence=artifacts/phase02-ashr
+mkdir -p "$evidence"
+"$llvm_bin/llvm-mc" -triple=amdgcn-amd-amdhsa -mcpu=gfx1030 \
+  -mattr=+wavefrontsize32 -filetype=obj fixtures/rdna2/ashr.s -o "$evidence/ashr.o"
+"$llvm_bin/llvm-objcopy" -O binary --only-section=.text "$evidence/ashr.o" "$evidence/rebuilt.bin"
+cmp "$evidence/rebuilt.bin" fixtures/rdna2/ashr.bin
+"$llvm_bin/llvm-objdump" -d --mcpu=gfx1030 --mattr=+wavefrontsize32 "$evidence/ashr.o"
+shasum -a 256 fixtures/rdna2/ashr.s fixtures/rdna2/ashr.bin
+```
+
+LLVM emitted word `0x31ffff01` at offset `0x14` and disassembled it as
+`v_ashrrev_i32_e32 v255, v1, v255` (class E encoding evidence).
+The 40-byte binary has SHA-256
+`8194ea7b3a2233823968f78472532df9d3809a5770c1be3ee8b68a9cfeedaf56`.
+The source has SHA-256
+`b44535bc7c38e17fa8ba1f73cf1b510efc00a21cb914f5ecaef633564346f10b`.
+
+## Review plan
+
+Supply counts 0 through 63 followed by `0x80000000` and `0xffffffff`.
+Independently derive each output as the floor of −2147483647 divided by
+2 raised to (count modulo 32), reduced modulo 2³². The checkpoint outputs
+for counts 0, 1, 31, 32 and 33 are `0x80000001`, `0xc0000000`,
+`0xffffffff`, `0x80000001` and `0xc0000000`. For a positive-value
+control, replace only the literal word at offset `0x10` with `0x7fffffff`
+and use +2147483647 in the derivation. The destination aliases the signed
+source to exercise the old register value.
+
+After the review slot clears, run the CPU test and the native readback in a
+bounded process:
+
+```sh
+CARGO_BUILD_JOBS=2 cargo test --locked -p xenora-semantic-review arithmetic_right_shift_preserves_sign_and_wraps_counts
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 \
+  MTL_SHADER_VALIDATION_ABORT_ON_FAULT=1 CARGO_BUILD_JOBS=2 timeout 30s \
+  cargo test --locked -p xenora-semantic-review arithmetic_right_shift_native_metal_known_answers \
+  -- --ignored --nocapture --test-threads=1
+```
+
+Native execution is pending. This fixture cannot establish Xbox behavior.
