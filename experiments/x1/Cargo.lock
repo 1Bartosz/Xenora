@@ -67,13 +67,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenora-decoder"
+version = "0.1.0"
+dependencies = [
+ "xenora-isa",
+]
+
+[[package]]
+name = "xenora-isa"
+version = "0.1.0"
+
+[[package]]
 name = "xenora-metal"
 version = "0.1.0"
 dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-metal",
+ "xenora-texture",
 ]
+
+[[package]]
+name = "xenora-shader"
+version = "0.1.0"
+dependencies = [
+ "xenora-decoder",
+]
+
+[[package]]
+name = "xenora-texture"
+version = "0.1.0"
 
 [[package]]
 name = "xenora-x1"
@@ -83,4 +106,6 @@ dependencies = [
  "objc2-foundation",
  "objc2-metal",
  "xenora-metal",
+ "xenora-shader",
+ "xenora-texture",
 ]

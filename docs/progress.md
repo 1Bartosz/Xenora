@@ -5,10 +5,8 @@
 ## Reading the progress graphic
 
 - **Decoded forms** counts rows marked decoded in the [status registry](status.toml), out of all rows in that reviewed gfx1030 instruction inventory.
-- **Accepted Metal forms** counts rows with accepted native fixture readback, over the same inventory. See the [form-by-form results](shaders/instruction-coverage.md) and [implementation checkpoint](testing/phase-02-baseline.md#implementation-checkpoint) for class A evidence from Apple M5. Arithmetic shift has its own [fixture record](../fixtures/rdna2/ashr.md).
+- **Accepted Metal forms** counts rows with accepted native fixture readback, over the same inventory. See the [form-by-form results](shaders/instruction-coverage.md) and [implementation checkpoint](testing/phase-02-baseline.md#implementation-checkpoint) for class A evidence from Apple M5. Arithmetic shift has its own [fixture record](../fixtures/rdna2/ashr.md); its CPU path now has explicit checkpoints, a positive-value control and independent-oracle coverage, while its native readback remains local evidence with independent acceptance open.
 - **Accepted guest milestones** counts the recorded fixture demonstrations for native guest instruction execution (X1), executable loading (X2), guest-to-GPU command submission (X3), and guest-driven Metal rendering (X4), out of those four milestones. See the [guest acceptance record](testing/phase-02-baseline.md#track-b--guest-execution).
-
-The denominators describe this repository's fixture scope. Xbox compatibility remains unmeasured. After updating the registry with reviewed evidence, run `python3 scripts/audit/status.py` to regenerate the tables and [SVG](assets/xenora-progress.svg). CI uses the same command with `--check`.
 
 <!-- status:features:start -->
 | Feature | Target | Implementation | Correctness | Hardware | Evidence | Limits |

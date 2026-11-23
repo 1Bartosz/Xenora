@@ -10,7 +10,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 
 ## Architecture and technical design
 
-- [Interface contracts](interfaces.md) — Shader inputs, guest services, and native command submission.
+- [Interface contracts](interfaces.md) — Shader inputs, guest services, native command submission, and synthetic textures.
 - [Fixture memory model](adr/0003-demo-memory-model.md) and [CPU boundary](adr/0004-cpu-boundary.md) — Buffer bindings, guest address translation, and dependency direction.
 
 ## RDNA 2 decoding and shader translation
@@ -27,10 +27,13 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 
 - [Guest experiment guide](../experiments/x1/README.md) — Bounded x86-64 execution, executable loading, experimental services, native compute, and offscreen rendering.
 - [Guest CPU research](research/cpu-boundary.md) — Public specifications and unresolved console requirements.
+- [Synthetic import fixtures](../tests/compat_fixtures/README.md) — Reproducible PE32+ builds and expected service behavior.
 
 ## Testing, validation, and benchmarks
 
 - [Engineering progress](progress.md) — Verification commands, metric definitions, and open release gates.
+- [Persistent resource and translated rendering acceptance](testing/x9-acceptance.md) — Pinned upstream tests, native ARM64 results and unsupported cases.
+
 - [Baseline acceptance](testing/phase-02-baseline.md), [Phase 01 assurance](testing/phase01-assurance.md), and [independent reviews](testing/review-log.md) — Candidate-specific results and release findings.
 - [Mutation testing](testing/mutation.md) and [benchmark protocol](testing/benchmarks.md) — Test sensitivity, benchmark inputs, and timing requirements.
 
@@ -38,6 +41,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 
 - [Public sources](research/sources.md), [RDNA 2 notes](research/rdna2.md), and [Xbox GPU evidence](research/xbox-gpu.md) — Specifications, evidence scope, and unknown console behavior.
 - [Shader inputs](research/shader-containers.md) and [risk register](risk-register.md) — Input provenance and unresolved engineering risks.
+- [Synthetic integration and upstream evidence](research/synthetic-integration.md) — Audited source snapshots and remaining commercial startup prerequisites.
 
 ## Security, licensing, and contributions
 

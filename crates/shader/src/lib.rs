@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Verified compilation for Xenora's synthetic compute ABI.
+//! Verified compilation for Xenora's synthetic compute and graphics ABIs.
 
 use std::fmt::{self, Write};
+
+mod graphics;
+pub use graphics::{PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 pub use xenora_decoder::Architecture;
 use xenora_decoder::{DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorSource};
@@ -20,9 +23,21 @@ pub struct CompiledShader {
 
 #[derive(Debug)]
 pub enum CompileError {
-    InvalidLength { bytes: usize },
+    InvalidLength {
+        bytes: usize,
+    },
     Decode(DecodeError),
-    Verify { offset: usize, reason: &'static str },
+    GraphicsStage {
+        stage: &'static str,
+        error: Box<CompileError>,
+    },
+    GraphicsLink {
+        reason: &'static str,
+    },
+    Verify {
+        offset: usize,
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for CompileError {
@@ -33,6 +48,8 @@ impl fmt::Display for CompileError {
                 "fixture length must be a nonzero multiple of four up to {MAX_CODE_BYTES} bytes, got {bytes}"
             ),
             Self::Decode(error) => error.fmt(formatter),
+            Self::GraphicsStage { stage, error } => write!(formatter, "{stage} shader: {error}"),
+            Self::GraphicsLink { reason } => write!(formatter, "graphics linking: {reason}"),
             Self::Verify { offset, reason } => {
                 write!(
                     formatter,
@@ -47,6 +64,7 @@ impl std::error::Error for CompileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Decode(error) => Some(error),
+            Self::GraphicsStage { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -66,8 +84,16 @@ enum Op {
     Load,
     Constant(u32),
     Binary(Binary, Value, Value),
+    MergeLanes {
+        mask: u32,
+        active: Value,
+        inactive: Value,
+    },
     Store(Value),
-    ScalarBranch { target: usize, taken: bool },
+    ScalarBranch {
+        target: usize,
+        taken: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -208,10 +234,7 @@ fn exact_float_result(operator: Binary, left: KnownBits, right: KnownBits) -> Op
 /// Bind equal-length disjoint input and output word buffers and dispatch one
 /// invocation per word in a one-dimensional grid.
 pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShader, CompileError> {
-    if bytes.is_empty() || bytes.len() > MAX_CODE_BYTES || !bytes.len().is_multiple_of(4) {
-        return Err(CompileError::InvalidLength { bytes: bytes.len() });
-    }
-    let decoded = xenora_decoder::decode(architecture, bytes).map_err(CompileError::Decode)?;
+    let decoded = decode_fixture(architecture, bytes)?;
     let operations = lift(&decoded, bytes.len())?;
 
     let disassembly = decoded.iter().map(|line| format!("{line}\n")).collect();
@@ -264,6 +287,16 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
                 );
                 continue;
             }
+            Op::MergeLanes {
+                mask,
+                active,
+                inactive,
+            } => (
+                format!("{dest} = merge.lanes mask=0x{mask:08x}, {active}, {inactive}"),
+                format!(
+                    "uint {dest} = ((0x{mask:08x}u >> (index & 31u)) & 1u) != 0u ? {active} : {inactive};"
+                ),
+            ),
             Op::Store(value) => (
                 format!("store.u32 output[index], {value}"),
                 format!("output[index] = {value};"),
@@ -281,6 +314,16 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
     })
 }
 
+fn decode_fixture(
+    architecture: Architecture,
+    bytes: &[u8],
+) -> Result<Vec<DecodedInstruction>, CompileError> {
+    if bytes.is_empty() || bytes.len() > MAX_CODE_BYTES || !bytes.len().is_multiple_of(4) {
+        return Err(CompileError::InvalidLength { bytes: bytes.len() });
+    }
+    xenora_decoder::decode(architecture, bytes).map_err(CompileError::Decode)
+}
+
 fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, Op)>, CompileError> {
     let mut operations = Vec::new();
     let mut registers = [None; 256];
@@ -289,6 +332,8 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
     let mut stored = false;
     let mut store_pending = false;
     let mut scalars = [None; 128];
+    let mut exec = u32::MAX; // The fixture starts with full Wave32 EXEC.
+    scalars[126] = Some(exec);
     let mut scc = None;
     let mut skip_before = 0;
 
@@ -297,7 +342,10 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
     for (index, instruction) in decoded.iter().enumerate() {
         let offset = instruction.offset;
         let reason = match instruction.instruction {
-            Instruction::Branch { target } | Instruction::BranchSccZero { target }
+            Instruction::Branch { target }
+            | Instruction::BranchSccZero { target }
+            | Instruction::BranchExecZero { target }
+            | Instruction::BranchVccZero { target }
                 if target <= offset
                     || decoded
                         .binary_search_by_key(&target, |instruction| instruction.offset)
@@ -311,6 +359,9 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             Instruction::BufferStoreDword {
                 index, resource, ..
             } if (index, resource) != (0, 4) => "unsupported resource or buffer index",
+            Instruction::Export { .. } | Instruction::Interpolate { .. } => {
+                "graphics instruction is unsupported in a compute fixture"
+            }
             Instruction::EndProgram if index + 1 != decoded.len() => {
                 return Err(CompileError::Verify {
                     offset: decoded[index + 1].offset,
@@ -341,6 +392,30 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 .flatten()
                 .ok_or_else(|| error("scalar source has no known value")),
         };
+        // Scalar instructions and waits still execute when all lanes are inactive.
+        if exec == 0 {
+            match instruction.instruction {
+                Instruction::MoveB32 { .. }
+                | Instruction::AddNoCarryU32 { .. }
+                | Instruction::VectorLshlrevB32 { .. }
+                | Instruction::VectorLshrrevB32 { .. }
+                | Instruction::VectorAshrrevI32 { .. }
+                | Instruction::VectorAndB32 { .. }
+                | Instruction::VectorOrB32 { .. }
+                | Instruction::VectorXorB32 { .. }
+                | Instruction::VectorAddF32 { .. }
+                | Instruction::VectorMulF32 { .. } => continue,
+                _ => {}
+            }
+        }
+        if exec != u32::MAX
+            && matches!(
+                instruction.instruction,
+                Instruction::BufferLoadDword { .. } | Instruction::BufferStoreDword { .. }
+            )
+        {
+            return Err(error("vector memory requires full Wave32 EXEC"));
+        }
         let next = Value(operations.len());
         let (dest, operation) = match instruction.instruction {
             Instruction::BufferLoadDword { data, .. } => {
@@ -383,7 +458,14 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         "move writes the index register or replaces a pending load",
                     ));
                 }
-                registers[slot] = Some(value);
+                registers[slot] = Some(merge_lanes(
+                    &mut operations,
+                    &mut facts,
+                    offset,
+                    exec,
+                    value,
+                    registers[slot],
+                )?);
                 continue;
             }
             Instruction::MoveB32 {
@@ -419,6 +501,9 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 if dst < 8 {
                     return Err(error("scalar move would modify a resource descriptor"));
                 }
+                if dst == 126 {
+                    exec = value;
+                }
                 let slot = scalars
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
@@ -429,9 +514,20 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 scc = Some(read_scalar(src0)? == read_scalar(src1)?);
                 continue;
             }
-            Instruction::BranchSccZero { target } => {
-                let taken =
-                    !scc.ok_or_else(|| error("conditional branch reads uninitialized SCC"))?;
+            Instruction::BranchSccZero { target }
+            | Instruction::BranchExecZero { target }
+            | Instruction::BranchVccZero { target } => {
+                let taken = match instruction.instruction {
+                    Instruction::BranchSccZero { .. } => {
+                        !scc.ok_or_else(|| error("conditional branch reads uninitialized SCC"))?
+                    }
+                    Instruction::BranchVccZero { .. } => {
+                        scalars[106]
+                            .ok_or_else(|| error("conditional branch reads uninitialized VCC_LO"))?
+                            == 0
+                    }
+                    _ => exec == 0,
+                };
                 if taken {
                     skip_before = target;
                 }
@@ -455,6 +551,11 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 Some(dst),
                 Op::Binary(Binary::FloatMul, read(src0)?, read(src1)?),
             ),
+            Instruction::Export { .. } | Instruction::Interpolate { .. } => {
+                return Err(error(
+                    "graphics instruction is unsupported in a compute fixture",
+                ));
+            }
             Instruction::EndProgram => {
                 if !stored || store_pending || pending_load.is_some() {
                     return Err(error(
@@ -464,15 +565,6 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 return Ok(operations);
             }
         };
-        if let Some(dest) = dest {
-            let slot = usize::from(dest);
-            if dest == 0 || pending_load.is_some_and(|(register, _)| register == slot) {
-                return Err(error(
-                    "instruction writes the index register or replaces a pending load",
-                ));
-            }
-            registers[slot] = Some(next);
-        }
         let value_bits = match operation {
             Op::Constant(bits) => KnownBits::constant(bits),
             Op::Binary(Binary::And, left, right) => facts[left.0].and(facts[right.0]),
@@ -486,11 +578,60 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         };
         facts.push(value_bits);
         operations.push((offset, operation));
+        if let Some(dest) = dest {
+            let slot = usize::from(dest);
+            if dest == 0 || pending_load.is_some_and(|(register, _)| register == slot) {
+                return Err(error(
+                    "instruction writes the index register or replaces a pending load",
+                ));
+            }
+            registers[slot] = Some(merge_lanes(
+                &mut operations,
+                &mut facts,
+                offset,
+                exec,
+                next,
+                registers[slot],
+            )?);
+        }
     }
     Err(CompileError::Verify {
         offset: code_len,
         reason: "missing program termination",
     })
+}
+
+// Keeping a value for inactive lanes requires a previously initialized destination.
+fn merge_lanes(
+    operations: &mut Vec<(usize, Op)>,
+    facts: &mut Vec<KnownBits>,
+    offset: usize,
+    mask: u32,
+    active: Value,
+    inactive: Option<Value>,
+) -> Result<Value, CompileError> {
+    if mask == u32::MAX {
+        return Ok(active);
+    }
+    let inactive = inactive.ok_or(CompileError::Verify {
+        offset,
+        reason: "partial EXEC requires an initialized vector destination",
+    })?;
+    let next = Value(operations.len());
+    operations.push((
+        offset,
+        Op::MergeLanes {
+            mask,
+            active,
+            inactive,
+        },
+    ));
+    facts.push(KnownBits {
+        zero: facts[active.0].zero & facts[inactive.0].zero,
+        one: facts[active.0].one & facts[inactive.0].one,
+        values: None,
+    });
+    Ok(next)
 }
 
 #[cfg(test)]

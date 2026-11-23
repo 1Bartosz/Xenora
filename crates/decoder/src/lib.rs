@@ -2,11 +2,14 @@
 
 use std::fmt;
 
-pub use xenora_isa::{Architecture, Instruction, ScalarSource, VectorSource};
+pub use xenora_isa::{
+    Architecture, ExportTarget, Instruction, InterpolationPhase, ScalarSource, VectorSource,
+};
 use xenora_isa::{
-    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, S_BRANCH, S_CBRANCH_SCC0, S_CMP_EQ_U32, S_ENDPGM,
-    S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32,
-    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0,
+    S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32,
+    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
+    V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 
 /// A successfully decoded instruction and its location in the input stream.
@@ -120,8 +123,10 @@ pub fn decode(
         offset += usize::from(byte_len);
     }
     for decoded in &result {
-        if let Instruction::Branch { target } | Instruction::BranchSccZero { target } =
-            decoded.instruction
+        if let Instruction::Branch { target }
+        | Instruction::BranchSccZero { target }
+        | Instruction::BranchExecZero { target }
+        | Instruction::BranchVccZero { target } = decoded.instruction
             && result
                 .binary_search_by_key(&target, |item| item.offset)
                 .is_err()
@@ -182,6 +187,41 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
             len,
         ));
     }
+    if EXP.matches(first) {
+        let len = EXP.byte_len();
+        let sources = word(bytes, len)?.to_le_bytes();
+        // RDNA 2 ISA Table 56. Match all operand and reserved bits, including
+        // the four enable bits, compression, DONE and valid-mask flags.
+        let target = match first & 0x03ff_ffff {
+            0x08cf => ExportTarget::Position0,
+            0x020f => ExportTarget::Parameter0,
+            0x180f => ExportTarget::RenderTarget0,
+            _ => {
+                return Err(unsupported(
+                    "exp",
+                    "expected full uncompressed POS0 done, PARAM0, or MRT0 done vm",
+                ));
+            }
+        };
+        return Ok((Instruction::Export { target, sources }, len));
+    }
+    for (opcode, phase) in [
+        (V_INTERP_P1_F32, InterpolationPhase::First),
+        (V_INTERP_P2_F32, InterpolationPhase::Second),
+    ] {
+        if opcode.matches(first) {
+            return Ok((
+                Instruction::Interpolate {
+                    phase,
+                    dst: (first >> 18) as u8,
+                    coordinate: first as u8,
+                    attribute: ((first >> 10) & 0x3f) as u8,
+                    component: ((first >> 8) & 3) as u8,
+                },
+                opcode.byte_len(),
+            ));
+        }
+    }
     if V_MOV_B32.matches(first) {
         return move_b32(first, bytes);
     }
@@ -192,10 +232,10 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     }
     if S_MOV_B32.matches(first) {
         let dst = ((first >> 16) & 0x7f) as u8;
-        if dst > 105 {
+        if !matches!(dst, 0..=107 | 126..=127) {
             return Err(unsupported(
                 "s_mov_b32",
-                "expected a normal SGPR destination",
+                "expected a normal SGPR or EXEC/VCC destination",
             ));
         }
         let (src, len) = scalar_source(first as u8, bytes, "s_mov_b32")?;
@@ -226,6 +266,20 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         return Ok((
             Instruction::BranchSccZero { target },
             S_CBRANCH_SCC0.byte_len(),
+        ));
+    }
+    if S_CBRANCH_EXECZ.matches(first) {
+        let target = branch_target(first, offset, "s_cbranch_execz")?;
+        return Ok((
+            Instruction::BranchExecZero { target },
+            S_CBRANCH_EXECZ.byte_len(),
+        ));
+    }
+    if S_CBRANCH_VCCZ.matches(first) {
+        let target = branch_target(first, offset, "s_cbranch_vccz")?;
+        return Ok((
+            Instruction::BranchVccZero { target },
+            S_CBRANCH_VCCZ.byte_len(),
         ));
     }
     if V_LSHLREV_B32.matches(first) {

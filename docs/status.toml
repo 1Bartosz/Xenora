@@ -125,7 +125,7 @@ llvm = "three-way passed"
 
 [[instruction]]
 form = "s_mov_b32"
-encoding = "Normal SGPR destination and normal SGPR, inline integer or literal source"
+encoding = "Normal SGPR or EXEC/VCC half destination and normal SGPR, inline integer or literal source"
 representation = "`BE880387`"
 lowering = "resolved scalar state"
 reference = "implemented"
@@ -265,7 +265,31 @@ cpu = "local known-answer test passed"
 gpu = "local Apple M5 readback passed; acceptance pending"
 recognized = true
 decoded = true
-llvm = "fixture reproduced"
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_cbranch_execz"
+encoding = "Nonnegative signed dword displacement"
+representation = "`BF880001`"
+lowering = "resolved Wave32 EXEC_LO zero check"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_cbranch_vccz"
+encoding = "Nonnegative signed dword displacement"
+representation = "`BF860001`"
+lowering = "resolved Wave32 VCC_LO zero check"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
 
 [guest_milestones]
 X1 = "accepted"

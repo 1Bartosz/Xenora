@@ -19,6 +19,8 @@ VARIANTS = (
     ("S_MOV_B32", "ENC_SOP1"),
     ("S_CMP_EQ_U32", "ENC_SOPC"),
     ("S_CBRANCH_SCC0", "ENC_SOPP"),
+    ("S_CBRANCH_EXECZ", "ENC_SOPP"),
+    ("S_CBRANCH_VCCZ", "ENC_SOPP"),
     ("S_BRANCH", "ENC_SOPP"),
     ("V_LSHLREV_B32", "ENC_VOP2"),
     ("V_LSHRREV_B32", "ENC_VOP2"),
@@ -28,6 +30,9 @@ VARIANTS = (
     ("V_XOR_B32", "ENC_VOP2"),
     ("V_ADD_F32", "ENC_VOP2"),
     ("V_MUL_F32", "ENC_VOP2"),
+    ("EXP", "ENC_EXP"),
+    ("V_INTERP_P1_F32", "ENC_VINTRP"),
+    ("V_INTERP_P2_F32", "ENC_VINTRP"),
 )
 
 
@@ -88,7 +93,11 @@ def main(xml_path):
         prefixes = {identifier & prefix_mask for identifier in identifiers}
         if len(prefixes) != 1:
             raise ValueError(f"{encoding_name} has an ambiguous encoding prefix")
-        opcode_mask, opcode_bits = bits_to_word(opcode, read_field(encoding, "OP"))
+        # EXP identifies the export instruction through the encoding prefix alone.
+        if encoding_name == "ENC_EXP" and opcode == 0:
+            opcode_mask, opcode_bits = 0, 0
+        else:
+            opcode_mask, opcode_bits = bits_to_word(opcode, read_field(encoding, "OP"))
         mask = prefix_mask | opcode_mask
         bits = prefixes.pop() | opcode_bits
         if bits not in {identifier & mask for identifier in identifiers}:

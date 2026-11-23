@@ -1,7 +1,13 @@
 use xenora_metal::NativeCompute;
 
+#[path = "native/guest_buffer.rs"]
+mod guest_buffer;
 #[path = "native/offscreen.rs"]
 mod offscreen;
+#[path = "native/texture.rs"]
+mod texture;
+#[path = "native/translated_render.rs"]
+mod translated_render;
 
 const KERNEL_HEADER: &str = r"
 #include <metal_stdlib>

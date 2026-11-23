@@ -6,8 +6,8 @@ const ZF: u64 = 1 << 6;
 const SF: u64 = 1 << 7;
 const OF: u64 = 1 << 11;
 const ARITHMETIC: u64 = CF | PF | AF | ZF | SF | OF;
-const MAX_CODE: usize = 64;
-const MAX_STEPS: usize = 16;
+pub(crate) const MAX_CODE: usize = 64;
+pub(crate) const MAX_STEPS: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct State {
@@ -42,7 +42,9 @@ pub(crate) type Service<'a> = dyn FnMut(&State) -> Result<u64, FaultKind> + 'a;
 enum Instruction {
     Mov(u32),
     AddOne,
-    CmpZero,
+    SubOne,
+    CmpImm8(u8),
+    Je(i8),
     Jne(i8),
     Store,
     Trap,
@@ -54,12 +56,18 @@ fn decode(bytes: &[u8], services: bool) -> Result<(Instruction, usize), FaultKin
         [0x0f, 0x0b, ..] if services => Ok((Trap, 2)),
         [0xb8, a, b, c, d, ..] => Ok((Mov(u32::from_le_bytes([*a, *b, *c, *d])), 5)),
         [0x83, 0xc0, 1, ..] => Ok((AddOne, 3)),
-        [0x83, 0xf8, 0, ..] => Ok((CmpZero, 3)),
+        [0x83, 0xe8, 1, ..] => Ok((SubOne, 3)),
+        [0x83, 0xf8, imm, ..] => Ok((CmpImm8(*imm), 3)),
+        [0x74, disp, ..] => Ok((Je(i8::from_le_bytes([*disp])), 2)),
         [0x75, disp, ..] => Ok((Jne(i8::from_le_bytes([*disp])), 2)),
         [0x48, 0x89, 0x07, ..] => Ok((Store, 3)),
-        [0xb8, ..] | [0x83] | [0x83, 0xc0 | 0xf8] | [0x75] | [0x48] | [0x48, 0x89] => {
-            Err(FaultKind::Truncated)
-        }
+        [0xb8, ..]
+        | [0x83]
+        | [0x83, 0xc0 | 0xe8 | 0xf8]
+        | [0x74]
+        | [0x75]
+        | [0x48]
+        | [0x48, 0x89] => Err(FaultKind::Truncated),
         _ => Err(FaultKind::Unsupported),
     }
 }
@@ -72,9 +80,11 @@ fn branch_target(
 ) -> Result<usize, FaultKind> {
     let target = next
         .checked_add_signed(isize::from(displacement))
-        .filter(|&target| target >= next && target < code.len())
+        .filter(|&target| target < code.len())
         .ok_or(FaultKind::BranchTarget)?;
-    let mut boundary = next;
+    // Validate that `target` falls on an instruction boundary by scanning from
+    // offset 0.  This rejects branches into the middle of immediates.
+    let mut boundary = 0;
     while boundary < target {
         let (_, len) = decode(&code[boundary..], services).map_err(|_| FaultKind::BranchTarget)?;
         boundary += len;
@@ -88,6 +98,22 @@ fn branch_target(
 fn result_flags(value: u32) -> u64 {
     let parity = value.to_le_bytes()[0].count_ones().is_multiple_of(2);
     (u64::from(parity) * PF) | (u64::from(value == 0) * ZF) | (u64::from(value >> 31) * SF)
+}
+
+/// Compute RFLAGS arithmetic bits for a subtraction `minuend - subtrahend = result`.
+/// Identical to x86-64 SUB and CMP semantics for 32-bit operands.
+fn sub_flags(minuend: u32, subtrahend: u32) -> u64 {
+    let result = minuend.wrapping_sub(subtrahend);
+    // CF: unsigned borrow.
+    let carry = minuend < subtrahend;
+    // AF: borrow out of bit 3 (low nibble).
+    let af = (minuend & 0xf) < (subtrahend & 0xf);
+    // OF: signed overflow on subtraction.
+    let overflow = ((minuend ^ subtrahend) & (minuend ^ result)) >> 31 != 0;
+    result_flags(result)
+        | (u64::from(carry) * CF)
+        | (u64::from(af) * AF)
+        | (u64::from(overflow) * OF)
 }
 
 fn step(
@@ -116,8 +142,22 @@ fn step(
             state.gpr[0] = u64::from(result);
             state.rflags = (state.rflags & !ARITHMETIC) | flags;
         }
-        Instruction::CmpZero => {
-            state.rflags = (state.rflags & !ARITHMETIC) | result_flags(eax);
+        Instruction::SubOne => {
+            let flags = sub_flags(eax, 1);
+            state.gpr[0] = u64::from(eax.wrapping_sub(1));
+            state.rflags = (state.rflags & !ARITHMETIC) | flags;
+        }
+        Instruction::CmpImm8(imm) => {
+            // x86-64 sign-extends the byte immediate to 32 bits before subtracting.
+            let subtrahend = imm as i8 as i32 as u32;
+            let flags = sub_flags(eax, subtrahend);
+            state.rflags = (state.rflags & !ARITHMETIC) | flags;
+        }
+        Instruction::Je(displacement) => {
+            let target = branch_target(code, next, displacement, services)?;
+            if state.rflags & ZF != 0 {
+                next = target;
+            }
         }
         Instruction::Jne(displacement) => {
             let target = branch_target(code, next, displacement, services)?;

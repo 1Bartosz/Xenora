@@ -1,6 +1,5 @@
 # gfx1030 Wave32 arithmetic right shift
 
-Leonida revision `2d3369a4c82e6f36c5190c4c534d3df600e135ec`,
 [`tools/rdna2spirv.py:200`](https://github.com/ItsNotRexed/Leonida/blob/2d3369a4c82e6f36c5190c4c534d3df600e135ec/tools/rdna2spirv.py#L200),
 identified the arithmetic shift as a candidate. Xenora uses the public
 [AMD RDNA 2 ISA](https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture)
@@ -65,3 +64,26 @@ known-answer test and the opt-in native readback test on Apple M5 with
 Metal API and shader validation enabled (class A). Local logs are in
 `artifacts/repo-overhaul/`. Independent acceptance remains open in
 [issue #19](https://github.com/ranveersoni98/Xenora/issues/19).
+
+## Local acceptance update (2026-11-23)
+
+On the current checkout, the ASHR fixture passed:
+
+- the semantic-review CPU suite (21 passed and 3 ignored opt-in GPU tests);
+- the fixture reassembly check;
+- the gfx1030 three-way LLVM comparison (332 comparisons across 19 forms); and
+- the opt-in `arithmetic_right_shift_native_metal_known_answers` test on Apple M5
+  with Metal API and GPU validation enabled.
+
+The CPU check now compares explicit checkpoint words for counts 0, 1, 2, 3, 4,
+7, 8, 15, 16, 23, 24, 30, 31, 32, 33, 63, `0x80000000` and `0xffffffff`, a
+positive-value control that replaces only the literal at offset `0x10`, the
+aliased-destination fixture and a renamed-destination variant. The
+semantic-review independent interpreter decodes the VOP2 form and derives the
+arithmetic shift with floor division rather than the production signed-shift
+operator. Malformed, inline-source and truncated streams are rejected by the
+compiler and by both interpreters.
+
+These are local results. Independent semantic and claims review remains open
+in [issue #19](https://github.com/ranveersoni98/Xenora/issues/19), and no
+commercial game execution is implied.

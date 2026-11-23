@@ -2,20 +2,46 @@
 
 The bounded x86-64 guest interpreter (X1) runs on native ARM64 macOS.
 
-This isolated Cargo workspace implements the two original fixtures in the
+This isolated Cargo workspace implements the original fixtures in the
 [Phase 02 feasibility study](../../docs/research/phase02-cpu-feasibility.md).
-Both fixtures use immutable code at guest address `0x1000` and an eight-byte
-writable output at `0x2000`. The interpreter takes the end of the code slice
-as the terminal address and validates each JNE target even when the condition
-is false. The program prints initial state, each retired state and the terminal
-state with output. The tests use literal expected RIP, RAX, arithmetic flags
-and output bytes. Their independent review is pending.
+Both flat fixtures use immutable code at guest address `0x1000` and an
+eight-byte writable output at `0x2000`. The interpreter takes the end of the
+code slice as the terminal address and validates each branch target from offset
+zero before executing. The program prints initial state, each retired state and
+the terminal state with output. The tests use literal expected RIP, RAX,
+arithmetic flags and output bytes.
 
 The checked-in fixture bytes are staged separately from the Rust decoder.
 `fixtures/check.sh` recreates the bytes from the assembly and prints tool
 versions, architecture and linkage, fixture bytes and SHA-256 hashes. The
 assembler emits a temporary x86-64 relocatable object and the script extracts
 its text. The host runs the LLVM tools and Rust interpreter as ARM64 processes.
+
+## Supported instruction subset
+
+The interpreter decodes and executes the following x86-64 forms. All other
+encodings trap with `Unsupported`. Partial encodings (truncated immediates or
+displacements) trap with `Truncated`.
+
+| Encoding | Instruction | Notes |
+| --- | --- | --- |
+| `B8 id` | `MOV EAX, imm32` | Zero-extends to RAX. |
+| `83 C0 01` | `ADD EAX, 1` | Full ARITHMETIC flags (CF PF AF ZF SF OF). |
+| `83 E8 01` | `SUB EAX, 1` | Full ARITHMETIC flags including borrow (CF) and AF. |
+| `83 F8 ib` | `CMP EAX, imm8` | Sets flags like SUB; EAX unchanged. |
+| `74 cb` | `JE rel8` | Jumps if ZF=1. Target validated from offset 0. |
+| `75 cb` | `JNE rel8` | Jumps if ZF=0. Target validated from offset 0. |
+| `48 89 07` | `MOV [RDI], RAX` | Writes 8 bytes; faults if outside output range. |
+| `0F 0B` | `UD2` (service trap) | Dispatches by EAX through the active service handler. |
+
+Branch targets are validated by scanning the code from offset zero to confirm
+the target address lies on an instruction boundary. Both forward and backward
+branches are permitted; the step budget (`MAX_STEPS=32`) prevents infinite
+loops.
+
+The initial register state used by the flat-fixture tests sets RDI to the
+8-byte output base. Only EAX and RFLAGS change during arithmetic operations;
+other registers are preserved by all non-service instructions.
 
 Run from the repository root after the active fuzz campaign completes.
 
@@ -166,3 +192,158 @@ env MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_ST
   python3 -c 'import subprocess, sys; sys.exit(subprocess.run(sys.argv[1:], timeout=30).returncode)' \
   "$CARGO_TARGET_DIR/$target/debug/xenora-x1" x4
 ```
+
+## Multi-service countdown dispatch (X5)
+
+X5 is an original synthetic PE32+ fixture that exercises typed service dispatch
+through a typed `ServiceRegistry`, a backward-branch countdown loop, and a
+data-section store — all without any `#[cfg(test)]` gate. The image uses the
+same two-section X2 profile: `.text` RX at `0x140001000`, `.data` RW at
+`0x140002000`; image base `0x140000000`.
+
+### Code layout (30 bytes)
+
+| Offset | Bytes | Instruction | Effect |
+| --- | --- | --- | --- |
+| 0–4 | `b8 01 00 00 00` | `MOV EAX,1` | Load service-1 ID |
+| 5–6 | `0f 0b` | `UD2` | Service 1 (identity): EAX ← RCX |
+| 7–9 | `83 f8 00` | `CMP EAX,0` | Is N zero? |
+| 10–11 | `74 06` | `JE +6` → [18] | Skip loop body if N=0 |
+| 12–14 | `83 e8 01` | `SUB EAX,1` | N-- |
+| 15–17 | `83 f8 00` | `CMP EAX,0` | Check decremented value |
+| 18–19 | `75 f3` | `JNE -13` → [7] | Loop back to CMP if N≠0 |
+| 20–24 | `b8 02 00 00 00` | `MOV EAX,2` | Load service-2 ID |
+| 25–26 | `0f 0b` | `UD2` | Service 2 (double): EAX ← RCX×2 |
+| 27–29 | `48 89 07` | `STORE [RDI]` | Write result to guest `.data` |
+
+### Services
+
+| ID | Name | Returns |
+| --- | --- | --- |
+| 1 | identity | `RCX` (the initial argument N) |
+| 2 | double | `RCX × 2` (wrapping) |
+
+### Independent expected outputs
+
+| N (RCX) | Loop iterations | `.data` bytes |
+| --- | --- | --- |
+| 0 | 0 (JE taken) | `[00, 00, 00, 00, 00, 00, 00, 00]` |
+| 1 | 0 (JNE falls) | `[02, 00, 00, 00, 00, 00, 00, 00]` |
+| 2 | 1 | `[04, 00, 00, 00, 00, 00, 00, 00]` |
+| 3 | 2 | `[06, 00, 00, 00, 00, 00, 00, 00]` |
+
+Expected values are derived from the program listing before running the code.
+
+Run from the repository root.
+
+```sh
+python3 experiments/x1/fixtures/x5.py --check
+export CARGO_BUILD_JOBS=2
+export CARGO_TARGET_DIR="$PWD/artifacts/x5/target"
+cargo test --manifest-path experiments/x1/Cargo.toml --locked --target aarch64-apple-darwin
+cargo run --manifest-path experiments/x1/Cargo.toml --locked --target aarch64-apple-darwin -- x5
+```
+
+
+## Multiple guest functions and mapped memory (X6)
+
+X6 runs an original fixed-base PE32+ guest through its entry point,
+countdown routine, and result-store routine. Each case gets fresh guest
+memory and stack state. The cases write 0, 2, 4, and 6 and retire 12, 16,
+20, and 24 instructions, respectively.
+
+Mappings enforce read, write, and execute permissions and reject cross-region
+accesses. Taken branches decode from their destination byte. `RET` verifies
+the expected stack slot and return value. A root `RET` exits after consuming
+the root slot. This loader profile accepts directory-free images.
+
+```sh
+python3 experiments/x1/fixtures/x6.py --check
+cargo run --locked --manifest-path experiments/x1/Cargo.toml --target aarch64-apple-darwin -- x6
+```
+
+## Named synthetic imports (X7)
+
+X7 supports a fixed-base test PE32+ image with named imports from
+`XENORA-TEST.dll`. The loader checks the import directories and resolves
+each named slot before entry. Calls through bound slots check the guest
+stack frame and dispatch synthetic services. The services validate the
+entire guest buffer before reading or writing it.
+
+Build the separate [compatibility fixtures](../../tests/compat_fixtures/README.md)
+and pass the resulting executable to the interpreter. The positive fixture
+prints `[4, 10, 22]` for both services and guest exit status `36`. The CLI
+returns zero when interpretation completes. The negative fixture returns a
+host failure and reports the unresolved symbol before guest entry.
+
+```sh
+tests/compat_fixtures/build.sh
+cargo run --locked --manifest-path experiments/x1/Cargo.toml --target aarch64-apple-darwin -- x7 artifacts/compat-fixtures/guest-0.exe
+cargo run --locked --manifest-path experiments/x1/Cargo.toml --target aarch64-apple-darwin -- x7 artifacts/compat-fixtures/guest-1.exe
+```
+
+X7 uses one interpreter thread and two synthetic services. Relocations,
+thread-local storage, and general Windows or Xbox executable loading remain
+unsupported.
+
+## Guest compute readback (X8)
+
+Run `tests/compat_fixtures/verify-compute.sh` on native ARM64 macOS with LLVM
+and Metal. The independently compiled PE32+ guest calls the synthetic
+`xenora_compute` import through the named-import runner. The guest initializes
+three words, submits a checked descriptor, reports the GPU output and
+returns its sum. The gate repeats the run and checks rejection of an unknown
+command, invalid handle, invalid binding, wrong count, unmapped buffer and
+reused one-shot handle.
+
+## Persistent guest resources and translated offscreen rendering (X9)
+
+The Metal-feature runner accepts `x9 <synthetic-pe-path>`. This loader
+profile resolves `xenora_resource` and `xenora_report` from
+`XENORA-TEST.dll`. It uses the same fixed-base named import resolution as
+X7 and retires at most 512 guest instructions.
+
+The resource import takes a four-byte-aligned guest request address in RCX
+and a guest data address or zero in RDX. A request is five little-endian
+32-bit words in the order opcode, handle, offset, length and kind. Unused
+fields are zero.
+
+| Opcode | Request fields | RDX | Return value |
+| --- | --- | --- | --- |
+| 1 | Length in bytes and kind 1 (32-bit words) or 2 (vertex vectors) | Readable source | Handle |
+| 2 | Handle, byte offset and byte length | Readable replacement bytes | Bytes updated |
+| 3 | Handle | Zero | Zero |
+| 4 | Handle, byte offset and byte length | Zero | Queued XOR input bytes |
+| 5 | Expected output length in bytes | Writable destination | Bytes written |
+| 6 | Handle, byte offset, length 96 and program 1 (constant) or 2 (varying) | Zero | Queued vertex bytes |
+| 7 | Block payload length in bytes | Readable texture descriptor followed by the block payload | Handle |
+| 8 | Handle, array layer in offset and mip level in length | Zero | Queued texture output bytes |
+
+The runtime owns eight slots of up to 4096 resource bytes each. A handle
+carries a process-wide generation and a slot. Releasing the slot invalidates
+that handle even if a subsequent allocation reuses the slot. Buffer creation
+copies guest data, and updates require aligned spans within the resource.
+Texture resources are immutable after creation. Their descriptor is eight
+little-endian 32-bit words in the order width, height, mip count, layer
+count, format (1 for BC1), usage (1 for sampled), row pitch and slice pitch.
+The payload stores consecutive mip chains in array-layer order. Pitches are
+in bytes and identical across mips.
+
+One queued operation retains an immutable resource snapshot. Updating or
+releasing a handle preserves the queued bytes. The finish operation validates
+the complete destination and runs the queued operation synchronously on
+Metal. The draw viewport is 4×3. Its input is three little-endian
+floating-point position vectors followed by three color vectors, each with
+four components. Program selection identifies one of the original gfx1030
+vertex and pixel fixture pairs. The shader compiler translates both stages
+to Metal Shading Language. The draw and texture readback produce tightly
+packed red, green, blue and alpha bytes in row order. Texture readback
+uses an authored Metal kernel with an output limit of 4096 texels. The
+runner retains at most 16 completed readbacks for fixture output.
+
+Guest exit drops resources and any queued operation. Queued work is still a
+CPU snapshot and creates native resources when finished. Asynchronous GPU
+submission, release of in-flight Metal allocations, guest-supplied shader
+code, and translated image instructions are outside this profile. The
+[guest resource gate](../../tests/compat_fixtures/README.md) documents
+the original fixture and checks.

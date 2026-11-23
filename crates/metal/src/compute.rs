@@ -11,14 +11,68 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
     MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily, MTLLibrary,
-    MTLMathFloatingPointFunctions, MTLMathMode, MTLResourceOptions, MTLShaderValidation, MTLSize,
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction, MTLGPUFamily, MTLLibrary,
+    MTLMathFloatingPointFunctions, MTLMathMode, MTLOrigin, MTLPixelFormat, MTLRegion,
+    MTLResourceOptions, MTLShaderValidation, MTLSize, MTLStorageMode, MTLTexture,
+    MTLTextureDescriptor, MTLTextureUsage,
 };
+use xenora_texture::{Bc1Upload, TiledBc1};
+
+#[path = "render.rs"]
+mod render;
 
 const MAX_THREADS_PER_GROUP: usize = 64;
 const MAX_GROUPS: usize = 64;
 const MAX_GRID_WORDS: usize = MAX_GROUPS * MAX_THREADS_PER_GROUP;
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
+
+const BC1_READBACK: &str = r"
+#include <metal_stdlib>
+using namespace metal;
+kernel void read_bc1(texture2d<float, access::read> image [[texture(0)]],
+                     device uint *output [[buffer(1)]],
+                     uint index [[thread_position_in_grid]]) {
+    uint width = image.get_width();
+    uint4 channels = uint4(round(image.read(uint2(index % width, index / width)) * 255.0f));
+    output[index] = channels.r | (channels.g << 8u) | (channels.b << 16u) | (channels.a << 24u);
+}
+";
+
+enum ComputeInput<'a> {
+    Words(&'a [u32]),
+    Texture(&'a ProtocolObject<dyn MTLTexture>, usize),
+}
+
+impl ComputeInput<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Words(words) => words.len(),
+            Self::Texture(_, pixels) => *pixels,
+        }
+    }
+}
+
+/// Host-provided backing bytes for one synthetic guest resource.
+pub struct GuestBuffer<'a> {
+    pub format: u32,
+    pub bytes: &'a [u8],
+}
+
+impl GuestBuffer<'_> {
+    /// The synthetic ABI's format identifier for little-endian 32-bit words.
+    pub const U32_LE: u32 = 1;
+}
+
+/// The synthetic guest's selection of an input range from a resource table.
+#[derive(Debug, Clone, Copy)]
+pub struct GuestBufferView {
+    /// Zero-based index in the supplied resource table.
+    pub handle: usize,
+    /// Input slot in the fixture ABI. Only slot zero accepts guest data.
+    pub binding: u32,
+    pub byte_offset: usize,
+    pub byte_len: usize,
+}
 
 /// Failure at a named operation in the native Metal backend.
 #[derive(Debug)]
@@ -58,7 +112,7 @@ pub struct RunProfile {
     pub output: Vec<u32>,
 }
 
-/// A native Metal device and its command queue for the Phase 01 fixture ABI.
+/// A native Metal device and its command queue for the fixture ABI.
 pub struct NativeCompute {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -94,6 +148,130 @@ impl NativeCompute {
         autoreleasepool(|_| self.device.name().to_string())
     }
 
+    /// Read an original synthetic BC1 subresource with a native Metal texture.
+    ///
+    /// The fixed compute kernel returns row-major RGBA8 texels. Each returned
+    /// word stores red in the least significant byte and alpha in the highest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subresource is invalid, exceeds the 4096-texel
+    /// limit, BC texture compression is unavailable, or Metal execution fails.
+    pub fn read_tiled_bc1(
+        &self,
+        tiled: &TiledBc1<'_>,
+        layer: usize,
+        mip: u32,
+    ) -> Result<Vec<u32>, MetalError> {
+        let (width, height) = tiled
+            .mip_extent(mip)
+            .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
+        let pixels = self.validate_bc1_extent(width, height)?;
+        let blocks = tiled
+            .linearize(layer, mip)
+            .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
+        self.read_bc1_blocks(&blocks, width.div_ceil(4) * 8, width, height, pixels)
+    }
+
+    /// Read a selected subresource from a validated pitched BC1 upload.
+    ///
+    /// Output matches [`Self::read_tiled_bc1`]. Metal receives the upload's
+    /// block-row stride and reads only the selected level's logical blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid layer or mip, out-of-policy size,
+    /// unavailable BC compression, or Metal setup or execution failure.
+    pub fn read_bc1_upload(
+        &self,
+        upload: &Bc1Upload<'_>,
+        layer: usize,
+        mip: u32,
+    ) -> Result<Vec<u32>, MetalError> {
+        let level = upload
+            .subresource(layer, mip)
+            .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
+        let pixels = self.validate_bc1_extent(level.width, level.height)?;
+        self.read_bc1_blocks(
+            level.bytes,
+            level.row_pitch,
+            level.width,
+            level.height,
+            pixels,
+        )
+    }
+
+    fn validate_bc1_extent(&self, width: usize, height: usize) -> Result<usize, MetalError> {
+        let pixels = width
+            .checked_mul(height)
+            .filter(|pixels| (1..=MAX_GRID_WORDS).contains(pixels))
+            .ok_or_else(|| MetalError::new("texture bounds", "expected 1..=4096 texels"))?;
+        if !self.device.supportsBCTextureCompression() {
+            return Err(MetalError::new(
+                "supportsBCTextureCompression",
+                "BC1 is unavailable",
+            ));
+        }
+        Ok(pixels)
+    }
+
+    fn read_bc1_blocks(
+        &self,
+        blocks: &[u8],
+        row_pitch: usize,
+        width: usize,
+        height: usize,
+        pixels: usize,
+    ) -> Result<Vec<u32>, MetalError> {
+        autoreleasepool(|_| {
+            // SAFETY: The positive bounded dimensions and supported BC1 format
+            // describe a 2D texture with just its base level.
+            let descriptor = unsafe {
+                MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                    MTLPixelFormat::BC1_RGBA,
+                    width,
+                    height,
+                    false,
+                )
+            };
+            descriptor.setStorageMode(MTLStorageMode::Shared);
+            descriptor.setUsage(MTLTextureUsage::ShaderRead);
+            let texture = self
+                .device
+                .newTextureWithDescriptor(&descriptor)
+                .ok_or_else(|| {
+                    MetalError::new("newTextureWithDescriptor", "BC1 allocation failed")
+                })?;
+            let region = MTLRegion {
+                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                size: MTLSize {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            };
+            // Apple documents a zero stride for a single compressed block row.
+            let bytes_per_row = if height <= 4 { 0 } else { row_pitch };
+            // SAFETY: The region spans the whole level, including any partial
+            // edge block. Both callers validate that the input holds all rows
+            // of complete BC1 blocks at the supplied, block-aligned stride.
+            unsafe {
+                texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                    region,
+                    0,
+                    NonNull::from(blocks).cast(),
+                    bytes_per_row,
+                );
+            }
+            self.run(
+                BC1_READBACK,
+                "read_bc1",
+                ComputeInput::Texture(&texture, pixels),
+            )
+            .map(|profile| profile.output)
+        })
+    }
+
     /// Run trusted MSL with read-only words at buffer 0 and output words at buffer 1.
     ///
     /// The kernel must use one invocation per word and restrict its memory accesses
@@ -113,6 +291,60 @@ impl NativeCompute {
     ) -> Result<Vec<u32>, MetalError> {
         self.run_words_profiled(source, entry, input)
             .map(|profile| profile.output)
+    }
+
+    /// Resolve a synthetic guest input view and run the trusted fixture kernel.
+    ///
+    /// The validated word range is copied into its own Metal buffer at slot zero.
+    /// Slot one receives a separate output buffer with the same number of words.
+    /// The trusted-kernel requirements of [`Self::run_words`] also apply here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported bindings or formats, invalid handles or
+    /// ranges, or any error from [`Self::run_words`].
+    pub fn run_guest_words(
+        &self,
+        source: &str,
+        entry: &str,
+        resources: &[GuestBuffer<'_>],
+        view: GuestBufferView,
+    ) -> Result<Vec<u32>, MetalError> {
+        if view.binding != 0 {
+            return Err(MetalError::new(
+                "guest buffer binding",
+                "expected input slot 0",
+            ));
+        }
+        let buffer = resources
+            .get(view.handle)
+            .ok_or_else(|| MetalError::new("guest buffer handle", "handle is not in the table"))?;
+        if buffer.format != GuestBuffer::U32_LE {
+            return Err(MetalError::new("guest buffer format", "expected U32_LE"));
+        }
+        let word_size = size_of::<u32>();
+        if !view.byte_offset.is_multiple_of(word_size)
+            || !view.byte_len.is_multiple_of(word_size)
+            || !(1..=MAX_GRID_WORDS).contains(&(view.byte_len / word_size))
+        {
+            return Err(MetalError::new(
+                "guest buffer bounds",
+                format!("expected an aligned range of 1..={MAX_GRID_WORDS} words"),
+            ));
+        }
+        let bytes = view
+            .byte_offset
+            .checked_add(view.byte_len)
+            .and_then(|end| buffer.bytes.get(view.byte_offset..end))
+            .ok_or_else(|| MetalError::new("guest buffer bounds", "range exceeds the resource"))?;
+        let words: Vec<_> = bytes
+            .as_chunks::<{ size_of::<u32>() }>()
+            .0
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes)
+            .collect();
+        self.run_words(source, entry, &words)
     }
 
     /// Run trusted MSL and report the measured compilation and execution stages.
@@ -135,45 +367,22 @@ impl NativeCompute {
                 format!("expected 1..={MAX_GRID_WORDS} words, got {}", input.len()),
             ));
         }
-        if source.is_empty() || source.len() > MAX_SOURCE_BYTES || entry.is_empty() {
-            return Err(MetalError::new(
-                "source bounds",
-                "expected a nonempty entry and source of at most 64 KiB",
-            ));
-        }
-
-        autoreleasepool(|_| self.run(source, entry, input))
+        validate_source(source, &[entry])?;
+        autoreleasepool(|_| self.run(source, entry, ComputeInput::Words(input)))
     }
 
-    fn run(&self, source: &str, entry: &str, input: &[u32]) -> Result<RunProfile, MetalError> {
+    fn run(
+        &self,
+        source: &str,
+        entry: &str,
+        input: ComputeInput<'_>,
+    ) -> Result<RunProfile, MetalError> {
         let host_start = Instant::now();
-        let options = MTLCompileOptions::new();
-        if !options.respondsToSelector(sel!(setMathMode:))
-            || !options.respondsToSelector(sel!(setMathFloatingPointFunctions:))
-        {
-            return Err(MetalError::new(
-                "MTLCompileOptions",
-                "this Metal runtime lacks explicit safe and precise math options",
-            ));
-        }
-        options.setMathMode(MTLMathMode::Safe);
-        options.setMathFloatingPointFunctions(MTLMathFloatingPointFunctions::Precise);
+        let options = compile_options()?;
         let library_start = Instant::now();
-        let library = self
-            .device
-            .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&options))
-            .map_err(|error| {
-                MetalError::new(
-                    "newLibraryWithSource",
-                    error.localizedDescription().to_string(),
-                )
-            })?;
+        let library = self.compile_library(source, &options)?;
         let library_seconds = library_start.elapsed().as_secs_f64();
-        let function = library
-            .newFunctionWithName(&NSString::from_str(entry))
-            .ok_or_else(|| {
-                MetalError::new("newFunctionWithName", format!("missing entry {entry}"))
-            })?;
+        let function = find_function(&library, entry)?;
         let pipeline_start = Instant::now();
         let pipeline = self
             .device
@@ -198,14 +407,17 @@ impl NativeCompute {
             ));
         }
 
-        let byte_len = size_of_val(input);
+        let byte_len = input.len() * size_of::<u32>();
         if byte_len > self.device.maxBufferLength() {
             return Err(MetalError::new(
                 "buffer bounds",
                 "fixture exceeds device buffer limit",
             ));
         }
-        let input_buffer = self.new_buffer(input)?;
+        let input_buffer = match input {
+            ComputeInput::Words(words) => Some(self.new_buffer(words)?),
+            ComputeInput::Texture(..) => None,
+        };
         let mut words = vec![0xA5A5_A5A5; input.len()];
         let output_buffer = self.new_buffer(&words)?;
         let command = self
@@ -216,25 +428,21 @@ impl NativeCompute {
             MetalError::new("computeCommandEncoder", "compute encoder creation failed")
         })?;
         encoder.setComputePipelineState(&pipeline);
-        // SAFETY: These live shared buffers belong to the same device and are
-        // initialized before encoding. Both offsets are zero. The kernel's
-        // documented ABI binds indices 0 and 1 as arrays of u32.
+        // SAFETY: All resources are live, initialized, and were allocated by
+        // this device. The kernel uses one input at index zero and writes the
+        // separate output buffer at index one. Both buffer offsets are zero.
         unsafe {
-            encoder.setBuffer_offset_atIndex(Some(&input_buffer), 0, 0);
+            if let ComputeInput::Texture(texture, _) = input {
+                encoder.setTexture_atIndex(Some(texture), 0);
+            }
+            if let Some(buffer) = input_buffer.as_deref() {
+                encoder.setBuffer_offset_atIndex(Some(buffer), 0, 0);
+            }
             encoder.setBuffer_offset_atIndex(Some(&output_buffer), 0, 1);
         }
         encoder.dispatchThreads_threadsPerThreadgroup(size(input.len()), size(width));
         encoder.endEncoding();
-        command.commit();
-        command.waitUntilCompleted();
-
-        if command.status() != MTLCommandBufferStatus::Completed {
-            let error = command.error().map_or_else(
-                || format!("unexpected command status {:?}", command.status()),
-                |error| error.localizedDescription().to_string(),
-            );
-            return Err(MetalError::new("waitUntilCompleted", error));
-        }
+        complete_command(&command)?;
         let gpu_seconds = command.GPUEndTime() - command.GPUStartTime();
         let host_seconds = host_start.elapsed().as_secs_f64();
         // SAFETY: Metal copied the initialized words into distinct shared storage.
@@ -257,6 +465,21 @@ impl NativeCompute {
         })
     }
 
+    fn compile_library(
+        &self,
+        source: &str,
+        options: &MTLCompileOptions,
+    ) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, MetalError> {
+        self.device
+            .newLibraryWithSource_options_error(&NSString::from_str(source), Some(options))
+            .map_err(|error| {
+                MetalError::new(
+                    "newLibraryWithSource",
+                    error.localizedDescription().to_string(),
+                )
+            })
+    }
+
     fn new_buffer(
         &self,
         words: &[u32],
@@ -273,6 +496,57 @@ impl NativeCompute {
         }
         .ok_or_else(|| MetalError::new("newBufferWithBytes", "shared buffer allocation failed"))
     }
+}
+
+fn validate_source(source: &str, entries: &[&str]) -> Result<(), MetalError> {
+    if source.is_empty()
+        || source.len() > MAX_SOURCE_BYTES
+        || entries.iter().any(|entry| entry.is_empty())
+    {
+        return Err(MetalError::new(
+            "source bounds",
+            "expected nonempty entries and source of at most 64 KiB",
+        ));
+    }
+    Ok(())
+}
+
+fn compile_options() -> Result<Retained<MTLCompileOptions>, MetalError> {
+    let options = MTLCompileOptions::new();
+    if !options.respondsToSelector(sel!(setMathMode:))
+        || !options.respondsToSelector(sel!(setMathFloatingPointFunctions:))
+    {
+        return Err(MetalError::new(
+            "MTLCompileOptions",
+            "this Metal runtime lacks explicit safe and precise math options",
+        ));
+    }
+    options.setMathMode(MTLMathMode::Safe);
+    options.setMathFloatingPointFunctions(MTLMathFloatingPointFunctions::Precise);
+    Ok(options)
+}
+
+fn find_function(
+    library: &ProtocolObject<dyn MTLLibrary>,
+    entry: &str,
+) -> Result<Retained<ProtocolObject<dyn MTLFunction>>, MetalError> {
+    library
+        .newFunctionWithName(&NSString::from_str(entry))
+        .ok_or_else(|| MetalError::new("newFunctionWithName", format!("missing entry {entry}")))
+}
+
+fn complete_command(command: &ProtocolObject<dyn MTLCommandBuffer>) -> Result<(), MetalError> {
+    command.commit();
+    command.waitUntilCompleted();
+
+    if command.status() != MTLCommandBufferStatus::Completed {
+        let error = command.error().map_or_else(
+            || format!("unexpected command status {:?}", command.status()),
+            |error| error.localizedDescription().to_string(),
+        );
+        return Err(MetalError::new("waitUntilCompleted", error));
+    }
+    Ok(())
 }
 
 fn verify_shader_validation(

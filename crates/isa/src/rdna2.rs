@@ -55,6 +55,16 @@ pub const S_CBRANCH_SCC0: Opcode = Opcode {
     bits: 0xbf840000,
     bytes: 4,
 };
+pub const S_CBRANCH_EXECZ: Opcode = Opcode {
+    mask: 0xffff0000,
+    bits: 0xbf880000,
+    bytes: 4,
+};
+pub const S_CBRANCH_VCCZ: Opcode = Opcode {
+    mask: 0xffff0000,
+    bits: 0xbf860000,
+    bytes: 4,
+};
 pub const S_BRANCH: Opcode = Opcode {
     mask: 0xffff0000,
     bits: 0xbf820000,
@@ -98,5 +108,20 @@ pub const V_ADD_F32: Opcode = Opcode {
 pub const V_MUL_F32: Opcode = Opcode {
     mask: 0xfe000000,
     bits: 0x10000000,
+    bytes: 4,
+};
+pub const EXP: Opcode = Opcode {
+    mask: 0xfc000000,
+    bits: 0xf8000000,
+    bytes: 8,
+};
+pub const V_INTERP_P1_F32: Opcode = Opcode {
+    mask: 0xfc030000,
+    bits: 0xc8000000,
+    bytes: 4,
+};
+pub const V_INTERP_P2_F32: Opcode = Opcode {
+    mask: 0xfc030000,
+    bits: 0xc8010000,
     bytes: 4,
 };

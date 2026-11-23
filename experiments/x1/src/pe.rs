@@ -15,6 +15,74 @@ pub(crate) enum LoadError {
     Entry,
 }
 
+/// Type alias for the handler closure stored in a service registry entry.
+#[allow(clippy::type_complexity)]
+pub(crate) type HandlerFn = Box<dyn FnMut(&State) -> Result<u64, cpu::FaultKind>>;
+
+/// A registered service entry: validates arguments from the guest `State`,
+/// then returns a result or a `FaultKind` on invalid input.
+///
+/// The service receives the full register state at the point of the UD2 trap.
+/// By convention `state.gpr[0]` (EAX) holds the service identifier that was
+/// used to select this entry; `state.gpr[1]` (RCX) carries the primary
+/// argument.  Additional general-purpose registers are available but their
+/// use must be defined per-service.
+pub(crate) struct ServiceEntry {
+    /// Human-readable name for diagnostics (printed by the CLI entrypoint).
+    #[allow(dead_code)]
+    pub(crate) name: &'static str,
+    /// Handler invoked on each trap.  Returns the value to place in RAX, or a
+    /// `FaultKind` to propagate as a fault (the trap instruction is not
+    /// retired).
+    pub(crate) handler: HandlerFn,
+}
+
+/// Typed service registry: maps service IDs (the EAX value at UD2) to
+/// validated handlers.  IDs must be non-zero; zero is reserved.
+///
+/// # Design constraints
+///
+/// - Each entry is called at most once per execution (the caller may enforce
+///   this via `submitted` guards in higher-level dispatch).
+/// - Handler argument validation is the responsibility of the entry; the
+///   registry only dispatches by ID.
+/// - An unknown or zero ID produces `FaultKind::UnknownService`.
+pub(crate) struct ServiceRegistry {
+    entries: Vec<(u64, ServiceEntry)>,
+}
+
+impl ServiceRegistry {
+    /// Construct an empty registry.
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Register a service under `id`.  Panics if `id` is 0 or already taken.
+    pub(crate) fn register(&mut self, id: u64, entry: ServiceEntry) {
+        assert!(id != 0, "service ID 0 is reserved");
+        assert!(
+            !self.entries.iter().any(|(k, _)| *k == id),
+            "duplicate service ID {id}"
+        );
+        self.entries.push((id, entry));
+    }
+
+    /// Dispatch a trap: look up the ID in `state.gpr[0]` (EAX) and invoke the
+    /// matching handler.  Returns `FaultKind::UnknownService` if no entry
+    /// matches.
+    fn dispatch(&mut self, state: &State) -> Result<u64, cpu::FaultKind> {
+        let id = state.gpr[0] & 0xffff_ffff; // EAX
+        for (k, entry) in &mut self.entries {
+            if *k == id {
+                return (entry.handler)(state);
+            }
+        }
+        Err(cpu::FaultKind::UnknownService)
+    }
+}
+
 #[derive(Debug)]
 struct Code<'a> {
     base: u64,
@@ -216,6 +284,24 @@ impl Image<'_> {
                 }
                 Ok(state.gpr[1].wrapping_add(1))
             },
+            retired,
+        )
+    }
+
+    /// Run with a typed service registry.  Each UD2 trap dispatches through
+    /// `registry` by EAX value.  An unknown ID or handler error faults with
+    /// the trap instruction unretired.
+    pub(crate) fn run_with_registry(
+        &mut self,
+        state: &mut State,
+        budget: usize,
+        registry: &mut ServiceRegistry,
+        retired: impl FnMut(&State),
+    ) -> Result<(), Fault> {
+        self.run_with_trap(
+            state,
+            budget,
+            &mut |state| registry.dispatch(state),
             retired,
         )
     }

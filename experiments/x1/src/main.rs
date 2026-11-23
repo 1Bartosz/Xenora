@@ -6,15 +6,46 @@ mod fixture;
 #[cfg(feature = "metal")]
 #[allow(unsafe_code)]
 mod graphics;
+mod interp;
+mod loader;
+mod mem;
 mod pe;
 #[cfg(any(test, feature = "metal"))]
 mod x3;
 #[cfg(any(test, feature = "metal"))]
 mod x4;
+mod x5;
+mod x6;
+mod x7;
+#[cfg(feature = "metal")]
+mod x8;
+#[cfg(feature = "metal")]
+mod x9;
 
 fn main() -> std::process::ExitCode {
-    match std::env::args().nth(1).as_deref() {
+    let mut args = std::env::args_os().skip(1);
+    let experiment = args.next();
+    match experiment.as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some("x7") => return run_pe(&mut args, x7::Profile::Imports, "x7"),
+        Some("x9") => {
+            #[cfg(feature = "metal")]
+            return run_pe(&mut args, x7::Profile::Resources, "x9");
+            #[cfg(not(feature = "metal"))]
+            {
+                eprintln!("X9 requires the metal feature");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+        _ => {}
+    }
+    if args.next().is_some() {
+        eprintln!("expected at most one experiment argument");
+        return std::process::ExitCode::FAILURE;
+    }
+    match experiment.as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("x2") => return run_x2(),
+        Some("x6") => return x6::run(),
+        Some("x5") => return x5::run(),
         Some("x4") => {
             #[cfg(feature = "metal")]
             return x4::run();
@@ -33,7 +64,11 @@ fn main() -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             }
         }
-        _ => {}
+        _ if experiment.is_none() => {}
+        _ => {
+            eprintln!("unknown experiment {:?}", experiment.unwrap_or_default());
+            return std::process::ExitCode::FAILURE;
+        }
     }
     for (name, bytes) in [("wrap", fixture::WRAP), ("nonwrap", fixture::NONWRAP)] {
         let mut state = fixture::initial();
@@ -77,5 +112,19 @@ fn run_x2() -> std::process::ExitCode {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE
+    }
+}
+
+fn run_pe(
+    args: &mut impl Iterator<Item = std::ffi::OsString>,
+    profile: x7::Profile,
+    command: &str,
+) -> std::process::ExitCode {
+    match (args.next(), args.next()) {
+        (Some(path), None) => x7::run(std::path::Path::new(&path), profile),
+        _ => {
+            eprintln!("usage: xenora-x1 {command} <synthetic-pe-path>");
+            std::process::ExitCode::FAILURE
+        }
     }
 }

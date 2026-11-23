@@ -18,7 +18,7 @@ The wider LLVM operand matrix exercises decoding only. ABI means application bin
 | `buffer_store_dword` | MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags | 8 B | yes | yes | three-way passed | MSL store | implemented | fixture verified | fixture verified |
 | `s_waitcnt_vscnt null, 0` | SOPK, exact null source and zero immediate | 4 B | yes | yes | three-way passed | verified store wait | implemented | fixture verified | fixture verified |
 | `s_endpgm` | SOPP, zero immediate | 4 B | yes | yes | three-way passed | verified termination | implemented | fixture verified | fixture verified |
-| `s_mov_b32` | Normal SGPR destination and normal SGPR, inline integer or literal source | `BE880387` | yes | yes | three-way passed | resolved scalar state | implemented | fixture verified | fixture verified |
+| `s_mov_b32` | Normal SGPR or EXEC/VCC half destination and normal SGPR, inline integer or literal source | `BE880387` | yes | yes | three-way passed | resolved scalar state | implemented | fixture verified | fixture verified |
 | `s_cmp_eq_u32` | Normal SGPR or integer operands, with at most one source selecting a literal | `BF068708` | yes | yes | three-way passed | resolved SCC | implemented | fixture verified | fixture verified |
 | `s_cbranch_scc0` | Nonnegative signed dword displacement | `BF840002` | yes | yes | three-way passed | resolved conditional branch | implemented | fixture verified | fixture verified |
 | `s_branch` | Nonnegative signed dword displacement | `BF820001` | yes | yes | three-way passed | resolved branch | implemented | fixture verified | fixture verified |
@@ -29,17 +29,19 @@ The wider LLVM operand matrix exercises decoding only. ABI means application bin
 | `v_or_b32_e32` | Two VGPR sources and one VGPR destination | `3803FF01` | yes | yes | three-way passed | MSL bitwise OR | implemented | fixture verified | fixture verified on Apple M5 |
 | `v_lshlrev_b32_e32` | Two VGPR sources and one VGPR destination | `34020501` | yes | yes | three-way passed | MSL logical left shift with a five-bit count | implemented | fixture verified | fixture verified on Apple M5 |
 | `v_lshrrev_b32_e32` | Two VGPR sources and one VGPR destination | `2DFFFF01` | yes | yes | three-way passed | MSL logical right shift with a five-bit count | implemented | fixture verified | fixture verified on Apple M5 |
-| `v_ashrrev_i32_e32` | Two VGPR sources and one VGPR destination | `31FFFF01` | yes | yes | fixture reproduced | MSL signed right shift with a five-bit count | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `v_ashrrev_i32_e32` | Two VGPR sources and one VGPR destination | `31FFFF01` | yes | yes | three-way passed | MSL signed right shift with a five-bit count | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_cbranch_execz` | Nonnegative signed dword displacement | `BF880001` | yes | yes | three-way passed | resolved Wave32 EXEC_LO zero check | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_cbranch_vccz` | Nonnegative signed dword displacement | `BF860001` | yes | yes | three-way passed | resolved Wave32 VCC_LO zero check | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
 <!-- status:instructions:end -->
 
 ## Automated three-way comparison
 
 LLVM 23.1.6, the production decoder and the independent reference decoder
-matched 303 instructions across five streams. These include three fixtures,
-a high-register sequence and a 266-instruction matrix assembled by LLVM.
+matched 338 instructions across eight streams: the six synthetic fixtures,
+a high-register sequence and a 272-instruction matrix assembled by LLVM.
 The harness checks byte offsets, widths, encoded bytes from LLVM, mnemonic
 and operands, and the typed reference operation against the production
-operation. It covers all 15 forms in this document.
+operation. It covers all 21 forms in this document.
 
 The matrix checks the 81 inline integer selectors in VOP1, SOP1 and SOPC,
 forced literals that could otherwise be inline, literal selection in either
@@ -48,10 +50,10 @@ operands, and zero and nonzero forward branch displacements. The decoder
 trace exposes MUBUF operands independently of the synthetic execution ABI,
 which still requires the original index and resource bindings.
 
-Three malformed LLVM probes produced diagnostics, and six valid encodings
+Five malformed LLVM probes produced diagnostics, and 19 valid encodings
 or disassemblable branch sequences were deliberately rejected by both Xenora
 decoders. Both Xenora decoders also reject all 37 interior truncation offsets
-in the add fixture and all 18 existing unsupported-encoding cases.
+in the add fixture and every case in the unsupported-encoding list.
 These case counts overlap where the same bytes are used in distinct tests.
 The truncated VOP1 literal is checked in Xenora only. LLVM 23.1.6's direct
 literal-truncation probe crashed, so it is outside the automated LLVM

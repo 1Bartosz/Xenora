@@ -31,17 +31,41 @@ pub enum Source {
 /// Operations decoded independently by the reference interpreter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Op {
-    Load { data: u8, index: u8, resource: u8 },
-    Store { data: u8, index: u8, resource: u8 },
+    Load {
+        data: u8,
+        index: u8,
+        resource: u8,
+    },
+    Store {
+        data: u8,
+        index: u8,
+        resource: u8,
+    },
     WaitRead,
     WaitWrite,
     Move(u8, Source),
     Add(u8, u8, u8),
     ScalarMove(u8, Source),
     CompareEqual(Source, Source),
-    Branch { target: usize, if_scc_zero: bool },
+    Branch {
+        target: usize,
+        condition: BranchCondition,
+    },
     Vector(VectorAlu, u8, u8, u8),
     End,
+}
+
+/// Scalar condition tested by a forward branch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchCondition {
+    /// Take the branch unconditionally.
+    Always,
+    /// Take the branch when SCC is clear.
+    SccZero,
+    /// Take the branch when the low half of VCC is clear.
+    VccZero,
+    /// Take the branch when the low half of EXEC is clear.
+    ExecZero,
 }
 
 /// VOP2 operations decoded by the reference interpreter.
@@ -104,7 +128,8 @@ pub fn execute(code: &[u8], input: &[u32]) -> Result<Vec<u32>, ReferenceError> {
     }
     input
         .iter()
-        .map(|&word| execute_lane(&program, word))
+        .enumerate()
+        .map(|(index, &word)| execute_lane(&program, word, index % 32))
         .collect()
 }
 
@@ -164,7 +189,13 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
             [0x70, 0x3f, 0x8c, 0xbf, ..] => (Op::WaitRead, 4),
             [0x00, 0x00, 0xfd, 0xbb, ..] => (Op::WaitWrite, 4),
             [0x00, 0x00, 0x81, 0xbf, ..] => (Op::End, 4),
-            [source, 3, destination @ 0x80..=0xe9, 0xbe, tail @ ..] => {
+            [
+                source,
+                3,
+                destination @ (0x80..=0xeb | 0xfe..=0xff),
+                0xbe,
+                tail @ ..,
+            ] => {
                 let (source, length) = decode_scalar(*source, tail, offset)?;
                 (Op::ScalarMove(destination & 0x7f, source), length)
             }
@@ -173,13 +204,18 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 let (right, right_length) = decode_scalar(*right, tail, offset)?;
                 (Op::CompareEqual(left, right), left_length.max(right_length))
             }
-            [lo, hi, opcode @ (0x82 | 0x84), 0xbf, ..] => {
+            [lo, hi, opcode @ (0x82 | 0x84 | 0x86 | 0x88), 0xbf, ..] => {
                 let words = i16::from_le_bytes([*lo, *hi]);
                 let words = usize::try_from(words).map_err(|_| error(offset, "backward branch"))?;
                 (
                     Op::Branch {
                         target: offset + 4 + words * 4,
-                        if_scc_zero: *opcode == 0x84,
+                        condition: match opcode {
+                            0x84 => BranchCondition::SccZero,
+                            0x86 => BranchCondition::VccZero,
+                            0x88 => BranchCondition::ExecZero,
+                            _ => BranchCondition::Always,
+                        },
                     },
                     4,
                 )
@@ -327,9 +363,15 @@ fn vector_alu(op: VectorAlu, a: u32, b: u32, offset: usize) -> Result<u32, Refer
     Ok(result.to_bits())
 }
 
-fn execute_lane(program: &[DecodedInstruction], input: u32) -> Result<u32, ReferenceError> {
+fn execute_lane(
+    program: &[DecodedInstruction],
+    input: u32,
+    lane: usize,
+) -> Result<u32, ReferenceError> {
     let mut registers = [None; 256];
-    let mut scalars = [None; 106];
+    let mut scalars = [None; 128];
+    let mut exec = u32::MAX;
+    scalars[126] = Some(exec);
     let mut scc = None;
     let mut target = 0;
     let mut pending_read = None;
@@ -354,6 +396,22 @@ fn execute_lane(program: &[DecodedInstruction], input: u32) -> Result<u32, Refer
             registers[usize::from(register)]
                 .ok_or_else(|| error(offset, "read from uninitialized VGPR"))
         };
+        if exec != u32::MAX {
+            match op {
+                Op::Move(dst, _) | Op::Add(dst, ..) | Op::Vector(_, dst, ..) => {
+                    if exec != 0 && registers[usize::from(dst)].is_none() {
+                        return Err(error(offset, "partial EXEC requires an initialized VGPR"));
+                    }
+                    if exec & (1 << lane) == 0 {
+                        continue;
+                    }
+                }
+                Op::Load { .. } | Op::Store { .. } => {
+                    return Err(error(offset, "vector memory requires full Wave32 EXEC"));
+                }
+                _ => {}
+            }
+        }
         let set = match op {
             Op::Load { data: dst, .. } => {
                 if dst == 0 || pending_read.is_some() {
@@ -387,7 +445,11 @@ fn execute_lane(program: &[DecodedInstruction], input: u32) -> Result<u32, Refer
                 if dst < 8 {
                     return Err(error(offset, "write to a reserved resource SGPR"));
                 }
-                scalars[usize::from(dst)] = Some(read_scalar(src)?);
+                let value = read_scalar(src)?;
+                if dst == 126 {
+                    exec = value;
+                }
+                scalars[usize::from(dst)] = Some(value);
                 None
             }
             Op::CompareEqual(lhs, rhs) => {
@@ -396,11 +458,20 @@ fn execute_lane(program: &[DecodedInstruction], input: u32) -> Result<u32, Refer
             }
             Op::Branch {
                 target: destination,
-                if_scc_zero,
+                condition,
             } => {
-                if !if_scc_zero
-                    || !scc.ok_or_else(|| error(offset, "branch with uninitialized SCC"))?
-                {
+                let take_branch = match condition {
+                    BranchCondition::Always => true,
+                    BranchCondition::SccZero => {
+                        !scc.ok_or_else(|| error(offset, "branch with uninitialized SCC"))?
+                    }
+                    BranchCondition::VccZero => scalars[106] == Some(0),
+                    BranchCondition::ExecZero => exec == 0,
+                };
+                if condition == BranchCondition::VccZero && scalars[106].is_none() {
+                    return Err(error(offset, "branch with uninitialized VCC_LO"));
+                }
+                if take_branch {
                     target = destination;
                 }
                 None

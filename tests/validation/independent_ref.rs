@@ -8,9 +8,12 @@
 //! field layout and executes them with an explicit program-counter machine, so
 //! a defect in the production decoder or reference cannot cancel out here.
 //!
-//! Scope matches the three demo fixtures: scalar move/compare/branch, VOP1
-//! move, VOP2 bitwise and float, VOP3 add-no-carry, MUBUF load/store and the
-//! two waits plus `s_endpgm`. Anything else is a controlled error.
+//! Scope matches the demo fixtures: scalar move/compare/branch, VOP1 move,
+//! VOP2 bitwise, shift, arithmetic-shift and float, VOP3 add-no-carry, MUBUF
+//! load/store and the two waits plus `s_endpgm`. Anything else is a controlled
+//! error. The arithmetic shift is evaluated as a floor division by a power of
+//! two rather than with a host signed shift, so the oracle does not share the
+//! production operator.
 
 const MAX_CODE_BYTES: usize = 1024;
 const MAX_INPUT_WORDS: usize = 4096;
@@ -26,6 +29,7 @@ enum Insn {
     SMov(u8, Src),
     SCmpEq(Src, Src),
     BranchScc0(usize),
+    BranchMaskZero { target: usize, register: usize },
     Branch(usize),
     VMov(u8, Src),
     VAddNc(u8, u8, u8),
@@ -33,6 +37,7 @@ enum Insn {
     VOr(u8, u8, u8),
     VShiftLeft(u8, u8, u8),
     VShiftRight(u8, u8, u8),
+    VShiftRightArithmetic(u8, u8, u8),
     VXor(u8, u8, u8),
     VAddF(u8, u8, u8),
     VMulF(u8, u8, u8),
@@ -52,12 +57,17 @@ pub fn execute(code: &[u8], input: &[u32]) -> Result<Vec<u32>, String> {
         return Err("code exceeds limit".to_string());
     }
     let program = decode(code)?;
-    input.iter().map(|&word| run_lane(&program, word)).collect()
+    input
+        .iter()
+        .enumerate()
+        .map(|(index, &word)| run_lane(&program, word, index % 32))
+        .collect()
 }
 
-fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
+fn run_lane(program: &[(usize, Insn)], lane_input: u32, lane: usize) -> Result<u32, String> {
     let mut vgpr = [None::<u32>; 256];
-    let mut sgpr = [None::<u32>; 106];
+    let mut sgpr = [None::<u32>; 128];
+    sgpr[126] = Some(u32::MAX);
     let mut scc: Option<bool> = None;
     let mut pending_read: Option<u8> = None;
     let mut pending_write: Option<u32> = None;
@@ -83,6 +93,36 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
                 }
             }
         };
+
+        let execution_mask = read_s(Src::Reg(126))?;
+        if execution_mask.count_ones() < 32 {
+            match insn {
+                Insn::Load(_) | Insn::Store(_) => {
+                    return Err(format!(
+                        "{offset:#x}: incomplete EXEC on a buffer instruction"
+                    ));
+                }
+                Insn::VMov(dst, _)
+                | Insn::VAddNc(dst, ..)
+                | Insn::VAnd(dst, ..)
+                | Insn::VOr(dst, ..)
+                | Insn::VXor(dst, ..)
+                | Insn::VShiftLeft(dst, ..)
+                | Insn::VShiftRight(dst, ..)
+                | Insn::VShiftRightArithmetic(dst, ..)
+                | Insn::VAddF(dst, ..)
+                | Insn::VMulF(dst, ..) => {
+                    if execution_mask != 0 && vgpr[usize::from(dst)].is_none() {
+                        return Err(format!("{offset:#x}: partial EXEC on uninitialized VGPR"));
+                    }
+                    if (execution_mask.rotate_right(lane as u32) & 1) == 0 {
+                        pc += 1;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
 
         match insn {
             Insn::Load(data) => {
@@ -142,6 +182,14 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
                 let divisor = 2_u32.pow(read_v(count)? % 32);
                 vgpr[dst as usize] = Some(read_v(value)? / divisor);
             }
+            Insn::VShiftRightArithmetic(dst, count, value) => {
+                check_destination(dst, pending_read, offset)?;
+                // Floor division of the sign-extended value, reduced modulo
+                // 2^32. This is arithmetic shift without using `>>`.
+                let shifted =
+                    i64::from(read_v(value)? as i32).div_euclid(1_i64 << (read_v(count)? % 32));
+                vgpr[dst as usize] = Some(shifted.rem_euclid(1_i64 << 32) as u32);
+            }
             Insn::VXor(dst, a, b) => {
                 check_destination(dst, pending_read, offset)?;
                 let value = read_v(a)? ^ read_v(b)?;
@@ -161,7 +209,8 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
                 if dst < 8 {
                     return Err(format!("{offset:#x}: write to a resource SGPR"));
                 }
-                sgpr[dst as usize] = Some(read_s(src)?);
+                let value = read_s(src)?;
+                sgpr[dst as usize] = Some(value);
             }
             Insn::SCmpEq(a, b) => {
                 scc = Some(read_s(a)? == read_s(b)?);
@@ -169,6 +218,12 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32) -> Result<u32, String> {
             Insn::BranchScc0(target) => {
                 let condition = scc.ok_or_else(|| format!("{offset:#x}: uninitialized SCC"))?;
                 if !condition {
+                    pc = index_of(program, target, offset)?;
+                    continue;
+                }
+            }
+            Insn::BranchMaskZero { target, register } => {
+                if sgpr[register].ok_or_else(|| format!("{offset:#x}: uninitialized mask"))? == 0 {
                     pc = index_of(program, target, offset)?;
                     continue;
                 }
@@ -253,7 +308,8 @@ fn decode(code: &[u8]) -> Result<Vec<(usize, Insn)>, String> {
         offset += len;
     }
     for &(at, insn) in &program {
-        if let Insn::Branch(target) | Insn::BranchScc0(target) = insn
+        if let Insn::Branch(target) | Insn::BranchScc0(target) | Insn::BranchMaskZero { target, .. } =
+            insn
             && !program.iter().any(|(boundary, _)| *boundary == target)
         {
             return Err(format!(
@@ -311,8 +367,8 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
     }
     if first & 0xff80_ff00 == 0xbe80_0300 {
         let dst = ((first >> 16) & 0x7f) as u8;
-        if dst > 105 {
-            return Err(fail("SOP1 destination is outside the normal SGPR bank"));
+        if dst > 107 && dst < 126 {
+            return Err(fail("unsupported SOP1 destination"));
         }
         let (src, len) = scalar_source(code, offset, first as u8)?;
         return Ok((Insn::SMov(dst, src), len));
@@ -333,6 +389,20 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
     if first & 0xffff_0000 == 0xbf84_0000 {
         return Ok((Insn::BranchScc0(branch_target(first, offset)?), 4));
     }
+    let tested_register = match first >> 16 {
+        0xbf86 => Some(106),
+        0xbf88 => Some(126),
+        _ => None,
+    };
+    if let Some(register) = tested_register {
+        return Ok((
+            Insn::BranchMaskZero {
+                target: branch_target(first, offset)?,
+                register,
+            },
+            4,
+        ));
+    }
     for (mask, value, kind) in [
         (0xfe00_0000, 0x3600_0000u32, 0u8),
         (0xfe00_0000, 0x3a00_0000, 1),
@@ -341,6 +411,7 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         (0xfe00_0000, 0x3800_0000, 4),
         (0xfe00_0000, 26 << 25, 5),
         (0xfe00_0000, 22 << 25, 6),
+        (0xfe00_0000, 24 << 25, 7),
     ] {
         if first & mask == value {
             if first & 0x100 == 0 {
@@ -356,7 +427,8 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
                 3 => Insn::VMulF(dst, a, b),
                 4 => Insn::VOr(dst, a, b),
                 5 => Insn::VShiftLeft(dst, a, b),
-                _ => Insn::VShiftRight(dst, a, b),
+                6 => Insn::VShiftRight(dst, a, b),
+                _ => Insn::VShiftRightArithmetic(dst, a, b),
             };
             return Ok((insn, 4));
         }

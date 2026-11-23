@@ -11,7 +11,8 @@ case "${1:-}" in
   *) printf '%s\n' 'usage: scripts/assemble-fixture.sh [--check]' >&2; exit 2 ;;
 esac
 
-for name in add bitwise-branch float-exact or shifts ashr; do
+for name in add bitwise-branch float-exact or shifts ashr \
+    x9-constant-vs x9-constant-ps x9-varying-vs x9-varying-ps x9-transform-vs; do
     "$llvm_bin/llvm-mc" -triple=amdgcn-amd-amdhsa -mcpu=gfx1030 -mattr=+wavefrontsize32 \
         -filetype=obj "fixtures/rdna2/$name.s" -o "$scratch/$name.o"
     "$llvm_bin/llvm-objcopy" -O binary --only-section=.text "$scratch/$name.o" "$scratch/$name.bin"

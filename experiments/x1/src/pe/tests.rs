@@ -177,3 +177,201 @@ fn truncated_mov_cannot_retire_or_invoke_service() {
     assert_eq!(state, initial);
     assert_eq!(image.data, [0xa5; 8]);
 }
+
+// ---------------------------------------------------------------------------
+// New tests: ServiceRegistry — typed multi-service dispatch
+// ---------------------------------------------------------------------------
+
+/// Helper: build the standard FIXTURE image, run it with a registry, return
+/// (trace of (rip,rax,rcx), final data, result).
+#[allow(clippy::type_complexity)]
+fn run_with_registry_fixture(
+    argument: u64,
+    registry: &mut ServiceRegistry,
+) -> (Vec<(u64, u64, u64)>, [u8; 8], Result<(), Fault>) {
+    let mut image = load(FIXTURE).unwrap();
+    let mut state = image.initial(argument);
+    let mut trace = Vec::new();
+    let result = image.run_with_registry(&mut state, 16, registry, |s| {
+        trace.push((s.rip, s.gpr[0], s.gpr[1]));
+    });
+    (trace, image.data, result)
+}
+
+/// Service ID 1 dispatched through registry returns RCX+1, same as the
+/// hardcoded `run` path.  This confirms the registry correctly routes by EAX.
+#[test]
+fn registry_service_one_matches_hardcoded_run() {
+    let mut registry = ServiceRegistry::new();
+    registry.register(
+        1,
+        ServiceEntry {
+            name: "increment",
+            handler: Box::new(|state| Ok(state.gpr[1].wrapping_add(1))),
+        },
+    );
+    let (trace, data, result) = run_with_registry_fixture(41, &mut registry);
+    result.unwrap();
+    // MOV EAX,1 → UD2(service 1, rcx=41→42) → STORE → three retirements.
+    assert_eq!(
+        trace,
+        [
+            (0x140001005, 1, 41),
+            (0x140001007, 42, 41),
+            (0x14000100a, 42, 41),
+        ]
+    );
+    assert_eq!(data, [42, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/// A second service (ID 2, doubles RCX) is registered alongside service 1.
+/// A patched fixture uses service 2: EAX=2 at UD2 must route to that handler.
+/// Independently derived: service 2(rcx=10) → 20 stored in .data.
+///
+/// Patch: change the `MOV EAX,1` immediate in .text from 1 to 2 so the guest
+/// uses service 2 instead of service 1.
+#[test]
+fn registry_dispatches_second_service_by_eax() {
+    // The x2 fixture .text starts at file offset 0x200.
+    // Bytes: B8 01 00 00 00 (MOV EAX,1) — patch immediate to 2.
+    let mut bytes = FIXTURE.to_vec();
+    bytes[0x201] = 2; // change service ID from 1 to 2
+
+    let mut image = load(&bytes).unwrap();
+    let mut state = image.initial(10); // RCX=10
+    let mut registry = ServiceRegistry::new();
+    registry.register(
+        1,
+        ServiceEntry {
+            name: "increment",
+            handler: Box::new(|state| Ok(state.gpr[1].wrapping_add(1))),
+        },
+    );
+    registry.register(
+        2,
+        ServiceEntry {
+            name: "double",
+            handler: Box::new(|state| Ok(state.gpr[1].wrapping_mul(2))),
+        },
+    );
+    let mut trace = Vec::new();
+    let result = image.run_with_registry(&mut state, 16, &mut registry, |s| {
+        trace.push((s.rip, s.gpr[0], s.gpr[1]));
+    });
+    result.unwrap();
+    // MOV EAX,2 → UD2(service 2, rcx=10→20) → STORE(20) → 3 retirements.
+    assert_eq!(
+        trace,
+        [
+            (0x140001005, 2, 10),
+            (0x140001007, 20, 10),
+            (0x14000100a, 20, 10),
+        ]
+    );
+    assert_eq!(image.data, [20, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/// An unknown service ID (not registered) produces `UnknownService` before the
+/// trap retires; .data remains at the initial sentinel value.
+/// Independently: EAX=99 at UD2 → no matching entry → fault at trap RIP.
+#[test]
+fn registry_unknown_id_faults_before_retire() {
+    let mut registry = ServiceRegistry::new();
+    registry.register(
+        1,
+        ServiceEntry {
+            name: "increment",
+            handler: Box::new(|state| Ok(state.gpr[1].wrapping_add(1))),
+        },
+    );
+    // Patch service ID to 99 (not registered).
+    let mut bytes = FIXTURE.to_vec();
+    bytes[0x201] = 99;
+    let (trace, data, result) = {
+        let mut image = load(&bytes).unwrap();
+        let mut state = image.initial(5);
+        let mut trace = Vec::new();
+        let result = image.run_with_registry(&mut state, 16, &mut registry, |s| {
+            trace.push((s.rip, s.gpr[0]));
+        });
+        (trace, image.data, result)
+    };
+    // Only MOV EAX,99 retires; UD2 faults before retirement.
+    assert_eq!(trace, [(0x140001005, 99,)]);
+    assert_eq!(
+        result,
+        Err(Fault {
+            kind: cpu::FaultKind::UnknownService,
+            rip: 0x140001005,
+        })
+    );
+    assert_eq!(data, [0xa5; 8]); // initial sentinel preserved
+}
+
+/// A handler that returns an error for an out-of-range argument propagates
+/// that error as a fault; the trap and store do not retire.
+/// Independently: service 1 rejects RCX=u64::MAX → fault at trap RIP.
+#[test]
+fn registry_handler_argument_rejection() {
+    let mut registry = ServiceRegistry::new();
+    registry.register(
+        1,
+        ServiceEntry {
+            name: "bounded_increment",
+            // Reject if RCX would overflow u32 on increment.
+            handler: Box::new(|state| {
+                let arg = state.gpr[1];
+                if arg > u64::from(u32::MAX) {
+                    return Err(cpu::FaultKind::UnknownService);
+                }
+                Ok(arg.wrapping_add(1))
+            }),
+        },
+    );
+    let (trace, data, result) = run_with_registry_fixture(u64::MAX, &mut registry);
+    // MOV EAX,1 retires; UD2 handler rejects argument; no store.
+    assert_eq!(trace, [(0x140001005, 1, u64::MAX)]);
+    assert_eq!(
+        result,
+        Err(Fault {
+            kind: cpu::FaultKind::UnknownService,
+            rip: 0x140001005,
+        })
+    );
+    assert_eq!(data, [0xa5; 8]);
+}
+
+/// Registering a duplicate service ID must panic (programmer error).
+#[test]
+#[should_panic(expected = "duplicate service ID 1")]
+fn registry_duplicate_id_panics() {
+    let mut registry = ServiceRegistry::new();
+    registry.register(
+        1,
+        ServiceEntry {
+            name: "first",
+            handler: Box::new(|_| Ok(0)),
+        },
+    );
+    registry.register(
+        1,
+        ServiceEntry {
+            name: "duplicate",
+            handler: Box::new(|_| Ok(0)),
+        },
+    );
+}
+
+/// Registering service ID 0 must panic (reserved).
+#[test]
+#[should_panic(expected = "service ID 0 is reserved")]
+fn registry_zero_id_panics() {
+    let mut registry = ServiceRegistry::new();
+    registry.register(
+        0,
+        ServiceEntry {
+            name: "zero",
+            handler: Box::new(|_| Ok(0)),
+        },
+    );
+}

@@ -80,12 +80,22 @@ mod review {
     }
 
     const ASHR_FIXTURE: &[u8; 40] = include_bytes!("../../fixtures/rdna2/ashr.bin");
+    const ASHR_VALUE: i32 = i32::MIN + 1; // The fixture literal 0x8000_0001.
+
+    fn arithmetic_shift_expected(value: i32, count: u32) -> u32 {
+        // Floor division of the sign-extended value by 2^(count mod 32),
+        // reduced modulo 2^32. Derived from the definition of an arithmetic
+        // right shift; no host `>>` or production code is involved.
+        i64::from(value)
+            .div_euclid(1_i64 << (count % 32))
+            .rem_euclid(1_i64 << 32) as u32
+    }
 
     fn arithmetic_right_shift_words() -> (Vec<u32>, Vec<u32>) {
         let input: Vec<u32> = (0..64).chain([0x8000_0000, u32::MAX]).collect();
         let expected = input
             .iter()
-            .map(|&count| (-2_147_483_647_i64).div_euclid(1_i64 << (count % 32)) as u32)
+            .map(|&count| arithmetic_shift_expected(ASHR_VALUE, count))
             .collect();
         (input, expected)
     }
@@ -104,12 +114,237 @@ mod review {
     }
 
     #[test]
+    fn arithmetic_right_shift_matches_explicit_checkpoints() {
+        // Hand-derived from floor(-2147483647 / 2^(count mod 32)) mod 2^32.
+        // Counts above 31 alias because the hardware masks the count.
+        const CHECKPOINTS: &[(u32, u32)] = &[
+            (0, 0x8000_0001),
+            (1, 0xc000_0000),
+            (2, 0xe000_0000),
+            (3, 0xf000_0000),
+            (4, 0xf800_0000),
+            (7, 0xff00_0000),
+            (8, 0xff80_0000),
+            (15, 0xffff_0000),
+            (16, 0xffff_8000),
+            (23, 0xffff_ff00),
+            (24, 0xffff_ff80),
+            (30, 0xffff_fffe),
+            (31, 0xffff_ffff),
+            (32, 0x8000_0001),
+            (33, 0xc000_0000),
+            (63, 0xffff_ffff),
+            (0x8000_0000, 0x8000_0001), // Masked to a count of zero.
+            (u32::MAX, 0xffff_ffff),    // Masked to a count of 31.
+        ];
+        for &(count, expected) in CHECKPOINTS {
+            assert_eq!(
+                arithmetic_shift_expected(ASHR_VALUE, count),
+                expected,
+                "derivation for count {count:#x}"
+            );
+            let input = [count];
+            assert_eq!(
+                xenora_ref::execute(ASHR_FIXTURE, &input).unwrap(),
+                [expected],
+                "reference for count {count:#x}"
+            );
+            assert_eq!(
+                independent_ref::execute(ASHR_FIXTURE, &input).unwrap(),
+                [expected],
+                "independent oracle for count {count:#x}"
+            );
+        }
+        // A logical shift would have produced 0x4000_0000 for count one.
+        assert_ne!(arithmetic_shift_expected(ASHR_VALUE, 1), 0x4000_0000);
+    }
+
+    #[test]
+    fn arithmetic_right_shift_positive_control_and_renamed_destination() {
+        let (input, _) = arithmetic_right_shift_words();
+        let mut positive = *ASHR_FIXTURE;
+        // Replace only the literal word at offset 0x10.
+        positive[16..20].copy_from_slice(&0x7fff_ffff_u32.to_le_bytes());
+        let expected: Vec<u32> = input
+            .iter()
+            .map(|&count| arithmetic_shift_expected(0x7fff_ffff, count))
+            .collect();
+        assert_eq!(expected[0], 0x7fff_ffff);
+        assert_eq!(expected[1], 0x3fff_ffff);
+        assert_eq!(expected[30], 1);
+        assert_eq!(expected[31], 0);
+        verify(&positive, &input, Some(&expected));
+
+        // Keep the value source at v255 and move the result to v254 so the
+        // destination no longer aliases the value input.
+        let mut renamed = *ASHR_FIXTURE;
+        renamed[20..24].copy_from_slice(&0x31fd_ff01_u32.to_le_bytes());
+        renamed[29] = 0xfe; // buffer_store_dword v254
+        let (_, expected) = arithmetic_right_shift_words();
+        verify(&renamed, &input, Some(&expected));
+    }
+
+    #[test]
+    fn arithmetic_right_shift_rejects_invalid_operands_and_incomplete_streams() {
+        let (input, _) = arithmetic_right_shift_words();
+        for instruction in [
+            0x31ff_ff03_u32, // Uninitialized v3 as the count.
+            0x31fe_0701,     // Uninitialized v3 as the value.
+            0x3001_ff01,     // Write to synthetic index v0.
+            0x31ff_ff80,     // Inline SRC0 outside the supported subset.
+        ] {
+            let mut code = *ASHR_FIXTURE;
+            code[20..24].copy_from_slice(&instruction.to_le_bytes());
+            verify(&code, &input, None);
+        }
+        for end in 0..ASHR_FIXTURE.len() {
+            verify(&ASHR_FIXTURE[..end], &input, None);
+        }
+    }
+
+    #[test]
     #[ignore = "requires a native Metal device with API and shader validation"]
     fn arithmetic_right_shift_native_metal_known_answers() {
         assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
         assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
         let (input, expected) = arithmetic_right_shift_words();
         let compiled = compile(Architecture::Gfx1030, ASHR_FIXTURE).unwrap();
+        let actual = xenora_metal::NativeCompute::new()
+            .unwrap()
+            .run_words(&compiled.msl, xenora_shader::ENTRY_POINT, &input)
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    fn wave32_masked_ashr() -> Vec<u8> {
+        // Preserve the original input load, wait and v255 literal.
+        let mut code = ASHR_FIXTURE[..20].to_vec();
+        code.extend(words(&[
+            0xbeff_03c1, // s_mov_b32 exec_hi, -1
+            0xbeeb_03c1, // s_mov_b32 vcc_hi, -1
+            0xbeea_0380, // s_mov_b32 vcc_lo, 0
+            0xbf88_0001, // s_cbranch_execz: initial low mask is full
+            0xbf82_0001, // s_branch past the incorrect-path overwrite
+            0x7ffe_0287, // v_mov_b32 v255, 7
+            0xbefe_0380, // s_mov_b32 exec_lo, 0
+            0x7ffe_0287, // inactive v_mov_b32 leaves v255 unchanged
+            0xbf88_0001, // s_cbranch_execz: low half zero despite high half
+            0xbeea_0381, // setting vcc_lo on this wrong path changes the result
+            0xbefe_03c1, // s_mov_b32 exec_lo, -1
+            0xbf86_0001, // s_cbranch_vccz: low half zero despite high half
+            0x7ffe_0287, // v_mov_b32 v255, 7 if VCC_LO is nonzero
+        ]));
+        code.extend_from_slice(&ASHR_FIXTURE[20..]);
+        code
+    }
+
+    #[test]
+    fn wave32_exec_and_vcc_zero_checks_use_low_halves() {
+        let input = [0, 1, 31, 32, 63];
+        let mut code = wave32_masked_ashr();
+        verify(
+            &code,
+            &input,
+            Some(&[0x8000_0001, 0xc000_0000, u32::MAX, 0x8000_0001, u32::MAX]),
+        );
+        let compiled = compile(Architecture::Gfx1030, &code).unwrap();
+        assert!(compiled.ir.contains("ashr.i32"));
+        assert!(compiled.msl.contains(" >> (t0 & 31u)"));
+        assert_eq!(compiled.ir.matches("taken=true").count(), 3);
+        assert_eq!(compiled.ir.matches("taken=false").count(), 1);
+
+        // Change only the VCC_LO initializer. The VCCZ branch falls through.
+        code[28] = 0x81;
+        verify(&code, &input, Some(&[7, 3, 0, 7, 0]));
+    }
+
+    #[test]
+    fn wave32_rejects_invalid_branches_and_empty_exec_memory() {
+        let code = wave32_masked_ashr();
+        for (offset, encoding) in [
+            (28, 0xbee9_0380u32), // Initialize s105 instead of VCC_LO.
+            (52, 0xbf88_ffff),    // Backward EXECZ branch.
+            (64, 0xbf86_0003),    // VCCZ branch into the second store word.
+        ] {
+            let mut rejected = code.clone();
+            rejected[offset..offset + 4].copy_from_slice(&encoding.to_le_bytes());
+            verify(&rejected, &[1], None);
+        }
+        // A reachable vector memory instruction with empty EXEC is unsupported.
+        let mut rejected = code;
+        rejected[48..52].copy_from_slice(&0xe030_2000_u32.to_le_bytes());
+        rejected.splice(52..52, 0x8000_0100_u32.to_le_bytes());
+        verify(&rejected, &[1], None);
+    }
+
+    fn partial_exec_ashr() -> Vec<u8> {
+        // Original gfx1030 instructions checked with llvm-mc -show-encoding.
+        // AMD's RDNA 2 ISA, section 6.2.2, predicates VGPR writes on EXEC.
+        let mut code = ASHR_FIXTURE[..20].to_vec();
+        code.extend(words(&[
+            0x7e04_0287, // v_mov_b32 v2, 7
+            0xbefe_03ff,
+            0x8000_0001, // s_mov_b32 exec_lo, 0x80000001
+            0xbf88_0001, // EXECZ would skip the move if the mask were empty
+            0x7ffe_0302, // v_mov_b32 v255, v2
+            0xd525_00ff,
+            0x0202_03ff, // v_add_nc_u32_e64 v255, v255, v1
+            0xbefe_03c1, // s_mov_b32 exec_lo, -1
+        ]));
+        code.extend_from_slice(&ASHR_FIXTURE[20..]);
+        code
+    }
+
+    fn partial_exec_expected() -> [u32; 67] {
+        let mut expected = [0xc000_0000; 67];
+        for index in [0, 31, 32, 63, 64] {
+            expected[index] = 4; // (7 + 1) arithmetic-shifted right one bit.
+        }
+        expected
+    }
+
+    #[test]
+    fn partial_wave32_updates_only_the_selected_lanes() {
+        verify(
+            &partial_exec_ashr(),
+            &[1; 67],
+            Some(&partial_exec_expected()),
+        );
+    }
+
+    #[test]
+    fn partial_wave32_rejects_vector_memory_and_uninitialized_destinations() {
+        let mut uninitialized = partial_exec_ashr();
+        // Replace the masked move's destination with uninitialized v254.
+        uninitialized[36..40].copy_from_slice(&0x7ffc_0302_u32.to_le_bytes());
+        verify(&uninitialized, &[1; 33], None);
+
+        let mut masked_memory = partial_exec_ashr();
+        // Leave the partial mask in place for the final buffer store.
+        masked_memory.drain(48..52);
+        verify(&masked_memory, &[1; 33], None);
+    }
+
+    #[test]
+    #[ignore = "requires a native Metal device with API and shader validation"]
+    fn partial_wave32_native_metal_known_answers() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
+        let compiled = compile(Architecture::Gfx1030, &partial_exec_ashr()).unwrap();
+        let actual = xenora_metal::NativeCompute::new()
+            .unwrap()
+            .run_words(&compiled.msl, xenora_shader::ENTRY_POINT, &[1; 67])
+            .unwrap();
+        assert_eq!(actual, partial_exec_expected());
+    }
+
+    #[test]
+    #[ignore = "requires a native Metal device with API and shader validation"]
+    fn wave32_masked_ashr_native_metal_known_answers() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
+        let (input, expected) = arithmetic_right_shift_words();
+        let compiled = compile(Architecture::Gfx1030, &wave32_masked_ashr()).unwrap();
         let actual = xenora_metal::NativeCompute::new()
             .unwrap()
             .run_words(&compiled.msl, xenora_shader::ENTRY_POINT, &input)
@@ -324,7 +559,7 @@ mod review {
 
     #[test]
     fn second_interpreter_agrees_with_reference_on_boundary_and_random_inputs() {
-        let fixtures: [(&[u8], &str); 3] = [
+        let fixtures: [(&[u8], &str); 4] = [
             (include_bytes!("../../fixtures/rdna2/add.bin"), "add"),
             (
                 include_bytes!("../../fixtures/rdna2/bitwise-branch.bin"),
@@ -334,6 +569,7 @@ mod review {
                 include_bytes!("../../fixtures/rdna2/float-exact.bin"),
                 "float-exact",
             ),
+            (include_bytes!("../../fixtures/rdna2/ashr.bin"), "ashr"),
         ];
         let mut inputs: Vec<u32> = vec![
             0,
@@ -463,7 +699,7 @@ mod review {
     fn skipped_code_still_has_to_obey_the_fixture_layout_and_bindings() {
         for bad_prefix in [
             &[0xbf82_0001u32, 0xbf81_0000][..],       // Early termination.
-            &[0xbf82_0001, 0xbeea_0380],              // Reserved VCC_LO instead of normal SGPR.
+            &[0xbf82_0001, 0xbeec_0380],              // Privileged TTMP0 destination.
             &[0xbf82_0002, 0xe030_3000, 0x8000_0100], // Unsupported OFFEN with IDXEN.
             &[0xbf82_0002, 0xe030_2000, 0x8000_0101], // v1 instead of v0 as index.
             &[0xbf82_0002, 0xe030_2000, 0x8001_0100], // Load the wrong buffer.

@@ -6,7 +6,7 @@ use xenora_decoder::{
     Architecture, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction, ScalarSource,
     VectorSource, decode,
 };
-use xenora_ref::{Op, Source, VectorAlu};
+use xenora_ref::{BranchCondition, Op, Source, VectorAlu};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
 const BITWISE_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/bitwise-branch.bin");
@@ -102,7 +102,7 @@ fn rejects_other_opcodes_and_noncanonical_operands() {
         (&[0xd525_8001, 0x0202_0501], "v_add_nc_u32_e64"),
         (&[0xd525_0001, 0x0202_0480], "v_add_nc_u32_e64"),
         (&[0xbf81_0001], "s_endpgm"),
-        (&[0xbefe_0387], "s_mov_b32"),
+        (&[0xbefc_0387], "s_mov_b32"),
         (&[0xbf06_87fe], "s_cmp_eq_u32"),
         (&[0xbf06_ffff, 0], "s_cmp_eq_u32"),
         (&[0xbf82_ffff], "s_branch"),
@@ -234,11 +234,19 @@ fn reference_op(instruction: Instruction) -> Op {
         }
         Instruction::BranchSccZero { target } => Op::Branch {
             target,
-            if_scc_zero: true,
+            condition: BranchCondition::SccZero,
+        },
+        Instruction::BranchExecZero { target } => Op::Branch {
+            target,
+            condition: BranchCondition::ExecZero,
+        },
+        Instruction::BranchVccZero { target } => Op::Branch {
+            target,
+            condition: BranchCondition::VccZero,
         },
         Instruction::Branch { target } => Op::Branch {
             target,
-            if_scc_zero: false,
+            condition: BranchCondition::Always,
         },
         Instruction::VectorAndB32 { dst, src0, src1 } => {
             Op::Vector(VectorAlu::And, dst, src0, src1)
@@ -262,6 +270,10 @@ fn reference_op(instruction: Instruction) -> Op {
         Instruction::VectorMulF32 { dst, src0, src1 } => {
             Op::Vector(VectorAlu::FloatMultiply, dst, src0, src1)
         }
+        Instruction::Export { .. } | Instruction::Interpolate { .. } => {
+            panic!("compute reference matrix received a graphics instruction")
+        }
+
         Instruction::EndProgram => Op::End,
     }
 }
@@ -287,7 +299,7 @@ fn compares_fixture_instructions_against_llvm() {
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 19, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 21, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -321,6 +333,12 @@ fn assemble_matrix() -> Vec<u8> {
         s_cmp_eq_u32 -16, 0xdeadbeef
         s_cmp_eq_u32 0xdeadbeef, -16
         s_cbranch_scc0 0
+        s_mov_b32 exec_lo, 0
+        s_mov_b32 exec_hi, -1
+        s_mov_b32 vcc_lo, 0
+        s_mov_b32 vcc_hi, -1
+        s_cbranch_execz 0
+        s_cbranch_vccz 0
         s_branch 2
         v_mov_b32_e32 v128, 0x12345678
         v_mov_b32_e32 v255, lit(0x1)
@@ -514,7 +532,7 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
     let (mnemonic, operands) = assembly.split_once(' ').unwrap_or((assembly, ""));
     match mnemonic {
         "s_waitcnt_vscnt" if operands == "null, 0x0" => format!("{mnemonic} null, 0"),
-        "s_branch" | "s_cbranch_scc0" => {
+        "s_branch" | "s_cbranch_scc0" | "s_cbranch_execz" | "s_cbranch_vccz" => {
             let displacement: usize = operands.parse().unwrap();
             let target = next_offset + displacement * 4;
             format!("{mnemonic} -> 0x{target:04x}")
@@ -579,10 +597,10 @@ fn displays_decoded_instructions_and_decode_errors() {
                 offset: 0,
                 kind: DecodeErrorKind::UnsupportedForm {
                     mnemonic: "s_mov_b32",
-                    detail: "expected a normal SGPR destination",
+                    detail: "expected a normal SGPR or EXEC/VCC destination",
                 },
             },
-            "gfx1030 decode at byte 0x0: unsupported s_mov_b32 form: expected a normal SGPR destination",
+            "gfx1030 decode at byte 0x0: unsupported s_mov_b32 form: expected a normal SGPR or EXEC/VCC destination",
         ),
         (
             DecodeError {
@@ -657,13 +675,13 @@ fn accepts_scalar_destination_105_and_vgpr_zero_add_sources() {
             src: ScalarSource::Immediate(0)
         }
     );
-    // s_mov_b32 s106, 0 does not fit the normal SGPR range.
-    let invalid = 0xbeea_0380u32.to_le_bytes();
+    // s_mov_b32 ttmp0, 0 selects a privileged destination.
+    let invalid = 0xbeec_0380u32.to_le_bytes();
     assert_eq!(
         decode(Architecture::Gfx1030, &invalid).unwrap_err().kind,
         DecodeErrorKind::UnsupportedForm {
             mnemonic: "s_mov_b32",
-            detail: "expected a normal SGPR destination",
+            detail: "expected a normal SGPR or EXEC/VCC destination",
         }
     );
 

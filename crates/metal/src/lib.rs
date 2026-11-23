@@ -1,4 +1,4 @@
-//! Bounded execution of trusted Metal compute kernels.
+//! Bounded execution of trusted Metal compute kernels and render stages.
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
 compile_error!("Xenora's Metal backend requires ARM64 macOS");
@@ -7,4 +7,4 @@ compile_error!("Xenora's Metal backend requires ARM64 macOS");
 mod compute;
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-pub use compute::{MetalError, NativeCompute, RunProfile};
+pub use compute::{GuestBuffer, GuestBufferView, MetalError, NativeCompute, RunProfile};
