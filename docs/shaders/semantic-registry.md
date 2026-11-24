@@ -31,14 +31,16 @@ The top of the file holds:
   snapshot it was written for.
 - `[documents.<name>]`: the public documents that spec references cite. Only
   `guide` (the AMD RDNA 2 ISA reference guide) and `xml` (the AMD
-  machine-readable ISA) are allowed.
+  machine-readable ISA) are allowed, and each must match the title and file
+  pinned in the generator, so a citation cannot point at another file.
 - `[operand_rules.<name>]`: an operand rule shared by a whole family. The
   decoder implements each rule once, and the generator only accepts a rule
   whose declaration matches the decoder's implementation exactly. Today there
   is one rule, `sop2_sgpr`: an SGPR destination `s0`-`s105`, two scalar sources
   (an SGPR, an inline integer -16 to 64, or a literal word) and at most one
   literal. Its `unsupported` list names the encodings the rule rejects, which
-  stay unsupported instead of being guessed.
+  stay unsupported instead of being guessed. The list must name exactly the
+  encodings the decoder rejects.
 
 Each `[[form]]` entry has exactly these fields. A missing or unknown field is an
 error.
@@ -55,7 +57,7 @@ error.
 | `width` | Operand and result width in bits | `32` |
 | `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `unchanged` |
 | `vcc`, `exec` | Effect on VCC and EXEC, stated rather than implied | `unchanged` |
-| `wave` | Wave sizes the form is valid in | `any`, `wave32` |
+| `wave` | Wave sizes the form is valid in | `any` (`wave32` is in the vocabulary but rejected until the decoder can enforce it) |
 | `operands` | Name of an `[operand_rules]` entry for the same family | e.g. `sop2_sgpr` |
 | `spec` | References `{ document, section, page }` | at least one `guide` reference with a page above 0 |
 | `verify` | Evidence the form needs before it counts as verified | `reference`, `independent`, `metal`, `llvm_encoding` |
@@ -90,7 +92,14 @@ vocabularies above, it rejects:
 - references: a spec citing an undeclared document, a bad section or page, or
   no guide page at all;
 - operand rules the decoder does not implement, or whose declaration differs
-  from the implemented one.
+  from the implemented one;
+- wrong types: a float width, a boolean schema, an opcode or page outside
+  0-65535, or a reserved variant name such as `Self`.
+
+CI runs `generate_semantics.py --check`, `scripts/audit/semantic_coverage.py
+--check` and both Python test suites next to the existing
+`generate_rdna2_meta.py --check`. Both scripts stop with a clear message on
+Python older than 3.11.
 
 ## What the generator does not do
 
