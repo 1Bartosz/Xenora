@@ -3,6 +3,7 @@
 use std::fmt;
 
 pub mod meta;
+pub mod semantics;
 mod rdna2;
 #[rustfmt::skip]
 mod rdna2_meta;
