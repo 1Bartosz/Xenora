@@ -100,6 +100,32 @@ fn literal_sdwa_and_dpp_words_extend_the_length() {
 }
 
 #[test]
+fn vop3_interpolation_attribute_fields_never_select_a_literal() {
+    // AMD RDNA 2 ISA guide section 10.4.2: in the VOP3 interpolation forms SRC0
+    // holds {attr_word, attr_chan, attr} bit-fields (XML OPR_ATTR), so SRC0 = 255
+    // is attr 63, channel w (and attr_word 0) and the instruction is 8 bytes.
+    // LLVM 23.1.6 agrees (#235).
+    for (first, name) in [
+        (0xd600_0000, "V_INTERP_P1_F32"),
+        (0xd601_0000, "V_INTERP_P2_F32"),
+        (0xd602_0000, "V_INTERP_MOV_F32"),
+        (0xd742_0000, "V_INTERP_P1LL_F16"),
+        (0xd743_0000, "V_INTERP_P1LV_F16"),
+        (0xd75a_0000, "V_INTERP_P2_F16"),
+    ] {
+        let found = identify(&words(&[first, 0x0000_00ff, 0x1234_5678])).unwrap();
+        assert_eq!((found.form.name, found.len), (name, 8));
+        assert!(!found.trailer.literal, "{name}");
+    }
+    // A general VOP3 source with the same selector still takes the literal.
+    let add = identify(&words(&[0xd503_0000, 0x0000_00ff, 0x1234_5678])).unwrap();
+    assert_eq!((add.form.name, add.len), ("V_ADD_F32", 12));
+    // So does a VGPR-only source (LLVM reports these 12 bytes with an invalid operand).
+    let permlane = identify(&words(&[0xd777_0000, 0x0000_00ff, 0x1234_5678])).unwrap();
+    assert_eq!((permlane.form.name, permlane.len), ("V_PERMLANE16_B32", 12));
+}
+
+#[test]
 fn truncated_and_unassigned_inputs_are_rejected() {
     assert_eq!(identify(&[]), Err(IdentifyError::Truncated { needed: 4 }));
     assert_eq!(
