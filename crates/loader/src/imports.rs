@@ -241,6 +241,21 @@ impl ImportRegistry {
         self.index(module, &ImportName::Name(symbol.to_owned()))
     }
 
+    pub(crate) fn canonical_exports(
+        &self,
+        module: &str,
+    ) -> impl Iterator<Item = (&ImportName, usize)> {
+        self.services
+            .iter()
+            .filter_map(move |((key, name), &index)| {
+                let descriptor = &self.handlers[index];
+                (key == module
+                    && descriptor.module == *key
+                    && descriptor.status != ServiceStatus::Stub)
+                    .then_some((name, index))
+            })
+    }
+
     fn check_key(module: &str, name: &ImportName) -> Result<(), RegistryError> {
         let printable = |text: &str| {
             !text.is_empty()

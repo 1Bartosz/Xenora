@@ -4,9 +4,10 @@
 
 use super::{ERROR_INVALID_HANDLE, ERROR_NOT_ENOUGH_MEMORY, KERNEL32, ServicesState};
 use crate::cpu::ExitReason;
+use crate::import_table::ImportName;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{GuestMemory, MemoryError};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const LOADER_API: &str = "api-ms-win-core-libraryloader-l1-2-0.dll";
@@ -18,7 +19,7 @@ const MODULE_BASE: u64 = 0x0000_0007_e000_0000;
 #[derive(Default)]
 struct Modules {
     names: BTreeMap<String, u64>,
-    exports: BTreeMap<(u64, String), usize>,
+    exports: BTreeMap<u64, HashMap<ImportName, usize>>,
     references: Mutex<BTreeMap<u64, u32>>,
 }
 
@@ -103,12 +104,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         if *count == 0 {
             references.remove(&args.rcx);
             if args.rcx != MODULE_BASE {
-                release_trampolines.revoke(
-                    modules
-                        .exports
-                        .iter()
-                        .filter_map(|((handle, _), &index)| (*handle == args.rcx).then_some(index)),
-                );
+                release_trampolines.revoke(modules.exports[&args.rcx].values().copied());
             }
         }
         Ok(1)
@@ -123,15 +119,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         if args.rcx != MODULE_BASE && !references.contains_key(&args.rcx) {
             return state.fail(ERROR_INVALID_HANDLE, 0);
         }
-        // Ordinal entries require an independently verified export catalog.
-        if args.rdx <= u16::MAX as u64 {
-            return state.fail(PROCEDURE_NOT_FOUND, 0);
-        }
-        let Some(symbol) = read_name(memory, args.rdx, false).map_err(ExitReason::MemoryFault)?
-        else {
-            return state.fail(PROCEDURE_NOT_FOUND, 0);
+        let export = if let Ok(ordinal) = u16::try_from(args.rdx) {
+            ImportName::Ordinal(ordinal)
+        } else {
+            let Some(symbol) =
+                read_name(memory, args.rdx, false).map_err(ExitReason::MemoryFault)?
+            else {
+                return state.fail(PROCEDURE_NOT_FOUND, 0);
+            };
+            ImportName::Name(symbol)
         };
-        match modules.exports.get(&(args.rcx, symbol)) {
+        match modules.exports[&args.rcx].get(&export) {
             Some(&index) => Ok(trampolines.expose(index)),
             None => state.fail(PROCEDURE_NOT_FOUND, 0),
         }
@@ -151,14 +149,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     catalog.references.get_mut().unwrap().insert(UCRT_HANDLE, 1);
     for (module, handle) in [(KERNEL32, MODULE_BASE), (UCRT, UCRT_HANDLE)] {
         catalog.names.insert(module.to_owned(), handle);
-        for (name, symbol, status) in registry.iter_registered() {
-            if name == module
-                && status != ServiceStatus::Stub
-                && let Some(index) = registry.service_index(name, symbol)
-            {
-                catalog.exports.insert((handle, symbol.to_owned()), index);
-            }
-        }
+        catalog.exports.insert(
+            handle,
+            registry
+                .canonical_exports(module)
+                .map(|(key, index)| (key.clone(), index))
+                .collect(),
+        );
         for (alias, _, canonical) in registry.iter_aliases() {
             if canonical == module {
                 catalog.names.insert(alias.to_owned(), handle);
@@ -174,7 +171,6 @@ const UCRT_HANDLE: u64 = MODULE_BASE + 0x10000;
 mod tests {
     use super::*;
     use crate::cpu::{CpuState, Register};
-    use crate::import_table::ImportName;
     use crate::imports::Win64Args;
     use crate::memory::MemoryPermissions;
     use crate::services::{MockClock, register_standard_services};
@@ -182,6 +178,14 @@ mod tests {
     #[test]
     fn guest_module_references_control_dynamic_export_lifetime() {
         let mut registry = ImportRegistry::new();
+        registry
+            .try_register(
+                UCRT,
+                ImportName::Ordinal(42),
+                ServiceStatus::Implemented,
+                Box::new(|_, _, _| Ok(42)),
+            )
+            .unwrap();
         register_standard_services(
             &mut registry,
             Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),
@@ -193,6 +197,7 @@ mod tests {
         memory.write_bytes(0x10000, b"UCRTBASE\0").unwrap();
         memory.write_bytes(0x10100, b"sqrt\0").unwrap();
         memory.write_bytes(0x10200, b"/unknown.dll\0").unwrap();
+        memory.write_bytes(0x10300, b"Ordinal#42\0").unwrap();
         let mut call = |symbol: &str, first, second| {
             let mut cpu = CpuState::default();
             cpu.set(Register::Rcx, first);
@@ -207,15 +212,27 @@ mod tests {
         assert_ne!(handle, 0);
         assert_eq!(call("LoadLibraryA", 0x10000, 0), handle);
         let export = call("GetProcAddress", handle, 0x10100);
+        let ordinal = call("GetProcAddress", handle, 42);
+        assert!(registry.is_service_trampoline(ordinal));
+        assert_ne!(ordinal, export);
+        assert_eq!(call("GetProcAddress", handle, 43), 0);
+        assert_eq!(call("GetProcAddress", handle, 0x10300), 0);
         assert!(registry.is_service_trampoline(export));
         assert_eq!(call("FreeLibrary", handle, 0), 1);
         assert!(registry.is_service_trampoline(export));
         assert_eq!(call("FreeLibrary", handle, 0), 1);
         assert!(!registry.is_service_trampoline(export));
+        assert!(!registry.is_service_trampoline(ordinal));
         assert_eq!(call("GetModuleHandleA", 0x10000, 0), 0);
         assert_eq!(call("GetProcAddress", handle, 0x10100), 0);
         assert_eq!(call("FreeLibrary", handle, 0), 0);
         assert_eq!(call("LoadLibraryA", 0x10000, 0), handle);
         assert_ne!(call("GetProcAddress", handle, 0x10100), 0);
+        let ordinal = call("GetProcAddress", handle, 42);
+        let mut cpu = CpuState::new(ordinal, 0x10400);
+        memory.write_u64(0x10400, 0x1234).unwrap();
+        registry.dispatch(ordinal, &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.get(Register::Rax), 42);
+        assert_eq!(cpu.rip, 0x1234);
     }
 }
