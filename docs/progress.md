@@ -17,9 +17,6 @@ reproducible tests, not by estimated game compatibility percentages.
 | --- | --- | --- | --- | --- | --- | --- |
 | native-compute | arm64 macOS | implemented | initial-native-suite-passed | verified on Apple M5 | A | Trusted MSL with bounded word buffers and an original native offscreen rendering test on Apple M5. |
 | synthetic-gfx1030 | gfx1030 Wave32 | three-fixture-demo-implemented | three-way-output-passed | verified on Apple M5 | A, B | Synthetic memory contract, statically resolved forward control flow, exact positive normal FP32 only. |
-| translated-blend | arm64 macOS Metal | implemented | metal-validated-passed | verified on Apple M5 Pro | A | 39 Metal-validated passes over two original overlapping triangles (see [README](../README.md#blend-pass)). |
-| indexed-draws | arm64 macOS Metal | implemented | metal-validated-passed | verified on Apple M5 Pro | A | 16 Metal-validated passes: both index sizes, 32-bit indices above 16 bits, odd 16-bit start, positive and negative base vertex, draw order (see [README](../README.md#indexed-draws)). |
-| translated-depth | arm64 macOS Metal | implemented | metal-validated-passed | verified on Apple M5 Pro | A | 30 Metal-validated passes of overlapping triangles with all eight compare functions and the no-attachment case (see [README](../README.md#depth-pass)). |
 | xbox-execution | Xbox Series X\|S | unsupported | untested | unverified | U | Game execution, proprietary guest containers and full guest execution-mask divergence are unsupported. The console launch ABI is unknown. |
 <!-- status:features:end -->
 
