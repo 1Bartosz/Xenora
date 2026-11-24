@@ -163,20 +163,20 @@ The resource system remains experimental. Native GPU work already in flight duri
 
 ## Texture support
 
-Xenora includes an original BC1 texture-processing path.
+Xenora includes original texture upload, readback and block-compression paths.
 
 Implemented and tested functionality includes:
 
 - Validated mip levels and array layers.
 - Pitched texture uploads.
-- Block-compressed texture handling.
+- Block-compressed texture handling, including BC4/BC5 upload and readback and a CPU BC7 decoder for the eight modes.
 - Native Metal texture readback.
 - Edge-block and transparency tests.
 - Invalid descriptor and bounds rejection.
 
 **Translated texture-sampling instructions are not yet implemented.**
 
-The existing texture readback path uses an authored Metal kernel. It should not be confused with executing arbitrary RDNA2 texture-fetch instructions.
+The existing texture readback path uses authored Metal kernels. It should not be confused with executing arbitrary RDNA2 texture-fetch instructions.
 
 Xbox-specific texture layouts and additional compression formats require further research and validation.
 
@@ -251,8 +251,8 @@ The following remain unsupported or incomplete:
 | Executable loader | General relocations, TLS, DLL initialization and authentic Xbox startup |
 | Xbox runtime | Console-specific services, system APIs, filesystem and application lifecycle |
 | RDNA2 shaders | General control flow, broader instructions, Wave64, cross-lane operations and mesh stages |
-| Graphics | Translated texture sampling, broader resource binding, synchronization and general draw workloads |
-| Textures | Authentic Xbox memory layouts and broader compressed-format support |
+| Graphics | Translated texture sampling and broader resource binding |
+| Textures | Authentic Xbox memory layouts and translated sampling |
 | Performance | Production-scale workloads, CPU/GPU profiling and optimized execution |
 | Game compatibility | No demonstrated execution of commercial Xbox titles |
 
