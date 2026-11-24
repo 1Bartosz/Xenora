@@ -6,6 +6,7 @@
 
 import AppKit
 import AVFoundation
+import AudioToolbox
 import CoreAudio
 import CXenora
 import Foundation
@@ -177,6 +178,10 @@ private enum FixturePlaybackError: Error {
     case invalidPCM
     case noDefaultOutput(OSStatus)
     case deviceDiscovery(OSStatus)
+    case unavailableOutput(AudioDeviceID)
+    case outputUnitUnavailable
+    case outputRouting(OSStatus)
+    case unexpectedOutput(AudioDeviceID)
     case timedOut
 }
 
@@ -241,7 +246,7 @@ private func audioOutputDevices() throws -> [AudioDeviceID] {
     }.sorted()
 }
 
-private func playFixturePCM(_ pcm: [UInt8]) throws -> FixturePlayback {
+private func playFixturePCM(_ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil) throws -> FixturePlayback {
     // The embedded audio/VFS fixture submits mono 48 kHz S16LE frames.
     guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
           let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) else {
@@ -249,8 +254,20 @@ private func playFixturePCM(_ pcm: [UInt8]) throws -> FixturePlayback {
     }
     let frames = pcm.count / 2
     let framesPerBuffer = 128
-    let outputDevice = try defaultAudioOutput()
     let engine = AVAudioEngine()
+    guard let outputUnit = engine.outputNode.audioUnit else {
+        throw FixturePlaybackError.outputUnitUnavailable
+    }
+    if var device = requestedOutput {
+        guard try audioOutputDevices().contains(device) else {
+            throw FixturePlaybackError.unavailableOutput(device)
+        }
+        let status = AudioUnitSetProperty(
+            outputUnit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+            &device, UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else { throw FixturePlaybackError.outputRouting(status) }
+    }
     let player = AVAudioPlayerNode()
     let played = DispatchSemaphore(value: 0)
     engine.attach(player)
@@ -261,6 +278,16 @@ private func playFixturePCM(_ pcm: [UInt8]) throws -> FixturePlayback {
         engine.detach(player)
     }
     try engine.start()
+    var outputDevice = AudioDeviceID(kAudioObjectUnknown)
+    var outputIDSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+    let routeStatus = AudioUnitGetProperty(
+        outputUnit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+        &outputDevice, &outputIDSize
+    )
+    guard routeStatus == noErr else { throw FixturePlaybackError.outputRouting(routeStatus) }
+    guard outputDevice != kAudioObjectUnknown, requestedOutput.map({ $0 == outputDevice }) ?? true else {
+        throw FixturePlaybackError.unexpectedOutput(outputDevice)
+    }
     let output = engine.outputNode.outputFormat(forBus: 0)
     let presentationLatency = engine.outputNode.presentationLatency
     var bufferCount = 0
@@ -743,14 +770,23 @@ if CommandLine.arguments.contains("--list-audio-outputs") {
 }
 
 if CommandLine.arguments.contains("--smoke-native-audio") {
+    var requestedOutput: AudioDeviceID?
+    if let index = CommandLine.arguments.firstIndex(of: "--audio-output") {
+        let values = CommandLine.arguments
+        guard index + 1 < values.count, let device = AudioDeviceID(values[index + 1]), device != 0 else {
+            print("smoke-native-audio: --audio-output requires a device ID")
+            exit(2)
+        }
+        requestedOutput = device
+    }
     let frame = AudioVfsFrame.run(captureAudio: true)
     guard frame.status == XENORA_OK, frame.samples == 256, frame.pcm.count == 512 else {
         print("smoke-native-audio: fixture PCM unavailable")
         exit(1)
     }
     do {
-        let played = try playFixturePCM(frame.pcm)
-        print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) defaultDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
+        let played = try playFixturePCM(frame.pcm, requestedOutput: requestedOutput)
+        print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
         exit(played.frames == Int(frame.samples) && played.buffers == 2 && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
     } catch {
         print("smoke-native-audio: \(error)")
