@@ -1077,6 +1077,16 @@ impl DbtEngine {
                     cur_rip += 1;
 
                     match op2 {
+                        // BSWAP r32/r64: the register is encoded in the opcode.
+                        0xC8..=0xCF => {
+                            insn_count += 1;
+                            let reg = (op2 & 7) | (u8::from(rex_b) << 3);
+                            let offset = u32::from(reg) * 8;
+                            asm.ldr_uoff_64(X9, X19, offset);
+                            // REV X9, X9 or REV W9, W9. A W write clears the upper half.
+                            asm.emit(if rex_w { 0xdac0_0d29 } else { 0x5ac0_0929 });
+                            asm.str_uoff_64(X9, X19, offset);
+                        }
                         // Jcc rel32 (0x0F 0x80..=0x8F)
                         0x80..=0x8F => {
                             insn_count += 1;

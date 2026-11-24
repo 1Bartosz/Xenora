@@ -276,16 +276,21 @@ impl<'a> Interpreter<'a> {
             // HLT: Halt execution
             0xF4 => Ok(Some(ExitReason::Halt)),
 
-            // SYSCALL: 0x0F 0x05
-            0x0F => {
-                let second = self.fetch_u8()?;
-                if second == 0x05 {
-                    let syscall_num = self.cpu.get(Register::Rax);
-                    Ok(Some(ExitReason::Syscall(syscall_num)))
-                } else {
-                    Err(ExitReason::IllegalInstruction(second))
+            0x0F => match self.fetch_u8()? {
+                0x05 => Ok(Some(ExitReason::Syscall(self.cpu.get(Register::Rax)))),
+                op @ 0xC8..=0xCF => {
+                    let reg = Register::from_index((op & 7) | (u8::from(rex_b) << 3));
+                    let value = self.cpu.get(reg);
+                    let reversed = if rex_w {
+                        value.swap_bytes()
+                    } else {
+                        u64::from((value as u32).swap_bytes())
+                    };
+                    self.cpu.set(reg, reversed);
+                    Ok(None)
                 }
-            }
+                op => Err(ExitReason::IllegalInstruction(op)),
+            },
 
             // MOV r32, imm32 (0xB8 + reg) or MOV r64, imm64 with REX.W
             0xB8..=0xBF => {
