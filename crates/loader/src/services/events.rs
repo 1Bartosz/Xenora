@@ -431,18 +431,21 @@ fn wait_for_objects(
     Err(ExitReason::GuestBlocked)
 }
 
-/// Continue the wait this thread is blocked in, if any. Signaled objects take
-/// precedence over an expired timeout.
+/// Continue the wait this thread is blocked in, if any. Waiters are retried
+/// directly after a signal, so an object found signaled once the deadline has
+/// passed was signaled too late and is left alone.
 fn resume_wait(state: &ServicesState, teb: u64) -> Option<Result<u64, ExitReason>> {
     let mut table = state.threads.lock().expect("guest thread table");
     let pending = table.waits.get(&teb)?;
-    let objects: Vec<&Arc<Mutex<Waitable>>> = pending.objects.iter().collect();
-    let result = try_satisfy(&objects, pending.all, teb).or_else(|| {
-        pending
-            .deadline
-            .is_some_and(|deadline| state.clock.performance_count() >= deadline)
-            .then_some(Ok(WAIT_TIMEOUT))
-    });
+    let expired = pending
+        .deadline
+        .is_some_and(|deadline| state.clock.performance_count() >= deadline);
+    let result = if expired {
+        Some(Ok(WAIT_TIMEOUT))
+    } else {
+        let objects: Vec<&Arc<Mutex<Waitable>>> = pending.objects.iter().collect();
+        try_satisfy(&objects, pending.all, teb)
+    };
     if result.is_some() {
         table.waits.remove(&teb);
     }

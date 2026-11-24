@@ -107,7 +107,9 @@ impl Scheduler {
         if report.outcome == Outcome::BudgetExhausted && self.all_ended() {
             report.outcome = Outcome::AllThreadsExited;
         }
-        self.state.detach_scheduler(memory);
+        let continues = report.outcome == Outcome::BudgetExhausted;
+        self.state
+            .detach_scheduler(memory, continues.then_some(&report.main));
         Ok(report)
     }
 
@@ -123,6 +125,10 @@ impl Scheduler {
             return Turn::Stop(outcome);
         }
         let Some(id) = self.next_ready() else {
+            // A spent budget may have left waiters untried, and must not sleep.
+            if report.instructions >= budget {
+                return Turn::Continue;
+            }
             return self.idle();
         };
         report.turns += 1;
@@ -189,7 +195,9 @@ impl Scheduler {
         table.queue.remove(position)
     }
 
-    /// Run the pending call of every blocked thread once, oldest first.
+    /// Run the pending call of every blocked thread, oldest first. A thread that
+    /// ends with its call may be what an older one waits for, so that repeats
+    /// the pass.
     fn wake(
         &self,
         engine: &mut DbtEngine,
@@ -198,37 +206,46 @@ impl Scheduler {
         budget: usize,
         report: &mut ScheduleReport,
     ) -> Option<Outcome> {
-        let mut blocked: Vec<(u64, u32)> = {
-            let table = self.state.threads.lock().expect("guest thread table");
-            report.peak_threads = report.peak_threads.max(table.threads.len());
-            table
-                .threads
-                .iter()
-                .filter(|(_, thread)| thread.suspend == 0)
-                .filter_map(|(&id, thread)| match thread.run {
-                    RunState::Blocked(sequence) => Some((sequence, id)),
-                    RunState::Ready => None,
-                })
-                .collect()
-        };
-        blocked.sort_unstable();
-        for (_, id) in blocked {
-            if report.instructions >= budget {
-                break;
-            }
-            match self.run_thread(engine, memory, id, main_id, 1, report) {
-                Stop::Outcome(outcome) => return Some(outcome),
-                Stop::Blocked | Stop::Ended => {}
-                Stop::Preempted { .. } => {
-                    let mut table = self.state.threads.lock().expect("guest thread table");
-                    if let Some(thread) = table.threads.get_mut(&id) {
-                        thread.run = RunState::Ready;
-                        table.queue.push_back(id);
+        loop {
+            let mut ended = false;
+            for id in self.blocked(report) {
+                if report.instructions >= budget {
+                    return None;
+                }
+                match self.run_thread(engine, memory, id, main_id, 1, report) {
+                    Stop::Outcome(outcome) => return Some(outcome),
+                    Stop::Blocked => {}
+                    Stop::Ended => ended = true,
+                    Stop::Preempted { .. } => {
+                        let mut table = self.state.threads.lock().expect("guest thread table");
+                        if let Some(thread) = table.threads.get_mut(&id) {
+                            thread.run = RunState::Ready;
+                            table.queue.push_back(id);
+                        }
                     }
                 }
             }
+            if !ended {
+                return None;
+            }
         }
-        None
+    }
+
+    /// Blocked threads that are not suspended, oldest first.
+    fn blocked(&self, report: &mut ScheduleReport) -> Vec<u32> {
+        let table = self.state.threads.lock().expect("guest thread table");
+        report.peak_threads = report.peak_threads.max(table.threads.len());
+        let mut blocked: Vec<(u64, u32)> = table
+            .threads
+            .iter()
+            .filter(|(_, thread)| thread.suspend == 0)
+            .filter_map(|(&id, thread)| match thread.run {
+                RunState::Blocked(sequence) => Some((sequence, id)),
+                RunState::Ready => None,
+            })
+            .collect();
+        blocked.sort_unstable();
+        blocked.into_iter().map(|(_, id)| id).collect()
     }
 
     /// Nothing can run: advance to the next deadline or stop.
@@ -273,9 +290,12 @@ impl Scheduler {
         };
         self.state.hooks.take_switch();
         let result = engine.run_slice(&mut cpu, memory, limit);
-        // A stopped call still makes progress, so a loop of them is bounded.
-        let yielded = usize::from(result.exit_reason == ExitReason::GuestYield);
-        report.instructions += (result.instructions_executed + yielded).max(1);
+        // The engine does not count a call that stops it.
+        let stopped = matches!(
+            result.exit_reason,
+            ExitReason::GuestYield | ExitReason::GuestBlocked | ExitReason::GuestThreadExited
+        );
+        report.instructions += result.instructions_executed + usize::from(stopped);
         let rip = cpu.rip;
         let returned = (rip == THREAD_RETURN && id != main_id)
             .then(|| cpu.get(crate::cpu::Register::Rax) as u32);

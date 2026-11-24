@@ -125,6 +125,9 @@ pub(crate) struct ThreadTable {
     /// Ready threads in the order they run.
     pub(crate) queue: VecDeque<u32>,
     pub(super) waits: BTreeMap<u64, PendingWait>,
+    /// Main thread wait of a run that stopped on its budget, and the context
+    /// that continues it.
+    continued: Option<(CpuState, PendingWait)>,
     slots: BTreeSet<u64>,
     last_id: u32,
     pub(crate) sequence: u64,
@@ -217,13 +220,18 @@ impl ServicesState {
             },
         );
         table.queue.push_back(self.thread_id);
+        if let Some((context, wait)) = table.continued.take()
+            && context == *main
+        {
+            table.waits.insert(main.gs_base, wait);
+        }
         Ok(self.thread_id)
     }
 
-    /// Reclaim every created thread. The main thread keeps its per-thread state,
-    /// so a run that stopped on its budget can be resumed if no other thread
-    /// was alive.
-    pub(crate) fn detach_scheduler(&self, memory: &mut GuestMemory) {
+    /// Reclaim every created thread. The main thread keeps its per-thread state.
+    /// `continues` is its context if the run stopped on its budget; its pending
+    /// wait is then kept for that context.
+    pub(crate) fn detach_scheduler(&self, memory: &mut GuestMemory, continues: Option<&CpuState>) {
         let workers: Vec<u32> = {
             let table = self.threads.lock().expect("guest thread table");
             let worker = |(&id, thread): (&u32, &GuestThread)| thread.slot.map(|_| id);
@@ -233,6 +241,10 @@ impl ServicesState {
             self.end_thread(id, 0, memory);
         }
         let mut table = self.threads.lock().expect("guest thread table");
+        if let Some(context) = continues {
+            let wait = table.waits.remove(&context.gs_base);
+            table.continued = wait.map(|wait| (context.clone(), wait));
+        }
         table.threads.clear();
         table.queue.clear();
         table.waits.clear();
@@ -282,6 +294,12 @@ impl ServicesState {
             .expect("guest thread table")
             .id_of(teb)
             .unwrap_or(self.thread_id)
+    }
+
+    /// Whether the main thread can still be named by its ID.
+    pub(super) fn main_thread_alive(&self) -> bool {
+        let table = self.threads.lock().expect("guest thread table");
+        !self.hooks.is_attached() || table.threads.contains_key(&self.thread_id)
     }
 
     /// Thread object for an ID, if that thread is alive and not the main thread.

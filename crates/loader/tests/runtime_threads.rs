@@ -33,6 +33,17 @@ const COUNTER: u64 = SHARED + 256;
 const FIRST_SLOT: u64 = 0x6_0000_0000;
 const BUDGET: usize = 20_000_000;
 const MAIN_ID: u32 = 0x4104;
+/// Host services of the test programs: advance the clock by RCX milliseconds,
+/// and try to run a second scheduler.
+const ADVANCE: u64 = 0x6_0000;
+const NESTED: u64 = 0x6_0010;
+
+fn return_to_guest(cpu: &mut CpuState, memory: &mut GuestMemory) -> Result<(), ExitReason> {
+    let rsp = cpu.get(Register::Rsp);
+    cpu.rip = memory.read_u64(rsp).map_err(ExitReason::MemoryFault)?;
+    cpu.set(Register::Rsp, rsp + 8);
+    Ok(())
+}
 
 struct Program {
     code: Vec<u8>,
@@ -199,6 +210,11 @@ fn guest(main: &str) -> Guest {
     registry.bind_imports(&pe, &bytes, BASE, memory).unwrap();
     let mut engine = DbtEngine::new(1024 * 1024).unwrap();
     engine.set_import_registry(registry);
+    let time = clock.clone();
+    engine.register_service(ADVANCE, move |cpu, memory| {
+        time.advance(cpu.get(Register::Rcx) * 10_000);
+        return_to_guest(cpu, memory)
+    });
     let mut cpu = CpuState::new(loaded.entry_point, STACK + STACK_LEN as u64 - 0x100);
     cpu.gs_base = TEB;
     Guest {
@@ -526,7 +542,7 @@ fn without_a_scheduler_nothing_pretends_to_create_threads() {
 }
 
 #[test]
-fn only_one_scheduler_can_be_attached_and_it_detaches() {
+fn a_finished_run_detaches_its_scheduler() {
     let mut guest = guest("main_timeout");
     for _ in 0..2 {
         let scheduler = Scheduler::new(Arc::clone(&guest.state), 1024);
@@ -537,6 +553,130 @@ fn only_one_scheduler_can_be_attached_and_it_detaches() {
         assert_ne!(report.main.get(Register::Rsp), 0);
     }
     assert_eq!(guest.memory.read_u64(COUNTER).unwrap(), 0);
+}
+
+#[test]
+fn a_second_scheduler_cannot_attach_while_one_runs() {
+    let mut guest = guest("main_nested");
+    let state = Arc::clone(&guest.state);
+    guest.engine.register_service(NESTED, move |cpu, memory| {
+        let mut engine = DbtEngine::new(1024 * 1024).unwrap();
+        let nested = Scheduler::new(Arc::clone(&state), 1024).run(&mut engine, memory, cpu, BUDGET);
+        assert_eq!(nested.err(), Some(ExitReason::ServiceAbiViolation));
+        memory
+            .write_u64(SHARED, 1)
+            .map_err(ExitReason::MemoryFault)?;
+        return_to_guest(cpu, memory)
+    });
+    let report = Scheduler::new(Arc::clone(&guest.state), 1024)
+        .run(&mut guest.engine, &mut guest.memory, &guest.cpu, BUDGET)
+        .unwrap();
+    // The refused attempt leaves the running scheduler attached.
+    assert_eq!(report.outcome, Outcome::Halted);
+    assert_eq!(guest.memory.read_u64(SHARED).unwrap(), 1);
+    assert_eq!(guest.memory.read_u64(SHARED + 8).unwrap(), 0);
+}
+
+#[test]
+fn a_signal_after_the_deadline_is_not_taken_by_the_expired_wait() {
+    for quantum in QUANTA {
+        let run = run_with("main_expired_wait", quantum, BUDGET).halted();
+        // WAIT_TIMEOUT, the signaling thread ends, and the auto-reset signal is
+        // still there once.
+        assert_eq!(run.outs(4), [258, 0, 0, 258], "quantum {quantum}");
+        assert_eq!(run.clock.performance_count(), 1_000_000);
+    }
+}
+
+/// Run `main_continued_wait` until `budget` is spent.
+fn first_part(budget: usize) -> (Guest, ScheduleReport) {
+    let mut guest = guest("main_continued_wait");
+    let report = Scheduler::new(Arc::clone(&guest.state), 1024)
+        .run(&mut guest.engine, &mut guest.memory, &guest.cpu, budget)
+        .unwrap();
+    (guest, report)
+}
+
+/// Smallest budget with which the wait has been called.
+fn budget_that_blocks() -> usize {
+    (1..200)
+        .find(|&budget| first_part(budget).0.engine.metrics.service_calls >= 2)
+        .unwrap()
+}
+
+#[test]
+fn a_continued_run_keeps_the_pending_wait() {
+    let blocks = budget_that_blocks();
+    for budget in [blocks, blocks + 1] {
+        let (mut guest, report) = first_part(budget);
+        assert_eq!(report.outcome, Outcome::BudgetExhausted);
+        guest.clock.advance(6_000_000);
+        // Neither the timeout nor the objects are taken again.
+        guest.memory.write_u64(SHARED + 8 * 49, 0xBAD).unwrap();
+        let report = Scheduler::new(Arc::clone(&guest.state), 1024)
+            .run(&mut guest.engine, &mut guest.memory, &report.main, BUDGET)
+            .unwrap();
+        assert_eq!(report.outcome, Outcome::Halted);
+        assert_eq!(guest.memory.read_u64(SHARED).unwrap(), 258);
+        assert_eq!(guest.clock.performance_count(), 10_000_000);
+    }
+}
+
+#[test]
+fn a_run_from_another_context_does_not_inherit_a_pending_wait() {
+    let (mut guest, _) = first_part(budget_that_blocks());
+    let report = Scheduler::new(Arc::clone(&guest.state), 1024)
+        .run(&mut guest.engine, &mut guest.memory, &guest.cpu, BUDGET)
+        .unwrap();
+    assert_eq!(report.outcome, Outcome::Halted);
+    guest.clock.advance(6_000_000);
+    let begun = guest.clock.performance_count();
+    Scheduler::new(Arc::clone(&guest.state), 1024)
+        .run(&mut guest.engine, &mut guest.memory, &guest.cpu, BUDGET)
+        .unwrap();
+    assert_eq!(guest.clock.performance_count(), begun + 10_000_000);
+
+    let (mut guest, _) = first_part(budget_that_blocks());
+    guest.clock.advance(6_000_000);
+    Scheduler::new(Arc::clone(&guest.state), 1024)
+        .run(&mut guest.engine, &mut guest.memory, &guest.cpu, BUDGET)
+        .unwrap();
+    assert_eq!(guest.clock.performance_count(), 16_000_000);
+}
+
+#[test]
+fn an_exhausted_run_neither_sleeps_nor_reports_a_deadlock() {
+    let blocks = budget_that_blocks();
+    for budget in 1..=blocks + 1 {
+        let (guest, report) = first_part(budget);
+        assert_eq!(report.outcome, Outcome::BudgetExhausted, "{budget}");
+        assert_eq!(guest.clock.performance_count(), 0, "{budget}");
+    }
+    // One retry more: there is budget left for the result of the sleep.
+    assert_eq!(
+        first_part(blocks + 2).0.clock.performance_count(),
+        10_000_000
+    );
+}
+
+#[test]
+fn a_thread_that_ends_with_its_wait_is_noticed_at_once() {
+    for quantum in QUANTA {
+        // Neither a deadlock nor the longer timeout of the thread waiting for it.
+        let run = run_with("main_ends_in_a_wait", quantum, BUDGET).halted();
+        assert_eq!(run.outs(3), [0, 0, 258], "quantum {quantum}");
+        assert_eq!(run.clock.performance_count(), 1_000_000);
+    }
+}
+
+#[test]
+fn a_thread_that_ended_cannot_be_opened_by_its_id() {
+    for quantum in QUANTA {
+        let run = run_with("main_reopened", quantum, BUDGET);
+        assert_eq!(run.report.outcome, Outcome::AllThreadsExited);
+        // ERROR_INVALID_PARAMETER.
+        assert_eq!(run.outs(4), [1, 1, 0, 87], "quantum {quantum}");
+    }
 }
 
 #[test]
@@ -707,6 +847,7 @@ fn every_small_budget_stops_cleanly() {
         for quantum in [1, 64, 1024] {
             for budget in (1..1500).step_by(29) {
                 let run = run_with(main, quantum, budget);
+                assert!(!matches!(run.report.outcome, Outcome::Deadlock { .. }));
                 // One block and one pass of retries may follow the limit.
                 assert!(
                     run.report.instructions < budget + 32,
@@ -723,6 +864,7 @@ fn retrying_many_waiters_stays_within_the_budget() {
     // Up to 63 threads wait at once; a pass over all of them must stop.
     for budget in (1500..12_000).step_by(211) {
         let run = run_with("main_limit", 64, budget);
+        assert!(!matches!(run.report.outcome, Outcome::Deadlock { .. }));
         assert!(
             run.report.instructions < budget + 32,
             "{budget}: {}",
@@ -770,11 +912,22 @@ fn thread_ids_are_not_reused_by_a_later_run() {
 
 #[test]
 fn service_calls_that_end_a_turn_are_counted() {
-    let run = run("main_signals").halted();
-    // The engine counts guest instructions and service calls separately.
-    assert!(run.metrics.service_calls > 1000);
-    assert_eq!(
-        run.report.instructions,
-        run.metrics.instructions_executed + run.metrics.service_calls
-    );
+    for (main, calls) in [
+        ("main_signals", 1000),
+        ("main_independent", 5),
+        ("main_mutex", 100),
+        ("main_fifo", 10),
+        ("main_churn", 100),
+        ("main_exits_first", 3),
+    ] {
+        for quantum in QUANTA {
+            let run = run_with(main, quantum, BUDGET);
+            assert!(run.metrics.service_calls >= calls, "{main} {quantum}");
+            assert_eq!(
+                run.report.instructions,
+                run.metrics.instructions_executed + run.metrics.service_calls,
+                "{main} quantum {quantum}"
+            );
+        }
+    }
 }

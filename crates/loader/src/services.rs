@@ -699,7 +699,8 @@ pub(crate) mod handlers {
     ) -> Outcome<u64> {
         let state = context.state;
         let worker = state.worker_object(id);
-        if id != state.thread_id && worker.is_none() {
+        let main = id == state.thread_id && state.main_thread_alive();
+        if !main && worker.is_none() {
             return state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
         }
         let supported = THREAD_SUPPORTED_RIGHTS

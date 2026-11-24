@@ -742,3 +742,65 @@ void main_orphaned_shared(void) {
     S->out[1] = TryAcquireSRWLockExclusive(&S->srw) & 0xFF;
     join(spawn(releases_shared, 0));
 }
+
+// Host services the test registers at fixed addresses.
+#define ADVANCE ((void (*)(u64))0x60000)
+#define NESTED ((void (*)(void))0x60010)
+
+// --- a signal after the deadline belongs to nobody -------------------------
+static u32 signals_too_late(void *unused) {
+    while (!S->flag) SwitchToThread();
+    settle();
+    ADVANCE(100);
+    SetEvent(S->a);
+    return 0;
+}
+void main_expired_wait(void) {
+    S->a = CreateEventA(0, 0, 0, 0);
+    HANDLE late = spawn(signals_too_late, 0);
+    S->flag = 1;
+    S->out[0] = WaitForSingleObject(S->a, 50);
+    S->out[1] = WaitForSingleObject(late, INFINITE);
+    S->out[2] = WaitForSingleObject(S->a, 0);
+    S->out[3] = WaitForSingleObject(S->a, 0);
+}
+
+void main_continued_wait(void) {
+    S->a = CreateEventA(0, 1, 0, 0);
+    S->handles[0] = S->a;
+    S->out[0] = WaitForMultipleObjects(1, S->handles, 1, 1000);
+    S->out[1] = 1;
+}
+
+static u32 reopens(void *id) {
+    settle();
+    S->out[2] = (u64)OpenThread(0x40, 0, (u32)(u64)id);
+    S->out[3] = GetLastError();
+    return 0;
+}
+void main_reopened(void) {
+    u32 id = GetCurrentThreadId();
+    S->out[0] = OpenThread(0x40, 0, id) != 0;
+    S->out[1] = spawn(reopens, id) != 0;
+    ExitThread(3);
+}
+
+// A tail call: the wait returns straight to the end of the thread.
+static u32 ends_in_a_wait(HANDLE event, u32 unused) {
+    __attribute__((musttail)) return WaitForSingleObject(event, 50);
+}
+void main_ends_in_a_wait(void) {
+    u32 code = 0;
+    S->a = CreateEventA(0, 1, 0, 0);
+    S->handles[0] = spawn((START)(void *)ends_in_a_wait, (u64)S->a);
+    S->out[0] = WaitForSingleObject(S->handles[0], INFINITE);
+    S->handles[1] = spawn((START)(void *)ends_in_a_wait, (u64)S->a);
+    S->out[1] = WaitForSingleObject(S->handles[1], 1000);
+    GetExitCodeThread(S->handles[1], &code);
+    S->out[2] = code;
+}
+
+void main_nested(void) {
+    NESTED();
+    S->out[1] = WaitForSingleObject(spawn(collatz, 97), INFINITE);
+}
