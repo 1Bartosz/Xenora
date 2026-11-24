@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn bit_scan_and_bit_test_encodings_match_llvm() {
+    fn rbit_clz_lslv_encodings_match_llvm() {
         // A64 words from Apple Clang's integrated assembler and llvm-objdump.
         let mut asm = Arm64Assembler::new();
         asm.rbit_64(X10, X9); // rbit x10, x9
@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn bit_scan_and_bit_test_reject_out_of_range_registers() {
+    fn rbit_clz_lslv_reject_out_of_range_registers() {
         let invalid_operands: [fn(&mut Arm64Assembler); 7] = [
             |asm| asm.rbit_64(32, X0),
             |asm| asm.rbit_64(X0, 32),
