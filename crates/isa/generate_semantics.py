@@ -447,6 +447,16 @@ def _render_enum(rule_name, forms, snapshot, positions):
     family = forms[0]["family"]
     encoding = snapshot["encodings"][_family_encoding(family)]
     mask = encoding["identifier_mask"]
+    (offset, size), = dict((name, ranges) for name, ranges in encoding["fields"])["OP"]
+    op_mask = ((1 << size) - 1) << offset
+    fixed_mask = mask & ~op_mask
+    fixed_bits = encoding["identifiers"][0] & fixed_mask
+    # Every identifier of the family must share the fixed bits, or the split
+    # into an encoding test plus an OP match would change which words match.
+    if any(identifier & fixed_mask != fixed_bits for identifier in encoding["identifiers"]) or (
+        mask & op_mask != op_mask
+    ):
+        raise ValueError(f"{family}: identifiers do not split into fixed bits and OP")
     out = [
         "",
         f"/// {family} operations declared in the semantic registry (operand rule `{rule_name}`).",
@@ -460,8 +470,19 @@ def _render_enum(rule_name, forms, snapshot, positions):
             f"{form['signedness']} {form['operation']}{carry}, SCC = {form['scc']}.",
             f"    {form['variant']},",
         ]
+    by_opcode = {form["opcode"]: form["variant"] for form in forms}
     out += [
         "}",
+        "",
+        f"/// {enum} by {family} OP field value; `None` for undeclared opcodes.",
+        f"const BY_OPCODE: [Option<{enum}>; {1 << size}] = [",
+    ]
+    out += [
+        f"    Some({enum}::{by_opcode[opcode]})," if opcode in by_opcode else "    None,"
+        for opcode in range(1 << size)
+    ]
+    out += [
+        "];",
         "",
         f"impl {enum} {{",
         "    /// Every operation, in registry order.",
@@ -471,15 +492,13 @@ def _render_enum(rule_name, forms, snapshot, positions):
     out += [
         "    ];",
         "",
-        f"    /// Selects the operation from a first instruction word (mask 0x{mask:09_x}).",
+        f"    /// Selects the operation from a first instruction word: the {family} encoding",
+        f"    /// bits (mask 0x{fixed_mask:09_x}) and then the OP field (bits {offset}-{offset + size - 1}).",
         "    pub const fn from_word(word: u32) -> Option<Self> {",
-        f"        match word & 0x{mask:09_x} {{",
-    ]
-    for form in sorted(forms, key=lambda item: item["opcode"]):
-        out.append(f"            0x{_identifier(encoding, form['opcode']):09_x} => Some(Self::{form['variant']}),")
-    out += [
-        "            _ => None,",
+        f"        if word & 0x{fixed_mask:09_x} != 0x{fixed_bits:09_x} {{",
+        "            return None;",
         "        }",
+        f"        BY_OPCODE[((word >> {offset}) & 0x{(1 << size) - 1:x}) as usize]",
         "    }",
         "",
         "    /// Lower-case mnemonic.",

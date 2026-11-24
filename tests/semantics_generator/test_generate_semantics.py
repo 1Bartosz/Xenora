@@ -461,14 +461,24 @@ class Render(unittest.TestCase):
         self.assertNotEqual(list(reg["form"][0]), list(reordered["form"][0]))
         self.assertEqual(gen.render(reg, snapshot()), gen.render(reordered, snapshot()))
 
-    def test_dispatch_is_sorted_by_opcode(self):
+    def test_dispatch_table_is_indexed_by_opcode(self):
         reg = registry()
         reg["form"].reverse()
         text = gen.render(reg, snapshot())
-        body = text.split("match word & ", 1)[1].split("_ => None", 1)[0]
-        words = [line.split(" => ")[0].strip() for line in body.splitlines()[1:] if "=>" in line]
-        self.assertEqual(words, sorted(words))
-        self.assertEqual(len(words), 5)
+        body = text.split("const BY_OPCODE: [Option<ScalarAluOp>; 128] = [", 1)[1].split("];", 1)[0]
+        rows = [line.strip() for line in body.splitlines() if line.strip()]
+        self.assertEqual(len(rows), 128)
+        declared = {index: row for index, row in enumerate(rows) if row != "None,"}
+        self.assertEqual(sorted(declared), [0, 2, 4, 14, 34])
+        self.assertEqual(declared[34], "Some(ScalarAluOp::AshrI32),")
+        self.assertIn("if word & 0xc000_0000 != 0x8000_0000 {", text)
+        self.assertIn("BY_OPCODE[((word >> 23) & 0x7f) as usize]", text)
+
+    def test_rejects_identifiers_that_do_not_share_the_encoding_bits(self):
+        snap = snapshot()
+        snap["encodings"]["ENC_SOP2"]["identifiers"].append(0x40000000)
+        with self.assertRaisesRegex(ValueError, "do not split into fixed bits and OP"):
+            gen.render(registry(), snap)
 
     def test_real_registry_renders_the_committed_file(self):
         text = gen.render(gen.load_registry(), gen.load_snapshot())
