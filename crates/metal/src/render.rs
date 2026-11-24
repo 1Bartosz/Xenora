@@ -808,7 +808,8 @@ impl BlendFactor {
     }
 }
 
-/// A blend operation combining the weighted source and destination.
+/// A blend operation combining the weighted source and destination; `Min`
+/// and `Max` take the unweighted values and ignore the factors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlendOperation {
     Add,

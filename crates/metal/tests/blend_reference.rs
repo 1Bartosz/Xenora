@@ -13,7 +13,7 @@ use xenora_ref::blend::{RefBlendDraw, render_blend};
 #[test]
 fn reference_matches_independent_expectations() {
     let (cases, expected) = (cases(), expected());
-    assert_eq!(cases.len(), 38);
+    assert_eq!(cases.len(), 39);
     assert_eq!(expected.len(), cases.len());
     for (case, want) in cases.iter().zip(&expected) {
         assert_eq!(case.name, want.name);

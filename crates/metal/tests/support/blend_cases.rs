@@ -136,6 +136,13 @@ pub fn cases() -> Vec<Case> {
         Some(same(SourceAlpha, OneMinusSourceAlpha, Add)),
         [true, true, false, false],
     ));
+    let mut first = case(
+        "first_draw_blended".to_owned(),
+        None,
+        [true, true, false, false],
+    );
+    first.draws[0].blend = Some(same(SourceAlpha, OneMinusSourceAlpha, Add));
+    first.draws[0].mask = [false, true, true, true];
     cases.push(case(
         "separate_operation".to_owned(),
         Some(RefBlend {
@@ -146,6 +153,7 @@ pub fn cases() -> Vec<Case> {
         }),
         all,
     ));
+    cases.push(first);
     cases
 }
 

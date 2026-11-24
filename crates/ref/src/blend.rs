@@ -148,6 +148,8 @@ pub fn blend_channel(
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum BlendRefError {
+    /// The extent is empty or its pixel count overflows.
+    Extent,
     /// The triangle coverage could not be computed.
     Raster(DepthRefError),
 }
@@ -166,15 +168,19 @@ impl std::error::Error for BlendRefError {}
 ///
 /// # Errors
 ///
-/// Returns an error when a triangle's coverage cannot be computed (see
-/// [`render_depth`]).
+/// Returns an error for an empty or overflowing extent, or when a triangle's
+/// coverage cannot be computed (see [`render_depth`]).
 pub fn render_blend(
     extent: [usize; 2],
     clear_color: [u8; 4],
     draws: &[RefBlendDraw],
 ) -> Result<Vec<[RefChannel; 4]>, BlendRefError> {
     let exact = |value| RefChannel { value, exact: true };
-    let mut target = vec![clear_color.map(exact); extent[0] * extent[1]];
+    let pixels = extent[0]
+        .checked_mul(extent[1])
+        .filter(|&n| n > 0)
+        .ok_or(BlendRefError::Extent)?;
+    let mut target = vec![clear_color.map(exact); pixels];
     for draw in draws {
         // Coverage: a white triangle over black, without depth attachment.
         let (coverage, _) = render_depth(
@@ -227,6 +233,16 @@ mod tests {
             source_alpha: source,
             destination_alpha: destination,
             alpha_operation: operation,
+        }
+    }
+
+    #[test]
+    fn bad_extents_are_rejected() {
+        for extent in [[0, 4], [4, 0], [usize::MAX, 2]] {
+            assert_eq!(
+                render_blend(extent, [0; 4], &[]),
+                Err(BlendRefError::Extent)
+            );
         }
     }
 
