@@ -8,7 +8,10 @@ from pathlib import Path
 import re
 import runpy
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - depends on the interpreter
+    sys.exit("semantic_coverage.py needs Python 3.11 or newer (tomllib)")
 
 ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOT = Path("crates/isa/data/rdna2.jsonl")

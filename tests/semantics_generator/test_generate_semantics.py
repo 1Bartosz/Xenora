@@ -82,12 +82,12 @@ def _form(name, opcode, variant, operation, signedness, scc, carry_in="none"):
 
 def registry():
     rule = copy.deepcopy(gen.OPERAND_RULES["sop2_sgpr"]["shape"])
-    rule["unsupported"] = ["dst_vcc", "two_literals"]
+    rule["unsupported"] = sorted(gen.UNSUPPORTED_COMBOS)
     return {
         "schema": 1,
         "architecture": "gfx1030",
         "source_sha256": SHA,
-        "documents": {"guide": {"title": "guide"}, "xml": {"title": "xml"}},
+        "documents": copy.deepcopy(gen.PINNED_DOCUMENTS),
         "operand_rules": {"sop2_sgpr": rule},
         "form": [
             _form("S_ADD_U32", 0, "AddU32", "add", "unsigned", "carry_out"),
@@ -287,6 +287,33 @@ class Validate(unittest.TestCase):
         reg = registry()
         reg["operand_rules"]["sop2_sgpr"]["max_literals"] = 2
         self.rejects(reg, "operand rule sop2_sgpr: declaration differs")
+
+    def test_rejects_an_incomplete_unsupported_list(self):
+        reg = registry()
+        reg["operand_rules"]["sop2_sgpr"]["unsupported"].remove("two_literals")
+        self.rejects(
+            reg, "operand rule sop2_sgpr: unsupported combos differ from those the decoder rejects"
+        )
+
+    def test_rejects_a_citation_to_another_file(self):
+        reg = registry()
+        reg["documents"]["guide"]["file"] = "missing.pdf"
+        self.rejects(reg, "document guide: differs from the pinned public document")
+
+    def test_rejects_an_unenforced_wave_restriction(self):
+        reg = registry()
+        reg["form"][0]["wave"] = "wave32"
+        self.rejects(reg, "S_ADD_U32: wave wave32 has no decoder enforcement yet")
+
+    def test_rejects_a_reserved_variant(self):
+        reg = registry()
+        reg["form"][0]["variant"] = "Self"
+        self.rejects(reg, "S_ADD_U32: variant 'Self' is reserved")
+
+    def test_rejects_a_boolean_schema(self):
+        reg = registry()
+        reg["schema"] = True
+        self.rejects(reg, "schema True is not 1")
 
     def test_rejects_unknown_unsupported_combo(self):
         reg = registry()
