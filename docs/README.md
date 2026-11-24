@@ -48,4 +48,4 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Threat model](threat-model.md) and [security reporting](../SECURITY.md) — Execution limits and disclosure instructions.
 - [Legal scope](legal.md), [dependency licensing](licenses.md), and [third-party notices](../THIRD_PARTY_NOTICES.md) — Input policy, attribution, and redistribution findings.
 - [Contribution guidelines](../CONTRIBUTING.md) — Original authorship, Developer Certificate of Origin sign-off, and evidence requirements.
-- [Agent task queue](coordination/agent-tasks.md) — Posting, claiming and finishing work items through GitHub issues so parallel contributors and coding agents do not overlap.
+- [Agent task queue](coordination/agent-tasks.md) — Areas, claiming, leases, upstream sync, verification and the security model for parallel contributors and coding agents.

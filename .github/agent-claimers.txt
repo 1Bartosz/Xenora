@@ -1,3 +1,0 @@
-# GitHub logins allowed to claim agent tasks, one per line.
-# Repository owners, members and collaborators are always allowed.
-elforeign

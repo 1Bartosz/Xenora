@@ -7,13 +7,31 @@ body:
     id: area
     attributes:
       label: Area
-      description: Which owner area the work belongs to. Shared work needs agreement from both owners before it is claimed.
+      description: "cpu: translation, DBT, PE loading, guest startup, guest memory. gpu: RDNA2, shaders, Metal. runtime: Win32, CRT, C++ runtime, import generation, OS services, platform abstractions. shared: cross-subsystem interfaces. qa: verification, regression, security review."
       options:
-        - gpu
         - cpu
+        - gpu
+        - runtime
         - shared
+        - qa
     validations:
       required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - critical
+        - high
+        - medium
+        - low
+    validations:
+      required: true
+  - type: input
+    id: interface
+    attributes:
+      label: Interface
+      description: For shared tasks, the interface name and the version or upstream commit it targets. Leave empty otherwise.
   - type: textarea
     id: goal
     attributes:
@@ -25,7 +43,7 @@ body:
     id: files
     attributes:
       label: Files
-      description: Paths the task may edit, one per line. Two claimed tasks never share a path.
+      description: Paths the task may edit, one per line: exact paths, directories ending in "/", or globs with * and **. Two claimed tasks never overlap.
       render: text
     validations:
       required: true
@@ -33,7 +51,7 @@ body:
     id: acceptance
     attributes:
       label: Acceptance command
-      description: The exact command whose success proves the task is done. It must fail before the change.
+      description: The exact command whose success proves the task is done. It must fail before the change. It is never run automatically; a maintainer must approve it with /approve-acceptance.
       render: sh
     validations:
       required: true

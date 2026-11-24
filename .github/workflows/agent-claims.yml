@@ -1,8 +1,9 @@
 name: Agent task claims
 
-# Serialises /claim, /release and /blocked comments on agent task issues and
-# returns stale claims to the queue. Only labels and comments change; no code
-# from the issue or comment is executed.
+# Applies queue commands (/claim, /release, /reassign, /progress, /blocked,
+# /unblock, /approve-acceptance) and audits the queue hourly. Comment and issue
+# text is only parsed as data by scripts/agent_queue; it is never executed and
+# never interpolated into a shell. Not yet run on GitHub.
 
 on:
   issue_comment:
@@ -11,83 +12,61 @@ on:
     - cron: "17 * * * *"
   workflow_dispatch:
 
-permissions:
-  issues: write
+permissions: {}
 
 jobs:
   command:
     if: github.event_name == 'issue_comment' && !github.event.issue.pull_request
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      issues: write
+    # One global group: claims are decided one at a time so file-overlap checks cannot race.
     concurrency:
-      group: agent-claim-${{ github.event.issue.number }}
+      group: agent-queue
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: .github/agent-claimers.txt
-          sparse-checkout-cone-mode: false
-      - name: Apply command
+          persist-credentials: false
+      - name: Decide and apply
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          ISSUE: ${{ github.event.issue.number }}
-          BODY: ${{ github.event.comment.body }}
-          ACTOR: ${{ github.event.comment.user.login }}
-          ASSOCIATION: ${{ github.event.comment.author_association }}
+          PYTHONPATH: scripts
         run: |
           set -eu
-          command=$(printf '%s\n' "$BODY" | head -1 | awk '{print $1}')
-          case "$command" in /claim|/release|/blocked|/unblock) ;; *) exit 0 ;; esac
-          allowed=no
-          case "$ASSOCIATION" in OWNER|MEMBER|COLLABORATOR) allowed=yes ;; esac
-          if [ -f .github/agent-claimers.txt ] && grep -qx "$ACTOR" .github/agent-claimers.txt; then allowed=yes; fi
-          if [ "$allowed" != yes ]; then
-            gh issue comment "$ISSUE" --body "Ignored $command: $ACTOR is not listed in .github/agent-claimers.txt."
-            exit 0
-          fi
-          labels=$(gh issue view "$ISSUE" --json labels -q '.labels[].name')
-          has() { printf '%s\n' "$labels" | grep -qx "$1"; }
-          holder=$(printf '%s\n' "$labels" | sed -n 's/^claimed-by:\(.*\)$/\1/p' | head -1)
-          case "$command" in
-            /claim)
-              if ! has agent:ready; then
-                gh issue comment "$ISSUE" --body "Not claimable: the issue is not labelled agent:ready${holder:+ (held by $holder)}."
-                exit 0
-              fi
-              gh label create "claimed-by:$ACTOR" --color BFD4F2 --force >/dev/null
-              gh issue edit "$ISSUE" --remove-label agent:ready --add-label agent:claimed --add-label "claimed-by:$ACTOR"
-              gh issue comment "$ISSUE" --body "Claimed by $ACTOR. The claim lapses after 24 hours without activity on this issue or its pull request."
-              ;;
-            /release)
-              if [ "$holder" != "$ACTOR" ] && [ "$ASSOCIATION" != OWNER ]; then
-                gh issue comment "$ISSUE" --body "Only the holder ($holder) or the repository owner can release this claim."
-                exit 0
-              fi
-              gh issue edit "$ISSUE" --remove-label agent:claimed --remove-label "claimed-by:$holder" --add-label agent:ready
-              ;;
-            /blocked)
-              gh issue edit "$ISSUE" --add-label agent:blocked
-              ;;
-            /unblock)
-              gh issue edit "$ISSUE" --remove-label agent:blocked
-              ;;
-          esac
+          python3 -m agent_queue event --path "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/event.json"
+          python3 -m agent_queue gather --repo "$GH_REPO" --no-prs > "$RUNNER_TEMP/state.json"
+          python3 -m agent_queue decide --event "$RUNNER_TEMP/event.json" --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
+          python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/actions.json"
 
-  lapse:
+  audit:
     if: github.event_name != 'issue_comment'
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: agent-queue
+      cancel-in-progress: false
     steps:
-      - name: Return stale claims to the queue
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lapse stale claims, flag invalid tasks, write summary
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          PYTHONPATH: scripts
         run: |
           set -eu
-          cutoff=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
-          gh issue list --label agent:claimed --state open --limit 200 \
-            --json number,updatedAt,labels \
-            -q ".[] | select(.updatedAt < \"$cutoff\") | select([.labels[].name] | index(\"agent:blocked\") | not) | [.number, ([.labels[].name | select(startswith(\"claimed-by:\"))] | first // \"\")] | @tsv" |
-          while IFS="$(printf '\t')" read -r number holder; do
-            gh issue edit "$number" --remove-label agent:claimed ${holder:+--remove-label "$holder"} --add-label agent:ready
-            gh issue comment "$number" --body "Claim lapsed after 24 hours without activity; the task is back in the queue."
-          done
+          python3 -m agent_queue gather --repo "$GH_REPO" > "$RUNNER_TEMP/state.json"
+          python3 -m agent_queue audit --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
+          python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/actions.json"
+          {
+            echo '## Agent queue summary'
+            echo '```json'
+            python3 -m agent_queue summary --state "$RUNNER_TEMP/state.json" --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

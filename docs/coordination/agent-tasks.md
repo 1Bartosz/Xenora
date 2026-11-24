@@ -1,60 +1,121 @@
 # Agent task queue
 
-Xenora's CPU and GPU work proceed in parallel, often by coding agents. This page
-describes how work is posted, claimed and finished through GitHub issues so that
-no person has to relay prompts between agents.
+Work items are GitHub issues. Contributors and coding agents claim them with a comment, work in
+their own branch, and open a pull request that is checked against the claim. The queue is
+deterministic: the rules live in `scripts/agent_queue/` (standard-library Python, no network, no
+model or external service), and GitHub Actions and the shell helpers only call it.
+
+Status: implemented and unit-tested locally. **Not yet run on GitHub**: the workflows are untested
+against the real API until the first live run.
+
+## Areas
+
+| Area | Owner | Scope |
+| --- | --- | --- |
+| `cpu` | maintainer | CPU translation, ARM64 dynamic binary translation, PE loading, guest startup, core guest memory |
+| `gpu` | GPU contributor | RDNA2, shaders, graphics, Metal |
+| `runtime` | runtime contributor | Win32, CRT, C++ runtime, import generation, OS services, platform abstractions |
+| `shared` | agreed by the owners involved | Interfaces that cross subsystems |
+| `qa` | any qa contributor | Independent verification, regression testing, security review |
+
+Who may claim what is in `.github/agent-queue.json` (`maintainers`, `contributors`, `lease_hours`,
+`upstream`). The file is plain JSON, so the notes live here: the maintainer must add the runtime
+contributor's GitHub login under `contributors` (for example `"their-login": ["runtime", "qa"]`)
+before that person can claim. Maintainers may claim any area; others only the areas listed for them.
+
+## One-time label bootstrap (maintainer)
+
+```sh
+for l in agent:ready agent:claimed agent:blocked agent:invalid agent:conflict \
+         area:cpu area:gpu area:runtime area:shared area:qa \
+         priority:critical priority:high priority:medium priority:low; do
+  gh label create "$l" --force --color BFD4F2
+done
+```
+
+`claimed-by:<login>` labels are created by the workflow when a claim is granted.
 
 ## Lifecycle
 
-1. **Post.** Anyone opens an issue with the *Agent task* template. It names the
-   owner area (`gpu`, `cpu` or `shared`), the files it may edit, the exact
-   acceptance command and any issues it depends on. New tasks are labelled
-   `agent:ready`.
-2. **Claim.** An agent comments `/claim`. The *Agent task claims* workflow
-   processes claims for one issue at a time, so the first claim wins. It
-   replaces `agent:ready` with `agent:claimed` and `claimed-by:<login>`. A later
-   claim is refused with a reply.
-3. **Work.** The holder works on a branch named after the issue, for example
-   `task/42-vop2-integer-semantics`, and edits only the listed files. A progress
-   comment or a linked pull request keeps the claim alive.
-4. **Finish.** The pull request says `Closes #42` and reports the acceptance
-   command's output. Review and merge follow [CONTRIBUTING.md](../../CONTRIBUTING.md);
-   an author never merges their own pull request.
-5. **Lapse.** A claim with no activity for 24 hours returns to `agent:ready`.
-   `/release` gives a task back early. `/blocked` pauses the lapse timer while a
-   question is open; `/unblock` resumes it.
+1. Post a task with the *Agent task* issue form or `scripts/agent-queue.sh new body.md "task: title"`.
+   Area, Priority, Files (exact paths, `dir/` prefixes, `*` and `**` globs), Acceptance command,
+   Depends on and, for shared work, Interface (interface name and the version or upstream commit
+   it targets).
+2. `scripts/agent-queue.sh next <area>` picks the highest-priority task you may claim now.
+3. `scripts/agent-queue.sh claim <n>` posts `/claim` and waits until the bot confirms: a grant
+   comment carrying a marker, and the label `claimed-by:<you>`. **Do not edit anything before it
+   prints "claimed".** Refusals name the reason: not `agent:ready`, area not allowed for you, open
+   or missing dependency, dependency cycle, or file overlap with a claimed task (the issue is named).
+   Claims are decided one at a time across the whole repository, so two overlapping claims cannot both win.
+4. `scripts/agent-queue.sh start <n>` creates branch `task/<n>-<slug>` from `upstream/main` in a
+   separate worktree `../xenora-task-<n>` (`--here` uses the current clean checkout instead).
+5. Keep the lease alive with `scripts/agent-queue.sh progress <n> "what changed"`. A claim lapses
+   `lease_hours` (24) after the latest of: the grant, your `/progress` comment, a push to your
+   linked pull request. Other people's comments never renew it. A lapsed task returns to the queue.
+6. Open the pull request with `Closes #<n>` and a DCO sign-off (`git commit -s`).
+7. A different person (not the author, not the task holder) who is a maintainer or has `qa`
+   comments `/verified <head sha>` after running the acceptance command. A new push changes the
+   head and invalidates the verification.
 
-Only repository owners, members, collaborators and logins listed in
-`.github/agent-claimers.txt` can claim. The workflow changes labels and posts
-comments; it never runs text from an issue.
+## Commands (issue comments)
 
-## Rules for posting tasks
+| Command | Who | Effect |
+| --- | --- | --- |
+| `/claim` | allowed for the area | Take a ready task |
+| `/release` | holder or maintainer | Return the task to the queue |
+| `/reassign <login>` | maintainer | Hand the task to someone allowed for its area; new lease |
+| `/progress <text>` | holder | Renew the lease (text required) |
+| `/blocked <reason>`, `/unblock` | holder or maintainer | Set or clear `agent:blocked` |
+| `/approve-acceptance` | maintainer | Authorise the acceptance command as currently written |
+| `/verified <sha>` (on a pull request) | maintainer or `qa`, not author, not holder | Independent verification of the current head |
 
-- One task, one reviewable change. Split anything that needs more than one
-  pull request.
-- List every file the task may edit. Two open claims never list the same path;
-  a task that needs a file another claim holds depends on that claim.
-- `shared` tasks touch interfaces both owners use (guest memory, loader hooks,
-  shared Cargo configuration). Agree the interface in the issue before anyone
-  claims it.
-- The acceptance command must fail before the change and pass after it.
-- Use public sources only and follow the clean-room rules in
-  [AGENTS.md](../../AGENTS.md).
+Labels: `area:<x>`, `priority:<critical|high|medium|low>`, `agent:ready|claimed|blocked|invalid|conflict`,
+`claimed-by:<login>`. An hourly audit lapses stale claims, marks tasks with missing dependencies or
+cycles `agent:invalid` (and restores them when fixed), flags overlapping claims `agent:conflict`, and
+writes a JSON summary to the run summary. `scripts/agent-queue.sh status --json` prints the same
+machine-readable summary (counts and lists per area, priority and state).
 
-## Agent loop
+## Pull request checks
 
-`scripts/agent-queue.sh` wraps the GitHub CLI for agents:
+`agent-pr-checks` fails a pull request when: it has no `Closes #N` for a claimed task; the task is held
+by someone else; it changes files outside the task's patterns; it changes a file that another open
+pull request also changes; the claim has lapsed without a push; or no eligible `/verified <current
+head sha>` exists. After a `/verified` comment the check is re-run automatically.
+
+## Forks and upstream sync
+
+Work from a fork, but synchronise against the real upstream (`ranveersoni98/Xenora` in the
+config), never only your fork's `origin/main`. `scripts/agent-sync.sh` adds the remote `upstream` if
+missing (it never touches `origin`), fetches every 12 minutes (`--interval 10..15`, `--once` for one
+pass) and, after each fetch, lists new upstream commits that touch files of tasks you hold. It never
+merges by itself; `--merge` merges `upstream/main` into the current task branch only when the tree
+is clean. It works from any worktree.
+
+Interface changes during work, for example the maintainer's unpublished changes landing: put the
+interface in a `shared` task whose Interface field names the version or commit other tasks target.
+Tasks that depend on it list it in Depends on, so they cannot be claimed before it closes, and a
+sync report that shows upstream touching your files is the signal to re-read the interface and merge.
+
+## Security model
+
+- Issue and comment text is data. It is parsed by fixed rules and never evaluated, never put into a
+  shell command line, and workflow expressions never appear inside `run:` blocks (event data is read
+  from the event file).
+- Acceptance commands are never run automatically. `scripts/agent-queue.sh acceptance <n>` prints
+  one only when a maintainer's `/approve-acceptance` marker (posted by the bot) matches a hash of
+  the current text; editing the issue body invalidates the approval. Read the command before running it.
+- Markers (grant, approval) count only when posted by the Actions bot, so they cannot be forged in a comment.
+- Workflows declare empty top-level permissions and grant each job only what it needs; actions are
+  pinned by commit SHA. Pull request checks run on the base branch (`pull_request_target`), never
+  check out or run pull request code and read changed files through the API.
+- Clean-room, DCO and native ARM64 rules in `AGENTS.md` and `CONTRIBUTING.md` apply unchanged.
+
+## Tests
 
 ```sh
-scripts/agent-queue.sh list gpu        # ready tasks in one area
-scripts/agent-queue.sh next gpu        # first ready task whose dependencies are closed
-scripts/agent-queue.sh claim 42        # waits up to two minutes for the workflow's decision
-scripts/agent-queue.sh note 42 "Decoder tables regenerated; tests next."
-scripts/agent-queue.sh held            # tasks you currently hold
-scripts/agent-queue.sh release 42
-scripts/agent-queue.sh new body.md "task: VOP2 integer semantics"
+PYTHONPATH=scripts python3 -m unittest discover -s tests/agent_queue -v
+sh -n scripts/agent-queue.sh scripts/agent-sync.sh
 ```
 
-A scheduled agent can run this loop unattended: update `main`, finish or note
-progress on held tasks, then claim the next ready task in its area. Agents post
-new tasks for anything they find outside their area instead of editing it.
+The tests cover command decisions, overlap, cycles, leases, acceptance hashing, pull request checks,
+the summary, the CLI and a structural check of the workflow files. They do not exercise GitHub itself.
