@@ -40,7 +40,17 @@ cargo test --locked -p xenora-ffi --features gpu-tests --test interactive --no-r
 timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test interactive -- \
     --nocapture --test-threads=1
 
+# Persistent GPU resources, dynamic texture updates, and resource retirement (Gate 5, #279).
+cargo test --locked -p xenora-ffi --features gpu-tests --test resources --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test resources -- \
+    --nocapture --test-threads=1
+
+# Audio PCM streaming and sandboxed virtual filesystem integration (Gate 6, #284).
+cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs -- \
+    --nocapture --test-threads=1
+
 # Native Metal known answers of the independent semantic review, including SOP2 scalar ALU
 # and VOPC compares.
 cargo test --locked -p xenora-semantic-review --no-run
-timeout 60s cargo test --locked -p xenora-semantic-review -- --ignored --nocapture --test-threads=1
+timeout 120s cargo test --locked -p xenora-semantic-review -- --ignored --nocapture --test-threads=1

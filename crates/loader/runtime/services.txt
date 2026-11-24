@@ -1,0 +1,181 @@
+# Typed runtime service registry.
+#
+# Data only. `cargo run -p xenora-import-gen --bin xenora-runtime-gen` validates
+# it and writes crates/loader/src/runtime_table.rs (typed Win64 adapters and
+# static metadata) and docs/runtime/services.md (coverage counts).
+#
+#   service <library> <symbol>(<name>: <type>, ...) -> <type>
+#       handler <Rust function in crates/loader/src/services.rs or crt.rs>
+#       status  implemented | partial | stub
+#       alias   <documented API set that forwards this symbol>
+#       fails   <failure contract>
+#       ref     <public header or document>
+#       test    <test function in crates/loader/tests/runtime_services.rs>
+#
+# Types: u32 i32 u64 bool32 handle ptr out<N> f32 f64, and void as a result.
+# A bool32 argument is true when nonzero. out<N> is a guest pointer to N bytes
+# the service writes. Arguments are assigned by position (Microsoft x64 calling
+# convention): RCX, RDX, R8, R9 or XMM0-XMM3 for floats, then the stack.
+#
+# "status" describes behaviour against the documented contract. A service needs
+# at least one test before it may be implemented or partial.
+
+service kernel32.dll SetProcessPriorityBoost(process: handle, disable: bool32) -> bool32
+    handler set_process_priority_boost
+    status partial
+    alias api-ms-win-core-processthreads-l1-1-2.dll
+    fails 0 with ERROR_INVALID_HANDLE
+    ref processthreadsapi.h SetProcessPriorityBoost
+    test priority_boost_round_trips_and_checks_its_handle
+
+service kernel32.dll GetProcessPriorityBoost(process: handle, disabled: out<4>) -> bool32
+    handler get_process_priority_boost
+    status partial
+    alias api-ms-win-core-processthreads-l1-1-2.dll
+    fails 0 with ERROR_INVALID_HANDLE or ERROR_NOACCESS
+    ref processthreadsapi.h GetProcessPriorityBoost
+    test priority_boost_round_trips_and_checks_its_handle
+
+service kernel32.dll GetCurrentProcess() -> handle
+    handler get_current_process
+    status implemented
+    alias api-ms-win-core-processthreads-l1-1-0.dll
+    fails never
+    ref processthreadsapi.h GetCurrentProcess
+    test identity_services_return_documented_pseudo_handles_and_ids
+
+service kernel32.dll GetProcessId(process: handle) -> u32
+    handler get_process_id
+    status partial
+    alias api-ms-win-core-processthreads-l1-1-0.dll
+    fails 0 with ERROR_INVALID_HANDLE
+    ref processthreadsapi.h GetProcessId
+    test identity_services_return_documented_pseudo_handles_and_ids
+
+service kernel32.dll GetCurrentThread() -> handle
+    handler get_current_thread
+    status implemented
+    alias api-ms-win-core-processthreads-l1-1-0.dll
+    fails never
+    ref processthreadsapi.h GetCurrentThread
+    test identity_services_return_documented_pseudo_handles_and_ids
+
+service kernel32.dll GetCurrentProcessId() -> u32
+    handler get_current_process_id
+    status implemented
+    alias api-ms-win-core-processthreads-l1-1-0.dll
+    fails never
+    ref processthreadsapi.h GetCurrentProcessId
+    test identity_services_return_documented_pseudo_handles_and_ids
+
+service kernel32.dll GetCurrentThreadId() -> u32
+    handler get_current_thread_id
+    status implemented
+    alias api-ms-win-core-processthreads-l1-1-0.dll
+    fails never
+    ref processthreadsapi.h GetCurrentThreadId
+    test identity_services_return_documented_pseudo_handles_and_ids
+
+service kernel32.dll OpenThread(access: u32, inherit: bool32, thread: u32) -> handle
+    handler open_thread
+    status partial
+    alias api-ms-win-core-processthreads-l1-1-0.dll
+    fails 0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED or ERROR_NOT_ENOUGH_MEMORY
+    ref processthreadsapi.h OpenThread
+    test thread_handles_check_access_and_are_rejected_once_closed
+
+service kernel32.dll GetThreadPriority(thread: handle) -> i32
+    handler get_thread_priority
+    status partial
+    alias api-ms-win-core-processthreads-l1-1-0.dll
+    fails THREAD_PRIORITY_ERROR_RETURN with ERROR_INVALID_HANDLE or ERROR_ACCESS_DENIED
+    ref processthreadsapi.h GetThreadPriority
+    test thread_handles_check_access_and_are_rejected_once_closed
+
+service kernel32.dll SetThreadPriority(thread: handle, priority: i32) -> bool32
+    handler set_thread_priority
+    status partial
+    alias api-ms-win-core-processthreads-l1-1-0.dll
+    fails 0 with ERROR_INVALID_HANDLE, ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER
+    ref processthreadsapi.h SetThreadPriority
+    test thread_handles_check_access_and_are_rejected_once_closed
+
+service kernel32.dll CloseHandle(object: handle) -> bool32
+    handler close_handle
+    status partial
+    alias api-ms-win-core-handle-l1-1-0.dll
+    fails 0 with ERROR_INVALID_HANDLE
+    ref handleapi.h CloseHandle
+    test thread_handles_check_access_and_are_rejected_once_closed
+
+service kernel32.dll GetSystemTimeAsFileTime(time: out<8>) -> void
+    handler get_system_time_as_file_time
+    status implemented
+    alias api-ms-win-core-sysinfo-l1-1-0.dll
+    fails guest fault on an invalid pointer
+    ref sysinfoapi.h GetSystemTimeAsFileTime
+    test system_time_comes_from_the_injected_clock
+
+service kernel32.dll GetLastError() -> u32
+    handler get_last_error
+    status partial
+    alias api-ms-win-core-errorhandling-l1-1-0.dll
+    fails never
+    ref errhandlingapi.h GetLastError
+    test last_error_is_set_by_failures_and_by_the_guest
+
+service kernel32.dll SetLastError(code: u32) -> void
+    handler set_last_error
+    status partial
+    alias api-ms-win-core-errorhandling-l1-1-0.dll
+    fails never
+    ref errhandlingapi.h SetLastError
+    test last_error_is_set_by_failures_and_by_the_guest
+
+service kernel32.dll VirtualAlloc(address: ptr, size: u64, kind: u32, protect: u32) -> ptr
+    handler virtual_alloc
+    status partial
+    alias api-ms-win-core-memory-l1-1-0.dll
+    fails 0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_INVALID_ADDRESS or ERROR_NOT_ENOUGH_MEMORY
+    ref memoryapi.h VirtualAlloc
+    test virtual_memory_is_mapped_released_and_bounded
+
+service kernel32.dll VirtualFree(address: ptr, size: u64, kind: u32) -> bool32
+    handler virtual_free
+    status partial
+    alias api-ms-win-core-memory-l1-1-0.dll
+    fails 0 with ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS
+    ref memoryapi.h VirtualFree
+    test virtual_memory_is_mapped_released_and_bounded
+
+service ucrtbase.dll sqrt(x: f64) -> f64
+    handler sqrt
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a negative argument; errno is not set
+    ref math.h sqrt (ISO C, IEC 60559 squareRoot)
+    test floating_arguments_and_results_use_xmm_registers
+
+service ucrtbase.dll sqrtf(x: f32) -> f32
+    handler sqrtf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a negative argument; errno is not set
+    ref math.h sqrtf (ISO C, IEC 60559 squareRoot)
+    test floating_arguments_and_results_use_xmm_registers
+
+service ucrtbase.dll fabs(x: f64) -> f64
+    handler fabs
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h fabs (ISO C, IEC 60559 abs)
+    test floating_arguments_and_results_use_xmm_registers
+
+service ucrtbase.dll fabsf(x: f32) -> f32
+    handler fabsf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h fabsf (ISO C, IEC 60559 abs)
+    test floating_arguments_and_results_use_xmm_registers

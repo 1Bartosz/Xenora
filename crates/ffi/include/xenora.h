@@ -146,6 +146,210 @@ xenora_status xenora_session_frame_loop_status(
 /* Largest file xenora_inspect_executable accepts, in bytes. */
 #define XENORA_MAX_INSPECT_BYTES 268435456u
 
+/* Opaque persistent GPU resource handle (Gate 5, #279) */
+typedef uint64_t xenora_resource;
+#define XENORA_NO_RESOURCE 0u
+
+enum {
+    XENORA_RESOURCE_TYPE_TEXTURE_2D = 1,
+    XENORA_RESOURCE_TYPE_BUFFER = 2,
+};
+
+/*
+ * Create a persistent RGBA8 2D texture owned by the session.
+ * If `initial_rgba` is non-null, it must point to at least width * height * 4 bytes.
+ */
+xenora_status xenora_session_create_texture(
+    xenora_session session,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t *initial_rgba,
+    xenora_resource *out_resource
+);
+
+/*
+ * Dynamically update a subregion of a persistent texture.
+ */
+xenora_status xenora_session_update_texture(
+    xenora_session session,
+    xenora_resource resource,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t *rgba,
+    uint64_t byte_count
+);
+
+/*
+ * Destroy or retire a persistent resource. If in-flight GPU execution is using
+ * the resource, destruction is deferred until the execution completes.
+ */
+xenora_status xenora_session_destroy_resource(
+    xenora_session session,
+    xenora_resource resource
+);
+
+/*
+ * Query type, dimensions, and in-flight status of a persistent resource.
+ */
+xenora_status xenora_session_resource_info(
+    xenora_session session,
+    xenora_resource resource,
+    uint32_t *out_type,
+    uint32_t *out_width,
+    uint32_t *out_height,
+    uint32_t *out_in_flight
+);
+
+/*
+ * Render a frame using a persistent texture resource.
+ */
+xenora_status xenora_session_render_textured(
+    xenora_session session,
+    xenora_resource resource,
+    uint8_t *out_rgba,
+    uint64_t capacity,
+    uint32_t *out_width,
+    uint32_t *out_height
+);
+
+/*
+ * Run the original textured PE fixture and verify its read-back frame.
+ */
+xenora_status xenora_session_run_textured_fixture(
+    xenora_session session,
+    uint8_t *out_rgba,
+    uint64_t capacity,
+    uint32_t *out_width,
+    uint32_t *out_height
+);
+
+/* Audio subsystem (Gate 6, #284) */
+typedef uint32_t xenora_audio_format;
+enum {
+    XENORA_AUDIO_FORMAT_PCM_S16LE = 1,
+    XENORA_AUDIO_FORMAT_PCM_F32LE = 2,
+};
+
+/*
+ * Initialize the audio subsystem for a session.
+ */
+xenora_status xenora_session_audio_init(
+    xenora_session session,
+    uint32_t sample_rate,
+    uint32_t channels,
+    xenora_audio_format format
+);
+
+/*
+ * Submit PCM audio bytes into the session audio queue.
+ */
+xenora_status xenora_session_audio_submit(
+    xenora_session session,
+    const uint8_t *pcm_bytes,
+    uint64_t byte_count
+);
+
+/*
+ * Read PCM audio bytes from the session audio queue.
+ */
+xenora_status xenora_session_audio_read(
+    xenora_session session,
+    uint8_t *out_pcm,
+    uint64_t capacity,
+    uint64_t *out_bytes_read
+);
+
+/*
+ * Query current audio queue status: queued bytes, underruns, total submitted.
+ */
+xenora_status xenora_session_audio_status(
+    xenora_session session,
+    uint32_t *out_queued_bytes,
+    uint32_t *out_underruns,
+    uint64_t *out_total_submitted
+);
+
+/*
+ * Set audio volume (0.0 to 1.0) and mute state (non-zero = muted).
+ */
+xenora_status xenora_session_audio_set_volume(
+    xenora_session session,
+    float volume,
+    uint32_t muted
+);
+
+/* Virtual Filesystem (Gate 6, #284) */
+typedef uint64_t xenora_file;
+#define XENORA_NO_FILE 0u
+
+enum {
+    XENORA_SEEK_SET = 0,
+    XENORA_SEEK_CUR = 1,
+    XENORA_SEEK_END = 2,
+};
+
+/*
+ * Set the sandboxed root directory for the session virtual filesystem.
+ */
+xenora_status xenora_session_vfs_set_root(
+    xenora_session session,
+    const char *root_path
+);
+
+/*
+ * Open a file within the virtual filesystem sandboxed root.
+ */
+xenora_status xenora_session_vfs_open(
+    xenora_session session,
+    const char *rel_path,
+    uint32_t flags,
+    xenora_file *out_file
+);
+
+/*
+ * Read bytes from an open virtual file.
+ */
+xenora_status xenora_session_vfs_read(
+    xenora_session session,
+    xenora_file file,
+    uint8_t *out_buffer,
+    uint64_t count,
+    uint64_t *out_bytes_read
+);
+
+/*
+ * Seek within an open virtual file.
+ */
+xenora_status xenora_session_vfs_seek(
+    xenora_session session,
+    xenora_file file,
+    int64_t offset,
+    uint32_t whence,
+    uint64_t *out_new_offset
+);
+
+/*
+ * Close an open virtual file.
+ */
+xenora_status xenora_session_vfs_close(
+    xenora_session session,
+    xenora_file file
+);
+
+/*
+ * Run the original audio and VFS PE fixture.
+ */
+xenora_status xenora_session_run_audio_vfs_fixture(
+    xenora_session session,
+    uint8_t *out_rgba,
+    uint64_t capacity,
+    uint32_t *out_width,
+    uint32_t *out_height,
+    uint32_t *out_audio_samples
+);
+
 /*
  * Read-only compatibility inspection of a caller-supplied PE file. Nothing in
  * `bytes` is executed: it is parsed and statically disassembled (bounded) only.

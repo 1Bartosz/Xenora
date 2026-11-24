@@ -9,7 +9,7 @@ fn test_builtin_db_classifies_crt_math() {
     assert!(matches!(acos_cls, Some(Classification::CrtNative { .. })));
 
     let sqrtf_cls = db.get("api-ms-win-crt-math-l1-1-0.dll", "sqrtf");
-    assert!(matches!(sqrtf_cls, Some(Classification::CrtNative { .. })));
+    assert!(matches!(sqrtf_cls, Some(Classification::StandardService)));
 }
 
 #[test]

@@ -129,6 +129,11 @@ impl SymbolDb {
 
     fn populate_crt_math(&mut self) {
         let m = "api-ms-win-crt-math-l1-1-0.dll";
+        for module in [m, "ucrtbase.dll"] {
+            for symbol in ["sqrt", "sqrtf", "fabs", "fabsf"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         for (sym, libc) in &[
             ("acos", "acos"),
             ("acosf", "acosf"),
@@ -147,8 +152,6 @@ impl SymbolDb {
             ("exp2", "exp2"),
             ("exp2f", "exp2f"),
             ("expf", "expf"),
-            ("fabs", "fabs"),
-            ("fabsf", "fabsf"),
             ("floor", "floor"),
             ("floorf", "floorf"),
             ("fma", "fma"),
@@ -172,8 +175,6 @@ impl SymbolDb {
             ("roundf", "roundf"),
             ("sin", "sin"),
             ("sinf", "sinf"),
-            ("sqrt", "sqrt"),
-            ("sqrtf", "sqrtf"),
             ("tan", "tan"),
             ("tanf", "tanf"),
             ("trunc", "trunc"),

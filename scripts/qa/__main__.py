@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from .bench_regress import IncompatibleComparison, compare_records, dumps_comparison, load_record
 from .bench_stats import export_json, human_report, summarize
@@ -35,14 +36,21 @@ from .pr_validate import (
     merge_reports,
 )
 from .rdna2_plan import (
+    build_manifests,
     classify_unsupported,
+    compact_candidates,
+    compact_inventory,
+    compact_manifests,
     coverage_diff,
     discrepancies,
     dumps_candidates,
     dumps_inventory,
     load_inventories,
+    parse_claims_file,
     plan_batches,
+    reconcile_with_coverage_report,
     summarize_inventory,
+    write_json,
 )
 from .coverage_history import historical_report, snapshot_inventory, write_snapshot
 from .stale_branch import classify_sync, format_sync_reports
@@ -91,8 +99,21 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--allowed", action="append", default=[])
 
     r = sub.add_parser("rdna2", help="read-only RDNA2 expansion planning")
-    r.add_argument("action", choices=("inventory", "candidates", "plan", "discrepancies", "diff"))
+    r.add_argument(
+        "action",
+        choices=("inventory", "candidates", "plan", "discrepancies", "diff", "manifests", "reconcile"),
+    )
     r.add_argument("--limit", type=int, default=0)
+    r.add_argument("--family", action="append", default=[], help="filter by encoding family")
+    r.add_argument(
+        "--status",
+        action="append",
+        default=[],
+        help="filter: reuse-primitives|needs-primitives|needs-operand-rules",
+    )
+    r.add_argument("--claims", default="", help="JSON claims file to exclude overlapping work")
+    r.add_argument("--compact", action="store_true", help="print compact summary to stdout")
+    r.add_argument("--out", default="", help="write full JSON under this path (prefer artifacts/)")
     r.add_argument("--before", default="", help="JSON inventory for diff")
     r.add_argument("--after", default="", help="JSON inventory for diff")
 
@@ -199,24 +220,93 @@ def main(argv: list[str] | None = None) -> int:
                 return Inventory(**{k: d[k] for k in (
                     "identified", "declared", "decoder_supported", "reference_verified",
                     "metal_verified", "unsupported", "by_family")})
-            print(json.dumps(coverage_diff(inv(before), inv(after)), indent=2, sort_keys=True))
+            payload = coverage_diff(inv(before), inv(after))
+            if args.out:
+                write_json(Path(args.out), payload)
+            if args.compact or args.out:
+                print(
+                    f"declared_delta={payload['declared_delta']} "
+                    f"unsupported_delta={payload['unsupported_delta']}"
+                )
+            else:
+                print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
         data = load_inventories(root)
         inv = summarize_inventory(data)
+        exclude_families: list[str] = []
+        claimed_paths: list[str] = []
+        if args.claims:
+            fams, paths = parse_claims_file(Path(args.claims))
+            exclude_families = sorted(fams)
+            claimed_paths = sorted(paths)
+        limit = args.limit or None
+
+        def emit(payload: Any, compact_text: str, full_text: str | None = None) -> int:
+            if args.out:
+                write_json(Path(args.out), payload)
+            if args.compact or args.out:
+                print(compact_text, end="")
+            elif full_text is not None:
+                print(full_text, end="")
+            else:
+                print(json.dumps(payload, indent=2, sort_keys=True) + "\n", end="")
+            return 0
+
         if args.action == "inventory":
-            print(dumps_inventory(inv), end="")
-            return 0
+            return emit(json.loads(dumps_inventory(inv)), compact_inventory(inv), dumps_inventory(inv))
         if args.action == "candidates":
-            limit = args.limit or None
-            print(dumps_candidates(classify_unsupported(data, limit=limit)), end="")
-            return 0
+            cands = classify_unsupported(
+                data,
+                limit=limit,
+                families=args.family or None,
+                statuses=args.status or None,
+                exclude_families=exclude_families,
+            )
+            payload = json.loads(dumps_candidates(cands))
+            return emit(payload, compact_candidates(cands), dumps_candidates(cands))
         if args.action == "plan":
-            cands = classify_unsupported(data, limit=(args.limit or None))
-            print(json.dumps(plan_batches(cands), indent=2, sort_keys=True))
+            cands = classify_unsupported(
+                data,
+                limit=limit,
+                families=args.family or None,
+                statuses=args.status or None,
+                exclude_families=exclude_families,
+            )
+            payload = plan_batches(cands)
+            return emit(payload, compact_candidates(cands))
+        if args.action == "manifests":
+            cands = classify_unsupported(
+                data,
+                limit=None,
+                families=args.family or None,
+                statuses=args.status or ["reuse-primitives"],
+                exclude_families=exclude_families,
+            )
+            manifests = build_manifests(
+                cands,
+                exclude_families=exclude_families,
+                claimed_paths=claimed_paths,
+                limit=limit,
+            )
+            payload = {
+                "note": "Codex-ready planning manifests only; forms are not implemented.",
+                "count": len(manifests),
+                "manifests": manifests,
+            }
+            out = args.out or "artifacts/rdna2-manifests.json"
+            write_json(Path(out), payload)
+            print(compact_manifests(manifests), end="")
+            print(f"wrote {out}")
             return 0
         if args.action == "discrepancies":
-            print(json.dumps(discrepancies(data), indent=2, sort_keys=True))
-            return 0
+            payload = discrepancies(data)
+            return emit(payload, f"discrepancies={len(payload)}\n")
+        if args.action == "reconcile":
+            payload = reconcile_with_coverage_report(root, data)
+            return emit(
+                payload,
+                f"reconcile_ok={payload['ok']} mismatches={len(payload['mismatches'])}\n",
+            )
 
     if args.command == "cpu-coverage":
         report = build_cpu_report(root)

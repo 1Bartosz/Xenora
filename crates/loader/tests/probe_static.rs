@@ -222,7 +222,7 @@ fn trusted_runner_callback_and_report_match_the_fixture() {
     );
     assert_eq!(callback[1].bytes, [0x48, 0xc7, 0, 17, 0, 0, 0]);
     assert!(callback[1].is_supported_dbt);
-    assert!(!callback[1].is_supported_interp);
+    assert!(callback[1].is_supported_interp);
     assert!(report.first_unsupported_dbt_insn.is_none());
     assert!(md.contains("Sections Census (4)"));
     assert!(json.contains("\"sections_count\": 4"));
@@ -237,14 +237,14 @@ fn trusted_runner_callback_and_report_match_the_fixture() {
 }
 
 #[test]
-fn probe_consumes_complete_c7_operands_even_when_native_support_is_missing() {
-    for (encoding, supported) in [
-        (&[0x48, 0xc7, 0x05, 0, 0, 0, 0, 17, 0, 0, 0][..], true),
-        (&[0xc7, 0xc0, 17, 0, 0, 0], true),
-        (&[0x66, 0xc7, 0xc0, 17, 0], false),
-        (&[0xc7, 0x00, 17, 0, 0, 0], false),
-        (&[0x48, 0xc7, 0x40, 4, 17, 0, 0, 0], false),
-        (&[0x48, 0xc7, 0x04, 0x25, 0, 0, 0, 0, 17, 0, 0, 0], false),
+fn probe_consumes_complete_c7_operands_and_reports_their_support() {
+    for encoding in [
+        &[0x48, 0xc7, 0x05, 0, 0, 0, 0, 17, 0, 0, 0][..],
+        &[0xc7, 0xc0, 17, 0, 0, 0],
+        &[0x66, 0xc7, 0xc0, 17, 0],
+        &[0xc7, 0x00, 17, 0, 0, 0],
+        &[0x48, 0xc7, 0x40, 4, 17, 0, 0, 0],
+        &[0x48, 0xc7, 0x04, 0x25, 0, 0, 0, 0, 17, 0, 0, 0],
     ] {
         let mut pe = create_synthetic_probe_pe();
         let end = 0x200 + encoding.len();
@@ -254,7 +254,7 @@ fn probe_consumes_complete_c7_operands_even_when_native_support_is_missing() {
         let records = report.instruction_records;
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].bytes, encoding);
-        assert_eq!(records[0].is_supported_dbt, supported);
+        assert!(records[0].is_supported_dbt && records[0].is_supported_interp);
         assert_eq!(records[1].rva, 0x1000 + encoding.len() as u32);
         assert!(!records[1].is_supported_dbt);
     }

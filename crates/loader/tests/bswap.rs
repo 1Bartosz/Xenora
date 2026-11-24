@@ -31,6 +31,7 @@ fn check_bswap(native: bool) {
                 zf: !wide,
                 sf: wide,
                 of: !wide,
+                ..RFlags::default()
             };
             let flags = cpu.flags;
             let mut expected = cpu.gpr;

@@ -166,15 +166,8 @@ fn gen_crt_wrapper_registration(module: &str, symbol: &str, _libc_sym: &str, not
 
 /// Generate a registration for a runtime helper (EH frame handlers, etc.).
 fn gen_runtime_helper_registration(module: &str, symbol: &str, note: &str) -> String {
-    // Termination helpers halt. Other unimplemented helpers fail explicitly.
-    let body = if symbol.contains("Throw")
-        || symbol.contains("terminate")
-        || symbol.contains("purecall")
-    {
-        "// C++ exception/terminate: halt guest execution.\n            Err(ExitReason::Halted)"
-    } else {
-        "Err(ExitReason::IllegalInstruction(0xFE))"
-    };
+    // Not implemented: fails explicitly instead of reporting success.
+    let body = "Err(ExitReason::IllegalInstruction(0xFE)) // 0xFE = Unsupported Host Service Call";
     format!(
         r#"
     // {note}
@@ -198,7 +191,7 @@ fn gen_stubs(manifest: &Manifest) -> String {
     out.push_str(
         r#"
 //! Auto-generated Win32 service stubs.
-//! Each stub logs its call site (module + symbol) and returns a safe default value.
+//! Each stub stops the guest with an explicit unsupported-service exit.
 //! Do not edit manually — regenerate with `xenora imports generate`.
 
 use crate::cpu::{CpuState, ExitReason};

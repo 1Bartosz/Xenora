@@ -7,6 +7,7 @@
 //! guest services without exposing raw host function pointers.
 
 use crate::cpu::{CpuState, ExitReason, Register};
+use crate::import_table::{ImportName, ImportTableError, MAX_NAME_LEN, parse_imports};
 use crate::memory::{GuestMemory, MemoryError};
 use crate::pe::ParsedPe;
 use std::collections::HashMap;
@@ -20,8 +21,7 @@ pub const IMPORT_TRAMPOLINE_STRIDE: u64 = 16;
 /// Typed error resulting from import resolution or service dispatch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImportError {
-    MalformedDirectory,
-    DirectoryOutOfBounds { rva: u32 },
+    Table(ImportTableError),
     UnresolvedImport { module: String, symbol: String },
     Memory(MemoryError),
 }
@@ -29,10 +29,7 @@ pub enum ImportError {
 impl fmt::Display for ImportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MalformedDirectory => write!(f, "malformed PE import directory"),
-            Self::DirectoryOutOfBounds { rva } => {
-                write!(f, "import directory at RVA 0x{rva:08x} is out of bounds")
-            }
+            Self::Table(e) => write!(f, "malformed PE imports: {e}"),
             Self::UnresolvedImport { module, symbol } => {
                 write!(f, "unresolved import dependency: {module}!{symbol}")
             }
@@ -42,6 +39,38 @@ impl fmt::Display for ImportError {
 }
 
 impl std::error::Error for ImportError {}
+
+/// Why a service could not be added to the registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegistryError {
+    /// The key already names a different service.
+    Duplicate {
+        module: String,
+        symbol: String,
+    },
+    /// An alias names a service that does not exist.
+    UnknownTarget {
+        module: String,
+        symbol: String,
+    },
+    InvalidName {
+        module: String,
+        symbol: String,
+    },
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (problem, module, symbol) = match self {
+            Self::Duplicate { module, symbol } => ("is already registered", module, symbol),
+            Self::UnknownTarget { module, symbol } => ("is not registered", module, symbol),
+            Self::InvalidName { module, symbol } => ("is not a valid name", module, symbol),
+        };
+        write!(f, "import {module}!{symbol} {problem}")
+    }
+}
+
+impl std::error::Error for RegistryError {}
 
 impl From<MemoryError> for ImportError {
     fn from(e: MemoryError) -> Self {
@@ -161,7 +190,8 @@ fn trampoline_address(index: usize) -> u64 {
 
 /// Registry for resolving and binding import symbols to guest trampoline VAs.
 pub struct ImportRegistry {
-    services: HashMap<(String, String), usize>, // (module_lowercase, symbol) -> service_index
+    // (lower-case module, name) -> service index. Symbol names keep their case.
+    services: HashMap<(String, ImportName), usize>,
     handlers: Vec<ServiceDescriptor>,
     dynamic_trampolines: DynamicTrampolines,
     trampoline_to_service: HashMap<u64, usize>, // Trampoline VA -> service_index
@@ -183,9 +213,16 @@ impl ImportRegistry {
         }
     }
 
-    pub(crate) fn service_index(&self, module: &str, symbol: &str) -> Option<usize> {
+    /// The one lookup used by binding, inspection and reports. Module names
+    /// compare without case, as Windows does; symbol names are exact. API sets
+    /// resolve only through registered aliases.
+    pub fn resolve(&self, module: &str, name: &ImportName) -> Option<&ServiceDescriptor> {
+        self.index(module, name).map(|index| &self.handlers[index])
+    }
+
+    fn index(&self, module: &str, name: &ImportName) -> Option<usize> {
         self.services
-            .get(&(module.to_ascii_lowercase(), symbol.to_owned()))
+            .get(&(module.to_ascii_lowercase(), name.clone()))
             .copied()
     }
 
@@ -193,12 +230,69 @@ impl ImportRegistry {
         self.dynamic_trampolines.clone()
     }
 
+    pub(crate) fn service_index(&self, module: &str, symbol: &str) -> Option<usize> {
+        self.index(module, &ImportName::Name(symbol.to_owned()))
+    }
+
+    fn check_key(module: &str, name: &ImportName) -> Result<(), RegistryError> {
+        let printable = |text: &str| {
+            !text.is_empty()
+                && text.len() <= MAX_NAME_LEN
+                && text.bytes().all(|b| b.is_ascii_graphic())
+        };
+        let valid = printable(module)
+            && match name {
+                ImportName::Name(symbol) => printable(symbol),
+                ImportName::Ordinal(_) => true,
+            };
+        if valid {
+            Ok(())
+        } else {
+            Err(RegistryError::InvalidName {
+                module: module.to_owned(),
+                symbol: name.to_string(),
+            })
+        }
+    }
+
     /// Check whether the exact import key has a binding, including stub handlers.
     pub fn has_binding(&self, module: &str, symbol: &str) -> bool {
         self.service_index(module, symbol).is_some()
     }
 
-    /// Register a host-provided guest service.
+    /// Register a host-provided guest service under a name or an ordinal.
+    pub fn try_register(
+        &mut self,
+        module: &str,
+        name: ImportName,
+        status: ServiceStatus,
+        handler: ServiceHandler,
+    ) -> Result<(), RegistryError> {
+        Self::check_key(module, &name)?;
+        let key = (module.to_ascii_lowercase(), name);
+        if self.services.contains_key(&key) {
+            return Err(RegistryError::Duplicate {
+                module: key.0,
+                symbol: key.1.to_string(),
+            });
+        }
+        let index = self.handlers.len();
+        self.handlers.push(ServiceDescriptor {
+            module: key.0.clone(),
+            symbol: key.1.to_string(),
+            handler,
+            status,
+        });
+        self.services.insert(key, index);
+        Ok(())
+    }
+
+    /// Register a named service.
+    ///
+    /// # Panics
+    ///
+    /// If the name is invalid or already registered, so that one host module
+    /// cannot silently replace another's service.
     pub fn register<F>(&mut self, module: &str, symbol: &str, handler: F)
     where
         F: Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason>
@@ -206,16 +300,7 @@ impl ImportRegistry {
             + Sync
             + 'static,
     {
-        let mod_key = module.to_ascii_lowercase();
-        let sym_key = symbol.to_string();
-        let index = self.handlers.len();
-        self.handlers.push(ServiceDescriptor {
-            module: mod_key.clone(),
-            symbol: sym_key.clone(),
-            handler: Box::new(handler),
-            status: ServiceStatus::Implemented,
-        });
-        self.services.insert((mod_key, sym_key), index);
+        self.register_with_status(module, symbol, ServiceStatus::Implemented, handler);
     }
 
     /// Describe the canonical binding behind an import without calling it.
@@ -239,7 +324,10 @@ impl ImportRegistry {
     pub fn iter_aliases(&self) -> impl Iterator<Item = (&str, &str, &str)> {
         // `services` maps (module_lc, symbol) -> handler_index.
         // An alias exists when module_lc != handlers[index].module.to_lowercase().
-        self.services.iter().filter_map(|((mod_lc, sym), &idx)| {
+        self.services.iter().filter_map(|((mod_lc, name), &idx)| {
+            let ImportName::Name(sym) = name else {
+                return None;
+            };
             let canonical_mod = self.handlers[idx].module.to_ascii_lowercase();
             if *mod_lc != canonical_mod {
                 Some((
@@ -260,7 +348,11 @@ impl ImportRegistry {
         self.handlers[index].status = status;
     }
 
-    /// Register a service with an explicit implementation status.
+    /// Register a named service with an explicit implementation status.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::register`].
     pub fn register_with_status<F>(
         &mut self,
         module: &str,
@@ -273,17 +365,45 @@ impl ImportRegistry {
             + Sync
             + 'static,
     {
-        self.register(module, symbol, handler);
-        self.set_status(module, symbol, status);
+        let name = ImportName::Name(symbol.to_owned());
+        if let Err(error) = self.try_register(module, name, status, Box::new(handler)) {
+            panic!("{error}");
+        }
     }
 
-    /// Point an API-set import at an existing handler and its trampoline.
+    /// Make `module` resolve `symbol` to the service registered as
+    /// `target!symbol`, sharing its trampoline.
     pub(crate) fn alias(&mut self, module: &str, target: &str, symbol: &str) {
+        self.try_alias(module, target, symbol)
+            .expect("valid built-in service alias");
+    }
+
+    pub fn try_alias(
+        &mut self,
+        module: &str,
+        target: &str,
+        symbol: &str,
+    ) -> Result<(), RegistryError> {
+        let name = ImportName::Name(symbol.to_owned());
+        Self::check_key(module, &name)?;
         let index = self
-            .service_index(target, symbol)
-            .expect("registered alias target");
-        self.services
-            .insert((module.to_ascii_lowercase(), symbol.to_owned()), index);
+            .index(target, &name)
+            .ok_or_else(|| RegistryError::UnknownTarget {
+                module: target.to_owned(),
+                symbol: symbol.to_owned(),
+            })?;
+        let previous = *self
+            .services
+            .entry((module.to_ascii_lowercase(), name))
+            .or_insert(index);
+        if previous == index {
+            Ok(())
+        } else {
+            Err(RegistryError::Duplicate {
+                module: module.to_owned(),
+                symbol: symbol.to_owned(),
+            })
+        }
     }
 
     /// Bind the PE's Import Address Table (IAT) in guest memory to synthetic trampoline VAs.
@@ -294,102 +414,37 @@ impl ImportRegistry {
         loaded_base: u64,
         memory: &mut GuestMemory,
     ) -> Result<usize, ImportError> {
-        let import_dir = find_import_directory(bytes)?;
-        let Some((import_rva, import_size)) = import_dir else {
+        let Some(directory) = find_import_directory(bytes) else {
             return Ok(0);
         };
-        if import_size == 0 {
-            return Ok(0);
+        let (entries, error) = parse_imports(bytes, directory, |rva| pe.rva_to_file_offset(rva));
+        if let Some(error) = error {
+            return Err(ImportError::Table(error));
         }
 
-        let mut desc_file_off = pe
-            .rva_to_file_offset(import_rva)
-            .ok_or(ImportError::DirectoryOutOfBounds { rva: import_rva })?;
-
-        let mut bound_count = 0;
-
-        while desc_file_off + 20 <= bytes.len() {
-            let oft =
-                u32::from_le_bytes(bytes[desc_file_off..desc_file_off + 4].try_into().unwrap());
-            let name_rva = u32::from_le_bytes(
-                bytes[desc_file_off + 12..desc_file_off + 16]
-                    .try_into()
-                    .unwrap(),
-            );
-            let ft = u32::from_le_bytes(
-                bytes[desc_file_off + 16..desc_file_off + 20]
-                    .try_into()
-                    .unwrap(),
-            );
-
-            if oft == 0 && name_rva == 0 && ft == 0 {
-                break;
-            }
-            desc_file_off += 20;
-
-            let mod_name = if let Some(no) = pe.rva_to_file_offset(name_rva) {
-                let mut end = no;
-                while end < bytes.len() && bytes[end] != 0 {
-                    end += 1;
-                }
-                String::from_utf8_lossy(&bytes[no..end]).into_owned()
-            } else {
-                "UNKNOWN.dll".to_string()
+        // Resolve everything first: a refused image must leave memory unbound.
+        let mut slots = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Some(index) = self.index(&entry.module, &entry.name) else {
+                return Err(ImportError::UnresolvedImport {
+                    module: entry.module,
+                    symbol: entry.name.to_string(),
+                });
             };
-
-            let thunk_rva = if oft != 0 { oft } else { ft };
-            let iat_base_rva = ft;
-
-            let Some(mut thunk_off) = pe.rva_to_file_offset(thunk_rva) else {
-                continue;
-            };
-
-            let mut idx = 0u32;
-            while thunk_off + 8 <= bytes.len() {
-                let val = u64::from_le_bytes(bytes[thunk_off..thunk_off + 8].try_into().unwrap());
-                if val == 0 {
-                    break;
-                }
-                thunk_off += 8;
-                let iat_rva = iat_base_rva + idx * 8;
-                idx += 1;
-
-                let sym_name = if (val & (1 << 63)) != 0 {
-                    format!("Ordinal#{}", val & 0xFFFF)
-                } else {
-                    let hint_rva = (val & 0x7FFF_FFFF) as u32;
-                    if let Some(ho) = pe.rva_to_file_offset(hint_rva) {
-                        let str_start = ho + 2;
-                        let mut str_end = str_start;
-                        while str_end < bytes.len() && bytes[str_end] != 0 {
-                            str_end += 1;
-                        }
-                        String::from_utf8_lossy(&bytes[str_start..str_end]).into_owned()
-                    } else {
-                        "UNKNOWN_SYM".to_string()
-                    }
-                };
-
-                let Some(service_idx) = self.service_index(&mod_name, &sym_name) else {
-                    return Err(ImportError::UnresolvedImport {
-                        module: mod_name,
-                        symbol: sym_name,
-                    });
-                };
-
-                // Assign a deterministic synthetic trampoline VA
-                let trampoline_va = trampoline_address(service_idx);
-                self.trampoline_to_service
-                    .insert(trampoline_va, service_idx);
-
-                // Write trampoline_va into guest IAT entry at (loaded_base + iat_rva)
-                let iat_va = loaded_base + iat_rva as u64;
-                memory.write_u64_bypass(iat_va, trampoline_va)?;
-                bound_count += 1;
-            }
+            let address = loaded_base
+                .checked_add(u64::from(entry.iat_rva))
+                .ok_or(MemoryError::Overflow)?;
+            // The loader writes slots regardless of page permissions, so only
+            // mapping is checked here.
+            memory.read_u64_bypass(address)?;
+            slots.push((address, index));
         }
-
-        Ok(bound_count)
+        for &(address, index) in &slots {
+            let trampoline = IMPORT_TRAMPOLINE_BASE_VA + (index as u64) * IMPORT_TRAMPOLINE_STRIDE;
+            memory.write_u64_bypass(address, trampoline)?;
+            self.trampoline_to_service.insert(trampoline, index);
+        }
+        Ok(slots.len())
     }
 
     /// Check if target RIP matches a synthetic service trampoline.
@@ -413,62 +468,60 @@ impl ImportRegistry {
 
         let descriptor = &self.handlers[service_idx];
 
-        // 1. Extract arguments according to Win64 convention
-        let args = Win64Args::new(cpu);
-
-        // 2. Execute service handler
-        let ret_val = (descriptor.handler)(&args, cpu, memory)?;
-
-        // 3. Store return value into RAX
-        cpu.set(Register::Rax, ret_val);
-
-        // 4. Emulate RET instruction: pop return address from guest stack into RIP
+        // Read the return address first, so a call that cannot return has no effect.
         let rsp = cpu.get(Register::Rsp);
         let ret_addr = memory.read_u64(rsp).map_err(ExitReason::MemoryFault)?;
-        cpu.set(Register::Rsp, rsp + 8);
-        cpu.rip = ret_addr;
+        let after = rsp
+            .checked_add(8)
+            .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
 
+        let args = Win64Args::new(cpu);
+        let preserved = Nonvolatile::of(cpu);
+        let value = (descriptor.handler)(&args, cpu, memory)?;
+        if Nonvolatile::of(cpu) != preserved {
+            return Err(ExitReason::ServiceAbiViolation);
+        }
+
+        cpu.set(Register::Rax, value);
+        cpu.set(Register::Rsp, after);
+        cpu.rip = ret_addr;
         Ok(())
     }
 }
 
-fn find_import_directory(bytes: &[u8]) -> Result<Option<(u32, u32)>, ImportError> {
-    if bytes.len() < 0x40 {
-        return Ok(None);
-    }
-    let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
-    let opt_offset = e_lfanew + 24;
-    let coff_offset = e_lfanew + 4;
-    if bytes.len() < coff_offset + 18 {
-        return Ok(None);
-    }
-    let size_of_opt = u16::from_le_bytes(
-        bytes[coff_offset + 16..coff_offset + 18]
-            .try_into()
-            .unwrap(),
-    ) as usize;
+/// Registers a Win64 callee must preserve (Microsoft x64 calling convention).
+#[derive(PartialEq, Eq)]
+struct Nonvolatile {
+    gpr: [u64; 9],
+    xmm: [u128; 10],
+}
 
-    // Import directory is directory index 1 (offset 112 + 1 * 8 = 120 in Optional Header)
-    if size_of_opt < 128 || bytes.len() < opt_offset + 128 {
-        return Ok(None);
+impl Nonvolatile {
+    fn of(cpu: &CpuState) -> Self {
+        use Register::{R12, R13, R14, R15, Rbp, Rbx, Rdi, Rsi, Rsp};
+        let mut xmm = [0; 10];
+        xmm.copy_from_slice(&cpu.xmm[6..]);
+        Self {
+            gpr: [Rbx, Rbp, Rdi, Rsi, Rsp, R12, R13, R14, R15].map(|register| cpu.get(register)),
+            xmm,
+        }
     }
+}
 
-    let import_rva = u32::from_le_bytes(
-        bytes[opt_offset + 120..opt_offset + 124]
-            .try_into()
-            .unwrap(),
-    );
-    let import_size = u32::from_le_bytes(
-        bytes[opt_offset + 124..opt_offset + 128]
-            .try_into()
-            .unwrap(),
-    );
-
-    if import_rva == 0 || import_size == 0 {
-        Ok(None)
-    } else {
-        Ok(Some((import_rva, import_size)))
+/// RVA of the import directory, if the image has one.
+pub(crate) fn find_import_directory(bytes: &[u8]) -> Option<u32> {
+    let field = |offset: usize, len: usize| bytes.get(offset..offset.checked_add(len)?);
+    let u32_at = |offset| Some(u32::from_le_bytes(field(offset, 4)?.try_into().ok()?));
+    let coff = (u32_at(0x3C)? as usize).checked_add(4)?;
+    let optional = coff.checked_add(20)?;
+    let optional_len = u16::from_le_bytes(field(coff + 16, 2)?.try_into().ok()?);
+    // The import directory is data directory 1, at offset 120.
+    if optional_len < 128 {
+        return None;
     }
+    let rva = u32_at(optional.checked_add(120)?)?;
+    let size = u32_at(optional.checked_add(124)?)?;
+    (rva != 0 && size != 0).then_some(rva)
 }
 
 #[cfg(test)]
