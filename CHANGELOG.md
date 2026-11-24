@@ -14,6 +14,7 @@ remains unsupported.
 - Added complete gfx1030 instruction metadata generated from AMD's public RDNA 2 XML: 1,465 base forms across 21 encoding families with fields, operands, flags and allowed extension words. A committed, normalised snapshot lets `crates/isa/generate_rdna2_meta.py --check` verify the generated table offline; CI runs it.
 - Added `xenora_isa::meta::identify`, which finds any gfx1030 instruction's form and exact length, including literal, SDWA, DPP and NSA words, and rejects truncated, unassigned and disallowed-extension encodings. It agrees with every LLVM-assembled fixture and with LLVM 23.1.6 on a probe set covering each family and extension word. Identification does not make an instruction executable: 25 forms have semantic decoding.
 - Added `xenora shaders coverage [--json]` and `xenora shaders inspect <file>` for per-family coverage and stream listings that separate decoding failures from unsupported semantics.
+- Added CPU block decoders for BC2, BC3, BC4 and BC5 (UNORM and SNORM) in `xenora-texture`, with tests whose expected texels were derived by hand from the Microsoft and Khronos block-compression specifications. Interpolated values truncate toward zero, as the existing BC1 decoder does; GPU upload and sampling of these formats are not implemented yet.
 - Added `dbt::tests::sib_store_executes_through_the_native_dbt`, an independent DBT execution
   test that runs the SIB store form `mov [rsp + 0x20], rbx` through the native ARM64 DBT and
   verifies the value lands in guest memory.

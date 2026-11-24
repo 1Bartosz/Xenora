@@ -7,8 +7,12 @@
 
 #![forbid(unsafe_code)]
 
+mod bc;
 pub mod sampler;
 mod upload;
+pub use bc::{
+    decode_bc2, decode_bc3, decode_bc4_snorm, decode_bc4_unorm, decode_bc5_snorm, decode_bc5_unorm,
+};
 pub use sampler::{AddressMode, FilterMode, SamplerDesc, SamplerError, TextureMetadata};
 pub use upload::{Bc1Subresource, Bc1Upload, Bc1UploadDesc};
 
