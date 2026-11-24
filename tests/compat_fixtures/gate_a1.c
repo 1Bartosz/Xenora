@@ -216,6 +216,8 @@ static u32 run(void) {
     memset(scratch, '.', sizeof scratch);
     memcpy(scratch, line, 7);
     CHECK(memcmp(scratch, "gate-a1.", 8) == 0 && scratch[31] == '.');
+    // Unequal blocks, in both orders: a memcmp that always says "equal" fails here.
+    CHECK(memcmp(scratch, "gate-a2.", 8) < 0 && memcmp("gate-b", scratch, 6) > 0);
 
     // Errors: a file that does not exist and an allocation that cannot succeed.
     static const wchar none[] = {'C', ':', '\\', 'n', 'o', 'n', 'e', '.', 'b', 'i', 'n', 0};
@@ -243,6 +245,14 @@ static u32 run(void) {
     CHECK(copy != 0);
     CHECK(ReadFile(file, copy, bytes, &moved, 0) && moved == bytes);
     CHECK(memcmp(copy, records, bytes) == 0);
+    // The same comparison without memcmp, and a one-bit difference in the
+    // last byte that memcmp has to see.
+    u32 same = 0;
+    for (u32 i = 0; i < bytes; i++) same += copy[i] == ((const u8 *)records)[i];
+    CHECK(same == bytes);
+    copy[bytes - 1] ^= 1;
+    CHECK(memcmp(copy, records, bytes) != 0);
+    copy[bytes - 1] ^= 1;
     CHECK(CloseHandle(file));
 
     // Memory the host inspects afterwards: one block freed, one kept.

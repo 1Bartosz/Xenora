@@ -38,12 +38,45 @@ fi
 for tool in "$clang" "$linker"; do
     [ -x "$tool" ] || { echo "missing tool: $tool" >&2; exit 1; }
 done
+# AGENTS.md: host tools and what they load must be ARM64, checked with file,
+# lipo -archs and otool -L. An @rpath library is looked up through the tool's
+# own run paths. A library that is still not a file on disk is in the system's
+# shared cache, and is listed only.
+native=
 if [ "$(uname -s)" = Darwin ]; then
     for tool in "$clang" "$linker"; do
+        case "$(file -bL "$tool")" in
+            *arm64*) ;;
+            *) echo "ARM64 tool required (file): $tool" >&2; exit 1 ;;
+        esac
         case "$(lipo -archs "$tool")" in
             *arm64*) ;;
-            *) echo "ARM64 tool required: $tool" >&2; exit 1 ;;
+            *) echo "ARM64 tool required (lipo): $tool" >&2; exit 1 ;;
         esac
+        here=$(dirname "$tool")
+        runpaths=$(otool -l "$tool" | awk '/LC_RPATH/ { getline; getline; print $2 }' |
+            sed "s|@loader_path|$here|; s|@executable_path|$here|")
+        for library in $(otool -L "$tool" | awk 'NR > 1 { print $1 }'); do
+            case "$library" in
+                @rpath/*)
+                    for runpath in $runpaths; do
+                        if [ -f "$runpath/${library#@rpath/}" ]; then
+                            library="$runpath/${library#@rpath/}"
+                            break
+                        fi
+                    done ;;
+            esac
+            [ -f "$library" ] || continue
+            case "$(lipo -archs "$library")" in
+                *arm64*) ;;
+                *) echo "ARM64 library required by $tool: $library" >&2; exit 1 ;;
+            esac
+            native="$native  $library: $(lipo -archs "$library")
+"
+        done
+        native="$native$(file -bL "$tool")
+$(otool -L "$tool")
+"
     done
 fi
 # $flavor is empty or two words on purpose.
@@ -56,6 +89,8 @@ cd "$out"
     "$clang" --version | head -1
     link --version | head -1
 } > toolchain.txt
+# What the native checks above looked at.
+printf '%s' "$native" > toolchain-native.txt
 
 cat > kernel32.def <<'DEF'
 LIBRARY kernel32.dll

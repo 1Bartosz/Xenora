@@ -250,13 +250,26 @@ impl ServicesState {
         *self.exit_status.lock().expect("guest exit status")
     }
 
-    /// How many guest handles are open.
+    /// How many guest handles are open: kernel objects, sockets and task
+    /// queues, which are kept in three separate tables.
     pub fn open_handle_count(&self) -> usize {
-        self.objects
+        let objects = self
+            .objects
             .lock()
             .expect("guest object state")
             .handles
-            .len()
+            .len();
+        let sockets = self
+            .winsock
+            .lock()
+            .expect("guest Winsock state")
+            .open_count();
+        let queues = self
+            .gdk_queues
+            .lock()
+            .expect("GDK queue handle table")
+            .open_count();
+        objects + sockets + queues
     }
 
     /// A file on the synthetic `C:` drive, named as the guest names it.
@@ -274,20 +287,31 @@ impl ServicesState {
     /// End the guest process. The first exit decides the status; a later one
     /// reports it again and changes nothing.
     ///
-    /// Every guest handle is closed. Files stay on the synthetic drive, guest
-    /// memory stays mapped for the host to inspect, and `atexit` functions are
-    /// not run.
+    /// Every guest handle is closed: kernel objects, sockets and task queues.
+    /// Files stay on the synthetic drive, guest memory stays mapped for the
+    /// host to inspect, and `atexit` functions are not run.
     fn exit_process(&self, status: u32) -> u32 {
         let mut exited = self.exit_status.lock().expect("guest exit status");
         if let Some(first) = *exited {
             return first;
         }
         *exited = Some(status);
+        // The three table locks are taken one at a time, never nested.
         self.objects
             .lock()
             .expect("guest object state")
             .handles
             .clear();
+        self.winsock
+            .lock()
+            .expect("guest Winsock state")
+            .close_all();
+        self.winsock_changed.notify_all();
+        self.gdk_queues
+            .lock()
+            .expect("GDK queue handle table")
+            .close_all();
+        self.gdk_queue_changed.notify_all();
         status
     }
 

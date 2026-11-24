@@ -97,8 +97,14 @@ returns its status) and `GATE_MISSING` (an import no service provides).
 Tools. `CLANG` defaults to Homebrew LLVM when it is installed and otherwise to
 the `clang` on `PATH`. `LLD_LINK` defaults to Homebrew `lld` when it is
 installed and otherwise to the `rust-lld` inside the active Rust toolchain,
-which is an LLD. On macOS the script requires both to be ARM64. The script
-writes the versions it used to `toolchain.txt`, and the test prints them.
+which is an LLD. On macOS the script requires both, and every library they
+load that is a file on disk, to be ARM64: it checks each tool with `file` and
+`lipo -archs`, and each library `otool -L` lists with `lipo -archs`, following
+the tool's own run paths. The script writes the versions it used to
+`toolchain.txt`, which the test prints, and what the native checks looked at to
+`toolchain-native.txt`. The test builds into a directory of its own for each
+test process under the Cargo target directory, so two runs that share a target
+directory do not overwrite each other's files; `cargo clean` removes them.
 
 Provenance. The source, the name lists and the script were written for Xenora
 and are GPL-3.0-or-later. Nothing from a Windows SDK, a C runtime or another

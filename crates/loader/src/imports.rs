@@ -199,6 +199,12 @@ const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRID
 /// Return address placed under a process entry point. Reaching it ends the
 /// process with EAX as its exit status.
 pub const ENTRY_RETURN: u64 = CALLBACK_RETURN - IMPORT_TRAMPOLINE_STRIDE;
+/// The 4 KiB page that holds [`ENTRY_RETURN`] and the callback return
+/// address. The engine intercepts those two addresses before it executes
+/// anything there, so startup reserves the page: guest code mapped over it
+/// would never run.
+pub const RETURN_SENTINEL_PAGE: u64 = ENTRY_RETURN & !0xFFF;
+const _: () = assert!(CALLBACK_RETURN & !0xFFF == RETURN_SENTINEL_PAGE);
 const MAX_CALLBACK_DEPTH: usize = 32;
 
 pub(crate) struct GuestCallback {

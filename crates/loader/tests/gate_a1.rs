@@ -27,7 +27,7 @@ const RECORDS: u32 = 64;
 /// Checks the program counts on a complete run, and the one that the
 /// `GATE_BREAK` variant fails: three for allocation, 63 for the sort order,
 /// then the Fibonacci check.
-const CHECKS: u32 = 89;
+const CHECKS: u32 = 92;
 const BROKEN_CHECK: u32 = 67;
 /// Twelve from ucrtbase.dll and eight from kernel32.dll.
 const IMPORTS: usize = 20;
@@ -38,7 +38,11 @@ const RELOCATIONS: usize = 6;
 fn built() -> &'static Path {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
     OUT.get_or_init(|| {
-        let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("gate-a1");
+        // One directory per test process: two `cargo test` runs that share a
+        // target directory must not write and read the same files.
+        let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("gate-a1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
         let script = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../tests/compat_fixtures/build-gate-a1.sh"
