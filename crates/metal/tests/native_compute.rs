@@ -1,5 +1,9 @@
 use xenora_metal::NativeCompute;
 
+#[path = "native/blend.rs"]
+mod blend;
+#[path = "support/blend_cases.rs"]
+mod blend_cases;
 #[path = "native/depth.rs"]
 mod depth;
 #[path = "support/depth_cases.rs"]
