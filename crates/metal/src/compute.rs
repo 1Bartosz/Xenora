@@ -104,6 +104,17 @@ pub struct MetalError {
 }
 
 impl MetalError {
+    /// Operation name of the error returned when the device lacks BC texture
+    /// compression, which is a hardware capability, not an implementation fault.
+    pub const BC_UNAVAILABLE: &'static str = "supportsBCTextureCompression";
+
+    /// Whether the device lacks a required capability, as opposed to a failure
+    /// in Xenora's validation or Metal execution.
+    #[must_use]
+    pub fn is_capability_unavailable(&self) -> bool {
+        self.operation == Self::BC_UNAVAILABLE
+    }
+
     pub(crate) fn new(operation: &'static str, detail: impl Into<String>) -> Self {
         Self {
             operation,
@@ -387,7 +398,7 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             .ok_or_else(|| MetalError::new("texture bounds", "expected 1..=4096 texels"))?;
         if !self.device.supportsBCTextureCompression() {
             return Err(MetalError::new(
-                "supportsBCTextureCompression",
+                MetalError::BC_UNAVAILABLE,
                 format!("{name} is unavailable"),
             ));
         }

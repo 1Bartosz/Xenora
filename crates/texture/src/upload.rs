@@ -407,15 +407,46 @@ mod tests {
                 mips: 4,
                 ..ALPHA_DESC
             },
+            BcAlphaUploadDesc {
+                width: 0,
+                ..ALPHA_DESC
+            },
+            BcAlphaUploadDesc {
+                height: 0,
+                ..ALPHA_DESC
+            },
+            BcAlphaUploadDesc {
+                layers: 0,
+                ..ALPHA_DESC
+            },
+            BcAlphaUploadDesc {
+                mips: 0,
+                ..ALPHA_DESC
+            },
         ] {
             assert_eq!(
                 BcAlphaUpload::new(&bytes, desc).unwrap_err(),
                 TextureError::InvalidLayout
             );
         }
+        // Short, oversized, and one block too few or too many for the layout.
+        let long = [0; 449];
+        for bytes in [&bytes[..447], &long[..], &bytes[..432], &[0; 464][..]] {
+            assert_eq!(
+                BcAlphaUpload::new(bytes, ALPHA_DESC).unwrap_err(),
+                TextureError::InvalidByteLength
+            );
+        }
         assert_eq!(
-            BcAlphaUpload::new(&bytes[..447], ALPHA_DESC).unwrap_err(),
-            TextureError::InvalidByteLength
+            BcAlphaUpload::new(
+                &bytes,
+                BcAlphaUploadDesc {
+                    width: usize::MAX,
+                    ..ALPHA_DESC
+                }
+            )
+            .unwrap_err(),
+            TextureError::SizeOverflow
         );
     }
 
