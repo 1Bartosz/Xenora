@@ -137,3 +137,25 @@ and read back from nine distinct generated kernels). Its 348 rejected programs
 are checked on both CPU interpreters and against the compiler, which rejects
 them before any Metal dispatch. `fixtures/rdna2/scalar-compare.s` (LLVM-assembled, expected input ^
 0x00000d5b) records every compare's SCC through an `s_cbranch_scc0` per form.
+
+## SOP1 unary forms
+
+Eleven 32-bit SOP1 forms are declared in the registry (operand rule
+`sop1_sgpr`): `s_not_b32`, `s_brev_b32`, `s_bcnt0_i32_b32`, `s_bcnt1_i32_b32`,
+`s_ff0_i32_b32`, `s_ff1_i32_b32`, `s_flbit_i32_b32`, `s_flbit_i32`,
+`s_sext_i32_i8`, `s_sext_i32_i16` and `s_abs_i32`. Following the guide (section
+12.3): a find-first or find-last search that finds nothing returns -1
+(0xffffffff); `s_flbit_i32` returns -1 for both 0 and -1; sign extension reads
+S0[7:0] or S0[15:0]; `s_abs_i32` of 0x80000000 is 0x80000000. Only NOT, BCNT0,
+BCNT1 and ABS write SCC, as D != 0; the other seven leave it unchanged.
+`s_mov_b32` stays hand-written, because it also accepts EXEC and VCC halves as
+destinations. As for SOP2, destinations s0-s7 are refused when a fixture runs
+(they hold its buffer descriptors), and float inline constants are rejected.
+
+`tests/validation/tests/sop1_unary.rs` checks 4,126 cases, with expected values
+derived from the guide (including its worked examples) separately from the
+registry, on both CPU interpreters and, through the translator, on native
+Metal; its 231 rejected programs are checked on the CPU interpreters and the
+compiler. `fixtures/rdna2/scalar-unary.s` (LLVM-assembled, expected input ^
+0x0f0080f5) chains all eleven and shows SCC surviving the forms that do not
+write it.
