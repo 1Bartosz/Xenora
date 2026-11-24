@@ -32,56 +32,153 @@ pub struct Bc1Subresource<'a> {
 
 impl<'a> Bc1Upload<'a> {
     pub fn new(bytes: &'a [u8], desc: Bc1UploadDesc) -> Result<Self, TextureError> {
-        let max_mips = usize::BITS - desc.width.max(desc.height).leading_zeros();
-        if desc.format != 1
-            || desc.usage != 1
-            || desc.width == 0
-            || desc.height == 0
-            || desc.layers == 0
-            || desc.mips == 0
-            || desc.mips > max_mips
-        {
+        if desc.format != 1 || desc.usage != 1 {
             return Err(TextureError::InvalidLayout);
         }
-        let (blocks_x, blocks_y) = mip_blocks(desc.width, desc.height, 0);
-        let tight_row = blocks_x
-            .checked_mul(BLOCK_BYTES)
-            .ok_or(TextureError::SizeOverflow)?;
-        if desc.row_pitch < tight_row || !desc.row_pitch.is_multiple_of(BLOCK_BYTES) {
-            return Err(TextureError::InvalidLayout);
-        }
-        let minimum_slice = desc
-            .row_pitch
-            .checked_mul(blocks_y)
-            .ok_or(TextureError::SizeOverflow)?;
-        if desc.slice_pitch < minimum_slice || !desc.slice_pitch.is_multiple_of(BLOCK_BYTES) {
-            return Err(TextureError::InvalidLayout);
-        }
-        let size = desc
-            .slice_pitch
-            .checked_mul(desc.mips as usize)
-            .and_then(|size| size.checked_mul(desc.layers))
-            .ok_or(TextureError::SizeOverflow)?;
-        if bytes.len() != size {
-            return Err(TextureError::InvalidByteLength);
-        }
+        Self::layout(desc).validate(bytes.len(), BLOCK_BYTES)?;
         Ok(Self { bytes, desc })
     }
 
     pub fn subresource(&self, layer: usize, mip: u32) -> Result<Bc1Subresource<'a>, TextureError> {
-        if layer >= self.desc.layers || mip >= self.desc.mips {
+        Self::layout(self.desc).subresource(self.bytes, layer, mip)
+    }
+
+    fn layout(desc: Bc1UploadDesc) -> PitchedLayout {
+        PitchedLayout {
+            width: desc.width,
+            height: desc.height,
+            mips: desc.mips,
+            layers: desc.layers,
+            row_pitch: desc.row_pitch,
+            slice_pitch: desc.slice_pitch,
+        }
+    }
+}
+
+/// A block-compressed format whose 16-byte block holds an alpha half followed
+/// by a BC1-style colour half.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BcAlphaFormat {
+    /// Explicit 4-bit alpha per texel.
+    Bc2,
+    /// Interpolated alpha from two 8-bit endpoints and 3-bit indices.
+    Bc3,
+}
+
+/// A layer-major BC2 or BC3 upload with the same pitch rules as
+/// [`Bc1UploadDesc`], measured in 16-byte blocks.
+#[derive(Clone, Copy, Debug)]
+pub struct BcAlphaUploadDesc {
+    pub width: usize,
+    pub height: usize,
+    pub mips: u32,
+    pub layers: usize,
+    pub format: BcAlphaFormat,
+    pub row_pitch: usize,
+    pub slice_pitch: usize,
+}
+
+#[derive(Debug)]
+pub struct BcAlphaUpload<'a> {
+    bytes: &'a [u8],
+    desc: BcAlphaUploadDesc,
+}
+
+impl<'a> BcAlphaUpload<'a> {
+    /// Size of one BC2 or BC3 block in bytes.
+    pub const BLOCK_BYTES: usize = 16;
+
+    pub fn new(bytes: &'a [u8], desc: BcAlphaUploadDesc) -> Result<Self, TextureError> {
+        Self::layout(desc).validate(bytes.len(), Self::BLOCK_BYTES)?;
+        Ok(Self { bytes, desc })
+    }
+
+    pub fn format(&self) -> BcAlphaFormat {
+        self.desc.format
+    }
+
+    /// Selects one level; the returned rows hold 16-byte blocks.
+    pub fn subresource(&self, layer: usize, mip: u32) -> Result<Bc1Subresource<'a>, TextureError> {
+        Self::layout(self.desc).subresource(self.bytes, layer, mip)
+    }
+
+    fn layout(desc: BcAlphaUploadDesc) -> PitchedLayout {
+        PitchedLayout {
+            width: desc.width,
+            height: desc.height,
+            mips: desc.mips,
+            layers: desc.layers,
+            row_pitch: desc.row_pitch,
+            slice_pitch: desc.slice_pitch,
+        }
+    }
+}
+
+/// Format-independent pitch rules shared by the pitched uploads.
+struct PitchedLayout {
+    width: usize,
+    height: usize,
+    mips: u32,
+    layers: usize,
+    row_pitch: usize,
+    slice_pitch: usize,
+}
+
+impl PitchedLayout {
+    fn validate(&self, len: usize, block_bytes: usize) -> Result<(), TextureError> {
+        let max_mips = usize::BITS - self.width.max(self.height).leading_zeros();
+        if self.width == 0
+            || self.height == 0
+            || self.layers == 0
+            || self.mips == 0
+            || self.mips > max_mips
+        {
+            return Err(TextureError::InvalidLayout);
+        }
+        let (blocks_x, blocks_y) = mip_blocks(self.width, self.height, 0);
+        let tight_row = blocks_x
+            .checked_mul(block_bytes)
+            .ok_or(TextureError::SizeOverflow)?;
+        if self.row_pitch < tight_row || !self.row_pitch.is_multiple_of(block_bytes) {
+            return Err(TextureError::InvalidLayout);
+        }
+        let minimum_slice = self
+            .row_pitch
+            .checked_mul(blocks_y)
+            .ok_or(TextureError::SizeOverflow)?;
+        if self.slice_pitch < minimum_slice || !self.slice_pitch.is_multiple_of(block_bytes) {
+            return Err(TextureError::InvalidLayout);
+        }
+        let size = self
+            .slice_pitch
+            .checked_mul(self.mips as usize)
+            .and_then(|size| size.checked_mul(self.layers))
+            .ok_or(TextureError::SizeOverflow)?;
+        if len != size {
+            return Err(TextureError::InvalidByteLength);
+        }
+        Ok(())
+    }
+
+    fn subresource<'a>(
+        &self,
+        bytes: &'a [u8],
+        layer: usize,
+        mip: u32,
+    ) -> Result<Bc1Subresource<'a>, TextureError> {
+        if layer >= self.layers || mip >= self.mips {
             return Err(TextureError::OutOfBounds);
         }
         // Construction proved that the complete array fits in the source span.
-        let offset = (layer * self.desc.mips as usize + mip as usize) * self.desc.slice_pitch;
-        let width = (self.desc.width >> mip).max(1);
-        let height = (self.desc.height >> mip).max(1);
+        let offset = (layer * self.mips as usize + mip as usize) * self.slice_pitch;
+        let width = (self.width >> mip).max(1);
+        let height = (self.height >> mip).max(1);
         let rows = height.div_ceil(4);
         Ok(Bc1Subresource {
-            bytes: &self.bytes[offset..offset + rows * self.desc.row_pitch],
+            bytes: &bytes[offset..offset + rows * self.row_pitch],
             width,
             height,
-            row_pitch: self.desc.row_pitch,
+            row_pitch: self.row_pitch,
         })
     }
 }
@@ -181,5 +278,78 @@ mod tests {
                 TextureError::SizeOverflow
             );
         }
+    }
+
+    const ALPHA_DESC: BcAlphaUploadDesc = BcAlphaUploadDesc {
+        width: 5,
+        height: 5,
+        mips: 2,
+        layers: 2,
+        format: BcAlphaFormat::Bc3,
+        row_pitch: 48,
+        slice_pitch: 112,
+    };
+
+    #[test]
+    fn selects_bc_alpha_subresources_in_sixteen_byte_blocks() {
+        let mut bytes = [0; 448];
+        // Layer 1 starts at 224; its base row 1, block 1 is at 224 + 48 + 16.
+        bytes[288..304].fill(0x5c);
+        bytes[336] = 0xa7; // Layer 1, mip 1, block 0.
+        let upload = BcAlphaUpload::new(&bytes, ALPHA_DESC).unwrap();
+        assert_eq!(upload.format(), BcAlphaFormat::Bc3);
+        let base = upload.subresource(1, 0).unwrap();
+        assert_eq!((base.width, base.height, base.row_pitch), (5, 5, 48));
+        assert_eq!(base.bytes.len(), 96);
+        assert_eq!(base.bytes[64..80], [0x5c; 16]);
+        let small = upload.subresource(1, 1).unwrap();
+        assert_eq!((small.width, small.height, small.bytes.len()), (2, 2, 48));
+        assert_eq!(small.bytes[0], 0xa7);
+        assert_eq!(
+            upload.subresource(2, 0).unwrap_err(),
+            TextureError::OutOfBounds
+        );
+        assert_eq!(
+            upload.subresource(0, 2).unwrap_err(),
+            TextureError::OutOfBounds
+        );
+    }
+
+    #[test]
+    fn rejects_bc1_pitches_for_sixteen_byte_blocks() {
+        let bytes = [0; 448];
+        // Each pitch is a valid BC1 multiple of 8 but not of 16, or is
+        // shorter than two 16-byte blocks.
+        for desc in [
+            BcAlphaUploadDesc {
+                row_pitch: 24,
+                ..ALPHA_DESC
+            },
+            BcAlphaUploadDesc {
+                row_pitch: 40,
+                ..ALPHA_DESC
+            },
+            BcAlphaUploadDesc {
+                slice_pitch: 104,
+                ..ALPHA_DESC
+            },
+            BcAlphaUploadDesc {
+                slice_pitch: 80,
+                ..ALPHA_DESC
+            },
+            BcAlphaUploadDesc {
+                mips: 4,
+                ..ALPHA_DESC
+            },
+        ] {
+            assert_eq!(
+                BcAlphaUpload::new(&bytes, desc).unwrap_err(),
+                TextureError::InvalidLayout
+            );
+        }
+        assert_eq!(
+            BcAlphaUpload::new(&bytes[..447], ALPHA_DESC).unwrap_err(),
+            TextureError::InvalidByteLength
+        );
     }
 }
