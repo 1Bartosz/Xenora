@@ -12,6 +12,39 @@ use xenora_isa::{
     V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 
+use xenora_isa::meta::EncodingFamily;
+
+/// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
+/// operand combination. Operand restrictions are listed in docs/status.toml;
+/// every other form in [`xenora_isa::meta::FORMS`] is rejected as unsupported.
+pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 25] = [
+    ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
+    ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
+    ("EXP", EncodingFamily::Exp),
+    ("IMAGE_SAMPLE_LZ", EncodingFamily::Mimg),
+    ("S_BRANCH", EncodingFamily::Sopp),
+    ("S_CBRANCH_EXECZ", EncodingFamily::Sopp),
+    ("S_CBRANCH_SCC0", EncodingFamily::Sopp),
+    ("S_CBRANCH_VCCZ", EncodingFamily::Sopp),
+    ("S_CMP_EQ_U32", EncodingFamily::Sopc),
+    ("S_ENDPGM", EncodingFamily::Sopp),
+    ("S_MOV_B32", EncodingFamily::Sop1),
+    ("S_WAITCNT", EncodingFamily::Sopp),
+    ("S_WAITCNT_VSCNT", EncodingFamily::Sopk),
+    ("V_ADD_F32", EncodingFamily::Vop2),
+    ("V_ADD_NC_U32", EncodingFamily::Vop3),
+    ("V_AND_B32", EncodingFamily::Vop2),
+    ("V_ASHRREV_I32", EncodingFamily::Vop2),
+    ("V_INTERP_P1_F32", EncodingFamily::Vintrp),
+    ("V_INTERP_P2_F32", EncodingFamily::Vintrp),
+    ("V_LSHLREV_B32", EncodingFamily::Vop2),
+    ("V_LSHRREV_B32", EncodingFamily::Vop2),
+    ("V_MOV_B32", EncodingFamily::Vop1),
+    ("V_MUL_F32", EncodingFamily::Vop2),
+    ("V_OR_B32", EncodingFamily::Vop2),
+    ("V_XOR_B32", EncodingFamily::Vop2),
+];
+
 /// A successfully decoded instruction and its location in the input stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodedInstruction {

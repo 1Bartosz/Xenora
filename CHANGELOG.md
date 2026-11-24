@@ -9,6 +9,12 @@ exact revision and known limitations.
 Guest execution uses original, purpose-built test programs. Commercial Xbox game execution
 remains unsupported.
 
+### Added
+
+- Added complete gfx1030 instruction metadata generated from AMD's public RDNA 2 XML: 1,460 base forms across 21 encoding families with fields, operands, flags and allowed extension words. A committed, normalised snapshot lets `crates/isa/generate_rdna2_meta.py --check` verify the generated table offline; CI runs it.
+- Added `xenora_isa::meta::identify`, which finds any gfx1030 instruction's form and exact length, including literal, SDWA, DPP and NSA words, and rejects truncated, unassigned and disallowed-extension encodings. It agrees with every LLVM-assembled fixture. Identification does not make an instruction executable: 25 forms have semantic decoding.
+- Added `xenora shaders coverage [--json]` and `xenora shaders inspect <file>` for per-family coverage and stream listings that separate decoding failures from unsupported semantics.
+
 ## [X18] - Automated Import Compatibility Generation & Metadata Ingestion
 
 Guest execution uses original, purpose-built test programs. Commercial Xbox game execution
