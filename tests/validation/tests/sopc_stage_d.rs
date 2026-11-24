@@ -112,10 +112,10 @@ const INPUT: [u32; 2] = [0, u32::MAX];
 
 const COUNTS: [(&str, usize); 5] = [
     ("sopc domain", 12 * 8 * 8 * 2),
-    ("sopc inline integer", 12 * 81 * 2 * 2),
-    ("sopc literal", 12 * 5 * 2 * 2),
+    ("sopc inline integer", 12 * 81 * 3 * 2),
+    ("sopc literal", 12 * 5 * 3 * 2),
     ("sopc aliasing", 12 * 3),
-    ("sopc no sgpr write", 12 * 4),
+    ("sopc no sgpr write", 12 * 5),
 ];
 /// Per form: two literals, 5 special registers and 9 float inline constants in
 /// each slot.
@@ -183,7 +183,7 @@ fn cases() -> Vec<Case> {
         // before is the opposite of the result, so a missing write shows.
         for selector in 128..=208 {
             let value = inline_integer(selector);
-            for other in [0xffff_fff8, 0x20] {
+            for other in [0xffff_fff8, 0x20, value] {
                 for slot in 0..2 {
                     let (alu, scc) = if slot == 0 {
                         (sopc(op, selector, 8), expect(form, value, other))
@@ -204,7 +204,7 @@ fn cases() -> Vec<Case> {
         }
         // A literal dword after the SOPC word in each slot.
         for value in [0, 1, 0x7fff_ffff, 0x8000_0000, u32::MAX] {
-            for other in [0x7fff_ffff, 0x8000_0000] {
+            for other in [0x7fff_ffff, 0x8000_0000, value] {
                 for slot in 0..2 {
                     let (alu, scc) = if slot == 0 {
                         ([sopc(op, LITERAL, 8), value], expect(form, value, other))
@@ -230,7 +230,9 @@ fn cases() -> Vec<Case> {
         let (a, b) = (0x8000_0000, 1);
         let scc = expect(form, a, b);
         let init = [(8, a), (9, b), (11, 0x1111_1111)];
-        for (reg, value) in [(8, a), (9, b), (10, MARKER), (11, 0x1111_1111)] {
+        // s12 holds the SCC-setting AND result, 1 when SCC was set before.
+        let s12 = u32::from(!scc);
+        for (reg, value) in [(8, a), (9, b), (10, MARKER), (11, 0x1111_1111), (12, s12)] {
             let code = program(&init, !scc, &[sopc(op, 8, 9)], reg);
             let label = format!("s{reg} after s8 {a:#x}, s9 {b:#x}");
             cases.push(case(name, "sopc no sgpr write", label, code, (value, scc)));
@@ -239,13 +241,36 @@ fn cases() -> Vec<Case> {
     cases
 }
 
-/// Programs both interpreters must refuse at the SOPC word.
-fn rejections() -> Vec<(String, Vec<u8>)> {
+/// The SOPC word's byte offset in `program` with `init` SGPR moves: three
+/// header words, one 8-byte move per init pair and the marker, and the AND.
+fn alu_offset(init: usize) -> usize {
+    12 + 8 * (init + 1) + 4
+}
+
+/// Both interpreters must refuse `code` at the SOPC word, not later.
+fn assert_rejected_at_alu(label: &str, code: &[u8], init: usize) {
+    let offset = alu_offset(init);
+    match xenora_ref::execute(code, &INPUT) {
+        Ok(_) => panic!("reference accepted {label}"),
+        Err(error) => assert_eq!(error.offset, offset, "reference rejected {label} elsewhere"),
+    }
+    match independent_ref::execute(code, &INPUT) {
+        Ok(_) => panic!("independent accepted {label}"),
+        Err(error) => assert!(
+            error.starts_with(&format!("{offset:#x}:")),
+            "independent rejected {label} elsewhere: {error}"
+        ),
+    }
+}
+
+/// Programs both interpreters must refuse at the SOPC word, with the number
+/// of init pairs before it.
+fn rejections() -> Vec<(String, Vec<u8>, usize)> {
     let mut all = Vec::new();
     for (form, name) in FORMS {
         let op = form as u32;
         let code = program(&[], false, &[sopc(op, LITERAL, LITERAL), 1], 10);
-        all.push((format!("{name} two literals"), code));
+        all.push((format!("{name} two literals"), code, 0));
         // VCC_LO, VCC_HI, M0, EXEC_LO, EXEC_HI, and the float inline
         // constants 240-248 (0.5 .. 1/(2*pi)).
         for selector in [106, 107, 124, 126, 127].into_iter().chain(240..=248) {
@@ -256,7 +281,7 @@ fn rejections() -> Vec<(String, Vec<u8>)> {
                     sopc(op, 8, selector)
                 };
                 let code = program(&[(8, 1)], false, &[alu], 10);
-                all.push((format!("{name} source {selector} in src{slot}"), code));
+                all.push((format!("{name} source {selector} in src{slot}"), code, 1));
             }
         }
     }
@@ -335,15 +360,8 @@ fn stage_d_compares_match_the_guide_on_the_independent_interpreter() {
 fn unsupported_compare_operands_are_rejected() {
     let rejections = rejections();
     assert_eq!(rejections.len(), REJECTIONS);
-    for (label, code) in &rejections {
-        assert!(
-            reference(code, &INPUT).is_err(),
-            "reference accepted {label}"
-        );
-        assert!(
-            independent_ref::execute(code, &INPUT).is_err(),
-            "independent accepted {label}"
-        );
+    for (label, code, init) in &rejections {
+        assert_rejected_at_alu(label, code, *init);
     }
     eprintln!("sopc_stage_d: {} rejections", rejections.len());
 }
@@ -354,14 +372,7 @@ fn neighbouring_sopc_opcodes_stay_unsupported() {
     // 20-127 are not listed. Neither interpreter supports any of them.
     for op in 12..=127 {
         let code = program(&[(8, 1), (9, 2)], false, &[sopc(op, 8, 9)], 10);
-        assert!(
-            reference(&code, &INPUT).is_err(),
-            "reference accepted opcode {op}"
-        );
-        assert!(
-            independent_ref::execute(&code, &INPUT).is_err(),
-            "independent accepted opcode {op}"
-        );
+        assert_rejected_at_alu(&format!("opcode {op}"), &code, 2);
     }
 }
 
@@ -370,7 +381,7 @@ fn neighbouring_sopc_opcodes_stay_unsupported() {
 fn stage_d_compares_match_the_guide_on_native_metal() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
-    for (label, code) in rejections() {
+    for (label, code, _) in rejections() {
         assert!(
             compile(Architecture::Gfx1030, &code).is_err(),
             "compiler accepted {label}"
