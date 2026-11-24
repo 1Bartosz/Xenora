@@ -10,6 +10,7 @@ Guest execution uses original, purpose-built test programs. Commercial Xbox game
 remains unsupported.
 
 ### Added
+- Added a typed runtime service registry (`crates/loader/runtime/services.txt`) and `xenora-runtime-gen`, which generates Win64 argument and result adapters, static metadata and a coverage report. It covers 20 services: 16 existing kernel32 services moved to typed handlers, and `sqrt`, `sqrtf`, `fabs` and `fabsf` with arguments and results in XMM registers. Conflicting keys, unlisted API sets, unsupported types and behaviour without an existing test are rejected. See `docs/runtime/registry.md`.
 - Added SSE and SSE2 floating point in scalar and packed, binary32 and binary64 forms: add, subtract, multiply, divide, minimum, maximum, square root, compares, COMI/UCOMI and the conversions between formats and integers (parts of #127 and #128; awaiting independent review). `crates/loader/src/softfloat.rs` computes every result exactly and rounds once, with MXCSR rounding modes, sticky flags, denormals-are-zero, flush-to-zero, tininess after rounding and x86 NaN rules; host floating point is not used because ARM64 differs. An unmasked exception exits with `SimdException` and leaves everything but MXCSR unchanged. RCP, RSQRT and MMX conversions are rejected, and no floating-point form is translated to NEON yet.
 - Added 6,824 floating-point vectors computed with exact fractions by `tests/x86/float_reference.py`, run through both engines from registers and memory and through the packed forms, and more than two million round-to-nearest results compared with the host's IEEE 754 hardware.
 - Added XMM0-XMM15 and MXCSR to the guest CPU state, and the SSE and SSE2 moves and packed integer forms: aligned, unaligned, scalar, half and non-temporal moves, MOVD/MOVQ, sign-mask extraction, bitwise operations, wrapping and saturating arithmetic, compares, minimum, maximum, average, multiplies, PSADBW, packs, unpacks, shifts, shuffles, PINSRW, PEXTRW, LDMXCSR and STMXCSR (parts of #124, #125, #126 and #128; awaiting independent review). Operations with identical NEON lane semantics are translated to ARM64; the rest call the shared semantics. Misaligned 16-byte operands and reserved MXCSR bits raise a distinct general-protection exit. MXCSR is state only: floating-point arithmetic is not implemented.
@@ -89,12 +90,17 @@ remains unsupported.
 - Added Win64 TEB allocation and `gs_base` initialization to synthetic guest startup.
 
 ### Changed
+- Registering an import key twice is now an error instead of silently replacing the first service, ordinals are distinct from names, and API sets in the import generator match exactly instead of by prefix.
+- `GetSystemTimeAsFileTime` now stops the guest on a null pointer, as on any other invalid pointer, instead of setting the last error.
 
 - Simplified the claim rules in `AGENTS.md`, `CONTRIBUTING.md` and the pull request template at the maintainer's request: claim an issue by replying on it in plain words, never claim over an existing claim, and treat a claim as stale only after about one week without a pull request. The task-queue lease (`lease_hours` in `.github/agent-queue.json`) is now 168 hours to match, and `docs/coordination/agent-tasks.md` marks the queue commands as optional.
 - The static PE probe now marks x86-64 SIB memory addressing as DBT-supported, matching the
   native DBT.
 
 ### Fixed
+- Fixed the static probe panicking on a truncated import name (#270), and made the probe and the binder share one bounded import parser. Truncated, unterminated, empty or non-ASCII names, reserved bits and endless tables are reported by the probe and refused by the binder.
+- Fixed import binding writing some slots before finding an unresolved import, and service calls taking effect before an unreadable return address was noticed. A service that changes a nonvolatile register, including XMM6 to XMM15, now stops the guest (part of #201).
+- Fixed older import-generator templates that reported success for unimplemented wrappers, used a nonexistent exit reason, and read floating-point arguments from integer registers.
 - Fixed guest flags in the native DBT (#64, #70). They lived only in host NZCV, so they were lost across helper calls and block boundaries and register ADD, SUB and XOR set none. JB, JAE, JBE and JA used ARM carry polarity, which is inverted for subtraction. Flags are now stored in the guest state.
 - Fixed the static probe reporting support for forms an engine rejects, including NOP, TEST, most conditional branches and the FF group in the interpreter.
 - Fixed the native DBT's `SXTW` encoding, which set bit 3 of the source register and was right only for registers that already had it set; the previous test used such a register by chance.

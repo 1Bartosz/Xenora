@@ -9,12 +9,16 @@ pub mod arm64;
 pub mod cpu;
 pub mod dbt;
 pub mod graphics;
+pub mod import_table;
 pub mod imports;
 pub mod jit;
 pub mod memory;
 pub mod pe;
 pub mod probe;
 pub mod reloc;
+pub mod runtime;
+#[rustfmt::skip]
+pub mod runtime_table;
 pub mod services;
 pub mod softfloat;
 pub mod startup;

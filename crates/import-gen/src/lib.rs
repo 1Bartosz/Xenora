@@ -31,6 +31,7 @@ pub mod ingest;
 pub mod manifest;
 pub mod metadata;
 pub mod parse;
+pub mod typed;
 pub mod verify;
 
 pub use apiset::{get_api_sets_for_canonical, resolve_api_set_canonical};

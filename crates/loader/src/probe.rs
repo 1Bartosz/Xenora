@@ -11,6 +11,7 @@
 //! startup blockers.
 
 use crate::dbt::{is_native, is_translatable};
+use crate::import_table::{ImportTableError, parse_imports};
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::MemoryPermissions;
 use crate::pe::{IMAGE_FILE_MACHINE_AMD64, PE32_PLUS_MAGIC, ParsedPe, PeError, PeSection};
@@ -671,7 +672,10 @@ pub struct ProbeReport {
     pub parsed: ParsedPe,
     pub relocations: RelocationCensus,
     pub tls: TlsCensus,
+    /// Imports before the first malformed entry, if any.
     pub imports: Vec<ImportedSymbol>,
+    /// Why the import table could not be read to its end.
+    pub import_error: Option<ImportTableError>,
     pub instruction_records: Vec<InstructionRecord>,
     pub first_unsupported_dbt_insn: Option<InstructionRecord>,
 }
@@ -945,76 +949,33 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         &mut registry,
         Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),
     );
-    let mut imports = Vec::new();
-    if import_dir_rva != 0
-        && let Some(mut desc_off) = rva_to_offset(import_dir_rva)
-    {
-        while desc_off + 20 <= bytes.len() {
-            let oft = u32::from_le_bytes(bytes[desc_off..desc_off + 4].try_into().unwrap());
-            let name_rva =
-                u32::from_le_bytes(bytes[desc_off + 12..desc_off + 16].try_into().unwrap());
-            let ft = u32::from_le_bytes(bytes[desc_off + 16..desc_off + 20].try_into().unwrap());
-            if oft == 0 && name_rva == 0 && ft == 0 {
-                break;
+    let (entries, import_error) = if import_dir_rva == 0 {
+        (Vec::new(), None)
+    } else {
+        // Binding accepts only bytes backed by section data; match it exactly.
+        parse_imports(bytes, import_dir_rva, |rva| {
+            sections.iter().find_map(|section| {
+                let offset = rva.checked_sub(section.virtual_address)?;
+                (offset < section.raw_data_size)
+                    .then(|| (section.raw_data_ptr as usize).checked_add(offset as usize))?
+            })
+        })
+    };
+    let imports: Vec<ImportedSymbol> = entries
+        .into_iter()
+        .map(|entry| {
+            let binding = registry.resolve(&entry.module, &entry.name);
+            ImportedSymbol {
+                category: ProbeReport::categorize_dll(&entry.module),
+                dll: entry.module,
+                symbol: entry.name.to_string(),
+                iat_rva: entry.iat_rva,
+                is_supported: binding.is_some(),
+                service_status: binding.map(|service| service.status),
+                canonical_module: binding.map(|service| service.module.clone()),
             }
-            desc_off += 20;
-
-            let dll_name = if let Some(no) = rva_to_offset(name_rva) {
-                let mut end = no;
-                while end < bytes.len() && bytes[end] != 0 {
-                    end += 1;
-                }
-                String::from_utf8_lossy(&bytes[no..end]).into_owned()
-            } else {
-                "UNKNOWN.dll".to_string()
-            };
-
-            let category = ProbeReport::categorize_dll(&dll_name);
-            let thunk_rva = if oft != 0 { oft } else { ft };
-            let iat_base_rva = ft;
-
-            if let Some(mut thunk_off) = rva_to_offset(thunk_rva) {
-                let mut idx = 0u32;
-                while thunk_off + 8 <= bytes.len() {
-                    let val =
-                        u64::from_le_bytes(bytes[thunk_off..thunk_off + 8].try_into().unwrap());
-                    if val == 0 {
-                        break;
-                    }
-                    thunk_off += 8;
-                    let iat_rva = iat_base_rva + idx * 8;
-                    idx += 1;
-
-                    let sym_name = if (val & (1 << 63)) != 0 {
-                        format!("Ordinal#{}", val & 0xFFFF)
-                    } else {
-                        let hint_rva = (val & 0x7FFF_FFFF) as u32;
-                        if let Some(ho) = rva_to_offset(hint_rva) {
-                            let str_start = ho + 2;
-                            let mut str_end = str_start;
-                            while str_end < bytes.len() && bytes[str_end] != 0 {
-                                str_end += 1;
-                            }
-                            String::from_utf8_lossy(&bytes[str_start..str_end]).into_owned()
-                        } else {
-                            "UNKNOWN_SYM".to_string()
-                        }
-                    };
-
-                    let binding = registry.binding(&dll_name, &sym_name);
-                    imports.push(ImportedSymbol {
-                        dll: dll_name.clone(),
-                        symbol: sym_name,
-                        iat_rva,
-                        category,
-                        is_supported: binding.is_some(),
-                        service_status: binding.map(|service| service.status),
-                        canonical_module: binding.map(|service| service.module.clone()),
-                    });
-                }
-            }
-        }
-    }
+        })
+        .collect();
 
     // 4. Control-Flow-Aware Static Disassembly
     //
@@ -1149,6 +1110,7 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         relocations,
         tls,
         imports,
+        import_error,
         instruction_records,
         first_unsupported_dbt_insn,
     })
@@ -1401,6 +1363,12 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
         "- **Unresolved standard import thunks**: `{missing}`. See `missing_imports.csv`. A registered handler may be a stub.\n"
     );
 
+    if let Some(error) = &report.import_error {
+        let _ = writeln!(
+            md,
+            "- **Import table is malformed**: {error}. Only the imports before it are listed, and binding refuses the image.\n"
+        );
+    }
     if trusted_runner_slots > 0 {
         let _ = writeln!(
             md,

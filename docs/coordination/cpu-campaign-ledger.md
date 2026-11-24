@@ -23,6 +23,7 @@ Evidence below is local to the named host unless stated. Nothing here is indepen
 | 2 | cpu: share one generated decoder and store guest flags | Registry, generator, shared decoder and semantics, integer expansion, architectural DBT flags, truthful probe support | `tests/x86_integer.rs`, `tests/arm64_encodings.rs`, `tests/x86_generator`; 37 targeted mutations: 36 caught (4 only after new tests), and one equivalent, whose redundant check was removed |
 | 3 | cpu: add SSE2 state, moves and packed integer forms | XMM and MXCSR state, mandatory prefixes, SSE/SSE2 moves and packed integer operations, NEON lowering | `tests/x86_vector.rs` (9 tests, 374 LLVM-assembled instructions, 64 states each), `tests/arm64_encodings.rs`; 35 targeted mutations: 34 caught (1 only after a new test) and one equivalent |
 | 4 | cpu: add exact SSE and SSE2 floating point | Software binary32/binary64 arithmetic with MXCSR, compares and conversions | `tests/x86_float.rs` (9 tests, 6,824 exact-fraction vectors, 172 LLVM-assembled instructions, over 2 million host comparisons); 53 targeted mutations: 52 caught (2 only after directed vectors), and one changes a rule deliberately left unasserted |
+| 5 | runtime: one import resolver and typed service adapters | Bounded import parser shared by probe and binder, strict registry, transactional binding, Win64 preservation check, typed registry and generator, 20 services | `tests/runtime_services.rs` (19 tests; every service is called by translated guest code), generator unit tests (4); 33 valid targeted mutations: all caught, 2 only after new cases |
 
 Encodings: `clang -target x86_64-apple-macos -c` and `clang -target arm64-apple-macos -c`, read back with `objdump -d`.
 
@@ -76,12 +77,36 @@ The registry now has 191 operations, 358 forms and 453 opcode slots. `dbt_bench`
 
 Main moved to 15 commits past this branch after milestone 3; they do not touch `crates/loader` and are not merged yet.
 
+## Verification of milestone 5 (local, real exit codes)
+
+Main `f685ede` (QA tooling) was merged first as `5e7c21b`.
+
+| Gate | Result |
+| --- | --- |
+| Formatting; strict Clippy, workspace, all targets and features | exit 0; exit 0 |
+| `cargo test --locked --workspace --no-fail-fast` | exit 0: 462 passed, 0 failed, 22 ignored |
+| `xenora-runtime-gen --check`; CPU generator, assembler and float reference checks; generator tests | exit 0 |
+| RDNA2 metadata, semantic registry, coverage and status checks; their Python tests; claims, dependencies and native audits; release build | exit 0 |
+| `scripts/test-gpu.sh`, `demo.sh`, `build-app.sh`, `--smoke-frame`, `--inspect` | exit 0; GPU 74 passed, 0 failed, 1 ignored |
+| `scripts/assemble-fixture.sh --check` and ignored LLVM AMDGPU tests | not verified: need `llvm-mc` |
+| Fuzz and mutation campaigns | not run |
+
+`dbt_bench`, middle of three runs: interpreter 11.08, cold DBT 8.48 and warm DBT 409.65 MIPS. Warm runs read 392 to 417, against 430 for milestone 4; no change here is known to affect that path and the cause was not investigated.
+
+The panic of #270 was reproduced on `5e7c21b` (`range start index 1025 out of range`) and does not occur after this milestone.
+
+## Overlap with upstream (needs coordination)
+
+- #65, #66 and #72 were claimed by another contributor, and #283, #281 and #280 merged into main (`c6a354b`) while this branch was unpublished. Milestones 1 and 2 cover the same ground, so `cpu.rs`, `dbt.rs` and `arm64.rs` now conflict. This branch claims none of those issues.
+- #286 is open for #270, which milestone 5 also fixes. Theirs is published and takes precedence.
+
 ## Known limitations
 
 - Only the forms in `x86/instructions.toml` exist. The RCP and RSQRT approximations, SSE3 and later, MMX, VEX, string instructions, RCL, RCR, SHLD, SHRD, LOCK, fences and atomics are unsupported.
 - Every floating-point form runs through software arithmetic in the DBT; none is lowered to NEON. No x86 hardware comparison exists, and `docs/cpu/instruction-registry.md` lists the choices left unasserted.
 - Packs, shuffles, high multiplies, PSADBW, sign-mask extraction, word insertion and extraction, byte shifts and shifts by a register count run through the shared semantics in the DBT.
-- XMM6-XMM15 preservation across Win64 service calls has no test yet.
+- The fixture graphics services, `XMemAlloc` and the `XMemFree` stub are outside the typed registry. Several older generated conformance tests check Rust library functions, not services.
+- Last error is one value per process; per-thread isolation (#202) waits for guest threads.
 - 8- and 16-bit ALU operations, shifts, MUL, DIV and bit operations run through the shared semantics in the DBT, not as ARM64.
 - The reference and the implementation share an author.
 - New CPU checks are not in CI; `.github` was left unchanged.
@@ -93,4 +118,4 @@ Main moved to 15 commits past this branch after milestone 3; they do not touch `
 
 ## Next task
 
-Runtime resolution and typed import metadata: one lookup for execution and static inspection, conflict detection and truthful unsupported diagnostics. Then Win64 ABI checks, including XMM6-XMM15 across service calls. Nothing in those areas is started.
+Integrate main `c6a354b` with its contributor: keep upstream's regression tests, resolve the three source conflicts, and agree how milestones 1 and 2 relate to the merged fixes. Then native CRT memory and string services. Those are not started.

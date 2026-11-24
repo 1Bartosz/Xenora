@@ -139,6 +139,8 @@ pub enum ExitReason {
     GeneralProtection,
     /// An unmasked SSE floating-point exception (#XM); MXCSR holds its flags.
     SimdException,
+    /// A host service changed a register the Win64 ABI requires it to preserve.
+    ServiceAbiViolation,
 }
 
 impl fmt::Display for ExitReason {
@@ -154,6 +156,9 @@ impl fmt::Display for ExitReason {
             Self::DivideError => write!(f, "guest divide error"),
             Self::GeneralProtection => write!(f, "guest general-protection fault"),
             Self::SimdException => write!(f, "guest SIMD floating-point exception"),
+            Self::ServiceAbiViolation => {
+                write!(f, "host service changed a nonvolatile guest register")
+            }
         }
     }
 }

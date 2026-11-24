@@ -33,9 +33,6 @@ const PAGE_SIZE: u64 = 4096;
 const MEM_COMMIT_RESERVE: u32 = 0x3000;
 const MEM_RELEASE: u32 = 0x8000;
 const ERROR_NOACCESS: u32 = 998;
-const KERNEL32: &str = "kernel32.dll";
-const PROCESS_THREADS_V1: &str = "api-ms-win-core-processthreads-l1-1-0.dll";
-const PROCESS_THREADS_V2: &str = "api-ms-win-core-processthreads-l1-1-2.dll";
 
 /// Clock trait for injecting deterministic time in tests or host time in production.
 pub trait Clock: Send + Sync {
@@ -136,9 +133,10 @@ impl ServicesState {
         self.priority_boost_disabled.load(Ordering::SeqCst)
     }
 
-    fn fail(&self, error: u32, return_value: u64) -> Result<u64, ExitReason> {
+    /// Record a guest error and return the documented failure value.
+    fn fail<T>(&self, error: u32, value: T) -> Result<T, ExitReason> {
         self.last_error.store(error, Ordering::SeqCst);
-        Ok(return_value)
+        Ok(value)
     }
 
     fn is_current_process(&self, handle: u64) -> bool {
@@ -151,264 +149,10 @@ impl ServicesState {
     }
 }
 
-/// Register standard Windows core and Xbox memory services into the registry.
+/// Register the services generated from `runtime/services.txt` and the
+/// hand-written fixture services.
 pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<ServicesState>) {
-    let s = state.clone();
-    registry.register(KERNEL32, "SetProcessPriorityBoost", move |args, _, mem| {
-        if !s.is_current_process(args.get(0, mem).map_err(ExitReason::MemoryFault)?) {
-            return Ok(0);
-        }
-        let disable = args.get(1, mem).map_err(ExitReason::MemoryFault)? as u32;
-        s.priority_boost_disabled
-            .store(disable != 0, Ordering::SeqCst);
-        Ok(1)
-    });
-    registry.alias(PROCESS_THREADS_V2, KERNEL32, "SetProcessPriorityBoost");
-
-    registry.set_status(KERNEL32, "SetProcessPriorityBoost", ServiceStatus::Partial);
-
-    let s = state.clone();
-    registry.register(KERNEL32, "GetProcessPriorityBoost", move |args, _, mem| {
-        if !s.is_current_process(args.get(0, mem).map_err(ExitReason::MemoryFault)?) {
-            return Ok(0);
-        }
-        let output = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
-        if mem
-            .write_u32(output, u32::from(s.priority_boost_disabled()))
-            .is_err()
-        {
-            s.last_error.store(ERROR_NOACCESS, Ordering::SeqCst);
-            return Ok(0);
-        }
-        Ok(1)
-    });
-    registry.alias(PROCESS_THREADS_V2, KERNEL32, "GetProcessPriorityBoost");
-    registry.set_status(KERNEL32, "GetProcessPriorityBoost", ServiceStatus::Partial);
-
-    registry.register(KERNEL32, "GetCurrentProcess", |_, _, _| Ok(CURRENT_PROCESS));
-    registry.alias(PROCESS_THREADS_V1, KERNEL32, "GetCurrentProcess");
-
-    let s = state.clone();
-    registry.register(KERNEL32, "GetProcessId", move |args, _, mem| {
-        if !s.is_current_process(args.get(0, mem).map_err(ExitReason::MemoryFault)?) {
-            return Ok(0);
-        }
-        Ok(u64::from(s.process_id))
-    });
-    registry.alias(PROCESS_THREADS_V1, KERNEL32, "GetProcessId");
-    registry.set_status(KERNEL32, "GetProcessId", ServiceStatus::Partial);
-
-    registry.register(KERNEL32, "GetCurrentThread", |_, _, _| Ok(CURRENT_THREAD));
-    registry.alias(PROCESS_THREADS_V1, KERNEL32, "GetCurrentThread");
-
-    let s = state.clone();
-    registry.register(KERNEL32, "OpenThread", move |args, _, mem| {
-        let access = args.get(0, mem).map_err(ExitReason::MemoryFault)? as u32;
-        let inherit = args.get(1, mem).map_err(ExitReason::MemoryFault)? as u32;
-        let id = args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32;
-        if id != s.thread_id {
-            return s.fail(ERROR_INVALID_PARAMETER, 0);
-        }
-        if inherit != 0 || access & !THREAD_SUPPORTED_RIGHTS != 0 {
-            return s.fail(ERROR_NOT_SUPPORTED, 0);
-        }
-        let mut thread = s.thread.lock().expect("guest thread state");
-        let Some(handle) = thread
-            .last_handle
-            .checked_add(4)
-            .filter(|_| thread.handles.len() < MAX_THREAD_HANDLES)
-        else {
-            return s.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
-        };
-        thread.handles.insert(handle, access);
-        thread.last_handle = handle;
-        Ok(handle)
-    });
-
-    let s = state.clone();
-    registry.register(KERNEL32, "GetThreadPriority", move |args, _, mem| {
-        let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        let thread = s.thread.lock().expect("guest thread state");
-        if let Err(error) = thread.check_access(handle, THREAD_QUERY_RIGHTS) {
-            return s.fail(error, THREAD_PRIORITY_ERROR_RETURN);
-        }
-        Ok(u64::from(thread.priority as u32))
-    });
-
-    let s = state.clone();
-    registry.register(KERNEL32, "SetThreadPriority", move |args, _, mem| {
-        let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        let priority = args.get(1, mem).map_err(ExitReason::MemoryFault)? as i32;
-        let mut thread = s.thread.lock().expect("guest thread state");
-        if let Err(error) = thread.check_access(handle, THREAD_SET_RIGHTS) {
-            return s.fail(error, 0);
-        }
-        if matches!(priority, 0x0001_0000 | 0x0002_0000) {
-            return s.fail(ERROR_NOT_SUPPORTED, 0);
-        }
-        if !matches!(priority, -15 | -2..=2 | 15) {
-            return s.fail(ERROR_INVALID_PARAMETER, 0);
-        }
-        thread.priority = priority;
-        Ok(1)
-    });
-
-    for symbol in ["OpenThread", "GetThreadPriority", "SetThreadPriority"] {
-        registry.alias(PROCESS_THREADS_V1, KERNEL32, symbol);
-        registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
-    }
-
-    let s = state.clone();
-    registry.register(KERNEL32, "CloseHandle", move |args, _, mem| {
-        let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        if matches!(handle, CURRENT_PROCESS | CURRENT_THREAD)
-            || s.thread
-                .lock()
-                .expect("guest thread state")
-                .handles
-                .remove(&handle)
-                .is_some()
-        {
-            return Ok(1);
-        }
-        s.fail(ERROR_INVALID_HANDLE, 0)
-    });
-    registry.alias("api-ms-win-core-handle-l1-1-0.dll", KERNEL32, "CloseHandle");
-    registry.set_status(KERNEL32, "CloseHandle", ServiceStatus::Partial);
-
-    // 1. GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *mut FILETIME)
-    let s = state.clone();
-    let handler = move |args: &crate::imports::Win64Args,
-                        _cpu: &mut crate::cpu::CpuState,
-                        mem: &mut GuestMemory|
-          -> Result<u64, ExitReason> {
-        let ptr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        if ptr == 0 {
-            s.last_error.store(87, Ordering::SeqCst); // ERROR_INVALID_PARAMETER
-            return Ok(0);
-        }
-        let ft = s.clock.now_filetime();
-        mem.write_u64(ptr, ft).map_err(ExitReason::MemoryFault)?;
-        Ok(0)
-    };
-    registry.register(KERNEL32, "GetSystemTimeAsFileTime", handler);
-    registry.alias(
-        "api-ms-win-core-sysinfo-l1-1-0.dll",
-        KERNEL32,
-        "GetSystemTimeAsFileTime",
-    );
-
-    // 2. GetCurrentProcessId() -> DWORD
-    let s = state.clone();
-    let handler = move |_args: &crate::imports::Win64Args,
-                        _cpu: &mut crate::cpu::CpuState,
-                        _mem: &mut GuestMemory|
-          -> Result<u64, ExitReason> { Ok(s.process_id as u64) };
-    registry.register(KERNEL32, "GetCurrentProcessId", handler);
-    registry.alias(PROCESS_THREADS_V1, KERNEL32, "GetCurrentProcessId");
-
-    // 3. GetCurrentThreadId() -> DWORD
-    let s = state.clone();
-    let handler = move |_args: &crate::imports::Win64Args,
-                        _cpu: &mut crate::cpu::CpuState,
-                        _mem: &mut GuestMemory|
-          -> Result<u64, ExitReason> { Ok(s.thread_id as u64) };
-    registry.register(KERNEL32, "GetCurrentThreadId", handler);
-    registry.alias(PROCESS_THREADS_V1, KERNEL32, "GetCurrentThreadId");
-
-    // 4. GetLastError() -> DWORD
-    let s = state.clone();
-    let handler =
-        move |_args: &crate::imports::Win64Args,
-              _cpu: &mut crate::cpu::CpuState,
-              _mem: &mut GuestMemory|
-              -> Result<u64, ExitReason> { Ok(s.last_error.load(Ordering::SeqCst) as u64) };
-    registry.register(KERNEL32, "GetLastError", handler);
-    registry.alias(
-        "api-ms-win-core-errorhandling-l1-1-0.dll",
-        KERNEL32,
-        "GetLastError",
-    );
-
-    // 5. SetLastError(dwErrCode: DWORD)
-    let s = state.clone();
-    let handler = move |args: &crate::imports::Win64Args,
-                        _cpu: &mut crate::cpu::CpuState,
-                        mem: &mut GuestMemory|
-          -> Result<u64, ExitReason> {
-        let code = args.get(0, mem).map_err(ExitReason::MemoryFault)? as u32;
-        s.last_error.store(code, Ordering::SeqCst);
-        Ok(0)
-    };
-    registry.register(KERNEL32, "SetLastError", handler);
-    registry.alias(
-        "api-ms-win-core-errorhandling-l1-1-0.dll",
-        KERNEL32,
-        "SetLastError",
-    );
-
-    let s = state.clone();
-    registry.register(KERNEL32, "VirtualAlloc", move |args, _, mem| {
-        let requested = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        let size = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
-        let allocation_type = args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32;
-        let protect = args.get(3, mem).map_err(ExitReason::MemoryFault)? as u32;
-
-        if size == 0 {
-            return s.fail(ERROR_INVALID_PARAMETER, 0);
-        }
-        if allocation_type != MEM_COMMIT_RESERVE {
-            return s.fail(ERROR_NOT_SUPPORTED, 0);
-        }
-        // Executable allocations require guest translation cache invalidation.
-        let permissions = match protect {
-            0x01 => MemoryPermissions::NO_ACCESS,
-            0x02 => MemoryPermissions::READ_ONLY,
-            0x04 => MemoryPermissions::READ_WRITE,
-            _ => return s.fail(ERROR_INVALID_PARAMETER, 0),
-        };
-        let base = requested & !(ALLOCATION_GRANULARITY - 1);
-        if requested != 0 && base == 0 {
-            return s.fail(ERROR_INVALID_ADDRESS, 0);
-        }
-        let Some(size) = size
-            .checked_add(requested - base)
-            .and_then(|span| span.checked_next_multiple_of(PAGE_SIZE))
-            .and_then(|span| usize::try_from(span).ok())
-        else {
-            return s.fail(ERROR_INVALID_PARAMETER, 0);
-        };
-
-        match mem.map_virtual_allocation(base, size, permissions) {
-            Ok(address) => Ok(address),
-            Err(MemoryError::OverlappingRegion { .. } | MemoryError::Overflow) => {
-                s.fail(ERROR_INVALID_ADDRESS, 0)
-            }
-            Err(_) => s.fail(ERROR_NOT_ENOUGH_MEMORY, 0),
-        }
-    });
-
-    let s = state.clone();
-    registry.register(KERNEL32, "VirtualFree", move |args, _, mem| {
-        let address = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        let size = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
-        let free_type = args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32;
-        if free_type != MEM_RELEASE {
-            return s.fail(ERROR_NOT_SUPPORTED, 0);
-        }
-        if size != 0 {
-            return s.fail(ERROR_INVALID_PARAMETER, 0);
-        }
-        if !mem.release_virtual_allocation(address) {
-            return s.fail(ERROR_INVALID_ADDRESS, 0);
-        }
-        Ok(1)
-    });
-
-    for symbol in ["VirtualAlloc", "VirtualFree"] {
-        registry.alias("api-ms-win-core-memory-l1-1-0.dll", KERNEL32, symbol);
-        registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
-    }
+    crate::runtime_table::register(registry, &state);
 
     // 8. XMemAlloc(dwSize, dwAllocAttributes) -> LPVOID (Xbox Scarlett allocator in xmem.dll)
     let s = state.clone();
@@ -581,4 +325,245 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         "SubmitGuestDraw",
         ServiceStatus::Implemented,
     );
+}
+
+/// Implementations behind the generated adapters. A failure the guest can
+/// observe sets its last error; `Err` stops the guest.
+pub(crate) mod handlers {
+    use super::*;
+    use crate::runtime::{Float32, Float64, OutPtr, ServiceContext};
+    use crate::softfloat::{Control, F32, F64, square_root};
+
+    type Outcome<T> = Result<T, ExitReason>;
+
+    pub fn set_process_priority_boost(
+        context: &mut ServiceContext<'_>,
+        process: u64,
+        disable: bool,
+    ) -> Outcome<bool> {
+        if !context.state.is_current_process(process) {
+            return Ok(false);
+        }
+        context
+            .state
+            .priority_boost_disabled
+            .store(disable, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    pub fn get_process_priority_boost(
+        context: &mut ServiceContext<'_>,
+        process: u64,
+        disabled: OutPtr<4>,
+    ) -> Outcome<bool> {
+        if !context.state.is_current_process(process) {
+            return Ok(false);
+        }
+        let value = u32::from(context.state.priority_boost_disabled());
+        if disabled.store(context.memory, value.to_le_bytes()).is_err() {
+            return context.state.fail(ERROR_NOACCESS, false);
+        }
+        Ok(true)
+    }
+
+    pub fn get_current_process(_: &mut ServiceContext<'_>) -> Outcome<u64> {
+        Ok(CURRENT_PROCESS)
+    }
+
+    pub fn get_process_id(context: &mut ServiceContext<'_>, process: u64) -> Outcome<u32> {
+        Ok(if context.state.is_current_process(process) {
+            context.state.process_id
+        } else {
+            0
+        })
+    }
+
+    pub fn get_current_thread(_: &mut ServiceContext<'_>) -> Outcome<u64> {
+        Ok(CURRENT_THREAD)
+    }
+
+    pub fn get_current_process_id(context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(context.state.process_id)
+    }
+
+    pub fn get_current_thread_id(context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(context.state.thread_id)
+    }
+
+    pub fn open_thread(
+        context: &mut ServiceContext<'_>,
+        access: u32,
+        inherit: bool,
+        id: u32,
+    ) -> Outcome<u64> {
+        let state = context.state;
+        if id != state.thread_id {
+            return state.fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        if inherit || access & !THREAD_SUPPORTED_RIGHTS != 0 {
+            return state.fail(ERROR_NOT_SUPPORTED, 0);
+        }
+        let mut thread = state.thread.lock().expect("guest thread state");
+        let Some(handle) = thread
+            .last_handle
+            .checked_add(4)
+            .filter(|_| thread.handles.len() < MAX_THREAD_HANDLES)
+        else {
+            return state.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+        };
+        thread.handles.insert(handle, access);
+        thread.last_handle = handle;
+        Ok(handle)
+    }
+
+    pub fn get_thread_priority(context: &mut ServiceContext<'_>, handle: u64) -> Outcome<i32> {
+        let thread = context.state.thread.lock().expect("guest thread state");
+        if let Err(error) = thread.check_access(handle, THREAD_QUERY_RIGHTS) {
+            return context
+                .state
+                .fail(error, THREAD_PRIORITY_ERROR_RETURN as i32);
+        }
+        Ok(thread.priority)
+    }
+
+    pub fn set_thread_priority(
+        context: &mut ServiceContext<'_>,
+        handle: u64,
+        priority: i32,
+    ) -> Outcome<bool> {
+        let state = context.state;
+        let mut thread = state.thread.lock().expect("guest thread state");
+        if let Err(error) = thread.check_access(handle, THREAD_SET_RIGHTS) {
+            return state.fail(error, false);
+        }
+        if matches!(priority, 0x0001_0000 | 0x0002_0000) {
+            return state.fail(ERROR_NOT_SUPPORTED, false);
+        }
+        if !matches!(priority, -15 | -2..=2 | 15) {
+            return state.fail(ERROR_INVALID_PARAMETER, false);
+        }
+        thread.priority = priority;
+        Ok(true)
+    }
+
+    pub fn close_handle(context: &mut ServiceContext<'_>, handle: u64) -> Outcome<bool> {
+        let closed = matches!(handle, CURRENT_PROCESS | CURRENT_THREAD)
+            || context
+                .state
+                .thread
+                .lock()
+                .expect("guest thread state")
+                .handles
+                .remove(&handle)
+                .is_some();
+        if closed {
+            Ok(true)
+        } else {
+            context.state.fail(ERROR_INVALID_HANDLE, false)
+        }
+    }
+
+    pub fn get_system_time_as_file_time(
+        context: &mut ServiceContext<'_>,
+        time: OutPtr<8>,
+    ) -> Outcome<()> {
+        let now = context.state.clock.now_filetime();
+        time.store(context.memory, now.to_le_bytes())
+            .map_err(ExitReason::MemoryFault)
+    }
+
+    pub fn get_last_error(context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(context.state.last_error.load(Ordering::SeqCst))
+    }
+
+    pub fn set_last_error(context: &mut ServiceContext<'_>, code: u32) -> Outcome<()> {
+        context.state.last_error.store(code, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn virtual_alloc(
+        context: &mut ServiceContext<'_>,
+        requested: u64,
+        size: u64,
+        kind: u32,
+        protect: u32,
+    ) -> Outcome<u64> {
+        let state = context.state;
+        if size == 0 {
+            return state.fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        if kind != MEM_COMMIT_RESERVE {
+            return state.fail(ERROR_NOT_SUPPORTED, 0);
+        }
+        // Executable allocations require guest translation cache invalidation.
+        let permissions = match protect {
+            0x01 => MemoryPermissions::NO_ACCESS,
+            0x02 => MemoryPermissions::READ_ONLY,
+            0x04 => MemoryPermissions::READ_WRITE,
+            _ => return state.fail(ERROR_INVALID_PARAMETER, 0),
+        };
+        let base = requested & !(ALLOCATION_GRANULARITY - 1);
+        if requested != 0 && base == 0 {
+            return state.fail(ERROR_INVALID_ADDRESS, 0);
+        }
+        let Some(size) = size
+            .checked_add(requested - base)
+            .and_then(|span| span.checked_next_multiple_of(PAGE_SIZE))
+            .and_then(|span| usize::try_from(span).ok())
+        else {
+            return state.fail(ERROR_INVALID_PARAMETER, 0);
+        };
+        match context
+            .memory
+            .map_virtual_allocation(base, size, permissions)
+        {
+            Ok(address) => Ok(address),
+            Err(MemoryError::OverlappingRegion { .. } | MemoryError::Overflow) => {
+                state.fail(ERROR_INVALID_ADDRESS, 0)
+            }
+            Err(_) => state.fail(ERROR_NOT_ENOUGH_MEMORY, 0),
+        }
+    }
+
+    pub fn virtual_free(
+        context: &mut ServiceContext<'_>,
+        address: u64,
+        size: u64,
+        kind: u32,
+    ) -> Outcome<bool> {
+        let state = context.state;
+        if kind != MEM_RELEASE {
+            return state.fail(ERROR_NOT_SUPPORTED, false);
+        }
+        if size != 0 {
+            return state.fail(ERROR_INVALID_PARAMETER, false);
+        }
+        if !context.memory.release_virtual_allocation(address) {
+            return state.fail(ERROR_INVALID_ADDRESS, false);
+        }
+        Ok(true)
+    }
+
+    /// The guest MXCSR is not visible to a service, so results use the default
+    /// rounding and raise no guest flags; the registry marks them partial.
+    const DEFAULT_MXCSR: u32 = crate::cpu::Mxcsr::RESET;
+
+    pub fn sqrt(_: &mut ServiceContext<'_>, x: Float64) -> Outcome<Float64> {
+        let control = Control::from_mxcsr(DEFAULT_MXCSR);
+        Ok(Float64(square_root(F64, x.0, &control).bits))
+    }
+
+    pub fn sqrtf(_: &mut ServiceContext<'_>, x: Float32) -> Outcome<Float32> {
+        let control = Control::from_mxcsr(DEFAULT_MXCSR);
+        let bits = square_root(F32, u64::from(x.0), &control).bits;
+        Ok(Float32(bits as u32))
+    }
+
+    pub fn fabs(_: &mut ServiceContext<'_>, x: Float64) -> Outcome<Float64> {
+        Ok(Float64(x.0 & !(1 << 63)))
+    }
+
+    pub fn fabsf(_: &mut ServiceContext<'_>, x: Float32) -> Outcome<Float32> {
+        Ok(Float32(x.0 & !(1 << 31)))
+    }
 }
