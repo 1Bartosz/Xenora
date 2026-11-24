@@ -769,6 +769,12 @@ fn test_d3d12_indexed_draw_fetches_start_and_base_vertex() {
 #[test]
 fn test_d3d12_indexed_draw_errors() {
     let mut rig = indexed_rig();
+    let calls = Arc::new(std::sync::Mutex::new(0usize));
+    let counter = calls.clone();
+    rig.ctx.set_metal_backend(move |vtx, viewport, clear| {
+        *counter.lock().unwrap() += 1;
+        GraphicsContext::execute_software_reference_draw(vtx, viewport, clear)
+    });
     let (ib16, ib32) = (rig.ib16, rig.ib32);
     let unknown = GraphicsHandle {
         id: 999,
@@ -803,6 +809,18 @@ fn test_d3d12_indexed_draw_errors() {
             "count not one triangle",
             (ib16, 0, R16_UINT),
             (6, 1, 0, 0),
+            GraphicsError::InvalidDescriptor,
+        ),
+        (
+            "bad count with zero instances",
+            (ib16, 0, R16_UINT),
+            (6, 0, 0, 0),
+            GraphicsError::InvalidDescriptor,
+        ),
+        (
+            "two instances",
+            (ib16, 0, R16_UINT),
+            (3, 2, 4, 2),
             GraphicsError::InvalidDescriptor,
         ),
         (
@@ -864,6 +882,48 @@ fn test_d3d12_indexed_draw_errors() {
         ctx.execute_command_list(rig.queue, rig.list, &rig.memory),
         Err(GraphicsError::InvalidDescriptor)
     );
+    // A nonzero start instance is rejected.
+    ctx.reset_command_list(rig.list, rig.alloc).unwrap();
+    ctx.cmd_set_vertex_buffer(rig.list, rig.vb, 0, INDEXED_STRIDE)
+        .unwrap();
+    ctx.cmd_set_index_buffer(rig.list, ib16, 0, R16_UINT)
+        .unwrap();
+    ctx.cmd_draw_indexed_instanced(rig.list, 3, 1, 4, 2, 1)
+        .unwrap();
+    ctx.close_command_list(rig.list).unwrap();
+    assert_eq!(
+        ctx.execute_command_list(rig.queue, rig.list, &rig.memory),
+        Err(GraphicsError::InvalidDescriptor)
+    );
+    // An index buffer whose guest backing would wrap the address space is
+    // rejected, not read at a wrapped address.
+    let device = ctx.create_device().unwrap();
+    // The read's start wraps (start 8 at 2 bytes each), then only its end does.
+    for (guest_addr, start) in [(u64::MAX - 8, 8), (u64::MAX - 2, 0)] {
+        let wrapping = rig
+            .ctx
+            .create_committed_resource(
+                device,
+                ResourceDesc {
+                    dimension: ResourceDimension::Buffer,
+                    width: 64,
+                    height: 1,
+                    depth_or_array_size: 1,
+                    mip_levels: 1,
+                    format_rgba8: false,
+                },
+                ResourceStates::COMMON,
+                Some(guest_addr),
+            )
+            .unwrap();
+        assert_eq!(
+            run_indexed(&mut rig, (wrapping, 0, R16_UINT), (3, 1, start, 0)).unwrap_err(),
+            GraphicsError::IndexOutOfRange,
+            "guest address {guest_addr:#x} start {start}"
+        );
+    }
+    // No rejected draw reached the backend.
+    assert_eq!(*calls.lock().unwrap(), 0);
 }
 
 /// The loader's indexed fetch feeds the native Metal renderer: the GPU image

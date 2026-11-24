@@ -1,7 +1,9 @@
 use xenora_metal::{DepthFill, IndexBuffer, IndexedDraw, IndexedPass};
 use xenora_texture::{Bc1Upload, Bc1UploadDesc};
 
-use super::indexed_cases::{BC1_BLOCKS, Case, Fill, INDICES, SIZE, cases, expected, vertices};
+use super::indexed_cases::{
+    BC1_BLOCKS, Case, Fill, INDICES, SIZE, cases, expected, vertices, wide_indices,
+};
 use super::{context, native};
 
 fn metal_draws(case: &Case) -> Vec<IndexedDraw> {
@@ -45,7 +47,7 @@ fn indexed_draw_known_answers() {
     let gpu = context();
     let upload = bc1_upload();
     let vertices = vertices();
-    let wide = INDICES.map(u32::from);
+    let wide = wide_indices();
     let (cases, expected) = (cases(), expected());
     assert_eq!(cases.len(), expected.len());
     let mut checked = 0;
@@ -110,29 +112,54 @@ fn invalid_indexed_draws_are_rejected() {
         .to_string()
     };
     let short = IndexBuffer::U16(&INDICES);
-    for (reason, error) in [
+    let count = "index count must be a nonzero multiple of 3";
+    let range = "index range past the index buffer";
+    let outside = "outside the vertex buffer";
+    let restart_value = "primitive-restart value";
+    for (reason, error, wanted) in [
         // First: Metal itself would draw this one, so only the check rejects it.
-        ("count not a multiple of 3", run(short, 0, 4, 0, flat)),
-        ("zero count", run(short, 0, 0, 0, flat)),
-        ("range past buffer", run(short, 19, 3, 0, flat)),
-        ("start overflow", run(short, usize::MAX, 3, 0, flat)),
-        ("negative vertex", run(short, 0, 3, -1, flat)),
-        ("vertex past buffer", run(short, 9, 3, 2, flat)),
+        (
+            "count not a multiple of 3",
+            run(short, 0, 4, 0, flat),
+            count,
+        ),
+        ("zero count", run(short, 0, 0, 0, flat), count),
+        ("range past buffer", run(short, 19, 3, 0, flat), range),
+        ("start overflow", run(short, usize::MAX, 3, 0, flat), range),
+        ("negative vertex", run(short, 0, 3, -1, flat), outside),
+        ("vertex past buffer", run(short, 9, 3, 2, flat), outside),
         (
             "32-bit index past buffer",
             run(IndexBuffer::U32(&[0, 1, 13]), 0, 3, 0, flat),
+            outside,
         ),
         (
-            "restart value",
+            "16-bit restart value",
             run(IndexBuffer::U16(&restart), 0, 3, 0, flat),
+            restart_value,
         ),
-        ("base overflow", run(short, 0, 3, i32::MAX, flat)),
+        // In range after the base vertex, but still the raw restart value.
+        (
+            "16-bit restart value with base vertex",
+            run(IndexBuffer::U16(&[65533, 65534, 65535]), 0, 3, -65533, flat),
+            restart_value,
+        ),
+        (
+            "32-bit restart value",
+            run(IndexBuffer::U32(&[0, 1, u32::MAX]), 0, 3, 0, flat),
+            restart_value,
+        ),
+        ("base overflow", run(short, 0, 3, i32::MAX, flat), outside),
         (
             "texture missing",
             run(short, 0, 3, 0, DepthFill::Bc1Texture),
+            "textured draw without texture",
         ),
     ] {
         println!("{reason}: {error}");
-        assert!(error.contains("indexed pass"), "{reason}: {error}");
+        assert!(
+            error.contains("indexed pass") && error.contains(wanted),
+            "{reason}: {error}"
+        );
     }
 }

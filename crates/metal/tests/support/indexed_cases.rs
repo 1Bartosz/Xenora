@@ -37,10 +37,20 @@ const VERTICES: [[f32; 2]; 13] = [
     [0.0, 16.0],
 ];
 
-/// The index buffer every case uses, as 16- or 32-bit indices.
+/// The index buffer of the 16-bit cases.
 pub const INDICES: [u16; 21] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 9, 11, 12, 2, 1, 0, 10, 11, 12,
 ];
+
+/// The index buffer of the 32-bit cases: [`INDICES`] and three indices that
+/// need more than 16 bits.
+pub fn wide_indices() -> Vec<u32> {
+    INDICES
+        .iter()
+        .map(|&index| u32::from(index))
+        .chain([65545, 65546, 65547])
+        .collect()
+}
 
 /// Clip-space positions of [`VERTICES`] at depth 0.5.
 pub fn vertices() -> Vec<[f32; 4]> {
@@ -129,6 +139,9 @@ pub fn cases() -> Vec<Case> {
                 draw(6, 3, -6, red),
             ],
         ),
+        case("flat_two_triangles", false, vec![draw(9, 6, 0, green)]),
+        case("textured_first", false, vec![draw(0, 3, 0, texture)]),
+        case("u32_high_indices", true, vec![draw(21, 3, -65536, red)]),
     ]
 }
 

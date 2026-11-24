@@ -5,8 +5,8 @@
 //! A draw reads `count` indices starting at index `start` and fetches vertex
 //! `index + base_vertex` for each, as `DrawIndexedInstanced` and Metal's
 //! `drawIndexedPrimitives` describe. Every fetched vertex must lie inside the
-//! vertex buffer; the reference rejects the draw instead of defining
-//! out-of-range behaviour. The triangles are then rasterised by
+//! vertex buffer, and no index may be the primitive-restart value (all bits
+//! set); the reference rejects the draw instead of defining either behaviour. The triangles are then rasterised by
 //! [`crate::depth::render_depth`] without a depth attachment.
 
 use std::fmt;
@@ -25,6 +25,13 @@ impl RefIndices<'_> {
         match self {
             Self::U16(indices) => indices.len(),
             Self::U32(indices) => indices.len(),
+        }
+    }
+
+    fn restart(self) -> u32 {
+        match self {
+            Self::U16(_) => u32::from(u16::MAX),
+            Self::U32(_) => u32::MAX,
         }
     }
 
@@ -53,6 +60,8 @@ pub enum IndexedRefError {
     IndexRange(usize),
     /// `index + base_vertex` lies outside the vertex buffer: (draw, index position).
     VertexRange(usize, usize),
+    /// The index is the primitive-restart value: (draw, index position).
+    Restart(usize, usize),
     /// The resolved triangles could not be rasterised.
     Raster(crate::depth::DepthRefError),
 }
@@ -70,7 +79,8 @@ impl std::error::Error for IndexedRefError {}
 /// # Errors
 ///
 /// Returns an error for a count that is zero or not a multiple of 3, an index
-/// range past the buffer, or a fetched vertex outside `0..vertex_count`.
+/// range past the buffer, a primitive-restart index, or a fetched vertex
+/// outside `0..vertex_count`.
 pub fn fetch(
     draw_number: usize,
     draw: &RefIndexedDraw,
@@ -87,8 +97,11 @@ pub fn fetch(
         .ok_or(IndexedRefError::IndexRange(draw_number))?;
     (draw.start..end)
         .map(|position| {
-            let index = i64::from(indices.get(position).expect("position checked above"));
-            usize::try_from(index + i64::from(draw.base_vertex))
+            let index = indices.get(position).expect("position checked above");
+            if index == indices.restart() {
+                return Err(IndexedRefError::Restart(draw_number, position));
+            }
+            usize::try_from(i64::from(index) + i64::from(draw.base_vertex))
                 .ok()
                 .filter(|&vertex| vertex < vertex_count)
                 .ok_or(IndexedRefError::VertexRange(draw_number, position))
@@ -172,10 +185,18 @@ mod tests {
             fetch(0, &draw(0, 3, 1), indices, 3),
             Err(IndexedRefError::VertexRange(0, 2))
         );
-        // The primitive-restart value is just another out-of-range index here.
         assert_eq!(
             fetch(0, &draw(1, 3, 0), indices, 3),
-            Err(IndexedRefError::VertexRange(0, 3))
+            Err(IndexedRefError::Restart(0, 3))
         );
+        // The raw restart value is rejected even when the base vertex would
+        // bring it into range.
+        let high = RefIndices::U16(&[65533, 65534, 65535]);
+        assert_eq!(
+            fetch(0, &draw(0, 3, -65533), high, 3),
+            Err(IndexedRefError::Restart(0, 2))
+        );
+        let high = RefIndices::U16(&[65532, 65533, 65534]);
+        assert_eq!(fetch(0, &draw(0, 3, -65532), high, 3), Ok(vec![0, 1, 2]));
     }
 }

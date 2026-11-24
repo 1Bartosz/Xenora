@@ -6,7 +6,7 @@
 #[path = "support/indexed_cases.rs"]
 mod indexed_cases;
 
-use indexed_cases::{BC1_BLOCKS, Fill, INDICES, SIZE, cases, expected, vertices};
+use indexed_cases::{BC1_BLOCKS, Fill, INDICES, SIZE, cases, expected, vertices, wide_indices};
 use xenora_ref::depth::{RefFill, RefTexture};
 use xenora_ref::indexed::{RefIndexedDraw, RefIndices, fetch, render_indexed};
 
@@ -28,10 +28,10 @@ fn reference_matches_independent_expectations() {
         height: 8,
         texels: &texels,
     };
-    let wide = INDICES.map(u32::from);
+    let wide = wide_indices();
     let vertices = vertices();
     let (cases, expected) = (cases(), expected());
-    assert_eq!(cases.len(), 13);
+    assert_eq!(cases.len(), 16);
     assert_eq!(expected.len(), cases.len());
     for (case, want) in cases.iter().zip(&expected) {
         assert_eq!(case.name, want.name);

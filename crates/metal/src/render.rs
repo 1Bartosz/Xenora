@@ -742,6 +742,13 @@ impl IndexBuffer<'_> {
         }
     }
 
+    fn restart(self) -> u32 {
+        match self {
+            Self::U16(_) => u32::from(u16::MAX),
+            Self::U32(_) => u32::MAX,
+        }
+    }
+
     fn size(self) -> usize {
         match self {
             Self::U16(_) => 2,
@@ -794,16 +801,16 @@ impl NativeCompute {
     /// Each draw is one native `drawIndexedPrimitives` call on the pass's
     /// index buffer with the draw's start offset and signed base vertex, so
     /// Metal itself fetches the vertices. Every fetched vertex is checked
-    /// against the vertex buffer first: out-of-range fetches are rejected,
-    /// never left to the GPU. Base vertex needs no capability query: the
+    /// against the vertex buffer first: out-of-range fetches and raw
+    /// primitive-restart values are rejected, never left to the GPU. Base vertex needs no capability query: the
     /// Apple family 7 that [`NativeCompute::new`] requires supports it.
     ///
     /// # Errors
     ///
     /// Returns an error for an invalid extent, too many draws, vertices or
     /// indices, non-finite positions, an index count that is zero or not a
-    /// multiple of 3, an index range past the buffer, a fetched vertex outside
-    /// the vertex buffer, a textured draw without texture, unavailable BC
+    /// multiple of 3, an index range past the buffer, a primitive-restart
+    /// index, a fetched vertex outside the vertex buffer, a textured draw without texture, unavailable BC
     /// compression (operation `supportsBCTextureCompression`), or Metal setup
     /// or execution failure.
     pub fn render_indexed(&self, pass: &IndexedPass<'_>) -> Result<Vec<u8>, MetalError> {
@@ -993,7 +1000,16 @@ fn validate_indexed_pass(pass: &IndexedPass<'_>) -> Result<(), MetalError> {
                 )
             })?;
         for position in draw.start_index..end {
-            let vertex = i64::from(pass.indices.index(position)) + i64::from(draw.base_vertex);
+            let index = pass.indices.index(position);
+            // Metal documents 0xFFFF / 0xFFFFFFFF as the primitive-restart value
+            // of indexed draws without defining it for triangle lists, so the
+            // raw value is rejected whatever the base vertex.
+            if index == pass.indices.restart() {
+                return invalid(format!(
+                    "draw {number}: index {position} is the primitive-restart value"
+                ));
+            }
+            let vertex = i64::from(index) + i64::from(draw.base_vertex);
             if !(0..pass.vertices.len() as i64).contains(&vertex) {
                 return invalid(format!(
                     "draw {number}: index {position} fetches vertex {vertex} outside the vertex buffer"

@@ -628,9 +628,11 @@ impl GraphicsContext {
         Ok(())
     }
 
-    /// Record draw indexed instanced. Each draw renders one triangle, so the
-    /// index count must be 3, or 0 (with a zero instance count) to draw nothing;
-    /// execution rejects any other count.
+    /// Record draw indexed instanced. Each draw renders one triangle once: at
+    /// execution the index count must be 0 or 3, the instance count 0 or 1 and
+    /// the start instance 0, or the draw is rejected; a zero index or instance
+    /// count draws nothing. Index values are ordinary triangle-list indices
+    /// (no primitive restart), range checked after adding the base vertex.
     pub fn cmd_draw_indexed_instanced(
         &mut self,
         list: GraphicsHandle,
@@ -810,13 +812,16 @@ impl GraphicsContext {
                     instance_count,
                     start_index_location,
                     base_vertex_location,
-                    ..
+                    start_instance_location,
                 } => {
+                    if !matches!(index_count_per_instance, 0 | 3)
+                        || *instance_count > 1
+                        || *start_instance_location != 0
+                    {
+                        return Err(GraphicsError::InvalidDescriptor);
+                    }
                     if *index_count_per_instance == 0 || *instance_count == 0 {
                         continue;
-                    }
-                    if *index_count_per_instance != 3 {
-                        return Err(GraphicsError::InvalidDescriptor);
                     }
                     let vertices = self.fetch_indexed_triangle(
                         memory,
@@ -984,7 +989,13 @@ impl GraphicsContext {
             .filter(|&end| end <= res.data.len())
             .ok_or(GraphicsError::IndexOutOfRange)?;
         match res.guest_backing_addr {
-            Some(guest_addr) => memory.read_bytes(guest_addr + offset as u64, out)?,
+            Some(guest_addr) => {
+                let address = guest_addr
+                    .checked_add(offset as u64)
+                    .filter(|address| address.checked_add(out.len() as u64).is_some())
+                    .ok_or(GraphicsError::IndexOutOfRange)?;
+                memory.read_bytes(address, out)?;
+            }
             None => out.copy_from_slice(&res.data[offset..end]),
         }
         Ok(())
