@@ -16,7 +16,11 @@
 //! ASHR (32-bit), the 32-bit integer forms MIN/MAX (I32, U32), CSELECT, BFM,
 //! MUL_I32, BFE (U32, I32), ABSDIFF, LSHL1-4_ADD and MUL_HI (U32, I32), VOP1 move
 //! (including from an SGPR),
-//! VOP2 bitwise, shift, arithmetic-shift and float, VOP3 add-no-carry, MUBUF
+//! VOP2 bitwise, shift, arithmetic-shift and float, the VOP2 integer forms
+//! MUL_I32_I24, MUL_HI_I32_I24, MUL_U32_U24, MUL_HI_U32_U24, MIN/MAX (I32,
+//! U32), XNOR and ADD/SUB/SUBREV_NC_U32 (any SRC0 a VOPC compare takes; a
+//! shift-and-add multiplier and floor division for the high half, the ripple
+//! adder for add and subtract), VOP3 add-no-carry, MUBUF
 //! load/store and the two waits plus `s_endpgm`. Anything else is a controlled
 //! error. The arithmetic shift is evaluated as a floor division by a power of
 //! two rather than with a host signed shift, so the oracle does not share the
@@ -85,6 +89,8 @@ enum Insn {
     VShiftRight(u8, u8, u8),
     VShiftRightArithmetic(u8, u8, u8),
     VXor(u8, u8, u8),
+    /// VOP2 integer opcode 9-12, 17-20, 30 or 37-39: VDST, SRC0, VSRC1.
+    VInt(u32, u8, CmpSrc, u8),
     VAddF(u8, u8, u8),
     VMulF(u8, u8, u8),
     Load(u8),
@@ -678,6 +684,7 @@ fn lane_step(
             | Insn::VShiftLeft(dst, ..)
             | Insn::VShiftRight(dst, ..)
             | Insn::VShiftRightArithmetic(dst, ..)
+            | Insn::VInt(_, dst, ..)
             | Insn::VAddF(dst, ..)
             | Insn::VMulF(dst, ..) => {
                 if execution_mask != 0 && lane.vgpr[usize::from(dst)].is_none() {
@@ -690,6 +697,22 @@ fn lane_step(
                         }
                         Insn::VMovFromVcc(_) => {
                             read_vcc()?;
+                        }
+                        // Sources must be readable even in an inactive lane.
+                        Insn::VInt(_, _, src0, src1) => {
+                            match src0 {
+                                CmpSrc::Sgpr(reg) => {
+                                    read_s(reg)?;
+                                }
+                                CmpSrc::Vcc => {
+                                    read_vcc()?;
+                                }
+                                CmpSrc::Vgpr(reg) => {
+                                    read_vgpr(lane, reg, offset)?;
+                                }
+                                CmpSrc::Imm(_) => {}
+                            }
+                            read_vgpr(lane, src1, offset)?;
                         }
                         _ => {}
                     }
@@ -786,6 +809,16 @@ fn lane_step(
             check_destination(dst, pending_read, offset)?;
             (dst, read_v(a)? ^ read_v(b)?)
         }
+        Insn::VInt(opcode, dst, src0, src1) => {
+            check_destination(dst, pending_read, offset)?;
+            let a = match src0 {
+                CmpSrc::Sgpr(reg) => read_s(reg)?,
+                CmpSrc::Vcc => read_vcc()?,
+                CmpSrc::Imm(value) => value,
+                CmpSrc::Vgpr(reg) => read_v(reg)?,
+            };
+            (dst, vector_integer(opcode, a, read_v(src1)?))
+        }
         Insn::VAddF(dst, a, b) => {
             check_destination(dst, pending_read, offset)?;
             (dst, exact_float(true, read_v(a)?, read_v(b)?, offset)?)
@@ -798,6 +831,78 @@ fn lane_step(
     };
     lane.vgpr[value.0 as usize] = Some(value.1);
     Ok(())
+}
+
+/// D of VOP2 integer opcode `opcode` (guide 12.7) for S0 = `a`, S1 = `b`.
+fn vector_integer(opcode: u32, a: u32, b: u32) -> u32 {
+    // Signed order equals unsigned order after flipping the sign bit.
+    let below = |signed: bool| {
+        let flip = if signed { 0x8000_0000 } else { 0 };
+        (a ^ flip) < (b ^ flip)
+    };
+    match opcode {
+        9 => product_word(multiply_field(a, b, 24, true), false),
+        10 => product_word(multiply_field(a, b, 24, true), true),
+        11 => product_word(multiply_field(a, b, 24, false), false),
+        12 => product_word(multiply_field(a, b, 24, false), true),
+        17 | 19 => {
+            if below(opcode == 17) {
+                a
+            } else {
+                b
+            }
+        }
+        18 | 20 => {
+            if below(opcode == 18) {
+                b
+            } else {
+                a
+            }
+        }
+        30 => (a & b) | (!a & !b),
+        37 => ripple(a, b, false).0,
+        38 => ripple(a, !b, true).0,
+        _ => ripple(b, !a, true).0,
+    }
+}
+
+/// The exact product of the low `width` bits of `a` and `b`, read as two's
+/// complement when `signed`, by shift-and-add on the magnitudes.
+fn multiply_field(a: u32, b: u32, width: u32, signed: bool) -> i128 {
+    let read = |value: u32| {
+        let low = i128::from(value) % (1_i128 << width);
+        if signed && low >= 1_i128 << (width - 1) {
+            low - (1_i128 << width)
+        } else {
+            low
+        }
+    };
+    let (x, y) = (read(a), read(b));
+    let (mx, my) = (x.unsigned_abs(), y.unsigned_abs());
+    let mut magnitude = 0_u128;
+    for bit in 0..width {
+        if (my >> bit) & 1 == 1 {
+            magnitude += mx << bit;
+        }
+    }
+    let magnitude = magnitude as i128;
+    if (x < 0) != (y < 0) {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// Bits 31:0 (or 63:32 when `high`) of `product` in 64-bit two's complement,
+/// by Euclidean division rather than a shift.
+fn product_word(product: i128, high: bool) -> u32 {
+    let word = 1_i128 << 32;
+    let part = if high {
+        product.div_euclid(word)
+    } else {
+        product
+    };
+    part.rem_euclid(word) as u32
 }
 
 /// Bit-serial addition with carry-in; returns the sum and the carry-out.
@@ -938,28 +1043,20 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
             193..=198 => (false, opcode - 192),
             _ => return Err(fail("unsupported VOPC opcode")),
         };
-        let selector = first & 0x1ff;
-        let (src0, len) = match selector {
-            0..=105 => (CmpSrc::Sgpr(selector as u8), 4),
-            106 => (CmpSrc::Vcc, 4),
-            128..=192 => (CmpSrc::Imm(selector - 128), 4),
-            193..=208 => (CmpSrc::Imm(192u32.wrapping_sub(selector)), 4),
-            255 => (
-                CmpSrc::Imm(
-                    word(code, offset + 4)
-                        .map_err(|_| format!("{offset:#x}: truncated VOPC literal"))?,
-                ),
-                8,
-            ),
-            256..=511 => (CmpSrc::Vgpr(selector as u8), 4),
-            _ => return Err(fail("bad VOPC source")),
-        };
+        let (src0, len) = vector_src0(code, offset, first, "VOPC")?;
         let insn = Insn::VCmp {
             relation: relation as u8,
             signed,
             src0,
             src1: (first >> 9) as u8,
         };
+        return Ok((insn, len));
+    }
+    // VOP2 integer forms: bit 31 = 0, OP 30:25, VDST 24:17, VSRC1 16:9, SRC0 8:0.
+    let vop2_op = (first >> 25) & 0x3f;
+    if first >> 31 == 0 && matches!(vop2_op, 9..=12 | 17..=20 | 30 | 37..=39) {
+        let (src0, len) = vector_src0(code, offset, first, "VOP2")?;
+        let insn = Insn::VInt(vop2_op, (first >> 17) as u8, src0, (first >> 9) as u8);
         return Ok((insn, len));
     }
     if first & 0xffff_0000 == 0xd525_0000 {
@@ -1107,6 +1204,32 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         return Ok((Insn::End, 4));
     }
     Err(fail("unsupported opcode"))
+}
+
+/// SRC0 (bits 8:0 of `first`) of a VOPC or VOP2 integer word: an SGPR,
+/// `vcc_lo`, an inline integer, a literal dword or a VGPR.
+fn vector_src0(
+    code: &[u8],
+    offset: usize,
+    first: u32,
+    what: &str,
+) -> Result<(CmpSrc, usize), String> {
+    let selector = first & 0x1ff;
+    Ok(match selector {
+        0..=105 => (CmpSrc::Sgpr(selector as u8), 4),
+        106 => (CmpSrc::Vcc, 4),
+        128..=192 => (CmpSrc::Imm(selector - 128), 4),
+        193..=208 => (CmpSrc::Imm(192u32.wrapping_sub(selector)), 4),
+        255 => (
+            CmpSrc::Imm(
+                word(code, offset + 4)
+                    .map_err(|_| format!("{offset:#x}: truncated {what} literal"))?,
+            ),
+            8,
+        ),
+        256..=511 => (CmpSrc::Vgpr(selector as u8), 4),
+        _ => return Err(format!("{offset:#x}: bad {what} source")),
+    })
 }
 
 fn vector_source(selector: u32) -> Option<Src> {
