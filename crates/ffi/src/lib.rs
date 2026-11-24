@@ -50,6 +50,7 @@ pub const XENORA_INPUT_DOWN: u32 = 1 << 3;
 pub const XENORA_INPUT_ACTION_A: u32 = 1 << 4;
 pub const XENORA_INPUT_ACTION_B: u32 = 1 << 5;
 
+pub use frame_loop::ControllerInput as xenora_controller_input;
 pub use frame_loop::InputState as xenora_input_state;
 
 pub const XENORA_FIXTURE_FRAME_WIDTH: u32 = 4;
@@ -423,6 +424,29 @@ pub unsafe extern "C" fn xenora_session_send_input(
         match session_loop(session) {
             Ok(Some(running)) => {
                 running.send_input(input_val);
+                XENORA_OK
+            }
+            Ok(None) => XENORA_INVALID_STATE,
+            Err(status) => status,
+        }
+    })
+}
+
+/// # Safety
+/// `input` must be a valid pointer to an initialized `xenora_controller_input`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_send_controller_input(
+    session: u64,
+    input: *const frame_loop::ControllerInput,
+) -> i32 {
+    guarded(|| {
+        if input.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let input = unsafe { *input };
+        match session_loop(session) {
+            Ok(Some(running)) => {
+                running.send_controller_input(input);
                 XENORA_OK
             }
             Ok(None) => XENORA_INVALID_STATE,

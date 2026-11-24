@@ -539,9 +539,12 @@ final class FrameLoopModel: ObservableObject {
         sendInput(buttons: buttons, x: 0, y: 0, connected: true)
     }
 
-    private func sendInput(buttons: UInt32, x: Int16, y: Int16, connected: Bool) {
+    private func sendInput(
+        buttons: UInt32, x: Int16, y: Int16, connected: Bool,
+        leftTrigger: Float = 0, rightTrigger: Float = 0
+    ) {
         guard session != 0 else { return }
-        var input = xenora_input_state(
+        let state = xenora_input_state(
             buttons: buttons,
             stick_x: x,
             stick_y: y,
@@ -551,7 +554,11 @@ final class FrameLoopModel: ObservableObject {
             connected: connected ? 1 : 0,
             reserved: 0
         )
-        _ = xenora_session_send_input(session, &input)
+        var input = xenora_controller_input(
+            state: state, left_trigger: UInt16((leftTrigger * 65535).rounded()),
+            right_trigger: UInt16((rightTrigger * 65535).rounded())
+        )
+        _ = xenora_session_send_controller_input(session, &input)
     }
 
     private func updateGameController() {
@@ -560,7 +567,8 @@ final class FrameLoopModel: ObservableObject {
         controller = next
         let snapshot = next?.snapshot
         sendInput(buttons: snapshot?.buttons ?? 0, x: snapshot?.x ?? 0, y: snapshot?.y ?? 0,
-                  connected: next != nil)
+                  connected: next != nil, leftTrigger: snapshot?.leftTrigger ?? 0,
+                  rightTrigger: snapshot?.rightTrigger ?? 0)
     }
 
     func pause() {

@@ -59,6 +59,13 @@ typedef struct {
     uint16_t reserved;
 } xenora_input_state;
 
+/* Extended controller snapshot. Trigger values span 0 to 65535. */
+typedef struct {
+    xenora_input_state state;
+    uint16_t left_trigger;
+    uint16_t right_trigger;
+} xenora_controller_input;
+
 #define XENORA_INPUT_NONE     0u
 #define XENORA_INPUT_RIGHT    (1u << 0)
 #define XENORA_INPUT_LEFT     (1u << 1)
@@ -116,6 +123,7 @@ xenora_status xenora_session_run_trusted_fixture(
 xenora_status xenora_session_start_frame_loop(xenora_session session, uint32_t frame_count);
 xenora_status xenora_session_start_interactive_loop(xenora_session session, uint32_t frame_count);
 xenora_status xenora_session_send_input(xenora_session session, const xenora_input_state *input);
+xenora_status xenora_session_send_controller_input(xenora_session session, const xenora_controller_input *input);
 xenora_status xenora_session_queue_input(xenora_session session, const xenora_input_state *input);
 xenora_status xenora_session_pause_frame_loop(xenora_session session);
 xenora_status xenora_session_resume_frame_loop(xenora_session session);
