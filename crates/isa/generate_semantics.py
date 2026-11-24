@@ -392,6 +392,9 @@ def load_registry(path=REGISTRY):
     rules = registry.setdefault("operand_rules", {})
     forms = registry.setdefault("form", [])
     directory = (path.parent / path.stem).resolve()
+    if (path.parent / path.stem).is_symlink():
+        raise RegistryError(f"{path.name}: the family directory {path.stem}/ is a link")
+    identities = set()
     for include in includes:
         part_path = path.parent / include
         family = Path(include).stem.upper()
@@ -401,6 +404,10 @@ def load_registry(path=REGISTRY):
         # not a link to data elsewhere (nor a second name for another include).
         if part_path.is_symlink() or part_path.resolve().parent != directory:
             raise RegistryError(f"{path.name}: included family file {include} is a link or outside {path.stem}/")
+        status = part_path.stat()
+        if (status.st_dev, status.st_ino) in identities:
+            raise RegistryError(f"{path.name}: included family file {include} is another name for an included file")
+        identities.add((status.st_dev, status.st_ino))
         with open(part_path, "rb") as handle:
             part = tomllib.load(handle)
         unknown = sorted(set(part) - FAMILY_FILE_KEYS)
@@ -749,6 +756,16 @@ def validate(registry, snapshot):
     return errors
 
 
+def _well_formed(rule):
+    """Whether a rule has the dst/src shape the operand checks read."""
+    return (
+        isinstance(rule, dict)
+        and isinstance(rule.get("src"), list)
+        and all(isinstance(src, dict) and isinstance(src.get("field"), str) for src in rule["src"])
+        and ("dst" not in rule or (isinstance(rule["dst"], dict) and isinstance(rule["dst"].get("field"), str)))
+    )
+
+
 def variant_row(registry, variant):
     """The base form re-encoded: its declaration with the variant's identity."""
     base = next(form for form in registry["form"] if form.get("name") == variant["of"])
@@ -818,7 +835,7 @@ def _check_variants(registry, rules, documents, snapshot, seen, errors):
         base_xml = snapshot["variants"].get((base["name"], _family_encoding(base["family"])))
         own_xml = snapshot["variants"].get((variant["of"], _family_encoding(variant["family"])))
         base_rule = rules.get(base.get("operands"))
-        if base_xml and own_xml and isinstance(base_rule, dict):
+        if base_xml and own_xml and _well_formed(base_rule) and _well_formed(rule):
             # Operands correspond by role, in rule order: the destination, then
             # each source (VSRC1 of VOP2 is SRC1 of VOP3).
             def roles(rule, record):

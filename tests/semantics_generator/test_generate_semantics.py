@@ -10,6 +10,7 @@ snapshot are only read, never edited. Run from the repository root:
 
 import copy
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -887,14 +888,25 @@ class Validate(unittest.TestCase):
 
     def test_compares_variant_formats_by_role_not_row_order(self):
         snap = snapshot()
+        # Give both encodings an unsigned destination and signed sources, then
+        # list the VOP3 rows in another order: by role they still match.
+        snap["variants"][("V_MIN_I32", "ENC_VOP2")]["operands"][0][1] = U32
         rows = snap["variants"][("V_MIN_I32", "ENC_VOP3")]["operands"]
+        rows[0][1] = U32
         rows[0], rows[1] = rows[1], rows[0]
-        self.assertEqual(self.errors(variants(), snap), [])
+        reg = variants()
+        errors = [error for error in self.errors(reg, snap) if "differs from the form" in error]
+        self.assertEqual(errors, [])
         # A genuine mismatch on the second source is still reported by role.
         rows[2][1] = U32
         self.rejects(
             variants(), "V_MIN_I32 (VOP3): XML SRC1 format FMT_NUM_U32 differs from the form's VSRC1", snap
         )
+
+    def test_a_malformed_variant_rule_is_a_diagnostic(self):
+        reg = variants()
+        reg["operand_rules"]["vop3_vgpr2"]["src"] = 1
+        self.rejects(reg, "operand rule vop3_vgpr2: declaration differs from the decoder's implemented rule")
 
     def test_rejects_malformed_spec_and_verify_without_a_traceback(self):
         cases = (
@@ -1272,6 +1284,15 @@ class LoadRegistry(unittest.TestCase):
         (self.dir / "rdna2" / "sop2.toml").symlink_to(outside)
         root = self.write('include = ["rdna2/sop2.toml"]\n', {})
         self.fails(root, "included family file rdna2/sop2.toml is a link or outside rdna2/")
+
+    def test_rejects_a_linked_directory_or_a_hard_link_alias(self):
+        root = self.write('include = ["rdna2/sop2.toml", "rdna2/vop2.toml"]\n', {"sop2.toml": ""})
+        os.link(self.dir / "rdna2" / "sop2.toml", self.dir / "rdna2" / "vop2.toml")
+        self.fails(root, "included family file rdna2/vop2.toml is another name for an included file")
+        outside = self.dir / "outside"
+        (self.dir / "rdna2").rename(outside)
+        (self.dir / "rdna2").symlink_to(outside, target_is_directory=True)
+        self.fails(root, "the family directory rdna2/ is a link")
 
     def test_rejects_a_missing_or_repeated_include(self):
         self.fails(self.write('include = ["rdna2/sop2.toml"]\n', {}), "included family file rdna2/sop2.toml does not exist")
