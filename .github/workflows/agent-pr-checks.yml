@@ -1,0 +1,78 @@
+name: Agent PR checks
+
+# Checks pull requests against the task queue: linked claimed task, file
+# ownership, overlap with other open pull requests, and independent
+# verification. Runs on the base branch only: pull request code is never checked
+# out or executed; changed files come from the API. Not yet run on GitHub.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PYTHONPATH: scripts
+        run: |
+          set -eu
+          python3 -m agent_queue event --path "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/event.json"
+          number=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["number"])' "$RUNNER_TEMP/event.json")
+          python3 -m agent_queue gather --repo "$GH_REPO" --pr "$number" > "$RUNNER_TEMP/state.json"
+          status=0
+          python3 -m agent_queue pr-check --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/result.json" || status=$?
+          {
+            echo '## Agent PR check'
+            echo '```json'
+            cat "$RUNNER_TEMP/result.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  verify:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request
+    runs-on: ubuntu-24.04-arm
+    # issues: write posts the reply; actions: write re-runs the check after a recorded verification.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: write
+    concurrency:
+      group: agent-verify-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Record verification and re-run the check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PYTHONPATH: scripts
+        run: |
+          set -eu
+          python3 -m agent_queue event --path "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/event.json"
+          number=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["number"])' "$RUNNER_TEMP/event.json")
+          python3 -m agent_queue gather --repo "$GH_REPO" --pr "$number" > "$RUNNER_TEMP/state.json"
+          python3 -m agent_queue decide --event "$RUNNER_TEMP/event.json" --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
+          python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/actions.json"
+          sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pr"]["head_sha"])' "$RUNNER_TEMP/state.json")
+          run=$(gh run list --workflow agent-pr-checks.yml --commit "$sha" --event pull_request_target --limit 1 --json databaseId -q '.[0].databaseId // empty')
+          if [ -n "$run" ]; then gh run rerun "$run" || true; fi
