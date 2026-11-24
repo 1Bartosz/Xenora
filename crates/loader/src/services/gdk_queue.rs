@@ -23,7 +23,12 @@ const MANUAL: u32 = 0;
 pub(super) struct QueueHandles {
     last_id: u64,
     queues: BTreeMap<u64, [u64; 2]>,
-    pending: BTreeMap<u64, VecDeque<GuestCallback>>,
+    pending: BTreeMap<u64, VecDeque<ScheduledCallback>>,
+}
+
+struct ScheduledCallback {
+    ready_at: Instant,
+    callback: GuestCallback,
 }
 
 impl QueueHandles {
@@ -66,7 +71,12 @@ impl QueueHandles {
         }
     }
 
-    fn submit(&mut self, handle: u64, selector: u32, callback: GuestCallback) -> Result<(), u32> {
+    fn submit(
+        &mut self,
+        handle: u64,
+        selector: u32,
+        callback: ScheduledCallback,
+    ) -> Result<(), u32> {
         let ports = self.queues.get(&handle).ok_or(ERROR_INVALID_HANDLE)?;
         let port = ports
             .get(selector as usize)
@@ -75,7 +85,8 @@ impl QueueHandles {
         if queue.len() >= MAX_CALLBACKS_PER_PORT {
             return Err(ERROR_OUTOFMEMORY);
         }
-        queue.push_back(callback);
+        let index = queue.partition_point(|item| item.ready_at <= callback.ready_at);
+        queue.insert(index, callback);
         Ok(())
     }
 }
@@ -173,27 +184,40 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         },
     );
 
-    let submit = Arc::clone(state);
-    registry.register_with_status(
-        MODULE,
-        "XTaskQueueSubmitCallback",
-        ServiceStatus::Partial,
-        move |args, _, memory| {
-            if args.r9 == 0 || memory.fetch_instruction_byte(args.r9).is_err() {
-                return Ok(guest_hresult(Err(ERROR_INVALID_PARAMETER)));
-            }
-            let callback = GuestCallback {
-                entry: args.r9,
-                context: args.r8,
-            };
-            let mut queues = submit.gdk_queues.lock().expect("GDK queue handle table");
-            let result = queues.submit(args.rcx, args.rdx as u32, callback);
-            if result.is_ok() {
-                submit.gdk_queue_changed.notify_all();
-            }
-            Ok(guest_hresult(result))
-        },
-    );
+    for (symbol, delayed) in [
+        ("XTaskQueueSubmitCallback", false),
+        ("XTaskQueueSubmitDelayedCallback", true),
+    ] {
+        let submit = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, _, memory| {
+                let (delay, context, entry) = if delayed {
+                    let Ok(entry) = args.get(4, memory) else {
+                        return Ok(guest_hresult(Err(ERROR_INVALID_PARAMETER)));
+                    };
+                    (args.r8 as u32, args.r9, entry)
+                } else {
+                    (0, args.r8, args.r9)
+                };
+                if entry == 0 || memory.fetch_instruction_byte(entry).is_err() {
+                    return Ok(guest_hresult(Err(ERROR_INVALID_PARAMETER)));
+                }
+                let mut queues = submit.gdk_queues.lock().expect("GDK queue handle table");
+                let callback = ScheduledCallback {
+                    ready_at: Instant::now() + Duration::from_millis(u64::from(delay)),
+                    callback: GuestCallback { entry, context },
+                };
+                let result = queues.submit(args.rcx, args.rdx as u32, callback);
+                if result.is_ok() {
+                    submit.gdk_queue_changed.notify_all();
+                }
+                Ok(guest_hresult(result))
+            },
+        );
+    }
     let dispatch = Arc::clone(state);
     registry.register_callback_dispatch(MODULE, "XTaskQueueDispatch", move |args, memory| {
         let timeout = args.r8 as u32;
@@ -210,15 +234,20 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             else {
                 return Ok(None);
             };
+            let now = Instant::now();
+            let mut wake_at = deadline;
             if let Some(pending) = queues.pending.get_mut(&port)
-                && let Some(callback) = pending.front()
+                && let Some(item) = pending.front()
             {
-                memory
-                    .fetch_instruction_byte(callback.entry)
-                    .map_err(ExitReason::MemoryFault)?;
-                return Ok(pending.pop_front());
+                if item.ready_at <= now {
+                    memory
+                        .fetch_instruction_byte(item.callback.entry)
+                        .map_err(ExitReason::MemoryFault)?;
+                    return Ok(pending.pop_front().map(|item| item.callback));
+                }
+                wake_at = wake_at.min(item.ready_at);
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = wake_at.saturating_duration_since(now);
             if remaining.is_zero() {
                 return Ok(None);
             }

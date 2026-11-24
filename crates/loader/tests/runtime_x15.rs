@@ -1143,9 +1143,12 @@ fn guest_gdk_dispatch_runs_callback_and_resumes_caller() {
     code.extend_from_slice(&[0x48, 0xb8]);
     code.extend_from_slice(&output.to_le_bytes());
     code.extend_from_slice(&[0x48, 0xc7, 0x00, 0xff, 0xff, 0xff, 0xff]);
-    set_args(&mut code, &[queue, 0, output, IMAGE + 0x1100]);
+    code.extend_from_slice(&[0x48, 0xb8]);
+    code.extend_from_slice(&(IMAGE + 0x1100).to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x20]);
+    set_args(&mut code, &[queue, 0, 30, output]);
     append_import_call(&mut code, 0x2060);
-    set_args(&mut code, &[queue, 0, 0]);
+    set_args(&mut code, &[queue, 0, 1000]);
     append_import_call(&mut code, 0x21a0);
     code.extend_from_slice(&[0x48, 0x89, 0xc3]); // retain successful dispatch in RBX
     set_args(&mut code, &[queue, 0, 0]);
@@ -1155,12 +1158,13 @@ fn guest_gdk_dispatch_runs_callback_and_resumes_caller() {
     // Store canceled, then clobber RAX to verify the dispatch return is restored.
     code.extend_from_slice(&[0x48, 0x89, 0x11, 0xb8, 99, 0, 0, 0, 0xc3]);
     let image = TestPeBuilder::new(IMAGE, 0x1000)
-        .add_import(MODULE, "XTaskQueueSubmitCallback")
+        .add_import(MODULE, "XTaskQueueSubmitDelayedCallback")
         .add_import(MODULE, "XTaskQueueDispatch")
         .code(&code)
         .build();
     let mut registry = ImportRegistry::new();
     register_standard_services(&mut registry, Arc::clone(&state));
+    let submitted = std::time::Instant::now();
     let result = run_synthetic_startup(
         &image,
         StartupLayout {
@@ -1173,6 +1177,7 @@ fn guest_gdk_dispatch_runs_callback_and_resumes_caller() {
     )
     .unwrap();
     assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+    assert!(submitted.elapsed() >= std::time::Duration::from_millis(30));
     let cpu = result.execution.final_state;
     assert_eq!(cpu.get(Register::Rbx), 1);
     assert_eq!(cpu.get(Register::Rax), 0);
