@@ -15,6 +15,7 @@ mod files;
 mod gdk_queue;
 mod heap;
 mod modules;
+mod platform_fixture;
 mod task_fixture;
 mod winsock;
 
@@ -175,6 +176,7 @@ pub struct ServicesState {
     last_errors: Mutex<BTreeMap<u64, u32>>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
+    platform_fixture: Mutex<platform_fixture::PlatformFixture>,
     gdk_queues: Mutex<gdk_queue::QueueHandles>,
     gdk_queue_changed: Condvar,
     winsock_changed: Condvar,
@@ -194,6 +196,7 @@ impl ServicesState {
             last_errors: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
+            platform_fixture: Mutex::default(),
             gdk_queues: Mutex::default(),
             gdk_queue_changed: Condvar::new(),
             winsock_changed: Condvar::new(),
@@ -554,6 +557,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     );
     winsock::register(registry, &state);
     task_fixture::register(registry, &state);
+    platform_fixture::register(registry, &state);
     gdk_queue::register(registry, &state);
     modules::register(registry, &state);
 }

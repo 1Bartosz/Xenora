@@ -1122,6 +1122,36 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn guest_platform_settings_follow_lifecycle_and_process_boundaries() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call =
+        |symbol, args: &[u64]| call_service_fixture(&state, "xenora_fixture.dll", symbol, args);
+    let value = |symbol, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    let output = PROCESS_FIXTURE_STACK_TOP - 0x400;
+    assert_eq!(value("GetFixtureApplicationId", &[]), 0);
+    assert_eq!(value("OpenFixturePlatform", &[]), 1);
+    assert_eq!(value("OpenFixturePlatform", &[]), 0);
+    assert_eq!(value("GetFixtureApplicationId", &[]), 0x5845_4e4f_5241_0001);
+    for key in 1..=32 {
+        assert_eq!(value("SetFixtureSetting", &[key, key * 10]), 1);
+    }
+    assert_eq!(value("SetFixtureSetting", &[33, 1]), 0);
+    assert_eq!(value("SetFixtureSetting", &[1, 99]), 1);
+    assert_eq!(value("CloseFixturePlatform", &[]), 1);
+    assert_eq!(value("GetFixtureSetting", &[1, output]), 0);
+    assert_eq!(value("OpenFixturePlatform", &[]), 1);
+    let read = call("GetFixtureSetting", &[1, output]);
+    assert_eq!(read.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(read.image.memory.read_u64(output).unwrap(), 99);
+    let other = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let module = "xenora_fixture.dll";
+    call_service_fixture(&other, module, "OpenFixturePlatform", &[]);
+    let missing = call_service_fixture(&other, module, "GetFixtureSetting", &[1, output]);
+    assert_eq!(missing.execution.final_state.get(Register::Rax), 0);
+    assert_eq!(missing.image.memory.read_u64(output).unwrap(), 0);
+}
+
+#[test]
 fn guest_gdk_dispatch_runs_callback_and_resumes_caller() {
     const IMAGE: u64 = 0x140000000;
     const MODULE: &str = "xgameruntime.dll";
