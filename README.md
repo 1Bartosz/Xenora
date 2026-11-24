@@ -8,6 +8,12 @@ Xenora is an open-source project written primarily in Rust that builds and verif
 
 Xenora is still experimental. Verified work is restricted to independently authored synthetic programs and shaders; authentic Xbox executable loading, system-service compatibility and commercial game execution remain unsupported. See the [current limitations](#current-limitations).
 
+### At a glance
+
+- **Native graphics:** translated gfx1030 vertex and pixel stages and native passes (indexed draws, blend, depth) run on Apple Silicon GPUs — verified, see [Blend pass](#blend-pass) and [Verified Apple M5 results](#verified-apple-m5-results).
+- **Guest execution:** bounded x86-64 execution, original PE32+ loading, synthetic services and guest-driven GPU dispatch — verified milestones X1–X9.
+- **Not supported:** authentic Xbox executable loading and commercial game execution; see the [milestone table](#development-milestones).
+
 [![Native Rust checks](https://github.com/ranveersoni98/Xenora/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ranveersoni98/Xenora/actions/workflows/ci.yml)
 
 ---
