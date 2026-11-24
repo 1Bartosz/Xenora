@@ -211,6 +211,21 @@ impl ParsedPe {
         })
     }
 
+    /// Translate a Relative Virtual Address (RVA) to a raw file offset.
+    pub fn rva_to_file_offset(&self, rva: u32) -> Option<usize> {
+        for sec in &self.sections {
+            let start = sec.virtual_address;
+            let size = std::cmp::max(sec.virtual_size, sec.raw_data_size);
+            if rva >= start && rva < start + size {
+                let diff = (rva - start) as usize;
+                if diff < sec.raw_data_size as usize {
+                    return Some(sec.raw_data_ptr as usize + diff);
+                }
+            }
+        }
+        None
+    }
+
     /// Load this parsed PE into a fresh `GuestMemory` instance, mapping all sections.
     pub fn load_into_memory(&self, bytes: &[u8]) -> Result<LoadedImage, PeError> {
         let mut memory = GuestMemory::new();

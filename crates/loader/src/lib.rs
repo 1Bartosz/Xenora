@@ -8,15 +8,20 @@
 pub mod arm64;
 pub mod cpu;
 pub mod dbt;
+pub mod imports;
 pub mod jit;
 pub mod memory;
 pub mod pe;
 pub mod probe;
+pub mod reloc;
+pub mod services;
+pub mod tls;
 pub mod triage;
 
 pub use arm64::Arm64Assembler;
 pub use cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, RFlags, Register};
 pub use dbt::{DbtEngine, DbtMetrics};
+pub use imports::{ImportError, ImportRegistry, ServiceDescriptor, ServiceHandler, Win64Args};
 pub use jit::{JitError, JitMemory};
 pub use memory::{GuestMemory, MemoryError, MemoryPermissions};
 pub use pe::{LoadedImage, ParsedPe, PeError, PeSection};
@@ -24,4 +29,10 @@ pub use probe::{
     ImportedSymbol, InstructionRecord, ProbeConfig, ProbeReport, RelocationCensus, TlsCensus,
     probe_pe_bytes, run_probe_and_export,
 };
+pub use reloc::{
+    IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64, RelocationError, RelocationReport,
+    apply_relocations,
+};
+pub use services::{Clock, MockClock, ServicesState, SystemClock, register_standard_services};
+pub use tls::{TlsDirectory, TlsError, execute_tls_callbacks, parse_tls_directory, setup_tls};
 pub use triage::{TriageReport, triage_bytes, triage_file};

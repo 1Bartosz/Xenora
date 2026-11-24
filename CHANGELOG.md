@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added PE32+ runtime support for base relocations, thread-local storage initialization and callbacks, and guest import dispatch. Synthetic runtime tests exercise the new loader paths.
+
 - Added a static PE compatibility probe that exports section, relocation, thread-local storage, import and bounded x86-64 entry-point analysis. Synthetic tests cover inspection and report export.
 - Added native Apple Silicon ARM64 Dynamic Binary Translation (DBT) engine (`DbtEngine`) with basic block decoding, native ARM64 code lowering, and W^X-compliant JIT code cache (`JitMemory`) utilizing macOS `MAP_JIT` and `pthread_jit_write_protect_np`.
 - Added an ARM64 machine instruction assembler (`Arm64Assembler`) supporting register/immediate arithmetic, logical operations, memory loads/stores, branch/call/ret control flow, and calling convention preservation.

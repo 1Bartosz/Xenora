@@ -237,9 +237,34 @@ impl GuestMemory {
         Ok(u64::from_le_bytes(buf))
     }
 
+    /// Read a 64-bit integer ignoring region read permissions (e.g. loader/relocation phase).
+    pub fn read_u64_bypass(&self, address: u64) -> Result<u64, MemoryError> {
+        for region in &self.regions {
+            if region.contains(address, 8) {
+                let offset = (address - region.base) as usize;
+                let buf: [u8; 8] = region.data[offset..offset + 8].try_into().unwrap();
+                return Ok(u64::from_le_bytes(buf));
+            }
+        }
+        Err(MemoryError::UnmappedAddress(address))
+    }
+
     /// Write a 64-bit integer (little endian) to guest memory.
     pub fn write_u64(&mut self, address: u64, value: u64) -> Result<(), MemoryError> {
         self.write_bytes(address, &value.to_le_bytes())
+    }
+
+    /// Write a 64-bit integer ignoring region write permissions (e.g. loader/relocation phase).
+    pub fn write_u64_bypass(&mut self, address: u64, value: u64) -> Result<(), MemoryError> {
+        let bytes = value.to_le_bytes();
+        for region in &mut self.regions {
+            if region.contains(address, 8) {
+                let offset = (address - region.base) as usize;
+                region.data[offset..offset + 8].copy_from_slice(&bytes);
+                return Ok(());
+            }
+        }
+        Err(MemoryError::UnmappedAddress(address))
     }
 
     /// Read a 32-bit integer (little endian) from guest memory.
@@ -252,5 +277,18 @@ impl GuestMemory {
     /// Write a 32-bit integer (little endian) to guest memory.
     pub fn write_u32(&mut self, address: u64, value: u32) -> Result<(), MemoryError> {
         self.write_bytes(address, &value.to_le_bytes())
+    }
+
+    /// Write a 32-bit integer ignoring region write permissions (e.g. loader/relocation phase).
+    pub fn write_u32_bypass(&mut self, address: u64, value: u32) -> Result<(), MemoryError> {
+        let bytes = value.to_le_bytes();
+        for region in &mut self.regions {
+            if region.contains(address, 4) {
+                let offset = (address - region.base) as usize;
+                region.data[offset..offset + 4].copy_from_slice(&bytes);
+                return Ok(());
+            }
+        }
+        Err(MemoryError::UnmappedAddress(address))
     }
 }
