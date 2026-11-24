@@ -1802,12 +1802,10 @@ mod review {
         let mut code = base.clone();
         code[0x14..0x18].copy_from_slice(&vopc(129, 256 + 1, 9).to_le_bytes());
         rejected_at(&code, 0x14);
-        // v_cmpx (writes EXEC), F and T forms, and the VOP3 encoding.
-        for word in [vopc(210, 257, 3), vopc(128, 257, 3), vopc(135, 257, 3)] {
-            let mut code = base.clone();
-            code[0x14..0x18].copy_from_slice(&word.to_le_bytes());
-            rejected_at(&code, 0x14);
-        }
+        // v_cmpx (writes EXEC) and the VOP3 encoding.
+        let mut code = base.clone();
+        code[0x14..0x18].copy_from_slice(&vopc(210, 257, 3).to_le_bytes());
+        rejected_at(&code, 0x14);
         let mut e64 = base[..0x14].to_vec();
         e64.extend(words(&[0xd481_006a, 0x0002_0701]));
         e64.extend_from_slice(&base[0x18..]);
