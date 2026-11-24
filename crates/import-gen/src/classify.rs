@@ -936,30 +936,57 @@ impl SymbolDb {
 
     fn populate_win32_sysinfo(&mut self) {
         let m = "api-ms-win-core-sysinfo-l1-1-0.dll";
-        self.win32_stub(
-            m,
-            "GetSystemTimeAsFileTime",
-            false,
-            "returns current UTC as FILETIME",
-        );
-        for module in [m, "kernel32.dll"] {
-            for symbol in ["GetTickCount", "GetTickCount64"] {
+        for (module, symbols) in [
+            (
+                m,
+                &[
+                    "GetSystemTimeAsFileTime",
+                    "GetTickCount",
+                    "GetTickCount64",
+                    "GetSystemInfo",
+                    "GlobalMemoryStatusEx",
+                    "GetSystemTime",
+                    "GetLocalTime",
+                ][..],
+            ),
+            (
+                "api-ms-win-core-sysinfo-l1-2-0.dll",
+                &["GetNativeSystemInfo", "GetSystemTimePreciseAsFileTime"],
+            ),
+            (
+                "api-ms-win-core-timezone-l1-1-0.dll",
+                &["FileTimeToSystemTime", "SystemTimeToFileTime"],
+            ),
+            (
+                "api-ms-win-core-realtime-l1-1-0.dll",
+                &["QueryUnbiasedInterruptTime"],
+            ),
+            ("api-ms-win-core-synch-l1-2-0.dll", &["Sleep"]),
+            ("api-ms-win-core-synch-l1-1-0.dll", &["SleepEx"]),
+            (
+                "kernel32.dll",
+                &[
+                    "GetSystemTimeAsFileTime",
+                    "GetTickCount",
+                    "GetTickCount64",
+                    "GetSystemInfo",
+                    "GetNativeSystemInfo",
+                    "GlobalMemoryStatusEx",
+                    "GetSystemTime",
+                    "GetLocalTime",
+                    "GetSystemTimePreciseAsFileTime",
+                    "FileTimeToSystemTime",
+                    "SystemTimeToFileTime",
+                    "QueryUnbiasedInterruptTime",
+                    "Sleep",
+                    "SleepEx",
+                ],
+            ),
+        ] {
+            for symbol in symbols {
                 self.ins(module, symbol, Classification::StandardService);
             }
         }
-        self.win32_stub(
-            m,
-            "GetSystemInfo",
-            false,
-            "fills SYSTEM_INFO with synthetic values",
-        );
-        self.win32_stub(
-            m,
-            "GetLocalTime",
-            false,
-            "fills SYSTEMTIME with host local time",
-        );
-        self.win32_stub(m, "GetSystemTime", false, "fills SYSTEMTIME with host UTC");
         self.win32_stub(
             m,
             "GetProcessorCount",

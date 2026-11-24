@@ -87,6 +87,8 @@ impl std::error::Error for MemoryError {}
 
 pub(crate) const PROCESS_HEAP: u64 = u64::MAX - 2;
 const MAX_DYNAMIC_BYTES: usize = 64 * 1024 * 1024;
+/// Host storage bound for each dynamic allocation kind.
+pub(crate) const DYNAMIC_BUDGET: u64 = MAX_DYNAMIC_BYTES as u64;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AllocationKind {
@@ -203,6 +205,19 @@ impl GuestMemory {
         permissions: MemoryPermissions,
     ) -> Result<u64, MemoryError> {
         self.map_dynamic_allocation(requested_base, size, permissions, AllocationKind::Virtual)
+    }
+
+    /// Bytes mapped in total, held by virtual allocations, and held by heap
+    /// blocks. Each of the last two kinds is bounded by [`DYNAMIC_BUDGET`].
+    pub(crate) fn usage(&self) -> (u64, u64, u64) {
+        let mapped = self
+            .regions
+            .iter()
+            .map(|region| region.data.len())
+            .sum::<usize>();
+        let virtual_bytes = self.dynamic_bytes(AllocationKind::Virtual);
+        let heap_bytes = self.dynamic_bytes(AllocationKind::Heap(PROCESS_HEAP));
+        (mapped as u64, virtual_bytes as u64, heap_bytes as u64)
     }
 
     pub(crate) fn crt_errno_address(&mut self, teb: u64) -> Result<u64, MemoryError> {

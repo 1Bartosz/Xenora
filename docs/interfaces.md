@@ -306,6 +306,37 @@ one-time initialization that another thread has pending.
   them. `FlsFree` releases the slot, then calls its cleanup callback on the
   calling thread for each thread's nonnull value, in TEB order.
 
+### System information, calendar time and sleeping
+
+The guest sees a simulated machine described by `GuestSystemProfile` on
+`ServicesState`, and never the host's hardware. `HostCapabilities::detect`
+reports the Mac's logical processors, physical memory and page size
+separately, for diagnostics.
+
+- `GetSystemInfo` and `GetNativeSystemInfo` report an AMD64 processor
+  (`PROCESSOR_ARCHITECTURE_AMD64`, `PROCESSOR_AMD_X8664`), 4 KiB pages,
+  64 KiB allocation granularity and the x64 user address range
+  `0x10000`–`0x7FFFFFFEFFFF`. The processor count comes from the profile and
+  defaults to one, because guest code runs on one thread at a time. The
+  processor level and revision are zero, because no CPU model is simulated.
+- `GlobalMemoryStatusEx` requires `dwLength` to be 64. Guest physical memory is
+  the virtual-allocation and heap budgets together, 128 MiB. Available memory
+  and `dwMemoryLoad` reflect current guest allocations. There is no paging
+  file, and the virtual totals cover the x64 user range.
+- `GetSystemTime`, `GetLocalTime` and `GetSystemTimePreciseAsFileTime` read
+  the injected clock. The guest time zone is UTC, so local time equals system
+  time. `FileTimeToSystemTime` and `SystemTimeToFileTime` convert using the
+  proleptic Gregorian calendar. They reject FILETIME values with the top bit
+  set and invalid dates (years outside 1601–30827), ignore the day of week on
+  input, and return `ERROR_INVALID_PARAMETER` without writing output.
+- `QueryUnbiasedInterruptTime` reports 100 ns ticks since the service state
+  was created.
+- `Sleep` and `SleepEx` suspend the calling thread through the clock, so the
+  mock clock advances instead of waiting. No APCs exist, so an alertable sleep
+  always returns zero. `INFINITE` and sleeps longer than 10 seconds stop the
+  guest with the runtime-limit fault, because a single guest thread could not
+  be woken.
+
 ### Services that call guest code
 
 A service registered as a callback task can call guest functions before it

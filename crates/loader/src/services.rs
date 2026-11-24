@@ -18,6 +18,7 @@ mod heap;
 mod modules;
 mod platform_fixture;
 mod synch;
+pub mod sysinfo;
 mod task_fixture;
 mod winsock;
 
@@ -68,6 +69,13 @@ pub trait Clock: Send + Sync {
         let ticks = ORIGIN.get_or_init(Instant::now).elapsed().as_nanos() / 100;
         ticks.min(u128::from(MAX_PERFORMANCE_COUNT)) as u64
     }
+
+    /// Suspend the calling guest thread for `intervals` 100-nanosecond ticks.
+    fn sleep(&self, intervals: u64) {
+        std::thread::sleep(std::time::Duration::from_nanos(
+            intervals.saturating_mul(100),
+        ));
+    }
 }
 
 /// Deterministic test clock.
@@ -101,6 +109,11 @@ impl Clock for MockClock {
 
     fn performance_count(&self) -> u64 {
         self.performance_count.load(Ordering::SeqCst)
+    }
+
+    /// Sleeping advances the mock clock instead of waiting.
+    fn sleep(&self, intervals: u64) {
+        self.advance(intervals);
     }
 }
 
@@ -174,6 +187,9 @@ pub struct ServicesState {
     pub process_id: u32,
     priority_boost_disabled: AtomicBool,
     pub thread_id: u32,
+    /// Characteristics the guest is told it runs on. These are simulated and
+    /// independent of the host; see [`sysinfo::HostCapabilities`] for the host.
+    pub guest_profile: sysinfo::GuestSystemProfile,
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
     synch: Mutex<synch::Synch>,
@@ -195,6 +211,7 @@ impl ServicesState {
             priority_boost_disabled: AtomicBool::new(false),
             process_id: 0x4100, // Synthetic process ID
             thread_id: 0x4104,  // Synthetic main thread ID
+            guest_profile: sysinfo::GuestSystemProfile::default(),
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
             synch: Mutex::default(),
@@ -338,6 +355,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
 
     events::register(registry, &state);
     synch::register(registry, &state);
+    sysinfo::register(registry, &state);
     files::register(registry, &state);
     crt::register(registry);
     crt::register_heap(registry);
