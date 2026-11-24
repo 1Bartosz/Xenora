@@ -24,6 +24,7 @@ remains unsupported.
 
 ### Fixed
 - Made the native semantic-review timeout in `scripts/test-gpu.sh` configurable with `XENORA_SEMANTIC_TIMEOUT` and raised its default from 120 to 300 seconds, so cold Apple Silicon runs do not fail while the expanded Metal known-answer suite is still progressing.
+- Added a Python 3 fallback for `timeout` in `scripts/test-gpu.sh`, so the native Metal suite runs on stock macOS without GNU coreutils while preserving bounded execution and the usual timeout exit status.
 
 ### Added
 - `dbt_bench` can also write its results as one JSON document when `XENORA_DBT_BENCH_JSON=<path>` is set (#112). The document records the host CPU, OS and architecture, the git revision and whether the tree had local changes, debug assertions, the workload and sample counts, the median, minimum, maximum, p95, p99, IQR and MIPS for the interpreter and for cold and warm DBT, and the cold DBT counters. Anything the benchmark cannot determine is `null`. The text output and the timed work are unchanged.
