@@ -23,6 +23,7 @@ remains unsupported.
 
 ### Fixed
 - Made the native semantic-review timeout in `scripts/test-gpu.sh` configurable with `XENORA_SEMANTIC_TIMEOUT` and raised its default from 120 to 300 seconds, so cold Apple Silicon runs do not fail while the expanded Metal known-answer suite is still progressing.
+- Added a Python 3 fallback for `timeout` in `scripts/test-gpu.sh`, so the native Metal suite runs on stock macOS without GNU coreutils while preserving bounded execution and the usual timeout exit status.
 
 ### Added
 - Added a documented independent acceptance rule for promoting AMD RDNA2 desktop GPU (gfx1030) forms from local CPU and Metal results to `fixture verified`, including clean-commit evidence, reviewer independence, raw-log location, review-log summary, failure handling and status regeneration (#302).
