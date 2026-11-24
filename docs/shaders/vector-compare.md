@@ -127,8 +127,11 @@ While VCC_LO is lane-derived it may be read only by:
    lanes (inactive lanes keep vD, as for any partial-EXEC move);
 3. SRC0 of a supported compare (`v_cmp_* vcc_lo, vcc_lo, vN`), which reads the
    old VCC_LO in every active lane before the new value is written.
+4. SRC0 of a registry VOP2 integer form (for example
+   `v_add_nc_u32_e32 vD, vcc_lo, vN`), which reads the 32-bit mask in every
+   active lane, as `v_mov_b32_e32` does.
 
-`v_mov_b32_e32 vD, vcc_lo` follows the usual EXEC rules: with EXEC_LO = 0 it
+`v_mov_b32_e32 vD, vcc_lo` and the VOP2 forms follow the usual EXEC rules: with EXEC_LO = 0 it
 is skipped without reading VCC; otherwise VCC_LO must be known or
 lane-derived. Every other read of vcc_lo is rejected in any state: the
 supported scalar instructions (`s_mov_b32`, SOP2, `s_cmp_eq_u32`) do not

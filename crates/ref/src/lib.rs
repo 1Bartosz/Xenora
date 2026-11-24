@@ -51,6 +51,8 @@ pub enum Op {
     Move(u8, Source),
     Add(u8, u8, u8),
     ScalarMove(u8, Source),
+    /// SOP1 unary operation writing an SGPR (s0-s105), and SCC for some.
+    ScalarUnary(ScalarUnary, u8, Source),
     /// VOP1 move of a normal SGPR or `vcc_lo` (106) into a VGPR.
     MoveScalar(u8, u8),
     /// VOPC 32-bit integer compare writing the Wave32 mask to `vcc_lo`.
@@ -67,6 +69,9 @@ pub enum Op {
         condition: BranchCondition,
     },
     Vector(VectorAlu, u8, u8, u8),
+    /// VOP2 32-bit integer form: VDST, SRC0 (VGPR, SGPR, `vcc_lo`, inline
+    /// integer or literal) and VSRC1. Writes neither VCC nor SCC.
+    VectorInteger(VectorInteger, u8, CompareSource, u8),
     End,
 }
 
@@ -105,7 +110,7 @@ impl Comparison {
     }
 }
 
-/// First source of a VOPC compare.
+/// First source of a VOPC compare or a VOP2 integer form.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompareSource {
     /// VGPR index.
@@ -162,6 +167,63 @@ pub enum ScalarAlu {
     ShiftRight,
     /// D = signext(S0) >> S1[4:0], SCC = (D != 0).
     ArithmeticShiftRight,
+    /// Guide 12.1: D = (S0 < S1) ? S0 : S1, SCC = (S0 < S1); signed or not.
+    Minimum {
+        signed: bool,
+    },
+    /// D = (S0 > S1) ? S0 : S1, SCC = (S0 > S1).
+    Maximum {
+        signed: bool,
+    },
+    /// D = SCC ? S0 : S1; reads SCC and leaves it unchanged.
+    Select,
+    /// D = ((1 << S0[4:0]) - 1) << S1[4:0]; SCC unchanged.
+    BitfieldMask,
+    /// D = low 32 bits of S0 * S1; SCC unchanged.
+    Multiply,
+    /// D = (S0 >> S1[4:0]) & ((1 << S1[22:16]) - 1), sign-extended from the
+    /// field's top bit when signed (S0 then shifts arithmetically);
+    /// SCC = (D != 0).
+    BitfieldExtract {
+        signed: bool,
+    },
+    /// D = |S0 - S1| with the 32-bit difference (0x80000000 stays),
+    /// SCC = (D != 0).
+    AbsoluteDifference,
+    /// D = (S0 << N) + S1, SCC = ((S0 << N) + S1 >= 2^32) with N = 1..4.
+    ShiftLeftAdd(u8),
+    /// D = high 32 bits of S0 * S1; SCC unchanged.
+    MultiplyHigh {
+        signed: bool,
+    },
+}
+
+/// SOP1 unary operations decoded by the reference interpreter (RDNA 2 ISA
+/// guide 12.3; SCC per Tables 12 and 14).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScalarUnary {
+    /// D = ~S0, SCC = (D != 0).
+    Not,
+    /// D[31:0] = S0[0:31].
+    ReverseBits,
+    /// D = number of zero bits, SCC = (D != 0).
+    CountZeros,
+    /// D = number of one bits, SCC = (D != 0).
+    CountOnes,
+    /// D = index of the lowest zero bit, or -1.
+    FindFirstZero,
+    /// D = index of the lowest one bit, or -1.
+    FindFirstOne,
+    /// D = number of zeros above the highest one bit, or -1 for 0.
+    FindLastBit,
+    /// D = number of leading bits equal to the sign bit, or -1 for 0 and -1.
+    FindLastSignBit,
+    /// D = signext(S0[7:0]).
+    SignExtendByte,
+    /// D = signext(S0[15:0]).
+    SignExtendShort,
+    /// D = |S0| (0x80000000 stays), SCC = (D != 0).
+    Absolute,
 }
 
 /// VOP2 operations decoded by the reference interpreter.
@@ -175,6 +237,90 @@ pub enum VectorAlu {
     Xor,
     FloatAdd,
     FloatMultiply,
+}
+
+/// VOP2 32-bit integer forms with a general SRC0 (AMD RDNA 2 ISA guide
+/// section 12.7). None has a carry-in or carry-out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VectorInteger {
+    /// 9 / 11: D = low 32 bits of S0[23:0] * S1[23:0], sign-extended from
+    /// bit 23 when `signed`.
+    Multiply24 { signed: bool },
+    /// 10 / 12: D = bits 63:32 of the same 48-bit product.
+    MultiplyHigh24 { signed: bool },
+    /// 17 / 19: D = S0 < S1 ? S0 : S1.
+    Minimum { signed: bool },
+    /// 18 / 20: D = S0 >= S1 ? S0 : S1.
+    Maximum { signed: bool },
+    /// 30: D = ~(S0 ^ S1).
+    Xnor,
+    /// 37: D = S0 + S1.
+    Add,
+    /// 38: D = S0 - S1.
+    Subtract,
+    /// 39: D = S1 - S0.
+    SubtractReverse,
+}
+
+impl VectorInteger {
+    /// Opcode bits 30-25 of the VOP2 word.
+    fn from_opcode(opcode: u8) -> Option<Self> {
+        Some(match opcode {
+            9 => Self::Multiply24 { signed: true },
+            10 => Self::MultiplyHigh24 { signed: true },
+            11 => Self::Multiply24 { signed: false },
+            12 => Self::MultiplyHigh24 { signed: false },
+            17 => Self::Minimum { signed: true },
+            18 => Self::Maximum { signed: true },
+            19 => Self::Minimum { signed: false },
+            20 => Self::Maximum { signed: false },
+            30 => Self::Xnor,
+            37 => Self::Add,
+            38 => Self::Subtract,
+            39 => Self::SubtractReverse,
+            _ => return None,
+        })
+    }
+
+    /// D for S0 = `a`, S1 = `b`, from exact i64 arithmetic reduced modulo 2^32.
+    fn apply(self, a: u32, b: u32) -> u32 {
+        let field = |bits: u32, signed: bool| {
+            if signed {
+                i64::from(((bits << 8) as i32) >> 8)
+            } else {
+                i64::from(bits & 0x00ff_ffff)
+            }
+        };
+        let widen = |bits: u32, signed: bool| {
+            if signed {
+                i64::from(bits as i32)
+            } else {
+                i64::from(bits)
+            }
+        };
+        match self {
+            Self::Multiply24 { signed } => (field(a, signed) * field(b, signed)) as u32,
+            Self::MultiplyHigh24 { signed } => ((field(a, signed) * field(b, signed)) >> 32) as u32,
+            Self::Minimum { signed } => {
+                if widen(a, signed) < widen(b, signed) {
+                    a
+                } else {
+                    b
+                }
+            }
+            Self::Maximum { signed } => {
+                if widen(a, signed) >= widen(b, signed) {
+                    a
+                } else {
+                    b
+                }
+            }
+            Self::Xnor => !(a ^ b),
+            Self::Add => a.wrapping_add(b),
+            Self::Subtract => a.wrapping_sub(b),
+            Self::SubtractReverse => b.wrapping_sub(a),
+        }
+    }
 }
 
 /// Execute original little-endian gfx1030 bytes with the synthetic binding ABI.
@@ -297,6 +443,31 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 let (source, length) = decode_scalar(*source, tail, offset)?;
                 (Op::ScalarMove(destination & 0x7f, source), length)
             }
+            // SOP1: ENCODING 0b10_1111101 in bits 23-31, SDST in 16-22 (s0-s105
+            // only), OP in 8-15.
+            [
+                source,
+                op @ (7 | 11 | 13 | 15 | 17 | 19 | 21 | 23 | 25 | 26 | 52),
+                destination @ 0x80..=0xe9,
+                0xbe,
+                tail @ ..,
+            ] => {
+                let kind = match op {
+                    7 => ScalarUnary::Not,
+                    11 => ScalarUnary::ReverseBits,
+                    13 => ScalarUnary::CountZeros,
+                    15 => ScalarUnary::CountOnes,
+                    17 => ScalarUnary::FindFirstZero,
+                    19 => ScalarUnary::FindFirstOne,
+                    21 => ScalarUnary::FindLastBit,
+                    23 => ScalarUnary::FindLastSignBit,
+                    25 => ScalarUnary::SignExtendByte,
+                    26 => ScalarUnary::SignExtendShort,
+                    _ => ScalarUnary::Absolute,
+                };
+                let (source, length) = decode_scalar(*source, tail, offset)?;
+                (Op::ScalarUnary(kind, destination & 0x7f, source), length)
+            }
             // SOPC: ENCODING 0b10_1111110 in bits 23-31, OP in 16-22 (guide
             // 13.1.4); 0-5 signed and 6-11 unsigned EQ, LG, GT, GE, LT, LE.
             [left, right, op @ 0..=11, 0xbf, tail @ ..] if (*left, *right) != (255, 255) => {
@@ -316,35 +487,46 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 (op, left_length.max(right_length))
             }
             // SOP2: OP in bits 23-29, SDST in bits 16-22, SSRC1, SSRC0.
-            [
-                left,
-                right,
-                low,
-                high @ (0x80..=0x82 | 0x87..=0x91),
-                tail @ ..,
-            ] if (*left, *right) != (255, 255)
-                && low & 0x7f <= 105
-                && (low & 0x80 == 0 || matches!(high, 0x80..=0x82)) =>
+            [left, right, low, high @ 0x80..=0xbf, tail @ ..]
+                if (*left, *right) != (255, 255)
+                    && low & 0x7f <= 105
+                    && matches!(
+                        (high & 0x3f) << 1 | low >> 7,
+                        0..=10 | 14 | 16 | 18 | 20 | 22 | 24 | 26 | 28 | 30 | 32 | 34
+                            | 36 | 38..=40 | 44 | 46..=49 | 53 | 54
+                    ) =>
             {
-                let kind = match (high, low >> 7) {
-                    (0x80, 0) => ScalarAlu::Add,
-                    (0x80, _) => ScalarAlu::Subtract,
-                    (0x81, 0) => ScalarAlu::AddSigned,
-                    (0x81, _) => ScalarAlu::SubtractSigned,
-                    (0x82, 0) => ScalarAlu::AddWithCarry,
-                    (0x82, _) => ScalarAlu::SubtractWithBorrow,
-                    (0x87, _) => ScalarAlu::And,
-                    (0x88, _) => ScalarAlu::Or,
-                    (0x89, _) => ScalarAlu::Xor,
-                    // Even opcodes 20-34 (bit 23 clear, checked above).
-                    (0x8a, _) => ScalarAlu::AndNot,
-                    (0x8b, _) => ScalarAlu::OrNot,
-                    (0x8c, _) => ScalarAlu::Nand,
-                    (0x8d, _) => ScalarAlu::Nor,
-                    (0x8e, _) => ScalarAlu::Xnor,
-                    (0x8f, _) => ScalarAlu::ShiftLeft,
-                    (0x90, _) => ScalarAlu::ShiftRight,
-                    _ => ScalarAlu::ArithmeticShiftRight,
+                let kind = match (high & 0x3f) << 1 | low >> 7 {
+                    0 => ScalarAlu::Add,
+                    1 => ScalarAlu::Subtract,
+                    2 => ScalarAlu::AddSigned,
+                    3 => ScalarAlu::SubtractSigned,
+                    4 => ScalarAlu::AddWithCarry,
+                    5 => ScalarAlu::SubtractWithBorrow,
+                    6 => ScalarAlu::Minimum { signed: true },
+                    7 => ScalarAlu::Minimum { signed: false },
+                    8 => ScalarAlu::Maximum { signed: true },
+                    9 => ScalarAlu::Maximum { signed: false },
+                    10 => ScalarAlu::Select,
+                    14 => ScalarAlu::And,
+                    16 => ScalarAlu::Or,
+                    18 => ScalarAlu::Xor,
+                    20 => ScalarAlu::AndNot,
+                    22 => ScalarAlu::OrNot,
+                    24 => ScalarAlu::Nand,
+                    26 => ScalarAlu::Nor,
+                    28 => ScalarAlu::Xnor,
+                    30 => ScalarAlu::ShiftLeft,
+                    32 => ScalarAlu::ShiftRight,
+                    34 => ScalarAlu::ArithmeticShiftRight,
+                    36 => ScalarAlu::BitfieldMask,
+                    38 => ScalarAlu::Multiply,
+                    39 => ScalarAlu::BitfieldExtract { signed: false },
+                    40 => ScalarAlu::BitfieldExtract { signed: true },
+                    44 => ScalarAlu::AbsoluteDifference,
+                    op @ 46..=49 => ScalarAlu::ShiftLeftAdd(op - 45),
+                    53 => ScalarAlu::MultiplyHigh { signed: false },
+                    _ => ScalarAlu::MultiplyHigh { signed: true },
                 };
                 let (left, left_length) = decode_scalar(*left, tail, offset)?;
                 let (right, right_length) = decode_scalar(*right, tail, offset)?;
@@ -406,24 +588,21 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                     signed: opcode < 192,
                 };
                 let vsrc1 = (packed >> 1) | ((upper & 1) << 7);
-                let selector = u16::from(*lo) | (u16::from(packed & 1) << 8);
-                let (src0, length) = match selector {
-                    0..=106 => (CompareSource::Scalar(*lo), 4),
-                    128..=192 => (CompareSource::Immediate(u32::from(selector - 128)), 4),
-                    193..=208 => (
-                        CompareSource::Immediate(0_u32.wrapping_sub(u32::from(selector - 192))),
-                        4,
-                    ),
-                    255 => {
-                        let literal = tail
-                            .first_chunk::<4>()
-                            .ok_or_else(|| error(offset, "truncated literal"))?;
-                        (CompareSource::Immediate(u32::from_le_bytes(*literal)), 8)
-                    }
-                    256..=511 => (CompareSource::Vector(*lo), 4),
-                    _ => return Err(error(offset, "unsupported VOPC source")),
-                };
+                let (src0, length) =
+                    decode_vector_source(*lo, *packed, tail, offset, "unsupported VOPC source")?;
                 (Op::Compare(comparison, src0, vsrc1), length)
+            }
+            // VOP2 integer forms (bit 31 = 0): OP bits 25-30, VDST 17-24,
+            // VSRC1 9-16, SRC0 0-8.
+            [lo, packed, upper, tag @ 0x00..=0x7b, tail @ ..]
+                if VectorInteger::from_opcode(tag >> 1).is_some() =>
+            {
+                let kind = VectorInteger::from_opcode(tag >> 1).unwrap();
+                let dst = (upper >> 1) | ((tag & 1) << 7);
+                let vsrc1 = (packed >> 1) | ((upper & 1) << 7);
+                let (src0, length) =
+                    decode_vector_source(*lo, *packed, tail, offset, "unsupported VOP2 source")?;
+                (Op::VectorInteger(kind, dst, src0, vsrc1), length)
             }
             [lo, packed, upper, tag @ 0x7e..=0x7f, tail @ ..]
                 if packed & 0xfe == 2 && upper & 1 == 0 =>
@@ -507,6 +686,34 @@ fn decode_scalar(
         }
         _ => Err(error(offset, "unsupported scalar source")),
     }
+}
+
+/// A vector SRC0 selector (bits 0-8: `lo` and bit 0 of `packed`): s0-s105 or
+/// `vcc_lo` (106), an inline integer, a literal dword from `tail`, or a VGPR.
+fn decode_vector_source(
+    lo: u8,
+    packed: u8,
+    tail: &[u8],
+    offset: usize,
+    unsupported: &'static str,
+) -> Result<(CompareSource, usize), ReferenceError> {
+    let selector = u16::from(lo) | (u16::from(packed & 1) << 8);
+    Ok(match selector {
+        0..=106 => (CompareSource::Scalar(lo), 4),
+        128..=192 => (CompareSource::Immediate(u32::from(selector - 128)), 4),
+        193..=208 => (
+            CompareSource::Immediate(0_u32.wrapping_sub(u32::from(selector - 192))),
+            4,
+        ),
+        255 => {
+            let literal = tail
+                .first_chunk::<4>()
+                .ok_or_else(|| error(offset, "truncated literal"))?;
+            (CompareSource::Immediate(u32::from_le_bytes(*literal)), 8)
+        }
+        256..=511 => (CompareSource::Vector(lo), 4),
+        _ => return Err(error(offset, unsupported)),
+    })
 }
 
 fn vector_alu(op: VectorAlu, a: u32, b: u32, offset: usize) -> Result<u32, ReferenceError> {
@@ -599,7 +806,8 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                 Op::Move(dst, _)
                 | Op::MoveScalar(dst, _)
                 | Op::Add(dst, ..)
-                | Op::Vector(_, dst, ..) => {
+                | Op::Vector(_, dst, ..)
+                | Op::VectorInteger(_, dst, ..) => {
                     if exec != 0
                         && registers
                             .iter()
@@ -681,6 +889,31 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                     results[lane] = Some((dst, value));
                 }
             }
+            Op::VectorInteger(kind, dst, src0, src1) => {
+                if exec != 0 {
+                    // As for a compare, sources are checked once for the wave,
+                    // whichever present lanes are active.
+                    let check = |register: u8| {
+                        (0..lanes).try_for_each(|lane| read(lane, register).map(|_| ()))
+                    };
+                    match src0 {
+                        CompareSource::Vector(register) => check(register)?,
+                        CompareSource::Scalar(register) => {
+                            read_scalar(Source::Register(register))?;
+                        }
+                        CompareSource::Immediate(_) => {}
+                    }
+                    check(src1)?;
+                }
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    let s0 = match src0 {
+                        CompareSource::Vector(register) => read(lane, register)?,
+                        CompareSource::Scalar(register) => read_scalar(Source::Register(register))?,
+                        CompareSource::Immediate(bits) => bits,
+                    };
+                    results[lane] = Some((dst, kind.apply(s0, read(lane, src1)?)));
+                }
+            }
             Op::ScalarMove(dst, src) => {
                 if dst < 8 {
                     return Err(error(offset, "write to a reserved resource SGPR"));
@@ -693,6 +926,44 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                     lane_derived_vcc = false;
                 }
                 scalars[usize::from(dst)] = Some(value);
+            }
+            Op::ScalarUnary(kind, dst, src) => {
+                if dst < 8 {
+                    return Err(error(offset, "write to a reserved resource SGPR"));
+                }
+                let value = read_scalar(src)?;
+                // -1 (all ones) when no bit is found.
+                let found = |index: u32| if index == 32 { u32::MAX } else { index };
+                let result = match kind {
+                    ScalarUnary::Not => !value,
+                    ScalarUnary::ReverseBits => value.reverse_bits(),
+                    ScalarUnary::CountZeros => value.count_zeros(),
+                    ScalarUnary::CountOnes => value.count_ones(),
+                    ScalarUnary::FindFirstZero => found(value.trailing_ones()),
+                    ScalarUnary::FindFirstOne => found(value.trailing_zeros()),
+                    ScalarUnary::FindLastBit => found(value.leading_zeros()),
+                    ScalarUnary::FindLastSignBit => {
+                        let same = if value >> 31 == 1 {
+                            value.leading_ones()
+                        } else {
+                            value.leading_zeros()
+                        };
+                        found(same)
+                    }
+                    ScalarUnary::SignExtendByte => value as u8 as i8 as i32 as u32,
+                    ScalarUnary::SignExtendShort => value as u16 as i16 as i32 as u32,
+                    ScalarUnary::Absolute => (value as i32).wrapping_abs() as u32,
+                };
+                scalars[usize::from(dst)] = Some(result);
+                if matches!(
+                    kind,
+                    ScalarUnary::Not
+                        | ScalarUnary::CountZeros
+                        | ScalarUnary::CountOnes
+                        | ScalarUnary::Absolute
+                ) {
+                    scc = Some(result != 0);
+                }
             }
             Op::CompareEqual(lhs, rhs) => {
                 scc = Some(read_scalar(lhs)? == read_scalar(rhs)?);
@@ -710,8 +981,13 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                     ScalarAlu::AddWithCarry | ScalarAlu::SubtractWithBorrow => i64::from(
                         scc.ok_or_else(|| error(offset, "carry-in from uninitialized SCC"))?,
                     ),
+                    ScalarAlu::Select => {
+                        i64::from(scc.ok_or_else(|| error(offset, "select on uninitialized SCC"))?)
+                    }
                     _ => 0,
                 };
+                let (signed_lhs, signed_rhs) =
+                    (i64::from(lhs as u32 as i32), i64::from(rhs as u32 as i32));
                 // Exact integer arithmetic, then reduction modulo 2^32.
                 let (exact, flag) = match kind {
                     ScalarAlu::Add | ScalarAlu::AddWithCarry => {
@@ -740,6 +1016,65 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                         };
                         (bits, bits != 0)
                     }
+                    // Guide 12.1: strict comparisons, so equal operands give
+                    // S1 (the same value) and SCC = 0.
+                    ScalarAlu::Minimum { signed } | ScalarAlu::Maximum { signed } => {
+                        let (a, b) = if signed {
+                            (signed_lhs, signed_rhs)
+                        } else {
+                            (lhs, rhs)
+                        };
+                        let first = if matches!(kind, ScalarAlu::Minimum { .. }) {
+                            a < b
+                        } else {
+                            a > b
+                        };
+                        (if first { lhs } else { rhs }, first)
+                    }
+                    // The SCC-less forms; `flag` is unused for them below.
+                    ScalarAlu::Select => (if carry == 1 { lhs } else { rhs }, false),
+                    ScalarAlu::BitfieldMask => (((1 << (lhs & 0x1f)) - 1) << (rhs & 0x1f), false),
+                    ScalarAlu::Multiply => (signed_lhs * signed_rhs, false),
+                    ScalarAlu::MultiplyHigh { signed } => {
+                        // The unsigned product fits only in u64.
+                        let high = if signed {
+                            (signed_lhs * signed_rhs) >> 32
+                        } else {
+                            ((lhs as u64 * rhs as u64) >> 32) as i64
+                        };
+                        (high, false)
+                    }
+                    // Offset S1[4:0], width S1[22:16] (0-127). A width of 32 or
+                    // more keeps every bit of the shifted word.
+                    ScalarAlu::BitfieldExtract { signed } => {
+                        let (shift, width) = (rhs & 0x1f, (rhs >> 16) & 0x7f);
+                        let data = if signed { signed_lhs } else { lhs };
+                        let shifted = data >> shift;
+                        let value = if width == 0 {
+                            0
+                        } else if width >= 32 {
+                            shifted
+                        } else {
+                            let field = shifted & ((1 << width) - 1);
+                            if signed && field >> (width - 1) == 1 {
+                                field - (1 << width)
+                            } else {
+                                field
+                            }
+                        };
+                        (value, value.rem_euclid(1 << 32) != 0)
+                    }
+                    // The 32-bit difference first (guide examples), then |D|.
+                    ScalarAlu::AbsoluteDifference => {
+                        let difference = (signed_lhs - signed_rhs) as u32 as i32;
+                        let value = difference.unsigned_abs();
+                        (i64::from(value), value != 0)
+                    }
+                    // The carry out of the exact (S0 << N) + S1.
+                    ScalarAlu::ShiftLeftAdd(n) => {
+                        let sum = (lhs << n) + rhs;
+                        (sum, sum >= 1 << 32)
+                    }
                     // Guide 12.1: shifts use only S1[4:0]; all set SCC = (D != 0).
                     _ => {
                         let (a, b) = (lhs as u32, rhs as u32);
@@ -758,7 +1093,16 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                 };
                 let value = exact.rem_euclid(1 << 32) as u32;
                 scalars[usize::from(dst)] = Some(value);
-                scc = Some(flag);
+                // Guide 12.1 and Tables 11, 12, 14: these forms leave SCC unchanged.
+                if !matches!(
+                    kind,
+                    ScalarAlu::Select
+                        | ScalarAlu::BitfieldMask
+                        | ScalarAlu::Multiply
+                        | ScalarAlu::MultiplyHigh { .. }
+                ) {
+                    scc = Some(flag);
+                }
             }
             // RDNA 2 ISA section 3.9: VCC[n] = EXEC[n] & test(n), fully written.
             Op::Compare(comparison, src0, src1) => {

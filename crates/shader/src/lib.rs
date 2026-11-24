@@ -9,7 +9,8 @@ pub use graphics::{PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 pub use xenora_decoder::Architecture;
 use xenora_decoder::{
-    DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorCompareOp, VectorSource,
+    DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorBinary, VectorCompareOp,
+    VectorSource,
 };
 
 /// SGPR index of `vcc_lo`.
@@ -161,6 +162,7 @@ impl Op {
                     Binary::ShiftLeft | Binary::ShiftRight => {
                         format!("{left} {symbol} ({right} & 31u)")
                     }
+                    Binary::Vector(operation) => vector_expression(operation, &left, &right),
                     _ => format!("{left} {symbol} {right}"),
                 }
             }
@@ -219,6 +221,8 @@ enum Binary {
     Xor,
     FloatAdd,
     FloatMul,
+    /// A registry VOP2 integer operation, lowered by its typed template.
+    Vector(VectorBinary),
 }
 
 impl Binary {
@@ -233,7 +237,53 @@ impl Binary {
             Self::Xor => ("xor.b32", "^"),
             Self::FloatAdd => ("add.f32", "+"),
             Self::FloatMul => ("mul.f32", "*"),
+            Self::Vector(operation) => (
+                match operation {
+                    VectorBinary::Add => "add.u32",
+                    VectorBinary::Sub => "sub.u32",
+                    VectorBinary::Xnor => "xnor.b32",
+                    VectorBinary::MinSigned => "min.i32",
+                    VectorBinary::MinUnsigned => "min.u32",
+                    VectorBinary::MaxSigned => "max.i32",
+                    VectorBinary::MaxUnsigned => "max.u32",
+                    VectorBinary::Mul24Signed => "mul24.i32",
+                    VectorBinary::Mul24Unsigned => "mul24.u32",
+                    VectorBinary::MulHi24Signed => "mulhi24.i32",
+                    VectorBinary::MulHi24Unsigned => "mulhi24.u32",
+                },
+                "",
+            ),
         }
+    }
+}
+
+/// The MSL template of each per-lane registry operation. Integer arithmetic is
+/// on `uint` (wrapping); signed forms reinterpret with `as_type`, and the
+/// 24-bit forms sign-extend bit 23 with a shift pair or mask to 24 bits first.
+fn vector_expression(operation: VectorBinary, left: &str, right: &str) -> String {
+    let int = |value: &str| format!("as_type<int>({value})");
+    let i24 = |value: &str| format!("(as_type<int>({value} << 8u) >> 8)");
+    let u24 = |value: &str| format!("({value} & 0x00ffffffu)");
+    match operation {
+        VectorBinary::Add => format!("{left} + {right}"),
+        VectorBinary::Sub => format!("{left} - {right}"),
+        VectorBinary::Xnor => format!("~({left} ^ {right})"),
+        VectorBinary::MinSigned => format!("as_type<uint>(min({}, {}))", int(left), int(right)),
+        VectorBinary::MinUnsigned => format!("min({left}, {right})"),
+        VectorBinary::MaxSigned => format!("as_type<uint>(max({}, {}))", int(left), int(right)),
+        VectorBinary::MaxUnsigned => format!("max({left}, {right})"),
+        // The low 32 bits of a product do not depend on signedness, so the
+        // sign-extended factors multiply as wrapping uint.
+        VectorBinary::Mul24Signed => format!(
+            "as_type<uint>({}) * as_type<uint>({})",
+            i24(left),
+            i24(right)
+        ),
+        VectorBinary::Mul24Unsigned => format!("{} * {}", u24(left), u24(right)),
+        VectorBinary::MulHi24Signed => {
+            format!("as_type<uint>(mulhi({}, {}))", i24(left), i24(right))
+        }
+        VectorBinary::MulHi24Unsigned => format!("mulhi({}, {})", u24(left), u24(right)),
     }
 }
 
@@ -632,7 +682,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 | Instruction::VectorXorB32 { dst, .. } => dst,
                 _ => {
                     return Err(error(
-                        "code skipped by a runtime s_cbranch_vccz may contain only integer vector ALU instructions",
+                        "code skipped by a runtime s_cbranch_vccz may contain only v_mov_b32, v_add_nc_u32_e64 and the hand-written integer VOP2 forms",
                     ));
                 }
             };
@@ -670,7 +720,8 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 | Instruction::VectorOrB32 { .. }
                 | Instruction::VectorXorB32 { .. }
                 | Instruction::VectorAddF32 { .. }
-                | Instruction::VectorMulF32 { .. } => continue,
+                | Instruction::VectorMulF32 { .. }
+                | Instruction::VectorAlu { .. } => continue,
                 _ => {}
             }
         }
@@ -809,6 +860,21 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 *slot = Some(value);
                 continue;
             }
+            Instruction::ScalarUnary { op, dst, src } => {
+                let src = read_scalar(src)?;
+                if dst < 8 {
+                    return Err(error("scalar unary would modify a resource descriptor"));
+                }
+                let (value, flag) = op.evaluate(src);
+                let slot = scalars
+                    .get_mut(usize::from(dst))
+                    .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
+                *slot = Some(value);
+                if let Some(flag) = flag {
+                    scc = Some(flag);
+                }
+                continue;
+            }
             Instruction::ScalarAlu {
                 op,
                 dst,
@@ -816,20 +882,22 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 src1,
             } => {
                 let (src0, src1) = (read_scalar(src0)?, read_scalar(src1)?);
-                let carry_in = if op.reads_scc() {
-                    scc.ok_or_else(|| error("carry-in or borrow-in reads uninitialized SCC"))?
+                let scc_in = if op.reads_scc() {
+                    scc.ok_or_else(|| error("SOP2 SCC input reads uninitialized SCC"))?
                 } else {
                     false
                 };
                 if dst < 8 {
                     return Err(error("scalar ALU would modify a resource descriptor"));
                 }
-                let (value, flag) = op.evaluate(src0, src1, carry_in);
+                let (value, flag) = op.evaluate(src0, src1, scc_in);
                 let slot = scalars
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = Some(value);
-                scc = Some(flag);
+                if let Some(flag) = flag {
+                    scc = Some(flag);
+                }
                 continue;
             }
             Instruction::ScalarCompare { op, src0, src1 } => {
@@ -923,6 +991,44 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     },
                 )
             }
+            Instruction::VectorAlu {
+                op,
+                dst,
+                src0,
+                src1,
+            } => {
+                let src0 = match src0 {
+                    VectorSource::Register(register) => read(register)?,
+                    VectorSource::Scalar(register) if usize::from(register) == VCC_LO => {
+                        match (lane_vcc, scalars[VCC_LO]) {
+                            (Some(mask), _) => mask,
+                            (None, Some(bits)) => {
+                                constant(&mut operations, &mut facts, offset, bits)
+                            }
+                            (None, None) => {
+                                return Err(error("vector ALU reads uninitialized VCC_LO"));
+                            }
+                        }
+                    }
+                    VectorSource::Scalar(register) => {
+                        let bits = read_scalar(ScalarSource::Register(register))?;
+                        constant(&mut operations, &mut facts, offset, bits)
+                    }
+                    VectorSource::Immediate(bits) => {
+                        constant(&mut operations, &mut facts, offset, bits)
+                    }
+                };
+                let src1 = read(src1)?;
+                let (left, right) = if op.swaps_sources() {
+                    (src1, src0)
+                } else {
+                    (src0, src1)
+                };
+                (
+                    Some(dst),
+                    Op::Binary(Binary::Vector(op.lowering()), left, right),
+                )
+            }
             Instruction::VectorAddF32 { dst, src0, src1 } => (
                 Some(dst),
                 Op::Binary(Binary::FloatAdd, read(src0)?, read(src1)?),
@@ -958,6 +1064,9 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             }
             _ => KnownBits::UNKNOWN,
         };
+        // Arms may push operand constants first, so the result is the next slot
+        // now rather than `next`.
+        let produced = Value(operations.len());
         facts.push(value_bits);
         operations.push((offset, operation));
         if let Some(dest) = dest {
@@ -972,7 +1081,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 &mut facts,
                 offset,
                 exec,
-                next,
+                produced,
                 registers[slot],
             )?);
         }
@@ -981,6 +1090,19 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         offset: code_len,
         reason: "missing program termination",
     })
+}
+
+/// A wave-uniform constant operand at `offset`.
+fn constant(
+    operations: &mut Vec<(usize, Op)>,
+    facts: &mut Vec<KnownBits>,
+    offset: usize,
+    bits: u32,
+) -> Value {
+    let value = Value(operations.len());
+    operations.push((offset, Op::Constant(bits)));
+    facts.push(KnownBits::constant(bits));
+    value
 }
 
 // Keeping a value for inactive lanes requires a previously initialized destination.

@@ -309,6 +309,48 @@ fn scalar_compare_results_resolve_every_branch() {
 }
 
 #[test]
+fn scalar_unary_results_reach_the_kernel_as_constants() {
+    let code = include_bytes!("../../../fixtures/rdna2/scalar-unary.bin");
+    let compiled = compile(Architecture::Gfx1030, code).unwrap();
+    assert_eq!(
+        compiled.ir,
+        include_str!("../../../fixtures/golden/scalar-unary.ir")
+    );
+    assert_eq!(
+        compiled.msl,
+        include_str!("../../../fixtures/golden/scalar-unary.metal")
+    );
+}
+
+#[test]
+fn scalar_arith_results_reach_the_kernel_as_constants() {
+    let code = include_bytes!("../../../fixtures/rdna2/scalar-arith.bin");
+    let compiled = compile(Architecture::Gfx1030, code).unwrap();
+    assert_eq!(
+        compiled.ir,
+        include_str!("../../../fixtures/golden/scalar-arith.ir")
+    );
+    assert_eq!(
+        compiled.msl,
+        include_str!("../../../fixtures/golden/scalar-arith.metal")
+    );
+}
+
+#[test]
+fn vector_integer_forms_lower_to_per_lane_templates() {
+    let code = include_bytes!("../../../fixtures/rdna2/vector-integer.bin");
+    let compiled = compile(Architecture::Gfx1030, code).unwrap();
+    assert_eq!(
+        compiled.ir,
+        include_str!("../../../fixtures/golden/vector-integer.ir")
+    );
+    assert_eq!(
+        compiled.msl,
+        include_str!("../../../fixtures/golden/vector-integer.metal")
+    );
+}
+
+#[test]
 fn vector_compares_lower_to_per_thread_wave_masks_and_selects() {
     let code = include_bytes!("../../../fixtures/rdna2/vector-compare.bin");
     let result = compile(Architecture::Gfx1030, code).unwrap();

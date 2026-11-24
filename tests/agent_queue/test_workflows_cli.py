@@ -134,6 +134,16 @@ class Cli(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), "ranveersoni98/Xenora")
 
+    def test_summary_accepts_now_after_subcommand(self):
+        # Actions passes --now after `summary`; parent-only --now used to reject that.
+        with tempfile.TemporaryDirectory() as d:
+            state = os.path.join(d, "state.json")
+            dump({"issues": [], "prs": []}, state)
+            r = self.run_cli("summary", "--state", state, "--now", "2026-01-10T12:00:00Z")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            payload = json.loads(r.stdout)
+            self.assertEqual(payload["generated_at"], "2026-01-10T12:00:00Z")
+
     def test_acceptance_authorization_end_to_end(self):
         from agent_queue import lease as L, tasks as T
         i = issue(1)

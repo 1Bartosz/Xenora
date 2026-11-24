@@ -18,7 +18,7 @@ pub use rdna2::{
     V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32, V_LSHRREV_B32,
     V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
-pub use semantics_gen::{ScalarAluOp, ScalarCompareOp};
+pub use semantics_gen::{ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp};
 
 /// SGPR index of `vcc_lo`, the Wave32 vector condition code.
 pub const VCC_LO: u8 = 106;
@@ -209,7 +209,15 @@ pub enum Instruction {
     AddNoCarryU32 { dst: u8, src0: u8, src1: u8 },
     /// SOP1 32-bit move to a normal SGPR or an EXEC/VCC half.
     ScalarMoveB32 { dst: u8, src: ScalarSource },
-    /// SOP2 32-bit integer operation writing a normal SGPR (s0-s105) and SCC.
+    /// SOP1 32-bit unary integer operation writing a normal SGPR (s0-s105) and,
+    /// for some operations, SCC.
+    ScalarUnary {
+        op: ScalarUnaryOp,
+        dst: u8,
+        src: ScalarSource,
+    },
+    /// SOP2 32-bit integer operation writing a normal SGPR (s0-s105) and, for
+    /// most operations, SCC; `s_cselect_b32` also reads SCC.
     ScalarAlu {
         op: ScalarAluOp,
         dst: u8,
@@ -226,6 +234,15 @@ pub enum Instruction {
     /// `src0` is a VGPR, `s0-s105`, `vcc_lo`, an inline integer or a literal.
     VectorCompare {
         op: VectorCompareOp,
+        src0: VectorSource,
+        src1: u8,
+    },
+    /// VOP2 32-bit per-lane integer operation from the semantic registry.
+    /// `src0` is a VGPR, `s0-s105`, `vcc_lo`, an inline integer or a literal;
+    /// `src1` is a VGPR. Inactive lanes keep `dst`.
+    VectorAlu {
+        op: VectorAluOp,
+        dst: u8,
         src0: VectorSource,
         src1: u8,
     },
@@ -307,9 +324,11 @@ impl Instruction {
             Self::MoveB32 { .. } => "v_mov_b32_e32",
             Self::AddNoCarryU32 { .. } => "v_add_nc_u32_e64",
             Self::ScalarMoveB32 { .. } => "s_mov_b32",
+            Self::ScalarUnary { op, .. } => op.mnemonic(),
             Self::ScalarAlu { op, .. } => op.mnemonic(),
             Self::ScalarCompare { op, .. } => op.mnemonic(),
             Self::VectorCompare { op, .. } => op.mnemonic(),
+            Self::VectorAlu { op, .. } => op.assembly_name(),
             Self::BranchSccZero { .. } => "s_cbranch_scc0",
             Self::BranchExecZero { .. } => "s_cbranch_execz",
             Self::BranchVccZero { .. } => "s_cbranch_vccz",
@@ -371,7 +390,7 @@ impl fmt::Display for Instruction {
             | Self::VectorMulF32 { dst, src0, src1 } => {
                 write!(formatter, " v{dst}, v{src0}, v{src1}")
             }
-            Self::ScalarMoveB32 { dst, src } => {
+            Self::ScalarMoveB32 { dst, src } | Self::ScalarUnary { dst, src, .. } => {
                 write!(formatter, " {}, {src}", ScalarDestination(dst))
             }
             Self::ScalarAlu {
@@ -380,6 +399,11 @@ impl fmt::Display for Instruction {
             Self::ScalarCompare { src0, src1, .. } => write!(formatter, " {src0}, {src1}"),
             Self::VectorCompare { src0, src1, .. } => {
                 write!(formatter, " vcc_lo, {src0}, v{src1}")
+            }
+            Self::VectorAlu {
+                dst, src0, src1, ..
+            } => {
+                write!(formatter, " v{dst}, {src0}, v{src1}")
             }
             Self::Branch { target }
             | Self::BranchSccZero { target }
