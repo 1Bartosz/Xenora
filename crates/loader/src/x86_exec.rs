@@ -13,6 +13,7 @@
 use crate::cpu::{CpuState, ExitReason, RFlags, Register};
 use crate::memory::GuestMemory;
 use crate::x86_decode::{Encoding, Insn, MemOperand, RegOperand, RmOperand, Segment};
+use crate::x86_simd;
 use crate::x86_table::Op;
 
 const RAX: usize = Register::Rax as usize;
@@ -54,7 +55,7 @@ fn offset(cpu: &CpuState, operand: &MemOperand) -> u64 {
     base.wrapping_add(index).wrapping_add_signed(operand.disp)
 }
 
-fn read_reg(cpu: &CpuState, reg: RegOperand, size: u8) -> u64 {
+pub(crate) fn read_reg(cpu: &CpuState, reg: RegOperand, size: u8) -> u64 {
     let value = cpu.gpr[usize::from(reg.index)];
     if reg.high {
         (value >> 8) & 0xFF
@@ -64,7 +65,7 @@ fn read_reg(cpu: &CpuState, reg: RegOperand, size: u8) -> u64 {
 }
 
 /// Write a register: 8- and 16-bit writes merge, 32-bit writes zero-extend.
-fn write_reg(cpu: &mut CpuState, reg: RegOperand, size: u8, value: u64) {
+pub(crate) fn write_reg(cpu: &mut CpuState, reg: RegOperand, size: u8, value: u64) {
     let slot = &mut cpu.gpr[usize::from(reg.index)];
     *slot = match (size, reg.high) {
         (1, true) => (*slot & !0xFF00) | ((value & 0xFF) << 8),
@@ -73,7 +74,7 @@ fn write_reg(cpu: &mut CpuState, reg: RegOperand, size: u8, value: u64) {
     };
 }
 
-fn read_mem(memory: &GuestMemory, address: u64, size: u8) -> Result<u64, ExitReason> {
+pub(crate) fn read_mem(memory: &GuestMemory, address: u64, size: u8) -> Result<u64, ExitReason> {
     match size {
         1 => memory.read_u8(address).map(u64::from),
         2 => memory.read_u16(address).map(u64::from),
@@ -83,7 +84,7 @@ fn read_mem(memory: &GuestMemory, address: u64, size: u8) -> Result<u64, ExitRea
     .map_err(ExitReason::MemoryFault)
 }
 
-fn write_mem(
+pub(crate) fn write_mem(
     memory: &mut GuestMemory,
     address: u64,
     size: u8,
@@ -98,7 +99,7 @@ fn write_mem(
     .map_err(ExitReason::MemoryFault)
 }
 
-fn rm_operand(insn: &Insn) -> Result<RmOperand, ExitReason> {
+pub(crate) fn rm_operand(insn: &Insn) -> Result<RmOperand, ExitReason> {
     // The decoder supplies a ModRM operand for every form that reaches here.
     insn.rm.ok_or(ExitReason::IllegalInstruction(0))
 }
@@ -554,6 +555,7 @@ pub fn execute(
             cpu.rip = next;
             return Ok(Some(ExitReason::Syscall(cpu.gpr[RAX])));
         }
+        _ => x86_simd::execute(cpu, memory, insn)?,
     }
     cpu.rip = next;
     Ok(None)

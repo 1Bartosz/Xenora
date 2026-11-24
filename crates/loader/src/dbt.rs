@@ -6,15 +6,15 @@
 //! executes them in a W^X code cache, and manages host-service dispatch and fallbacks.
 
 use crate::arm64::{
-    Arm64Assembler, Condition, SP, X0, X1, X2, X4, X5, X6, X9, X10, X11, X12, X13, X14, X15, X19,
-    X20, X21, X29, X30, XZR,
+    Arm64Assembler, Condition, SP, X0, X1, X2, X3, X4, X5, X6, X9, X10, X11, X12, X13, X14, X15,
+    X19, X20, X21, X29, X30, XZR,
 };
 use crate::cpu::{CpuState, ExecutionResult, ExitReason, RFlags, Register};
 use crate::jit::{JitError, JitMemory};
 use crate::memory::GuestMemory;
 use crate::x86_decode::{Encoding, Insn, MemOperand, RegOperand, RmOperand, Segment, decode};
 use crate::x86_exec;
-use crate::x86_table::Op;
+use crate::x86_table::{FORMS, Op};
 use std::collections::HashMap;
 
 const MAX_BLOCK_INSTRUCTIONS: usize = 16;
@@ -309,6 +309,12 @@ const PF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, pf) as u32;
 const AF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, af) as u32;
 const ALL_FLAGS: u8 = 0x3F;
 
+const NEON_EOR: u32 = 0x6e20_1c00; // EOR Vd.16B, Vn.16B, Vm.16B
+
+fn xmm_offset(index: u8) -> u32 {
+    std::mem::offset_of!(CpuState, xmm) as u32 + u32::from(index) * 16
+}
+
 fn reg_offset(index: u8) -> u32 {
     u32::from(index) * 8
 }
@@ -343,8 +349,79 @@ pub fn is_native(insn: &Insn) -> bool {
         | Op::Ret
         | Op::Nop
         | Op::Hlt => true,
+        Op::Movaps
+        | Op::Movups
+        | Op::Movdqa
+        | Op::Movdqu
+        | Op::Movntdq
+        | Op::Movntps
+        | Op::Movd
+        | Op::Movq
+        | Op::Movss
+        | Op::Movsd
+        | Op::Movlps
+        | Op::Movhps => true,
+        op if insn.encoding == Encoding::XmmRm => neon_operation(op).is_some(),
+        Op::Psllw
+        | Op::Pslld
+        | Op::Psllq
+        | Op::Psrlw
+        | Op::Psrld
+        | Op::Psrlq
+        | Op::Psraw
+        | Op::Psrad => insn.encoding == Encoding::RmImmXmm,
         _ => false,
     }
+}
+
+/// NEON base word for a packed operation with identical lane semantics, and
+/// whether its sources are swapped (BIC is `Vn & !Vm`, PANDN is `!dst & src`).
+#[rustfmt::skip]
+fn neon_operation(op: Op) -> Option<(u32, bool)> {
+    Some(match op {
+        Op::Pand => (0x4e20_1c00, false), // and.16b
+        Op::Por => (0x4ea0_1c00, false), // orr.16b
+        Op::Pxor => (0x6e20_1c00, false), // eor.16b
+        Op::Pandn => (0x4e60_1c00, true), // bic.16b
+        Op::Paddb => (0x4e20_8400, false), // add.16b
+        Op::Paddw => (0x4e60_8400, false), // add.8h
+        Op::Paddd => (0x4ea0_8400, false), // add.4s
+        Op::Paddq => (0x4ee0_8400, false), // add.2d
+        Op::Psubb => (0x6e20_8400, false), // sub.16b
+        Op::Psubw => (0x6e60_8400, false), // sub.8h
+        Op::Psubd => (0x6ea0_8400, false), // sub.4s
+        Op::Psubq => (0x6ee0_8400, false), // sub.2d
+        Op::Paddsb => (0x4e20_0c00, false), // sqadd.16b
+        Op::Paddsw => (0x4e60_0c00, false), // sqadd.8h
+        Op::Psubsb => (0x4e20_2c00, false), // sqsub.16b
+        Op::Psubsw => (0x4e60_2c00, false), // sqsub.8h
+        Op::Paddusb => (0x6e20_0c00, false), // uqadd.16b
+        Op::Paddusw => (0x6e60_0c00, false), // uqadd.8h
+        Op::Psubusb => (0x6e20_2c00, false), // uqsub.16b
+        Op::Psubusw => (0x6e60_2c00, false), // uqsub.8h
+        Op::Pcmpeqb => (0x6e20_8c00, false), // cmeq.16b
+        Op::Pcmpeqw => (0x6e60_8c00, false), // cmeq.8h
+        Op::Pcmpeqd => (0x6ea0_8c00, false), // cmeq.4s
+        Op::Pcmpgtb => (0x4e20_3400, false), // cmgt.16b
+        Op::Pcmpgtw => (0x4e60_3400, false), // cmgt.8h
+        Op::Pcmpgtd => (0x4ea0_3400, false), // cmgt.4s
+        Op::Pminub => (0x6e20_6c00, false), // umin.16b
+        Op::Pmaxub => (0x6e20_6400, false), // umax.16b
+        Op::Pminsw => (0x4e60_6c00, false), // smin.8h
+        Op::Pmaxsw => (0x4e60_6400, false), // smax.8h
+        Op::Pavgb => (0x6e20_1400, false), // urhadd.16b
+        Op::Pavgw => (0x6e60_1400, false), // urhadd.8h
+        Op::Pmullw => (0x4e60_9c00, false), // mul.8h
+        Op::Punpcklbw => (0x4e00_3800, false), // zip1.16b
+        Op::Punpcklwd => (0x4e40_3800, false), // zip1.8h
+        Op::Punpckldq => (0x4e80_3800, false), // zip1.4s
+        Op::Punpcklqdq => (0x4ec0_3800, false), // zip1.2d
+        Op::Punpckhbw => (0x4e00_7800, false), // zip2.16b
+        Op::Punpckhwd => (0x4e40_7800, false), // zip2.8h
+        Op::Punpckhdq => (0x4e80_7800, false), // zip2.4s
+        Op::Punpckhqdq => (0x4ec0_7800, false), // zip2.2d
+        _ => return None,
+    })
 }
 
 /// Whether the flags produced by `insns[index]` can be observed. They cannot if
@@ -694,10 +771,205 @@ impl Emitter<'_> {
         }
     }
 
+    /// Load a 16-byte memory operand into X0 (low) and X1 (high).
+    fn load_wide(&mut self, insn: &Insn, operand: &MemOperand, completed: usize) {
+        self.effective_address(operand, true);
+        let helper = if FORMS[usize::from(insn.form)].unaligned {
+            read_u128_helper as *const ()
+        } else {
+            read_aligned_u128_helper as *const ()
+        };
+        self.call_helper(helper as u64);
+        self.guard(insn, completed);
+    }
+
+    /// Store both halves of a guest XMM register.
+    fn store_halves(&mut self, index: u8, low: u8, high: u8) {
+        self.asm.str_uoff_64(low, X19, xmm_offset(index));
+        self.asm.str_uoff_64(high, X19, xmm_offset(index) + 8);
+    }
+
+    fn vector(&mut self, insn: &Insn, completed: usize) {
+        let reg = insn.reg.index;
+        match (insn.op, insn.encoding) {
+            (Op::Movd, Encoding::XmmGpr) => {
+                self.load_rm(X9, insn, completed);
+                if insn.size == 4 {
+                    self.asm.mov_reg_32(X9, X9);
+                }
+                self.store_halves(reg, X9, XZR);
+            }
+            (Op::Movd, _) => {
+                self.asm.ldr_uoff_64(X10, X19, xmm_offset(reg));
+                self.store_rm(insn, X10, completed);
+            }
+            (_, Encoding::RmXmm) => self.vector_store(insn, completed),
+            (
+                Op::Movaps
+                | Op::Movups
+                | Op::Movdqa
+                | Op::Movdqu
+                | Op::Movq
+                | Op::Movss
+                | Op::Movsd
+                | Op::Movlps
+                | Op::Movhps,
+                _,
+            ) => self.vector_load(insn, completed),
+            (op, Encoding::RmImmXmm) => {
+                let Some(RmOperand::Reg(target)) = insn.rm else {
+                    return;
+                };
+                let offset = xmm_offset(target.index);
+                let lane = match op {
+                    Op::Psllw | Op::Psrlw | Op::Psraw => 16,
+                    Op::Pslld | Op::Psrld | Op::Psrad => 32,
+                    _ => 64,
+                };
+                let count = insn.imm.min(u64::from(lane)) as u32;
+                if count == 0 {
+                    return;
+                }
+                let asm = &mut *self.asm;
+                asm.ldr_q_uoff(0, X19, offset);
+                match op {
+                    Op::Psllw | Op::Pslld | Op::Psllq if count == lane => {
+                        asm.neon3(NEON_EOR, 0, 0, 0);
+                    }
+                    Op::Psllw | Op::Pslld | Op::Psllq => asm.shl_vector(0, 0, lane, count),
+                    Op::Psraw | Op::Psrad => asm.sshr_vector(0, 0, lane, count),
+                    _ => asm.ushr_vector(0, 0, lane, count),
+                }
+                asm.str_q_uoff(0, X19, offset);
+            }
+            (op, _) => {
+                let Some((base, swapped)) = neon_operation(op) else {
+                    return;
+                };
+                match insn.rm {
+                    Some(RmOperand::Mem(operand)) => {
+                        self.load_wide(insn, &operand, completed);
+                        self.asm.fmov_d_from_x(1, X0);
+                        self.asm.ins_d1_from_x(1, X1);
+                    }
+                    Some(RmOperand::Reg(source)) => {
+                        self.asm.ldr_q_uoff(1, X19, xmm_offset(source.index));
+                    }
+                    None => return,
+                }
+                let asm = &mut *self.asm;
+                asm.ldr_q_uoff(0, X19, xmm_offset(reg));
+                if swapped {
+                    asm.neon3(base, 0, 1, 0);
+                } else {
+                    asm.neon3(base, 0, 0, 1);
+                }
+                asm.str_q_uoff(0, X19, xmm_offset(reg));
+            }
+        }
+    }
+
+    fn vector_load(&mut self, insn: &Insn, completed: usize) {
+        let reg = insn.reg.index;
+        let target = xmm_offset(reg);
+        match insn.rm {
+            Some(RmOperand::Mem(operand)) if insn.rm_size == 16 => {
+                self.load_wide(insn, &operand, completed);
+                self.store_halves(reg, X0, X1);
+            }
+            Some(RmOperand::Mem(_)) => {
+                self.load_rm(X9, insn, completed);
+                match insn.op {
+                    Op::Movlps => self.asm.str_uoff_64(X9, X19, target),
+                    Op::Movhps => self.asm.str_uoff_64(X9, X19, target + 8),
+                    _ => self.store_halves(reg, X9, XZR),
+                }
+            }
+            Some(RmOperand::Reg(source)) => {
+                let from = xmm_offset(source.index);
+                let asm = &mut *self.asm;
+                match insn.op {
+                    Op::Movss => {
+                        asm.ldr_uoff_32(X9, X19, from);
+                        asm.str_uoff_32(X9, X19, target);
+                    }
+                    Op::Movsd => {
+                        asm.ldr_uoff_64(X9, X19, from);
+                        asm.str_uoff_64(X9, X19, target);
+                    }
+                    Op::Movq => {
+                        asm.ldr_uoff_64(X9, X19, from);
+                        self.store_halves(reg, X9, XZR);
+                    }
+                    // MOVHLPS and MOVLHPS.
+                    Op::Movlps => {
+                        asm.ldr_uoff_64(X9, X19, from + 8);
+                        asm.str_uoff_64(X9, X19, target);
+                    }
+                    Op::Movhps => {
+                        asm.ldr_uoff_64(X9, X19, from);
+                        asm.str_uoff_64(X9, X19, target + 8);
+                    }
+                    _ => {
+                        asm.ldr_q_uoff(0, X19, from);
+                        asm.str_q_uoff(0, X19, target);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn vector_store(&mut self, insn: &Insn, completed: usize) {
+        let from = xmm_offset(insn.reg.index);
+        match insn.rm {
+            Some(RmOperand::Mem(operand)) if insn.rm_size == 16 => {
+                self.asm.ldr_uoff_64(X2, X19, from);
+                self.asm.ldr_uoff_64(X3, X19, from + 8);
+                self.effective_address(&operand, true);
+                let helper = if FORMS[usize::from(insn.form)].unaligned {
+                    write_u128_helper as *const ()
+                } else {
+                    write_aligned_u128_helper as *const ()
+                };
+                self.call_helper(helper as u64);
+                self.guard(insn, completed);
+            }
+            Some(RmOperand::Mem(_)) => {
+                let half = if insn.op == Op::Movhps { 8 } else { 0 };
+                self.asm.ldr_uoff_64(X10, X19, from + half);
+                self.store_rm(insn, X10, completed);
+            }
+            Some(RmOperand::Reg(target)) => {
+                let to = xmm_offset(target.index);
+                match insn.op {
+                    Op::Movss => {
+                        self.asm.ldr_uoff_32(X9, X19, from);
+                        self.asm.str_uoff_32(X9, X19, to);
+                    }
+                    Op::Movsd => {
+                        self.asm.ldr_uoff_64(X9, X19, from);
+                        self.asm.str_uoff_64(X9, X19, to);
+                    }
+                    Op::Movq => {
+                        self.asm.ldr_uoff_64(X9, X19, from);
+                        self.store_halves(target.index, X9, XZR);
+                    }
+                    _ => {
+                        self.asm.ldr_q_uoff(0, X19, from);
+                        self.asm.str_q_uoff(0, X19, to);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
     /// Lower an instruction accepted by [`is_native`].
     fn lower(&mut self, insn: &Insn, completed: usize, flags: bool) {
         match insn.op {
             Op::Nop => {}
+            _ if insn.op.is_vector() => self.vector(insn, completed),
             Op::Neg => {
                 self.load_rm(X10, insn, completed);
                 self.asm.mov_reg_64(X21, X10);
@@ -907,6 +1179,47 @@ fn load_helper(size: u8) -> u64 {
         _ => read_u64_helper as *const (),
     };
     helper as u64
+}
+
+fn fault(ctx: *mut BlockContext, reason: ExitReason) {
+    unsafe {
+        (*ctx).faulted = 1;
+        (*ctx).exit_reason = Some(reason);
+    }
+}
+
+/// Read 16 bytes at any alignment; returned in X0 (low) and X1 (high).
+extern "C" fn read_u128_helper(ctx: *mut BlockContext, addr: u64) -> u128 {
+    let memory = unsafe { &*(*ctx).memory_ptr };
+    let mut bytes = [0; 16];
+    if let Err(error) = memory.read_bytes(addr, &mut bytes) {
+        fault(ctx, ExitReason::MemoryFault(error));
+    }
+    u128::from_le_bytes(bytes)
+}
+
+extern "C" fn read_aligned_u128_helper(ctx: *mut BlockContext, addr: u64) -> u128 {
+    if !addr.is_multiple_of(16) {
+        fault(ctx, ExitReason::GeneralProtection);
+        return 0;
+    }
+    read_u128_helper(ctx, addr)
+}
+
+/// Write 16 bytes at any alignment; `value` arrives in X2 (low) and X3 (high).
+extern "C" fn write_u128_helper(ctx: *mut BlockContext, addr: u64, value: u128) {
+    let memory = unsafe { &mut *(*ctx).memory_ptr };
+    if let Err(error) = memory.write_bytes(addr, &value.to_le_bytes()) {
+        fault(ctx, ExitReason::MemoryFault(error));
+    }
+}
+
+extern "C" fn write_aligned_u128_helper(ctx: *mut BlockContext, addr: u64, value: u128) {
+    if !addr.is_multiple_of(16) {
+        fault(ctx, ExitReason::GeneralProtection);
+        return;
+    }
+    write_u128_helper(ctx, addr, value);
 }
 
 /// Execute one decoded instruction through the shared semantics.

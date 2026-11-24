@@ -77,3 +77,86 @@ fn flag_and_byte_operations_match_llvm() {
         assert_eq!(assembler.instructions(), [*word], "{text}");
     }
 }
+
+#[test]
+fn vector_operations_match_llvm() {
+    let cases: &[(&str, Emit, u32)] = &[
+        (
+            "ldr q1, [x19, #160]",
+            |a| a.ldr_q_uoff(1, 19, 160),
+            0x3dc02a61,
+        ),
+        (
+            "str q0, [x19, #400]",
+            |a| a.str_q_uoff(0, 19, 400),
+            0x3d806660,
+        ),
+        ("fmov d1, x0", |a| a.fmov_d_from_x(1, 0), 0x9e670001),
+        ("mov v1.d[1], x1", |a| a.ins_d1_from_x(1, 1), 0x4e181c21),
+        (
+            "and v0.16b, v1.16b, v2.16b",
+            |a| a.neon3(0x4e20_1c00, 0, 1, 2),
+            0x4e221c20,
+        ),
+        (
+            "sub v31.2d, v30.2d, v29.2d",
+            |a| a.neon3(0x6ee0_8400, 31, 30, 29),
+            0x6efd87df,
+        ),
+        (
+            "shl v0.8h, v1.8h, #0",
+            |a| a.shl_vector(0, 1, 16, 0),
+            0x4f105420,
+        ),
+        (
+            "shl v0.8h, v1.8h, #15",
+            |a| a.shl_vector(0, 1, 16, 15),
+            0x4f1f5420,
+        ),
+        (
+            "shl v2.4s, v3.4s, #31",
+            |a| a.shl_vector(2, 3, 32, 31),
+            0x4f3f5462,
+        ),
+        (
+            "shl v4.2d, v5.2d, #63",
+            |a| a.shl_vector(4, 5, 64, 63),
+            0x4f7f54a4,
+        ),
+        (
+            "ushr v0.8h, v1.8h, #1",
+            |a| a.ushr_vector(0, 1, 16, 1),
+            0x6f1f0420,
+        ),
+        (
+            "ushr v0.8h, v1.8h, #16",
+            |a| a.ushr_vector(0, 1, 16, 16),
+            0x6f100420,
+        ),
+        (
+            "ushr v2.4s, v3.4s, #32",
+            |a| a.ushr_vector(2, 3, 32, 32),
+            0x6f200462,
+        ),
+        (
+            "ushr v4.2d, v5.2d, #64",
+            |a| a.ushr_vector(4, 5, 64, 64),
+            0x6f4004a4,
+        ),
+        (
+            "sshr v0.8h, v1.8h, #16",
+            |a| a.sshr_vector(0, 1, 16, 16),
+            0x4f100420,
+        ),
+        (
+            "sshr v2.4s, v3.4s, #5",
+            |a| a.sshr_vector(2, 3, 32, 5),
+            0x4f3b0462,
+        ),
+    ];
+    for (text, emit, word) in cases {
+        let mut assembler = Arm64Assembler::new();
+        emit(&mut assembler);
+        assert_eq!(assembler.instructions(), [*word], "{text}");
+    }
+}

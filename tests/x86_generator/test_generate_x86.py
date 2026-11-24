@@ -56,6 +56,17 @@ class GenerateX86(unittest.TestCase):
         self.rejects(self.form('op = "nop"\nopcode = 0xD7\ndigit = 1\nenc = "none"\nsize = "n"'), "digit needs")
         self.rejects(self.form('op = "nop"\nopcode = 0xD4\ncount = 8\nenc = "none"\nsize = "n"'), "aligned")
 
+    def test_mandatory_prefix_cannot_shadow_an_operand_size(self):
+        # 66 0F AF is a 16-bit IMUL, and 66 0F 6E is a MOVD; neither may be both.
+        self.rejects(self.form('op = "paddb"\nmap = "0f"\nprefix = "66"\nopcode = 0xAF\nenc = "xmm_rm"\nsize = "x"\nsrc = "x"'), "both an operand size")
+        self.rejects(self.form('op = "imul2"\nmap = "0f"\nopcode = 0x6E\nenc = "reg_rm"\nsize = "v"'), "both an operand size")
+
+    def test_vector_operand_rules(self):
+        self.rejects(self.form('op = "paddb"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "x"'), "source size")
+        self.rejects(self.form('op = "paddb"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "v"\nsrc = "x"'), "XMM size")
+        self.rejects(self.form('op = "movq"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "x"\nsrc = "q"\nunaligned = true'), "alignment applies")
+        self.rejects(self.form('op = "nop"\nprefix = "66"\nopcode = 0xD7\nenc = "none"\nsize = "n"'), "map 0f")
+
     def test_unknown_vocabulary_is_rejected(self):
         self.rejects(self.form('op = "frob"\nopcode = 0xD7\nenc = "none"\nsize = "n"'), "unknown op")
         self.rejects(self.form('op = "nop"\nopcode = 0xD7\nenc = "none"\nsize = "z"'), "unknown size")

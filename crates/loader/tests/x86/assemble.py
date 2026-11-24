@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Assemble the original x86-64 integer fixture with the LLVM assembler.
+"""Assemble the original x86-64 fixtures with the LLVM assembler.
 
-  generate   write crates/loader/tests/x86/integer.txt
-  --check    reassemble in memory and fail if the committed fixture differs
+  generate   write integer.txt and vector.txt next to this file
+  --check    reassemble in memory and fail if a committed fixture differs
 
 Each output line is `<hex bytes> | <Intel-syntax text>`. The assembler is
 `clang -target x86_64-apple-macos` and the bytes are read with `objdump -d`,
@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent / "integer.txt"
+HERE = Path(__file__).resolve().parent
 LOW = "a c d b sp bp si di".split()
 CONDITIONS = "o no b ae e ne be a s ns p np l ge le g".split()
 PTR = {8: "byte", 16: "word", 32: "dword", 64: "qword"}
@@ -92,6 +92,46 @@ def cases():
     return list(dict.fromkeys(out))
 
 
+PACKED = """punpcklbw punpcklwd punpckldq punpcklqdq punpckhbw punpckhwd punpckhdq punpckhqdq
+packsswb packssdw packuswb pcmpgtb pcmpgtw pcmpgtd pcmpeqb pcmpeqw pcmpeqd paddb paddw paddd paddq
+psubb psubw psubd psubq paddsb paddsw paddusb paddusw psubsb psubsw psubusb psubusw pmullw pmulhw
+pmulhuw pmuludq pmaddwd psadbw pavgb pavgw pminub pmaxub pminsw pmaxsw pand pandn por pxor andps
+andpd andnps andnpd orps orpd xorps xorpd unpcklps unpcklpd unpckhps unpckhpd psllw pslld psllq
+psrlw psrld psrlq psraw psrad movaps movapd movups movupd movdqa movdqu""".split()
+
+
+def vector_cases():
+    wide, quad, dword = (f"{w} ptr [rsi + 4*rdi + 16]" for w in ("xmmword", "qword", "dword"))
+    word = "word ptr [rsi + 4*rdi + 16]"
+    out = []
+    for op in PACKED:
+        out += [f"{op} xmm3, xmm9", f"{op} xmm10, {wide}", f"{op} xmm2, xmm2"]
+    for op in "movaps movapd movups movupd movdqa movdqu movntdq movntps movntpd".split():
+        out.append(f"{op} {wide}, xmm11")
+    for op, width in (("movss", dword), ("movsd", quad), ("movq", quad)):
+        out += [f"{op} xmm3, xmm9", f"{op} xmm10, {width}", f"{op} {width}, xmm11"]
+    for op in "movlps movlpd movhps movhpd".split():
+        out += [f"{op} xmm3, {quad}", f"{op} {quad}, xmm9"]
+    out += ["movhlps xmm3, xmm9", "movlhps xmm10, xmm1", "movhlps xmm2, xmm2", "movlhps xmm2, xmm2"]
+    out += ["movd xmm3, r9d", "movd xmm12, eax", "movq xmm3, r9", "movd r9d, xmm3", "movd ebx, xmm12",
+            "movq r9, xmm3", f"movd xmm3, {dword}", f"movd {dword}, xmm9"]
+    for op in "movmskps movmskpd pmovmskb".split():
+        out += [f"{op} ebx, xmm9", f"{op} r10d, xmm3"]
+    for op, bits in (("w", 16), ("d", 32), ("q", 64)):
+        for name in ("psll", "psrl", "psra"):
+            if name + op != "psraq":
+                out += [f"{name}{op} xmm{3 + 6 * (n % 2)}, {n}" for n in (0, 1, 7, bits - 1, bits, 255)]
+    for op in ("pslldq", "psrldq"):
+        out += [f"{op} xmm9, {n}" for n in (0, 1, 5, 15, 16, 255)]
+    for op in "pshufd pshufhw pshuflw shufps shufpd".split():
+        out += [f"{op} xmm3, xmm9, {n}" for n in (0, 27, 78, 177, 255)]
+        out += [f"{op} xmm10, {wide}, 114", f"{op} xmm2, xmm2, 57"]
+    for n in (0, 3, 7):
+        out += [f"pinsrw xmm9, ebx, {n}", f"pinsrw xmm3, {word}, {n}", f"pextrw r9d, xmm3, {n}"]
+    out += [f"stmxcsr {dword}"]
+    return list(dict.fromkeys(out))
+
+
 def assemble(lines):
     with tempfile.TemporaryDirectory() as directory:
         source, obj = Path(directory, "a.s"), Path(directory, "a.o")
@@ -108,12 +148,13 @@ def assemble(lines):
 def main(argv):
     if len(argv) != 2 or argv[1] not in ("generate", "--check"):
         sys.exit("usage: assemble.py generate|--check")
-    text = assemble(cases())
-    if argv[1] == "generate":
-        OUT.write_text(text)
-    elif OUT.read_text() != text:
-        sys.exit("integer.txt differs from the assembler output")
-    print(f"{text.count(chr(10))} instructions")
+    for name, lines in (("integer.txt", cases()), ("vector.txt", vector_cases())):
+        text = assemble(lines)
+        if argv[1] == "generate":
+            (HERE / name).write_text(text)
+        elif (HERE / name).read_text() != text:
+            sys.exit(f"{name} differs from the assembler output")
+        print(f"{name}: {len(lines)} instructions")
 
 
 if __name__ == "__main__":

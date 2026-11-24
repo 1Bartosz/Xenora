@@ -26,15 +26,16 @@ RUST = HERE / "src/x86_table.rs"
 TOP_KEYS = {"schema", "architecture", "documents", "operation", "alu", "form", "group"}
 OPERATION_KEYS = {"reads", "writes", "undefined", "conditional", "terminator", "faults", "ref"}
 FORM_KEYS = {"op", "map", "prefix", "opcode", "count", "digit", "enc", "size", "imm", "src",
-             "memory_only", "register_only", "no_rex_b"}
+             "memory_only", "register_only", "no_rex_b", "unaligned"}
 GROUP_KEYS = {"map", "opcodes", "digits"}
 FLAGS = ["cf", "zf", "sf", "of", "pf", "af"]
 MAPS = {"1": "ONE_BYTE", "0f": "TWO_BYTE"}
-PREFIXES = {"", "f3"}
-SIZES = {"b": "Byte", "v": "Variable", "q": "Quad", "y": "Wide", "n": "None"}
-IMMS = {"": "None", "ib": "SignedByte", "iz": "SignedFull", "iv": "Full", "iw": "Word",
+# Two-byte opcode table per mandatory prefix.
+PREFIXES = {"": "TWO_BYTE", "66": "TWO_BYTE_66", "f3": "TWO_BYTE_F3", "f2": "TWO_BYTE_F2"}
+SIZES = {"b": "Byte", "v": "Variable", "q": "Quad", "y": "Wide", "n": "None", "x": "Xmm"}
+IMMS = {"": "None", "ib": "SignedByte", "iz": "SignedFull", "iv": "Full", "iw": "Word", "ub": "Byte",
         "rel8": "SignedByte", "rel32": "Signed32"}
-SRCS = {"": 0, "b": 1, "w": 2, "d": 4}
+SRCS = {"": 0, "b": 1, "w": 2, "d": 4, "q": 8, "x": 16}
 # encoding -> (Rust variant, has ModRM, required immediates)
 ENCS = {
     "none": ("None", False, {""}),
@@ -52,7 +53,18 @@ ENCS = {
     "op_reg_imm": ("OpRegImm", False, {"ib", "iv"}),
     "imm": ("Imm", False, {"ib", "iz", "iw"}),
     "rel": ("Rel", False, {"rel8", "rel32"}),
+    "xmm_rm": ("XmmRm", True, {""}),
+    "rm_xmm": ("RmXmm", True, {""}),
+    "xmm_rm_imm": ("XmmRmImm", True, {"ub"}),
+    "rm_imm_xmm": ("RmImmXmm", True, {"ub"}),
+    "xmm_gpr": ("XmmGpr", True, {""}),
+    "gpr_xmm": ("GprXmm", True, {""}),
+    "xmm_gpr_imm": ("XmmGprImm", True, {"ub"}),
+    "reg_xmm": ("RegXmm", True, {""}),
+    "reg_xmm_imm": ("RegXmmImm", True, {"ub"}),
 }
+# Encodings whose ModRM operand is an XMM register or memory of the source width.
+XMM_RM = {"xmm_rm", "rm_xmm", "xmm_rm_imm", "rm_imm_xmm", "reg_xmm", "reg_xmm_imm"}
 # One-byte opcodes that are prefixes or the two-byte escape, never instructions.
 RESERVED = {0x0F, 0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3,
             *range(0x40, 0x50)}
@@ -151,8 +163,16 @@ def load(text):
             fail(f"{where}: memory_only and register_only contradict")
         if (form.get("memory_only") or form.get("register_only")) and not modrm:
             fail(f"{where}: operand restriction without ModRM")
-        if form["src"] and form["enc"] != "reg_rm":
-            fail(f"{where}: a source size needs reg_rm")
+        sourced = form["enc"] in XMM_RM or form["enc"] == "xmm_gpr_imm"
+        if sourced != bool(form["src"]) and form["enc"] not in ("reg_rm", "rm"):
+            fail(f"{where}: source size does not match the encoding")
+        if form["src"] and not sourced and form["enc"] == "rm" and form["size"] != "n":
+            fail(f"{where}: source size does not match the encoding")
+        if (form["size"] == "x") != (form["enc"] in XMM_RM - {"reg_xmm", "reg_xmm_imm"}
+                                     or form["enc"] == "xmm_gpr_imm"):
+            fail(f"{where}: XMM size does not match the encoding")
+        if form.get("unaligned") and form["src"] != "x":
+            fail(f"{where}: alignment applies only to 16-byte operands")
         if form["prefix"] and form["map"] != "0f":
             fail(f"{where}: mandatory prefixes are only supported in map 0f")
         if form["count"] not in (1, 8, 16) or form["opcode"] % form["count"]:
@@ -170,6 +190,14 @@ def load(text):
             if form["digit"] in slots or (slots and (None in slots or form["digit"] is None)):
                 fail(f"{where}: overlapping encoding")
             slots[form["digit"]] = form
+            # 0x66 selects a 16-bit operand for an unprefixed integer form, so a
+            # 66-prefixed form at the same opcode would be ambiguous.
+            for other, sized in (("66", form), ("", None)):
+                if form["map"] == "0f" and form["prefix"] == ("" if other == "66" else "66"):
+                    for rival in claimed.get(("0f", other, opcode), {}).values():
+                        plain = sized or rival
+                        if plain["size"] in ("b", "v"):
+                            fail(f"{where}: 0x66 is both an operand size and a mandatory prefix")
             if form["digit"] is not None:
                 first = next(iter(slots.values()))
                 if (first["size"] in "bn") != (form["size"] in "bn"):
@@ -225,6 +253,8 @@ def generate(operations, forms):
            lambda op, e: str(e["terminator"]).lower())
     method("Can raise an arithmetic fault.", "can_fault", "bool",
            lambda op, e: str(e["faults"]).lower())
+    vector = {form["op"] for form in forms if form["size"] == "x" or "xmm" in form["enc"]}
+    method("Uses an XMM register.", "is_vector", "bool", lambda op, e: str(op in vector).lower())
     out[-1:] = ["}", ""]
 
     out.append(f"pub static FORMS: [Form; {len(forms)}] = [")
@@ -235,14 +265,15 @@ def generate(operations, forms):
             f"source: {SRCS[form['src']]}, has_modrm: {str(ENCS[form['enc']][1]).lower()}, "
             f"memory_only: {str(bool(form.get('memory_only'))).lower()}, "
             f"register_only: {str(bool(form.get('register_only'))).lower()}, "
-            f"no_rex_b: {str(bool(form.get('no_rex_b'))).lower()} }},")
+            f"no_rex_b: {str(bool(form.get('no_rex_b'))).lower()}, "
+            f"unaligned: {str(bool(form.get('unaligned'))).lower()} }},")
     out += ["];", ""]
 
     groups = []
-    tables = {name: ["Entry::Unsupported"] * 256 for name in ("ONE_BYTE", "TWO_BYTE", "TWO_BYTE_F3")}
+    tables = {name: ["Entry::Unsupported"] * 256 for name in ("ONE_BYTE", *PREFIXES.values())}
     slots = {}
     for index, form in enumerate(forms):
-        table = "TWO_BYTE_F3" if form["prefix"] else MAPS[form["map"]]
+        table = MAPS[form["map"]] if form["map"] == "1" else PREFIXES[form["prefix"]]
         for opcode in range(form["opcode"], form["opcode"] + form["count"]):
             slots.setdefault((table, opcode), {})[form["digit"]] = index
     for (table, opcode), digits in sorted(slots.items()):

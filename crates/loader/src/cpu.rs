@@ -67,6 +67,24 @@ pub struct RFlags {
     pub af: bool, // Auxiliary carry flag
 }
 
+/// SSE control and status register. Reset state masks every exception and
+/// rounds to nearest (Intel SDM Vol. 1, 10.2.3).
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mxcsr(pub u32);
+
+impl Mxcsr {
+    pub const RESET: u32 = 0x1F80;
+    /// Bits that exist; loading any other bit raises #GP.
+    pub const WRITABLE: u32 = 0xFFFF;
+}
+
+impl Default for Mxcsr {
+    fn default() -> Self {
+        Self(Self::RESET)
+    }
+}
+
 /// x86-64 CPU state. Native DBT accesses the general registers and RIP by offset.
 #[repr(C)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -76,6 +94,9 @@ pub struct CpuState {
     pub flags: RFlags,
     pub gs_base: u64,
     pub fs_base: u64,
+    /// XMM0-XMM15, lane 0 in the low bits.
+    pub xmm: [u128; 16],
+    pub mxcsr: Mxcsr,
 }
 
 impl CpuState {
@@ -88,6 +109,8 @@ impl CpuState {
             flags: RFlags::default(),
             gs_base: 0,
             fs_base: 0,
+            xmm: [0; 16],
+            mxcsr: Mxcsr::default(),
         }
     }
 
@@ -112,6 +135,8 @@ pub enum ExitReason {
     StackUnderflow,
     /// Division by zero or a quotient too large for its destination (#DE).
     DivideError,
+    /// A misaligned 16-byte operand or a reserved MXCSR bit (#GP).
+    GeneralProtection,
 }
 
 impl fmt::Display for ExitReason {
@@ -125,6 +150,7 @@ impl fmt::Display for ExitReason {
             Self::IllegalInstruction(op) => write!(f, "illegal or unsupported opcode: 0x{op:02x}"),
             Self::StackUnderflow => write!(f, "stack underflow"),
             Self::DivideError => write!(f, "guest divide error"),
+            Self::GeneralProtection => write!(f, "guest general-protection fault"),
         }
     }
 }
@@ -152,7 +178,8 @@ mod layout_tests {
         assert_eq!(std::mem::offset_of!(RFlags, of), 3);
         assert_eq!(std::mem::offset_of!(RFlags, pf), 4);
         assert_eq!(std::mem::offset_of!(RFlags, af), 5);
-        assert_eq!(std::mem::size_of::<CpuState>(), 16 * 8 + 8 + 8 + 8 + 8);
+        assert_eq!(std::mem::offset_of!(CpuState, xmm), 160);
+        assert_eq!(std::mem::offset_of!(CpuState, mxcsr), 160 + 16 * 16);
 
         let cpu = CpuState::default();
         let base = std::ptr::addr_of!(cpu) as usize;

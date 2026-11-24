@@ -7,7 +7,9 @@
 //! `x86/instructions.toml`, so instruction boundaries, operands and rejected
 //! forms agree across them.
 
-use crate::x86_table::{FORMS, GROUPS, ONE_BYTE, Op, TWO_BYTE, TWO_BYTE_F3};
+use crate::x86_table::{
+    FORMS, GROUPS, ONE_BYTE, Op, TWO_BYTE, TWO_BYTE_66, TWO_BYTE_F2, TWO_BYTE_F3,
+};
 
 /// Architectural x86-64 instruction length limit, in bytes.
 ///
@@ -46,6 +48,8 @@ pub struct Form {
     pub memory_only: bool,
     pub register_only: bool,
     pub no_rex_b: bool,
+    /// A 16-byte memory operand may have any alignment.
+    pub unaligned: bool,
 }
 
 /// Opcode table entry.
@@ -73,6 +77,21 @@ pub enum Encoding {
     OpRegImm,
     Imm,
     Rel,
+    /// XMM `reg` from XMM or memory.
+    XmmRm,
+    /// XMM or memory from XMM `reg`.
+    RmXmm,
+    XmmRmImm,
+    /// XMM `rm` shifted in place by an immediate.
+    RmImmXmm,
+    /// XMM `reg` from a general register or memory.
+    XmmGpr,
+    /// General register or memory from XMM `reg`.
+    GprXmm,
+    XmmGprImm,
+    /// General `reg` from XMM `rm`.
+    RegXmm,
+    RegXmmImm,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +100,7 @@ pub enum OperandSize {
     Variable,
     Wide,
     Quad,
+    Xmm,
     None,
 }
 
@@ -92,6 +112,8 @@ pub enum Immediate {
     Signed32,
     Full,
     Word,
+    /// Zero-extended byte.
+    Byte,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +122,8 @@ pub enum Segment {
     Gs,
 }
 
-/// A register operand. `high` selects AH, CH, DH or BH of `index`.
+/// A general or XMM register operand, as the encoding says. `high` selects AH,
+/// CH, DH or BH of `index`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegOperand {
     pub index: u8,
@@ -133,7 +156,7 @@ pub struct Insn {
     /// Guest address of the first byte.
     pub rip: u64,
     pub len: u8,
-    /// Operand size in bytes: 1, 2, 4 or 8, or 0 when there is none.
+    /// Operand size in bytes: 1, 2, 4, 8 or 16 (XMM), or 0 when there is none.
     pub size: u8,
     /// Width of the ModRM operand in bytes.
     pub rm_size: u8,
@@ -208,7 +231,7 @@ impl<E, F: FnMut(u64) -> Result<u8, E>> Cursor<F> {
 /// Decode one instruction at `rip`. `fetch` supplies the byte at an address and
 /// is called only for bytes that belong to the instruction, in order.
 ///
-/// Forms the registry does not declare, LOCK, REPNE, address-size overrides and
+/// Forms the registry does not declare, LOCK, address-size overrides and
 /// conflicting segment overrides are rejected rather than approximated.
 pub fn decode<E>(
     rip: u64,
@@ -222,6 +245,7 @@ pub fn decode<E>(
     };
     let mut operand_size = false;
     let mut rep = false;
+    let mut repne = false;
     let mut segment = None;
     let mut byte = cursor.u8()?;
     loop {
@@ -235,6 +259,11 @@ pub fn decode<E>(
             }
             0xF3 => {
                 rep = true;
+                byte = cursor.u8()?;
+                continue;
+            }
+            0xF2 => {
+                repne = true;
                 byte = cursor.u8()?;
                 continue;
             }
@@ -260,20 +289,32 @@ pub fn decode<E>(
     let (rex_w, rex_r, rex_x, rex_b) =
         (rex & 8 != 0, (rex & 4) << 1, (rex & 2) << 2, (rex & 1) << 3);
 
-    let table = if byte == 0x0F {
-        byte = cursor.u8()?;
-        if rep { &TWO_BYTE_F3 } else { &TWO_BYTE }
-    } else {
-        &ONE_BYTE
-    };
-    let opcode = byte;
-    let one_byte = std::ptr::eq(table, &raw const ONE_BYTE);
-    // Only PAUSE (F3 90) has a meaning here for F3 on a one-byte opcode.
-    if rep && one_byte && opcode != 0x90 {
-        return Err(DecodeError::Unsupported(0xF3));
+    // F2 and F3 together have no defined meaning for any declared form.
+    if rep && repne {
+        return Err(DecodeError::Unsupported(0xF2));
     }
+    let two_byte = byte == 0x0F;
+    let opcode = if two_byte { cursor.u8()? } else { byte };
+    let slot = usize::from(opcode);
+    let table = if !two_byte {
+        // Only PAUSE (F3 90) has a meaning here for F3 on a one-byte opcode.
+        if repne || (rep && opcode != 0x90) {
+            return Err(DecodeError::Unsupported(if rep { 0xF3 } else { 0xF2 }));
+        }
+        &ONE_BYTE
+    } else if rep {
+        &TWO_BYTE_F3
+    } else if repne {
+        &TWO_BYTE_F2
+    } else if operand_size && !matches!(TWO_BYTE_66[slot], Entry::Unsupported) {
+        // 0x66 selects the form instead of an operand size.
+        operand_size = false;
+        &TWO_BYTE_66
+    } else {
+        &TWO_BYTE
+    };
 
-    let entry = table[usize::from(opcode)];
+    let entry = table[slot];
     let mut modrm = 0;
     let form_index = match entry {
         Entry::Unsupported => return Err(DecodeError::Unsupported(opcode)),
@@ -294,6 +335,7 @@ pub fn decode<E>(
         OperandSize::None => 0,
         OperandSize::Byte => 1,
         OperandSize::Quad => 8,
+        OperandSize::Xmm => 16,
         OperandSize::Wide | OperandSize::Variable if rex_w => 8,
         OperandSize::Variable if operand_size => 2,
         OperandSize::Wide | OperandSize::Variable => 4,
@@ -378,6 +420,7 @@ pub fn decode<E>(
         Immediate::Signed32 => cursor.signed(4)?,
         Immediate::Full => cursor.bytes(usize::from(size))?,
         Immediate::Word => cursor.bytes(2)?,
+        Immediate::Byte => cursor.bytes(1)?,
     };
 
     let end = rip.wrapping_add(cursor.len as u64);

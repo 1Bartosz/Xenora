@@ -21,6 +21,7 @@ pub mod tls;
 pub mod triage;
 pub mod x86_decode;
 pub mod x86_exec;
+pub mod x86_simd;
 #[rustfmt::skip]
 pub mod x86_table;
 

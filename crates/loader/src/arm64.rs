@@ -290,6 +290,75 @@ impl Arm64Assembler {
         );
     }
 
+    /// LDR Qt, [Xn, #offset] (offset a multiple of 16)
+    pub fn ldr_q_uoff(&mut self, qt: u8, xn: u8, offset: u32) {
+        self.emit(
+            0x3dc0_0000
+                | (((offset / 16) & 0xfff) << 10)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(qt) & 0x1f),
+        );
+    }
+
+    /// STR Qt, [Xn, #offset] (offset a multiple of 16)
+    pub fn str_q_uoff(&mut self, qt: u8, xn: u8, offset: u32) {
+        self.emit(
+            0x3d80_0000
+                | (((offset / 16) & 0xfff) << 10)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(qt) & 0x1f),
+        );
+    }
+
+    /// FMOV Dd, Xn (clears the upper half of Vd)
+    pub fn fmov_d_from_x(&mut self, vd: u8, xn: u8) {
+        self.emit(0x9e67_0000 | ((u32::from(xn) & 0x1f) << 5) | (u32::from(vd) & 0x1f));
+    }
+
+    /// MOV Vd.D[1], Xn
+    pub fn ins_d1_from_x(&mut self, vd: u8, xn: u8) {
+        self.emit(0x4e18_1c00 | ((u32::from(xn) & 0x1f) << 5) | (u32::from(vd) & 0x1f));
+    }
+
+    /// Three-register vector instruction from its base word
+    pub fn neon3(&mut self, base: u32, vd: u8, vn: u8, vm: u8) {
+        self.emit(
+            base | ((u32::from(vm) & 0x1f) << 16)
+                | ((u32::from(vn) & 0x1f) << 5)
+                | (u32::from(vd) & 0x1f),
+        );
+    }
+
+    /// SHL Vd, Vn, #shift for 0 <= shift < lane
+    pub fn shl_vector(&mut self, vd: u8, vn: u8, lane: u32, shift: u32) {
+        self.emit(
+            0x4f00_5400
+                | ((lane + shift) << 16)
+                | ((u32::from(vn) & 0x1f) << 5)
+                | (u32::from(vd) & 0x1f),
+        );
+    }
+
+    /// USHR Vd, Vn, #shift for 1 <= shift <= lane
+    pub fn ushr_vector(&mut self, vd: u8, vn: u8, lane: u32, shift: u32) {
+        self.emit(
+            0x6f00_0400
+                | ((2 * lane - shift) << 16)
+                | ((u32::from(vn) & 0x1f) << 5)
+                | (u32::from(vd) & 0x1f),
+        );
+    }
+
+    /// SSHR Vd, Vn, #shift for 1 <= shift <= lane
+    pub fn sshr_vector(&mut self, vd: u8, vn: u8, lane: u32, shift: u32) {
+        self.emit(
+            0x4f00_0400
+                | ((2 * lane - shift) << 16)
+                | ((u32::from(vn) & 0x1f) << 5)
+                | (u32::from(vd) & 0x1f),
+        );
+    }
+
     /// SXTW (64-bit/sign-extended): SXTW Xd, Wn (SBFM Xd, Xn, #0, #31)
     pub fn sxtw_64(&mut self, xd: u8, wn: u8) {
         self.emit(0x93407c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));

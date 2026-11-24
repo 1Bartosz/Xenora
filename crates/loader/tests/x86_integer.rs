@@ -921,15 +921,29 @@ fn every_fixture_instruction_matches_the_reference_in_both_engines() {
 #[test]
 fn every_declared_form_is_executed_by_a_fixture() {
     let mut seen = BTreeSet::new();
-    for case in cases() {
+    let vector = include_str!("x86/vector.txt");
+    for line in FIXTURE.lines().chain(vector.lines()) {
+        let (hex, _) = line.split_once(" | ").unwrap();
+        let code: Vec<u8> = hex
+            .split(' ')
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect();
         let insn = decode(ENTRY, |address| {
-            case.code.get((address - ENTRY) as usize).copied().ok_or(())
+            code.get((address - ENTRY) as usize).copied().ok_or(())
         })
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{line}: {error:?}"));
         seen.insert(usize::from(insn.form));
     }
     // Control flow and exits are covered by the tests below.
-    let separate = [Op::Jcc, Op::Jmp, Op::Call, Op::Ret, Op::Hlt, Op::Syscall];
+    let separate = [
+        Op::Ldmxcsr,
+        Op::Jcc,
+        Op::Jmp,
+        Op::Call,
+        Op::Ret,
+        Op::Hlt,
+        Op::Syscall,
+    ];
     let mut missing: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (index, form) in FORMS.iter().enumerate() {
         if !separate.contains(&form.op) && !seen.contains(&index) {
