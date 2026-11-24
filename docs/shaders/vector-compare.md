@@ -53,6 +53,8 @@ The 32-bit VOPC encoding (bits 31:25 = 0b0111110), no SDWA or DPP:
 | v_cmp_gt_i32 / v_cmp_gt_u32 | S0 > S1 |
 | v_cmp_ne_i32 / v_cmp_ne_u32 | S0 != S1 |
 | v_cmp_ge_i32 / v_cmp_ge_u32 | S0 >= S1 |
+| v_cmp_f_i32 / v_cmp_f_u32 | false (Table 59 offset 0) |
+| v_cmp_t_i32 / v_cmp_t_u32 | true (offset 7) |
 
 `_i32` compares the 32-bit two's-complement values, `_u32` the unsigned values.
 The forms are declared in the semantic registry
@@ -98,7 +100,7 @@ this wave (all 32 except in a final partial wave, see 7). As an unsigned
 
 - V_CMPX_* (writes EXEC: divergent execution; needs its own contract).
 - The VOP3 encoding of any compare (arbitrary SGPR destination, modifiers).
-- SDWA and DPP forms; F/T, 16-bit, 64-bit and float compares; v_cmp_class.
+- SDWA and DPP forms; 16-bit, 64-bit and float compares; v_cmp_class.
 - SRC0 inline float constants (240-248), SGPRs other than s0-s106, TTMPs,
   M0, EXEC_LO/HI, VCC_HI, SCC/VCCZ/EXECZ selectors, LDS direct.
 - A normal-SGPR SRC0 without a known value, when EXEC_LO != 0.
@@ -197,13 +199,19 @@ instructions are pure 32-bit ALU and are evaluated unconditionally.
 ## 9. Verification
 
 `fixtures/rdna2/vector-compare.s` is an original program, assembled by LLVM.
-It uses all twelve forms with VGPR, SGPR, inline, literal and `vcc_lo`
+It uses the twelve relational forms with VGPR, SGPR, inline, literal and `vcc_lo`
 sources, a compare and a mask move under partial EXEC, a compare under empty
 EXEC that must clear a stale VCC, SCC kept across compares, and a runtime
 `s_cbranch_vccz`. Its expected output is written in
 `tests/validation/known_answers.rs` from the listing, with an explicit
 relation for each row. The test input has a wave whose branch is taken, one
 whose branch is not, and a final partial wave of 9 lanes.
+
+`fixtures/rdna2/vector-compare-ft.s` does the same for the four F and T
+forms: an F that clears a stale VCC, T and F under partial EXEC, a T reading
+`vcc_lo`, and runtime `s_cbranch_vccz` on a T result (never taken) and an F
+result (always taken). The independent oracle for F and T is
+`tests/validation/tests/vopc_f_t.rs`.
 
 The same file runs each form against 10 boundary values (0, 1, 0x7ffffffe,
 0x7fffffff, 0x80000000, 0x80000001, 0xfffffff0, 0xfffffffe, 0xffffffff,

@@ -60,8 +60,10 @@ SOURCE_BITS = {8, 16}
 RELATION_KEY = "relation"
 RELATIONS = {
     "eq": "Equal", "lg": "NotEqual", "gt": "Greater", "ge": "GreaterOrEqual",
-    "lt": "Less", "le": "LessOrEqual",
+    "lt": "Less", "le": "LessOrEqual", "f": "False", "t": "True",
 }
+# F and T exist only as VOPC compares (guide Table 59 offsets 0 and 7).
+VECTOR_ONLY_RELATIONS = {"f", "t"}
 # (relation, signedness) -> primitive. Equality does not depend on signedness,
 # so both declared signednesses of EQ and LG share one primitive.
 COMPARE_PRIMITIVES = {
@@ -71,6 +73,8 @@ COMPARE_PRIMITIVES = {
     ("ge", "signed"): "ge_i32", ("ge", "unsigned"): "ge_u32",
     ("lt", "signed"): "lt_i32", ("lt", "unsigned"): "lt_u32",
     ("le", "signed"): "le_i32", ("le", "unsigned"): "le_u32",
+    ("f", "signed"): "false_b32", ("f", "unsigned"): "false_b32",
+    ("t", "signed"): "true_b32", ("t", "unsigned"): "true_b32",
 }
 # Logical operations take untyped bits; arithmetic ones never do. Shifts take
 # the signedness their primitive names, and their S1 is an unsigned count.
@@ -564,6 +568,8 @@ def validate(registry, snapshot):
                 errors.append(f"{label}: unknown or missing {RELATION_KEY} {relation!r}")
             elif (relation, form["signedness"]) not in COMPARE_PRIMITIVES:
                 errors.append(f"{label}: no primitive implements {relation}/{form['signedness']}")
+            elif relation in VECTOR_ONLY_RELATIONS and _rule_kind(form) != "vector_compare":
+                errors.append(f"{label}: relation {relation} exists only for VOPC compares")
             # SOPC compares write SCC; VOPC compares write VCC and leave SCC.
             scc = "unchanged" if _rule_kind(form) == "vector_compare" else "relation"
             if form["scc"] != scc:

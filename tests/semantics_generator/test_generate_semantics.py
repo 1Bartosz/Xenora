@@ -831,6 +831,22 @@ class Validate(unittest.TestCase):
         form(reg, "V_CMP_LT_I32")["signedness"] = "unsigned"
         self.rejects(reg, "V_CMP_LT_I32: signedness unsigned contradicts XML format FMT_NUM_I32")
 
+    def test_rejects_f_and_t_outside_vopc(self):
+        for relation in ("f", "t"):
+            with self.subTest(relation=relation):
+                reg = compares()
+                form(reg, "S_CMP_LT_I32")["relation"] = relation
+                self.rejects(reg, f"S_CMP_LT_I32: relation {relation} exists only for VOPC compares")
+
+    def test_renders_f_and_t_primitives(self):
+        reg = vector_compares()
+        form(reg, "V_CMP_LT_I32")["relation"] = "t"
+        form(reg, "V_CMP_NE_U32")["relation"] = "f"
+        self.assertEqual(self.errors(reg), [])
+        text = gen.render(reg, snapshot())
+        self.assertIn("Self::CmpLtI32 => primitive::true_b32(src0, src1),", text)
+        self.assertIn("Self::CmpNeU32 => CompareRelation::False,", text)
+
     def test_renders_vector_compare_dispatch(self):
         text = gen.render(vector_compares(), snapshot())
         self.assertIn("pub enum VectorCompareOp {", text)

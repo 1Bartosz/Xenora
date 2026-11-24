@@ -1678,3 +1678,92 @@ spec = [
   { document = "guide", section = "3.9", page = 19 },
 ]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+# ---- VOPC F and T compares (guide Table 59 offsets 0 and 7) ----
+# The test is false or true for every lane, so VCC_LO := 0 or the EXEC lanes
+# that exist. Sources are still decoded and checked as for the other compares
+# (docs/shaders/vector-compare.md section 5).
+
+[[form]]
+name = "V_CMP_F_I32"
+family = "VOPC"
+opcode = 128
+variant = "CmpFI32"
+operation = "compare"
+relation = "f"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "lane_mask"
+exec = "unchanged"
+wave = "wave32"
+operands = "vopc_vcc"
+spec = [
+  { document = "guide", section = "12.9", page = 150 },
+  { document = "guide", section = "3.9", page = 19 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "V_CMP_T_I32"
+family = "VOPC"
+opcode = 135
+variant = "CmpTI32"
+operation = "compare"
+relation = "t"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "lane_mask"
+exec = "unchanged"
+wave = "wave32"
+operands = "vopc_vcc"
+spec = [
+  { document = "guide", section = "12.9", page = 150 },
+  { document = "guide", section = "3.9", page = 19 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "V_CMP_F_U32"
+family = "VOPC"
+opcode = 192
+variant = "CmpFU32"
+operation = "compare"
+relation = "f"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "lane_mask"
+exec = "unchanged"
+wave = "wave32"
+operands = "vopc_vcc"
+spec = [
+  { document = "guide", section = "12.9", page = 150 },
+  { document = "guide", section = "3.9", page = 19 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "V_CMP_T_U32"
+family = "VOPC"
+opcode = 199
+variant = "CmpTU32"
+operation = "compare"
+relation = "t"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "lane_mask"
+exec = "unchanged"
+wave = "wave32"
+operands = "vopc_vcc"
+spec = [
+  { document = "guide", section = "12.9", page = 150 },
+  { document = "guide", section = "3.9", page = 19 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]

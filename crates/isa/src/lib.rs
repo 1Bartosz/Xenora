@@ -111,6 +111,10 @@ pub enum CompareRelation {
     NotEqual,
     /// S0 >= S1 (offset 6).
     GreaterOrEqual,
+    /// Never holds (VOPC F, offset 0).
+    False,
+    /// Always holds (VOPC T, offset 7).
+    True,
 }
 
 /// Output targeted by a supported uncompressed four-component export.

@@ -143,6 +143,8 @@ fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
                     CompareRelation::Greater => ordering.is_gt(),
                     CompareRelation::NotEqual => ordering.is_ne(),
                     CompareRelation::GreaterOrEqual => ordering.is_ge(),
+                    CompareRelation::False => false,
+                    CompareRelation::True => true,
                 };
                 assert_eq!(
                     op.test(src0, src1),
@@ -153,7 +155,7 @@ fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
             }
         }
     }
-    // v_cmpx, F/T and the 16-, 64-bit and float compares must not be dispatched.
+    // v_cmpx and the 16-, 64-bit and float compares must not be dispatched.
     dispatch_selects_exactly(EncodingFamily::Vopc, |word| {
         VectorCompareOp::from_word(word).map(|op| op.semantics().name)
     });

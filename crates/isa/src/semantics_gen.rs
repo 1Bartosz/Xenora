@@ -1439,6 +1439,14 @@ pub enum VectorCompareOp {
     CmpNeU32,
     /// `v_cmp_ge_u32` (VOPC opcode 198): unsigned compare ge, VCC = lane_mask.
     CmpGeU32,
+    /// `v_cmp_f_i32` (VOPC opcode 128): signed compare f, VCC = lane_mask.
+    CmpFI32,
+    /// `v_cmp_t_i32` (VOPC opcode 135): signed compare t, VCC = lane_mask.
+    CmpTI32,
+    /// `v_cmp_f_u32` (VOPC opcode 192): unsigned compare f, VCC = lane_mask.
+    CmpFU32,
+    /// `v_cmp_t_u32` (VOPC opcode 199): unsigned compare t, VCC = lane_mask.
+    CmpTU32,
 }
 
 /// VectorCompareOp by VOPC OP field value; `None` for undeclared opcodes.
@@ -1571,13 +1579,14 @@ const VECTOR_COMPARE_OP_BY_OPCODE: [Option<VectorCompareOp>; 256] = [
     None,
     None,
     None,
-    None,
+    Some(VectorCompareOp::CmpFI32),
     Some(VectorCompareOp::CmpLtI32),
     Some(VectorCompareOp::CmpEqI32),
     Some(VectorCompareOp::CmpLeI32),
     Some(VectorCompareOp::CmpGtI32),
     Some(VectorCompareOp::CmpNeI32),
     Some(VectorCompareOp::CmpGeI32),
+    Some(VectorCompareOp::CmpTI32),
     None,
     None,
     None,
@@ -1634,15 +1643,14 @@ const VECTOR_COMPARE_OP_BY_OPCODE: [Option<VectorCompareOp>; 256] = [
     None,
     None,
     None,
-    None,
-    None,
+    Some(VectorCompareOp::CmpFU32),
     Some(VectorCompareOp::CmpLtU32),
     Some(VectorCompareOp::CmpEqU32),
     Some(VectorCompareOp::CmpLeU32),
     Some(VectorCompareOp::CmpGtU32),
     Some(VectorCompareOp::CmpNeU32),
     Some(VectorCompareOp::CmpGeU32),
-    None,
+    Some(VectorCompareOp::CmpTU32),
     None,
     None,
     None,
@@ -1703,7 +1711,7 @@ const VECTOR_COMPARE_OP_BY_OPCODE: [Option<VectorCompareOp>; 256] = [
 
 impl VectorCompareOp {
     /// Every operation, in registry order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 16] = [
         Self::CmpLtI32,
         Self::CmpEqI32,
         Self::CmpLeI32,
@@ -1716,6 +1724,10 @@ impl VectorCompareOp {
         Self::CmpGtU32,
         Self::CmpNeU32,
         Self::CmpGeU32,
+        Self::CmpFI32,
+        Self::CmpTI32,
+        Self::CmpFU32,
+        Self::CmpTU32,
     ];
 
     /// Selects the operation from a first instruction word: the VOPC encoding
@@ -1742,6 +1754,10 @@ impl VectorCompareOp {
             Self::CmpGtU32 => "v_cmp_gt_u32",
             Self::CmpNeU32 => "v_cmp_ne_u32",
             Self::CmpGeU32 => "v_cmp_ge_u32",
+            Self::CmpFI32 => "v_cmp_f_i32",
+            Self::CmpTI32 => "v_cmp_t_i32",
+            Self::CmpFU32 => "v_cmp_f_u32",
+            Self::CmpTU32 => "v_cmp_t_u32",
         }
     }
 
@@ -1760,6 +1776,10 @@ impl VectorCompareOp {
             Self::CmpGtU32 => 77,
             Self::CmpNeU32 => 78,
             Self::CmpGeU32 => 79,
+            Self::CmpFI32 => 80,
+            Self::CmpTI32 => 81,
+            Self::CmpFU32 => 82,
+            Self::CmpTU32 => 83,
         }]
     }
 
@@ -1778,6 +1798,10 @@ impl VectorCompareOp {
             Self::CmpGtU32 => "v_cmp_gt_u32_e32",
             Self::CmpNeU32 => "v_cmp_ne_u32_e32",
             Self::CmpGeU32 => "v_cmp_ge_u32_e32",
+            Self::CmpFI32 => "v_cmp_f_i32_e32",
+            Self::CmpTI32 => "v_cmp_t_i32_e32",
+            Self::CmpFU32 => "v_cmp_f_u32_e32",
+            Self::CmpTU32 => "v_cmp_t_u32_e32",
         }
     }
 
@@ -1796,6 +1820,10 @@ impl VectorCompareOp {
             Self::CmpGtU32 => false,
             Self::CmpNeU32 => false,
             Self::CmpGeU32 => false,
+            Self::CmpFI32 => true,
+            Self::CmpTI32 => true,
+            Self::CmpFU32 => false,
+            Self::CmpTU32 => false,
         }
     }
 
@@ -1814,6 +1842,10 @@ impl VectorCompareOp {
             Self::CmpGtU32 => CompareRelation::Greater,
             Self::CmpNeU32 => CompareRelation::NotEqual,
             Self::CmpGeU32 => CompareRelation::GreaterOrEqual,
+            Self::CmpFI32 => CompareRelation::False,
+            Self::CmpTI32 => CompareRelation::True,
+            Self::CmpFU32 => CompareRelation::False,
+            Self::CmpTU32 => CompareRelation::True,
         }
     }
 
@@ -1832,12 +1864,16 @@ impl VectorCompareOp {
             Self::CmpGtU32 => primitive::gt_u32(src0, src1),
             Self::CmpNeU32 => primitive::ne_b32(src0, src1),
             Self::CmpGeU32 => primitive::ge_u32(src0, src1),
+            Self::CmpFI32 => primitive::false_b32(src0, src1),
+            Self::CmpTI32 => primitive::true_b32(src0, src1),
+            Self::CmpFU32 => primitive::false_b32(src0, src1),
+            Self::CmpTU32 => primitive::true_b32(src0, src1),
         }
     }
 }
 
 /// Identity of every registry form, in registry order.
-pub const FORM_IDS: [(&str, EncodingFamily); 80] = [
+pub const FORM_IDS: [(&str, EncodingFamily); 84] = [
     ("S_ADD_U32", EncodingFamily::Sop2),
     ("S_SUB_U32", EncodingFamily::Sop2),
     ("S_ADD_I32", EncodingFamily::Sop2),
@@ -1918,10 +1954,14 @@ pub const FORM_IDS: [(&str, EncodingFamily); 80] = [
     ("V_CMP_GT_U32", EncodingFamily::Vopc),
     ("V_CMP_NE_U32", EncodingFamily::Vopc),
     ("V_CMP_GE_U32", EncodingFamily::Vopc),
+    ("V_CMP_F_I32", EncodingFamily::Vopc),
+    ("V_CMP_T_I32", EncodingFamily::Vopc),
+    ("V_CMP_F_U32", EncodingFamily::Vopc),
+    ("V_CMP_T_U32", EncodingFamily::Vopc),
 ];
 
 /// One validated row per registry form, in registry order.
-pub static FORMS: [FormSemantics; 80] = [
+pub static FORMS: [FormSemantics; 84] = [
     FormSemantics {
         name: "S_ADD_U32",
         family: EncodingFamily::Sop2,
@@ -3594,6 +3634,90 @@ pub static FORMS: [FormSemantics; 80] = [
         swap_sources: false,
         source_bits: 32,
         relation: Some(CompareRelation::GreaterOrEqual),
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::LaneMask,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Wave32,
+        operands: OperandRule::VopcVcc,
+        spec: &[SpecRef { document: Document::Guide, section: "12.9", page: 150 }, SpecRef { document: Document::Guide, section: "3.9", page: 19 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "V_CMP_F_I32",
+        family: EncodingFamily::Vopc,
+        opcode: 128,
+        operation: Operation::Compare,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        swap_sources: false,
+        source_bits: 32,
+        relation: Some(CompareRelation::False),
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::LaneMask,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Wave32,
+        operands: OperandRule::VopcVcc,
+        spec: &[SpecRef { document: Document::Guide, section: "12.9", page: 150 }, SpecRef { document: Document::Guide, section: "3.9", page: 19 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "V_CMP_T_I32",
+        family: EncodingFamily::Vopc,
+        opcode: 135,
+        operation: Operation::Compare,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        swap_sources: false,
+        source_bits: 32,
+        relation: Some(CompareRelation::True),
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::LaneMask,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Wave32,
+        operands: OperandRule::VopcVcc,
+        spec: &[SpecRef { document: Document::Guide, section: "12.9", page: 150 }, SpecRef { document: Document::Guide, section: "3.9", page: 19 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "V_CMP_F_U32",
+        family: EncodingFamily::Vopc,
+        opcode: 192,
+        operation: Operation::Compare,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        swap_sources: false,
+        source_bits: 32,
+        relation: Some(CompareRelation::False),
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::LaneMask,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Wave32,
+        operands: OperandRule::VopcVcc,
+        spec: &[SpecRef { document: Document::Guide, section: "12.9", page: 150 }, SpecRef { document: Document::Guide, section: "3.9", page: 19 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "V_CMP_T_U32",
+        family: EncodingFamily::Vopc,
+        opcode: 199,
+        operation: Operation::Compare,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        swap_sources: false,
+        source_bits: 32,
+        relation: Some(CompareRelation::True),
         scc: SccEffect::Unchanged,
         vcc: MaskEffect::LaneMask,
         exec: MaskEffect::Unchanged,

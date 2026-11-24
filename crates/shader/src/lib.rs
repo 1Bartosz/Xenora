@@ -202,6 +202,9 @@ fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
         CompareRelation::Greater => ">",
         CompareRelation::NotEqual => "!=",
         CompareRelation::GreaterOrEqual => ">=",
+        // F and T read no operand bits.
+        CompareRelation::False => return "false".to_owned(),
+        CompareRelation::True => return "true".to_owned(),
     };
     if op.signed() {
         format!("as_type<int>({left}) {symbol} as_type<int>({right})")
@@ -523,7 +526,15 @@ fn emit_lane_mask(
     exec: u32,
 ) {
     let mut cone = vec![false; index];
-    let mut pending = vec![src0, src1];
+    // F and T do not depend on the operands, so their lanes compute none.
+    let mut pending = if matches!(
+        op.relation(),
+        xenora_decoder::CompareRelation::False | xenora_decoder::CompareRelation::True
+    ) {
+        Vec::new()
+    } else {
+        vec![src0, src1]
+    };
     while let Some(value) = pending.pop() {
         if uniform[value.0] || cone[value.0] {
             continue;
