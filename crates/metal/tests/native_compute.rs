@@ -31,6 +31,17 @@ fn context() -> NativeCompute {
     NativeCompute::new().expect("native Metal device and queue")
 }
 
+/// Unwraps a native result, reporting a missing device capability apart from
+/// an implementation failure. Both fail the test; neither counts as a pass.
+fn native<T>(result: Result<T, xenora_metal::MetalError>) -> T {
+    result.unwrap_or_else(|error| {
+        if error.is_capability_unavailable() {
+            panic!("CAPABILITY UNAVAILABLE on this device, not an implementation failure: {error}")
+        }
+        panic!("IMPLEMENTATION FAILURE: {error}")
+    })
+}
+
 fn verify_words(body: &str, input: &[u32], expected: &[u32]) {
     let actual = context()
         .run_words(&fixture(body), "fixture", input)
