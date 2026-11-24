@@ -139,24 +139,233 @@ fn main() -> ExitCode {
 }
 
 /// `xenora imports sync [--report <dir>] [--check]`
-///
-/// Reads the `imports.csv` from a probe report directory, compares each import
-/// against the current standard service registry, and writes a refreshed
-/// `import_backlog.md` and `import_coverage.csv` with implementation status.
-///
-/// With `--check`: exits non-zero if `import_backlog.md` would change.
+/// `xenora imports generate --pe <path> [--out <dir>]`
+/// `xenora imports metadata sync [--out <dir>]`
+/// `xenora imports verify`
 fn imports_command(args: Vec<String>) -> ExitCode {
-    let mut report_dir = "diagnostics/gta6-candidate-e95020b2".to_string();
-    let mut check_mode = false;
-    let mut subcommand_seen = false;
+    if args.is_empty() {
+        eprintln!("usage: xenora imports <sync|generate|metadata|verify> [options]");
+        return ExitCode::from(2);
+    }
 
+    match args[0].as_str() {
+        "generate" => run_imports_generate_cli(&args[1..]),
+        "sync" => run_imports_sync_cli(&args[1..]),
+        "metadata" => run_imports_metadata_cli(&args[1..]),
+        "verify" => run_imports_verify_cli(&args[1..]),
+        other => {
+            eprintln!("unknown imports subcommand: {other}");
+            eprintln!("usage: xenora imports <sync|generate|metadata|verify> [options]");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_imports_metadata_cli(args: &[String]) -> ExitCode {
+    let mut out_dir = "artifacts/metadata".to_string();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "sync" => {
-                subcommand_seen = true;
                 i += 1;
             }
+            "--out" => {
+                if i + 1 < args.len() {
+                    out_dir = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("missing argument for --out");
+                    return ExitCode::from(2);
+                }
+            }
+            other => {
+                eprintln!("unknown metadata argument: {other}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    println!("Synchronizing offline API metadata catalog from public specifications...");
+    let catalog = xenora_import_gen::MetadataCatalog::builtin();
+    println!(
+        "Loaded version {} with {} entries.",
+        catalog.version,
+        catalog.entries.len()
+    );
+
+    let _ = std::fs::create_dir_all(&out_dir);
+    let out_file = format!("{out_dir}/api_catalog.json");
+    let mut json = String::from("{\n  \"version\": 1,\n  \"entries\": [\n");
+    let mut first = true;
+    for ((module, sym), sig) in &catalog.entries {
+        if !first {
+            json.push_str(",\n");
+        }
+        first = false;
+        json.push_str(&format!(
+            "    {{\"module\": \"{}\", \"symbol\": \"{}\", \"header\": \"{}\", \"doc\": \"{}\"}}",
+            module, sym, sig.header_source, sig.doc
+        ));
+    }
+    json.push_str("\n  ]\n}\n");
+
+    if let Err(e) = std::fs::write(&out_file, json) {
+        eprintln!("failed to write metadata catalog: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("API metadata catalog synchronized to: {out_file}");
+    ExitCode::SUCCESS
+}
+
+fn run_imports_verify_cli(args: &[String]) -> ExitCode {
+    if !args.is_empty() {
+        eprintln!("warning: verify takes no additional arguments");
+    }
+    println!("Running automated behavioral verification for generated import bindings...");
+    match xenora_import_gen::run_verification() {
+        Ok(res) => {
+            for detail in &res.details {
+                println!("  {detail}");
+            }
+            println!(
+                "Verification summary: {}/{} tests passed.",
+                res.passed, res.total
+            );
+            if res.failed > 0 {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(err) => {
+            eprintln!("verification failed: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_imports_generate_cli(args: &[String]) -> ExitCode {
+    let mut pe_path: Option<String> = None;
+    let mut csv_path: Option<String> = None;
+    let mut out_dir = "crates/loader/src/generated".to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--pe" => {
+                if i + 1 < args.len() {
+                    pe_path = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("missing argument for --pe");
+                    return ExitCode::from(2);
+                }
+            }
+            "--csv" => {
+                if i + 1 < args.len() {
+                    csv_path = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("missing argument for --csv");
+                    return ExitCode::from(2);
+                }
+            }
+            "--out" => {
+                if i + 1 < args.len() {
+                    out_dir = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("missing argument for --out");
+                    return ExitCode::from(2);
+                }
+            }
+            other => {
+                eprintln!("unknown generate argument: {other}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    let records = if let Some(ref pe) = pe_path {
+        println!("Extracting imports from PE executable: {pe}");
+        let bytes = match std::fs::read(pe) {
+            Ok(b) => b,
+            Err(err) => {
+                eprintln!("error reading PE binary '{pe}': {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let probe_cfg = xenora_loader::ProbeConfig::default();
+        let report = match xenora_loader::probe::probe_pe_bytes(&bytes, &probe_cfg) {
+            Ok(rep) => rep,
+            Err(err) => {
+                eprintln!("error probing PE binary: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        report
+            .imports
+            .into_iter()
+            .map(|imp| xenora_import_gen::ImportRecord {
+                module: imp.dll,
+                symbol: imp.symbol,
+                iat_rva: imp.iat_rva as u64,
+            })
+            .collect::<Vec<_>>()
+    } else if let Some(ref csv) = csv_path {
+        match xenora_import_gen::parse_csv(csv) {
+            Ok(recs) => recs,
+            Err(err) => {
+                eprintln!("error reading CSV '{csv}': {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        eprintln!(
+            "usage: xenora imports generate <--pe <executable> | --csv <missing_imports.csv>> [--out <dir>]"
+        );
+        return ExitCode::from(2);
+    };
+
+    println!("Total imports extracted: {}", records.len());
+    let db = xenora_import_gen::SymbolDb::builtin();
+    let manifest = xenora_import_gen::Manifest::build(&records, &db);
+    let summary = manifest.summary();
+
+    println!("Classification summary:");
+    for (tier, count) in &summary {
+        let pct = (*count as f64 / records.len() as f64 * 100.0) as u32;
+        println!("  - {tier}: {count} ({pct}%)");
+    }
+
+    let files = xenora_import_gen::generate(&manifest, &db);
+    if let Err(err) = files.write_all(&out_dir) {
+        eprintln!("failed to write generated files: {err}");
+        return ExitCode::FAILURE;
+    }
+    let manifest_csv = format!("{out_dir}/generated_manifest.csv");
+    if let Err(err) = manifest.write_csv(&manifest_csv) {
+        eprintln!("failed to write manifest CSV: {err}");
+        return ExitCode::FAILURE;
+    }
+
+    println!("Successfully generated bindings in '{out_dir}':");
+    println!("  - {out_dir}/generated_crt.rs");
+    println!("  - {out_dir}/generated_stubs.rs");
+    println!("  - {out_dir}/generated_tests.rs");
+    println!("  - {out_dir}/generated_manifest.md");
+    println!("  - {out_dir}/generated_manifest.csv");
+
+    ExitCode::SUCCESS
+}
+
+fn run_imports_sync_cli(args: &[String]) -> ExitCode {
+    let mut report_dir = "diagnostics/gta6-candidate-e95020b2".to_string();
+    let mut check_mode = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "--report" => {
                 if i + 1 < args.len() {
                     report_dir = args[i + 1].clone();
@@ -171,15 +380,10 @@ fn imports_command(args: Vec<String>) -> ExitCode {
                 i += 1;
             }
             other => {
-                eprintln!("unknown imports argument: {other}");
+                eprintln!("unknown sync argument: {other}");
                 return ExitCode::from(2);
             }
         }
-    }
-
-    if !subcommand_seen {
-        eprintln!("usage: xenora imports sync [--report <dir>] [--check]");
-        return ExitCode::from(2);
     }
 
     match run_imports_sync(&report_dir, check_mode) {

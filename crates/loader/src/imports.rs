@@ -214,11 +214,28 @@ impl ImportRegistry {
         })
     }
 
-    pub(crate) fn set_status(&mut self, module: &str, symbol: &str, status: ServiceStatus) {
+    pub fn set_status(&mut self, module: &str, symbol: &str, status: ServiceStatus) {
         let index = self
             .service_index(module, symbol)
             .expect("registered service");
         self.handlers[index].status = status;
+    }
+
+    /// Register a service with an explicit implementation status.
+    pub fn register_with_status<F>(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        status: ServiceStatus,
+        handler: F,
+    ) where
+        F: Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.register(module, symbol, handler);
+        self.set_status(module, symbol, status);
     }
 
     /// Point an API-set import at an existing handler and its trampoline.

@@ -9,7 +9,19 @@ exact revision and known limitations.
 Guest execution uses original, purpose-built test programs. Commercial Xbox game execution
 remains unsupported.
 
+## [X18] - Automated Import Compatibility Generation & Metadata Ingestion
+
+Guest execution uses original, purpose-built test programs. Commercial Xbox game execution
+remains unsupported.
+
 ### Added
+
+- Added `xenora-import-gen` deterministic code generation crate and `xenora imports generate <--pe <exe> | --csv <file>> [--out <dir>]` CLI command. Automatically extracts imported symbols from PE executables or CSV manifests, classifies them against a built-in offline database of documented public Win32/CRT and ISO C specifications without consuming AI tokens or network resources, maps compatible CRT functions to native macOS libc ABI adapters with guest memory bounds checking, generates logged Win32 service stubs, generates deterministic conformance test suites, and produces coverage reports in both Markdown and CSV format.
+- Added automated metadata ingestion (`ingest_standard_system_headers`) and `xenora imports metadata sync` command capable of parsing real POSIX/C system headers into typed `MetadataCatalog` definitions (188 entries).
+- Added `xenora imports verify` automated behavioral verification runner checking CRT math, string, and memory bounds invariants across 12 independent behavioral test cases.
+- Added explicit failure semantics for unsupported stubs returning `ExitReason::IllegalInstruction(0xFE)` rather than fabricated success.
+- Added public registration helper `ImportRegistry::register_with_status` and runtime integration test verifying generated bindings and stub failure semantics.
+- Added 8-bit and 16-bit guest memory access helpers (`read_u8`, `write_u8`, `read_u16`, `write_u16`) to `xenora-loader::GuestMemory`.
 
 - Added guest-facing D3D12-style graphics runtime interfaces (`GraphicsContext`, `GraphicsDevice`, `GraphicsCommandQueue`, `GraphicsCommandAllocator`, `GraphicsCommandList`, `GraphicsResource`) with explicit backend selection (`GraphicsBackendId::MetalNative` vs `GraphicsBackendId::SoftwareReference`). Original PE32+ integration tests verify device creation, generation-checked handle ownership, command recording, barriers, and presentation.
 - Connected guest execution via ARM64 DBT and IAT dispatch to native Apple Silicon Metal rendering (`test_guest_dbt_graphics_pipeline_metal_render_dual_inputs`), proving that different guest vertex positions and clear colors produce distinct, verified GPU-rendered framebuffers with active Metal validation on Apple M5.

@@ -340,4 +340,28 @@ impl GuestMemory {
         }
         Err(MemoryError::UnmappedAddress(address))
     }
+
+    /// Read a single byte from guest memory.
+    pub fn read_u8(&self, address: u64) -> Result<u8, MemoryError> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(address, &mut buf)?;
+        Ok(buf[0])
+    }
+
+    /// Write a single byte to guest memory.
+    pub fn write_u8(&mut self, address: u64, value: u8) -> Result<(), MemoryError> {
+        self.write_bytes(address, &[value])
+    }
+
+    /// Read a 16-bit little-endian integer from guest memory.
+    pub fn read_u16(&self, address: u64) -> Result<u16, MemoryError> {
+        let mut buf = [0u8; 2];
+        self.read_bytes(address, &mut buf)?;
+        Ok(u16::from_le_bytes(buf))
+    }
+
+    /// Write a 16-bit little-endian integer to guest memory.
+    pub fn write_u16(&mut self, address: u64, value: u16) -> Result<(), MemoryError> {
+        self.write_bytes(address, &value.to_le_bytes())
+    }
 }
