@@ -120,7 +120,8 @@ pub struct GuestMemory {
     regions: Vec<MappedRegion>,
     private_heaps: std::collections::BTreeSet<u64>,
     private_heap_serial: u64,
-    crt_errno: Option<u64>,
+    // Stable errno pointers indexed by the guest thread's TEB address.
+    crt_errno: std::collections::BTreeMap<u64, u64>,
 }
 
 impl GuestMemory {
@@ -202,13 +203,16 @@ impl GuestMemory {
         self.map_dynamic_allocation(requested_base, size, permissions, AllocationKind::Virtual)
     }
 
-    pub(crate) fn crt_errno_address(&mut self) -> Result<u64, MemoryError> {
-        if let Some(address) = self.crt_errno {
+    pub(crate) fn crt_errno_address(&mut self, teb: u64) -> Result<u64, MemoryError> {
+        if let Some(&address) = self.crt_errno.get(&teb) {
             return Ok(address);
+        }
+        if self.crt_errno.len() >= 1024 {
+            return Err(MemoryError::AllocationFailed);
         }
         let address = self.find_dynamic_base(4)?;
         self.map_region(address, 4, MemoryPermissions::READ_WRITE)?;
-        self.crt_errno = Some(address);
+        self.crt_errno.insert(teb, address);
         Ok(address)
     }
 

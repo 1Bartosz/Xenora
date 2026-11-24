@@ -3,7 +3,7 @@
 //! C runtime services that operate on checked guest memory.
 
 use crate::cpu::ExitReason;
-use crate::imports::{ImportRegistry, ServiceStatus};
+use crate::imports::{ImportRegistry, ServiceStatus, Win64Args};
 use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
 
 const SCAN_BUDGET: u64 = 1_048_576;
@@ -168,9 +168,9 @@ pub(super) fn register(registry: &mut ImportRegistry) {
 const ENOMEM: u32 = 12;
 const EINVAL: u32 = 22;
 
-fn set_errno(memory: &mut GuestMemory, error: u32) -> Result<(), ExitReason> {
+fn set_errno(memory: &mut GuestMemory, teb: u64, error: u32) -> Result<(), ExitReason> {
     let address = memory
-        .crt_errno_address()
+        .crt_errno_address(teb)
         .map_err(ExitReason::MemoryFault)?;
     memory
         .write_u32(address, error)
@@ -179,12 +179,13 @@ fn set_errno(memory: &mut GuestMemory, error: u32) -> Result<(), ExitReason> {
 
 fn allocation_result(
     memory: &mut GuestMemory,
+    teb: u64,
     result: Result<u64, MemoryError>,
 ) -> Result<u64, ExitReason> {
     match result {
         Ok(address) => Ok(address),
         Err(_) => {
-            set_errno(memory, ENOMEM)?;
+            set_errno(memory, teb, ENOMEM)?;
             Ok(0)
         }
     }
@@ -194,20 +195,20 @@ const ERANGE: u32 = 34;
 
 fn parse_integer(
     memory: &mut GuestMemory,
-    address: u64,
-    end: u64,
-    mut radix: u32,
+    args: &Win64Args,
+    teb: u64,
     signed: bool,
     wide_result: bool,
     unit: StringUnit,
 ) -> Result<u64, ExitReason> {
+    let (address, end, mut radix) = (args.rcx, args.rdx, args.r8 as u32);
     if address == 0 || (radix != 0 && !(2..=36).contains(&radix)) {
         if end != 0 {
             memory
                 .write_u64(end, address)
                 .map_err(ExitReason::MemoryFault)?;
         }
-        set_errno(memory, EINVAL)?;
+        set_errno(memory, teb, EINVAL)?;
         return Ok(0);
     }
 
@@ -272,7 +273,7 @@ fn parse_integer(
             .map_err(ExitReason::MemoryFault)?;
     }
     if overflow {
-        set_errno(memory, ERANGE)?;
+        set_errno(memory, teb, ERANGE)?;
         value = limit;
     }
     if negative && (!overflow || signed) {
@@ -300,16 +301,8 @@ pub(super) fn register_conversions(registry: &mut ImportRegistry) {
         ("_wcstoi64", true, true, StringUnit::Wide),
         ("_wcstoui64", false, true, StringUnit::Wide),
     ] {
-        registry.register(UCRT, symbol, move |args, _, memory| {
-            parse_integer(
-                memory,
-                args.rcx,
-                args.rdx,
-                args.r8 as u32,
-                signed,
-                wide_result,
-                unit,
-            )
+        registry.register(UCRT, symbol, move |args, cpu, memory| {
+            parse_integer(memory, args, cpu.gs_base, signed, wide_result, unit)
         });
         registry.alias("api-ms-win-crt-convert-l1-1-0.dll", UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
@@ -317,20 +310,22 @@ pub(super) fn register_conversions(registry: &mut ImportRegistry) {
 }
 
 pub(super) fn register_errno(registry: &mut ImportRegistry) {
-    registry.register(UCRT, "_errno", |_, _, memory| {
-        memory.crt_errno_address().map_err(ExitReason::MemoryFault)
+    registry.register(UCRT, "_errno", |_, cpu, memory| {
+        memory
+            .crt_errno_address(cpu.gs_base)
+            .map_err(ExitReason::MemoryFault)
     });
-    registry.register(UCRT, "_set_errno", |args, _, memory| {
-        set_errno(memory, args.rcx as u32)?;
+    registry.register(UCRT, "_set_errno", |args, cpu, memory| {
+        set_errno(memory, cpu.gs_base, args.rcx as u32)?;
         Ok(0)
     });
-    registry.register(UCRT, "_get_errno", |args, _, memory| {
+    registry.register(UCRT, "_get_errno", |args, cpu, memory| {
         if args.rcx == 0 {
-            set_errno(memory, EINVAL)?;
+            set_errno(memory, cpu.gs_base, EINVAL)?;
             return Ok(u64::from(EINVAL));
         }
         let address = memory
-            .crt_errno_address()
+            .crt_errno_address(cpu.gs_base)
             .map_err(ExitReason::MemoryFault)?;
         let value = memory.read_u32(address).map_err(ExitReason::MemoryFault)?;
         memory
@@ -345,31 +340,31 @@ pub(super) fn register_errno(registry: &mut ImportRegistry) {
 }
 
 pub(super) fn register_heap(registry: &mut ImportRegistry) {
-    registry.register(UCRT, "malloc", |args, _, memory| {
+    registry.register(UCRT, "malloc", |args, cpu, memory| {
         let result = memory.map_heap_allocation(PROCESS_HEAP, args.rcx.max(1) as usize);
-        allocation_result(memory, result)
+        allocation_result(memory, cpu.gs_base, result)
     });
-    registry.register(UCRT, "calloc", |args, _, memory| {
+    registry.register(UCRT, "calloc", |args, cpu, memory| {
         let result = args
             .rcx
             .checked_mul(args.rdx)
             .ok_or(MemoryError::AllocationFailed)
             .and_then(|size| memory.map_heap_allocation(PROCESS_HEAP, size.max(1) as usize));
-        allocation_result(memory, result)
+        allocation_result(memory, cpu.gs_base, result)
     });
-    registry.register(UCRT, "realloc", |args, _, memory| {
+    registry.register(UCRT, "realloc", |args, cpu, memory| {
         let address = args.rcx;
         let size = args.rdx;
         if address == 0 {
             let result = memory.map_heap_allocation(PROCESS_HEAP, size.max(1) as usize);
-            return allocation_result(memory, result);
+            return allocation_result(memory, cpu.gs_base, result);
         }
         if size == 0 {
             free(memory, address)?;
             return Ok(0);
         }
         let result = memory.resize_heap_allocation(PROCESS_HEAP, address, size as usize, false);
-        allocation_result(memory, result)
+        allocation_result(memory, cpu.gs_base, result)
     });
     registry.register(UCRT, "free", |args, _, memory| {
         free(memory, args.rcx)?;
@@ -390,4 +385,42 @@ fn free(memory: &mut GuestMemory, address: u64) -> Result<(), ExitReason> {
             address,
         )))
     }
+}
+
+#[cfg(test)]
+#[test]
+fn errno_isolated_by_guest_teb_on_one_host_thread() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+
+    let mut registry = ImportRegistry::new();
+    register_errno(&mut registry);
+    register_heap(&mut registry);
+    let mut memory = GuestMemory::new();
+    let mut first = CpuState {
+        gs_base: 0x10000,
+        ..CpuState::default()
+    };
+    let mut second = CpuState {
+        gs_base: 0x20000,
+        ..CpuState::default()
+    };
+    let call = |symbol: &str, cpu: &mut CpuState, memory: &mut GuestMemory| {
+        let service = registry
+            .resolve(UCRT, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (service.handler)(&Win64Args::new(cpu), cpu, memory).unwrap()
+    };
+
+    let first_slot = call("_errno", &mut first, &mut memory);
+    first.set(Register::Rcx, 23);
+    assert_eq!(call("_set_errno", &mut first, &mut memory), 0);
+    let second_slot = call("_errno", &mut second, &mut memory);
+    assert_ne!(first_slot, second_slot);
+    assert_eq!(memory.read_u32(second_slot).unwrap(), 0);
+    second.set(Register::Rcx, u64::MAX);
+    assert_eq!(call("malloc", &mut second, &mut memory), 0);
+    assert_eq!(memory.read_u32(second_slot).unwrap(), ENOMEM);
+    assert_eq!(call("_errno", &mut first, &mut memory), first_slot);
+    assert_eq!(memory.read_u32(first_slot).unwrap(), 23);
 }
