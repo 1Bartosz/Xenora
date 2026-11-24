@@ -38,5 +38,5 @@ are outside this subset.
 The Metal lowering reuses the compare mask's replay of the current wave's
 input lanes to form carry and borrow masks. The original `vector-vcc.s`
 fixture chains all four operations. LLVM checks encoding, and the guide-derived
-oracle checks both CPU interpreters. Native Metal readback and independent
-acceptance are pending. The expectations are derived from the public AMD specification (class B).
+oracle checks both CPU interpreters. `vop2_vcc_matches_guide_on_native_metal` passes on a local
+Apple M5 under API and shader validation; independent acceptance is pending. The expectations are derived from the public AMD specification (class B).
