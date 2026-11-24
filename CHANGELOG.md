@@ -65,6 +65,7 @@ remains unsupported.
 
 ### Fixed
 
+- Fixed `xenora_isa::meta::identify` reading six VOP3 interpolation forms (`v_interp_p1_f32_e64`, `v_interp_p2_f32_e64`, `v_interp_mov_f32_e64`, `v_interp_p1ll_f16`, `v_interp_p1lv_f16`, `v_interp_p2_f16`) as 12 bytes when SRC0 is 255. In these forms SRC0 holds attribute bit-fields, not an operand selector (AMD RDNA 2 ISA guide section 10.4.2; XML operand type `OPR_ATTR`), so SRC0 = 255 no longer adds a literal word. The six corpus probes are now 8 bytes, as LLVM 23.1.6 also decodes them. The six pinned `mismatch` rows in the LLVM corpus check are gone: one now agrees fully, and five are `operand_flagged` (same instruction and length; LLVM flags an operand).
 - Updated `test_probe_static_analysis_does_not_execute_code`: the SIB store `mov [rsp + 0x20],
   rbx` at RVA 0x1004 is now genuinely supported by the native DBT (verified by the independent
   execution test above), so the probe reports no blocker for this program.
