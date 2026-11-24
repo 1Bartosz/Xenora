@@ -439,8 +439,16 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             return Ok(0);
         }
 
-        let page_size = 4096;
-        let aligned_size = (size + page_size - 1) & !(page_size - 1);
+        let page_size = 4096usize;
+        // Huge or overflowing sizes fail the allocation instead of panicking
+        // in debug builds (the fuzz harness feeds u64::MAX-sized requests).
+        let Some(aligned_size) = size
+            .checked_add(page_size - 1)
+            .map(|rounded| rounded & !(page_size - 1))
+            .filter(|&aligned| aligned != 0)
+        else {
+            return Ok(0);
+        };
         let alloc_addr = s
             .next_alloc_addr
             .fetch_add(aligned_size as u64, Ordering::SeqCst);
