@@ -127,6 +127,10 @@ vocabularies above, it rejects:
 
 - contradictions: a declared `scc` or `carry_in` that the primitive does not
   have, `bitwise` on an arithmetic operation or the reverse;
+- VOPC compares whose opcode is not the group base (128 for `signed`, 192
+  for `unsigned`) plus the relation's offset in guide Table 59 (F 0, LT 1,
+  EQ 2, LE 3, GT 4, LG/NE 5, GE 6, T 7), and a `lane_mask` form whose XML
+  does not have exactly one implicit VCC operand that is written and not read;
 - duplicates: the same `name`, the same `(family, opcode)`, or the same
   `variant` twice in one generated enum;
 - XML disagreements: a family with no XML encoding, a form with no default XML

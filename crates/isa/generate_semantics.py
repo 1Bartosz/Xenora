@@ -64,6 +64,11 @@ RELATIONS = {
 }
 # F and T exist only as VOPC compares (guide Table 59 offsets 0 and 7).
 VECTOR_ONLY_RELATIONS = {"f", "t"}
+# Guide 12.9 Table 59 and Table 61: a 32-bit integer VOPC compare's opcode is
+# its group base (128 for _I32, 192 for _U32) plus its relation's offset. This
+# is the guide's opcode layout, not a reading of the mnemonic.
+VOPC_INTEGER_BASES = {"signed": 128, "unsigned": 192}
+VOPC_RELATION_OFFSETS = {"f": 0, "lt": 1, "eq": 2, "le": 3, "gt": 4, "lg": 5, "ge": 6, "t": 7}
 # (relation, signedness) -> primitive. Equality does not depend on signedness,
 # so both declared signednesses of EQ and LG share one primitive.
 COMPARE_PRIMITIVES = {
@@ -384,6 +389,7 @@ def _check_xml(form, rule, snapshot, errors):
     operands = {}
     scc_in = scc_out = False
     implicit = set()
+    vcc_writes = []
     for field, data_format, kind, size, is_input, is_output, _implicit, _encoded in variant["operands"]:
         if kind == "OPR_SSRC_SPECIAL_SCC":
             scc_in |= is_input
@@ -392,10 +398,13 @@ def _check_xml(form, rule, snapshot, errors):
             operands[field] = (data_format, size, is_input, is_output)
         else:
             implicit.add(kind)
+            if kind == "OPR_VCC":
+                vcc_writes.append((is_input, is_output))
     # The vocabulary states SCC effects and a lane-mask VCC write; any other
     # implicit XML operand (such as an EXEC write) is undeclared.
     if form["vcc"] == "lane_mask":
-        if "OPR_VCC" not in implicit:
+        # Exactly one fieldless VCC operand, written and not read.
+        if vcc_writes != [(False, True)]:
             errors.append(f"{label}: vcc lane_mask but the XML has no implicit VCC output")
         implicit.discard("OPR_VCC")
     if implicit:
@@ -570,6 +579,14 @@ def validate(registry, snapshot):
                 errors.append(f"{label}: no primitive implements {relation}/{form['signedness']}")
             elif relation in VECTOR_ONLY_RELATIONS and _rule_kind(form) != "vector_compare":
                 errors.append(f"{label}: relation {relation} exists only for VOPC compares")
+            elif _rule_kind(form) == "vector_compare":
+                base = VOPC_INTEGER_BASES.get(form["signedness"])
+                expected = None if base is None else base + VOPC_RELATION_OFFSETS[relation]
+                if form["opcode"] != expected:
+                    errors.append(
+                        f"{label}: relation {relation}/{form['signedness']} has VOPC opcode "
+                        f"{expected} (guide Table 59), not {form['opcode']}"
+                    )
             # SOPC compares write SCC; VOPC compares write VCC and leave SCC.
             scc = "unchanged" if _rule_kind(form) == "vector_compare" else "relation"
             if form["scc"] != scc:

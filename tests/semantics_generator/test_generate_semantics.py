@@ -151,9 +151,12 @@ def snapshot():
             ["SRC0", [[0, 9]]], ["VSRC1", [[9, 8]]], ["OP", [[17, 8]]], ["ENCODING", [[25, 7]]],
         ],
         "identifier_mask": 0xFFFE0000,
-        "identifiers": [0x7C000000 | (op << 17) for op in (129, 197)],
+        "identifiers": [0x7C000000 | (op << 17) for op in (129, 135, 192, 197)],
     }
-    for name, opcode, data_format in (("V_CMP_LT_I32", 129, I32), ("V_CMP_NE_U32", 197, U32)):
+    for name, opcode, data_format in (
+        ("V_CMP_LT_I32", 129, I32), ("V_CMP_T_I32", 135, I32), ("V_CMP_F_U32", 192, U32),
+        ("V_CMP_NE_U32", 197, U32),
+    ):
         variants[(name, "ENC_VOPC")] = {
             "instruction": name, "encoding": "ENC_VOPC", "opcode": opcode,
             # Values copied from the AMD XML snapshot: an implicit 64-bit VCC output.
@@ -255,6 +258,8 @@ def vector_compares():
     reg["form"] += [
         # The same variant name as a SOPC form: variants are per enum.
         compare("V_CMP_LT_I32", 129, "CmpLtI32", "lt", "signed"),
+        compare("V_CMP_T_I32", 135, "CmpTI32", "t", "signed"),
+        compare("V_CMP_F_U32", 192, "CmpFU32", "f", "unsigned"),
         compare("V_CMP_NE_U32", 197, "CmpNeU32", "lg", "unsigned"),
     ]
     return reg
@@ -840,12 +845,44 @@ class Validate(unittest.TestCase):
 
     def test_renders_f_and_t_primitives(self):
         reg = vector_compares()
-        form(reg, "V_CMP_LT_I32")["relation"] = "t"
-        form(reg, "V_CMP_NE_U32")["relation"] = "f"
         self.assertEqual(self.errors(reg), [])
         text = gen.render(reg, snapshot())
-        self.assertIn("Self::CmpLtI32 => primitive::true_b32(src0, src1),", text)
-        self.assertIn("Self::CmpNeU32 => CompareRelation::False,", text)
+        self.assertIn("Self::CmpTI32 => primitive::true_b32(src0, src1),", text)
+        self.assertIn("Self::CmpFU32 => CompareRelation::False,", text)
+
+    def test_rejects_a_vopc_relation_that_contradicts_the_opcode(self):
+        for name, relation, expected in (
+            ("V_CMP_T_I32", "f", 128), ("V_CMP_LT_I32", "gt", 132), ("V_CMP_F_U32", "t", 199),
+        ):
+            with self.subTest(name=name):
+                reg = vector_compares()
+                form(reg, name)["relation"] = relation
+                signedness = form(reg, name)["signedness"]
+                self.rejects(
+                    reg,
+                    f"{name}: relation {relation}/{signedness} has VOPC opcode {expected} "
+                    f"(guide Table 59), not {form(reg, name)['opcode']}",
+                )
+
+    def test_rejects_an_implicit_vcc_read_as_a_lane_mask_write(self):
+        for direction in ([True, False], [True, True]):
+            with self.subTest(direction=direction):
+                snap = snapshot()
+                operands = snap["variants"][("V_CMP_T_I32", "ENC_VOPC")]["operands"]
+                operands[0][4:6] = direction
+                self.rejects(
+                    vector_compares(),
+                    "V_CMP_T_I32: vcc lane_mask but the XML has no implicit VCC output",
+                    snap,
+                )
+
+    def test_rejects_a_second_implicit_vcc_operand(self):
+        snap = snapshot()
+        operands = snap["variants"][("V_CMP_T_I32", "ENC_VOPC")]["operands"]
+        operands.append(["", "FMT_NUM_M64", "OPR_VCC", 64, True, False, False, False])
+        self.rejects(
+            vector_compares(), "V_CMP_T_I32: vcc lane_mask but the XML has no implicit VCC output", snap
+        )
 
     def test_renders_vector_compare_dispatch(self):
         text = gen.render(vector_compares(), snapshot())

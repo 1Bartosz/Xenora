@@ -213,7 +213,7 @@ forms: an F that clears a stale VCC, T and F under partial EXEC, a T reading
 result (always taken). The independent oracle for F and T is
 `tests/validation/tests/vopc_f_t.rs`.
 
-The same file runs each form against 10 boundary values (0, 1, 0x7ffffffe,
+`tests/validation/known_answers.rs` runs each relational form against 10 boundary values (0, 1, 0x7ffffffe,
 0x7fffffff, 0x80000000, 0x80000001, 0xfffffff0, 0xfffffffe, 0xffffffff,
 0x0f0f0f0f), in both operand orders. That is 240 programs, checked against
 exact i128 differences. It also covers partial and empty EXEC with seeded
@@ -221,9 +221,10 @@ destinations, both runtime branch edges in one dispatch, and 32 rejections
 pinned to their byte offset. The translator, the reference (lockstep waves,
 compares on widened i64 values) and the second interpreter (sign-bit flip,
 then an unsigned compare) must all agree. The 9 ordered compare slots in the
-fixture each change the result when their signedness is flipped. The same
-programs, plus 2 mask-chain programs (252 in all), match on native Metal with API and shader validation
-(`vector_compare_native_metal_known_answers`, run by `scripts/test-gpu.sh`).
+relational fixture each change the result when their signedness is flipped. The same
+programs, plus 2 mask-chain programs (252 in all), and the F/T fixture (253) match on native Metal with API and shader validation
+(`vector_compare_native_metal_known_answers`, run by `scripts/test-gpu.sh`). The F/T oracle's own native Metal cases
+run in `vopc_f_t_match_the_guide_on_native_metal`.
 
 A deliberately broken copy of each implementation fails these tests: the
 reference with unsigned-only compares or with the EXEC test removed; the
