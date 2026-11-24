@@ -89,11 +89,17 @@ ordinal, and slot in the delay import address table, after the ordinary rows.
 Binding does not resolve them: the PE format leaves that to a delay-load helper
 inside the image. The totals above and `missing_imports.csv` therefore cover
 ordinary imports only, and the JSON report counts delayed slots and DLLs in
-`delayed_imports` and `delayed_imported_dlls_count`. The probe reads descriptors
-whose `RvaBased` attribute is set. A truncated or out-of-range table, a reserved
-attribute bit, a missing name table or the earlier virtual-address descriptor
-form is reported in `delay_import_error` and in the Markdown report, together
-with the entries read before it.
+`delayed_imports` and `delayed_imported_dlls_count`. `xenora imports sync`
+leaves delayed rows out of its backlog for the same reason.
+
+The probe reads only descriptors that lie wholly inside the directory's
+declared size, and expects that size to hold the empty descriptor that ends the
+table. It reads descriptors whose `RvaBased` attribute is set, and requires each
+one's DLL name, import address table and import name table to be present and to
+start in section data. A table that breaks one of these rules, sets a reserved
+attribute bit, is truncated, or uses the earlier virtual-address descriptor form
+is reported in `delay_import_error` and in the Markdown report, together with
+the entries read before it.
 
 The synthetic process registry supports the current-process pseudo handle and
 its process ID. The priority boost setter and getter record and query a guest

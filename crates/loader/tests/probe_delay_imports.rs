@@ -8,7 +8,7 @@
 //! the same order, with the address tables at RVA 0x2050, 0x3000 and 0x3020.
 
 use std::collections::BTreeMap;
-use xenora_loader::import_table::{ImportTableError, parse_delay_imports};
+use xenora_loader::import_table::{DelayField, ImportTableError, parse_delay_imports};
 use xenora_loader::probe::{
     ImportedSymbol, ProbeConfig, ProbeReport, probe_pe_bytes, run_probe_and_export,
 };
@@ -31,6 +31,7 @@ const DELAYED: [Row; 3] = [
 // File offsets in the fixture.
 const NUMBER_OF_RVA_AND_SIZES: usize = 0x98 + 108;
 const DELAY_DIRECTORY_ENTRY: usize = 0x98 + 216;
+const DELAY_DIRECTORY_SIZE: usize = DELAY_DIRECTORY_ENTRY + 4;
 const RDATA_RAW_SIZE: usize = 0x188 + 40 + 16;
 /// The delay-load directory is at RVA 0x2200; `.rdata` maps RVA 0x2000 to 0x600.
 const FIRST_DESCRIPTOR: usize = 0x800;
@@ -206,7 +207,7 @@ fn malformed_delay_tables_are_diagnosed_and_ordinary_imports_kept() {
         &'static str,
     );
     // (name, damage, delayed imports still listed, error, message)
-    let cases: [Case; 9] = [
+    let cases: [Case; 13] = [
         (
             "directory-out-of-range",
             |pe| put(pe, DELAY_DIRECTORY_ENTRY, 0x9000),
@@ -245,17 +246,60 @@ fn malformed_delay_tables_are_diagnosed_and_ordinary_imports_kept() {
             "import data at RVA 0x00009000 is truncated or outside the section data",
         ),
         (
+            // The second DLL's name table becomes the empty entry that ends the
+            // first one, at RVA 0x2110, so no import reads the address table.
+            "address-table-out-of-range-without-imports",
+            |pe| {
+                put(pe, SECOND_DESCRIPTOR + 16, 0x2110);
+                put(pe, SECOND_DESCRIPTOR + 12, 0x9000);
+            },
+            2,
+            ImportTableError::OutOfBounds { rva: 0x9000 },
+            "import data at RVA 0x00009000 is truncated or outside the section data",
+        ),
+        (
             "dll-name-out-of-range",
             |pe| put(pe, SECOND_DESCRIPTOR + 4, 0x9000),
             2,
-            ImportTableError::MalformedName { rva: 0x9000 },
-            "malformed import name at RVA 0x00009000",
+            ImportTableError::OutOfBounds { rva: 0x9000 },
+            "import data at RVA 0x00009000 is truncated or outside the section data",
+        ),
+        (
+            // RVA 0x2028 is zero padding after the ordinary import directory.
+            "dll-name-empty",
+            |pe| put(pe, SECOND_DESCRIPTOR + 4, 0x2028),
+            2,
+            ImportTableError::MalformedName { rva: 0x2028 },
+            "malformed import name at RVA 0x00002028",
+        ),
+        (
+            "dll-name-missing",
+            |pe| put(pe, SECOND_DESCRIPTOR + 4, 0),
+            2,
+            ImportTableError::DelayFieldMissing {
+                rva: 0x2220,
+                field: DelayField::DllName,
+            },
+            "delay-load descriptor at RVA 0x00002220 has no DLL name",
+        ),
+        (
+            "address-table-missing",
+            |pe| put(pe, FIRST_DESCRIPTOR + 12, 0),
+            0,
+            ImportTableError::DelayFieldMissing {
+                rva: 0x2200,
+                field: DelayField::AddressTable,
+            },
+            "delay-load descriptor at RVA 0x00002200 has no import address table",
         ),
         (
             "name-table-missing",
             |pe| put(pe, SECOND_DESCRIPTOR + 16, 0),
             2,
-            ImportTableError::DelayNamesMissing { rva: 0x2220 },
+            ImportTableError::DelayFieldMissing {
+                rva: 0x2220,
+                field: DelayField::NameTable,
+            },
             "delay-load descriptor at RVA 0x00002220 has no import name table",
         ),
         (
@@ -303,19 +347,61 @@ fn malformed_delay_tables_are_diagnosed_and_ordinary_imports_kept() {
 }
 
 #[test]
+fn declared_directory_size_bounds_the_table() {
+    // The fixture declares 96 bytes at RVA 0x2200: two descriptors and the
+    // empty one. A descriptor counts only if the declared size holds all of
+    // it, and the size must reach the empty descriptor.
+    let end = |rva| Some(ImportTableError::DelayDirectoryEnd { rva });
+    for (size, listed, error) in [
+        (0, 0, end(0x2200)),
+        (31, 0, end(0x221f)),
+        (32, 2, end(0x2220)),
+        (63, 2, end(0x223f)),
+        (64, 3, end(0x2240)),
+        (95, 3, end(0x225f)),
+        (96, 3, None),
+        (97, 3, None),
+        (0x1000, 3, None),
+        // The directory would run past the end of the address space.
+        (
+            u32::MAX,
+            0,
+            Some(ImportTableError::OutOfBounds { rva: 0x2200 }),
+        ),
+    ] {
+        let mut pe = FIXTURE.to_vec();
+        put(&mut pe, DELAY_DIRECTORY_SIZE, size);
+        let report = probe_pe_bytes(&pe, &ProbeConfig::default()).unwrap();
+        assert_eq!(rows(&report.imports), ORDINARY, "size {size}");
+        assert_eq!(
+            rows(&report.delayed_imports),
+            DELAYED[..listed],
+            "size {size}"
+        );
+        assert_eq!(report.delay_import_error, error, "size {size}");
+    }
+    assert_eq!(
+        ImportTableError::DelayDirectoryEnd { rva: 0x2240 }.to_string(),
+        "delay-load directory ends at RVA 0x00002240 before its empty descriptor"
+    );
+}
+
+#[test]
 fn endless_delay_table_is_refused() {
     // Every descriptor RVA maps onto the same 32 bytes, so the table never
-    // reaches its empty entry. The descriptor names module "a" at RVA 0x1000
-    // and an empty name table at RVA 0x2000.
+    // reaches its empty entry within the megabyte it declares. The descriptor
+    // names module "a" at RVA 0x1000, an empty name table at RVA 0x2000 and an
+    // address table at RVA 0x3000.
     let mut bytes = vec![0u8; 48];
     put(&mut bytes, 0, 1);
     put(&mut bytes, 4, 0x1000);
     put(&mut bytes, 12, 0x3000);
     put(&mut bytes, 16, 0x2000);
     bytes[32] = b'a';
-    let (imports, error) = parse_delay_imports(&bytes, 0x10_0000, |rva| match rva {
+    let (imports, error) = parse_delay_imports(&bytes, 0x10_0000, 0x10_0000, |rva| match rva {
         0x1000..0x1002 => Some(32 + (rva - 0x1000) as usize),
         0x2000..0x2008 => Some(40 + (rva - 0x2000) as usize),
+        0x3000..0x3008 => Some(40 + (rva - 0x3000) as usize),
         0x10_0000.. => Some((rva % 32) as usize),
         _ => None,
     });

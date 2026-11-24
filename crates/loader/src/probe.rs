@@ -831,20 +831,27 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
     };
     // The delay import descriptor is data directory 13. It exists only when
     // NumberOfRvaAndSizes covers it.
-    let delay_dir_rva = if size_of_optional_header >= 224
+    let (delay_dir_rva, delay_dir_size) = if size_of_optional_header >= 224
         && u32::from_le_bytes(
             bytes[opt_offset + 108..opt_offset + 112]
                 .try_into()
                 .unwrap(),
         ) > 13
     {
-        u32::from_le_bytes(
-            bytes[opt_offset + 216..opt_offset + 220]
-                .try_into()
-                .unwrap(),
+        (
+            u32::from_le_bytes(
+                bytes[opt_offset + 216..opt_offset + 220]
+                    .try_into()
+                    .unwrap(),
+            ),
+            u32::from_le_bytes(
+                bytes[opt_offset + 220..opt_offset + 224]
+                    .try_into()
+                    .unwrap(),
+            ),
         )
     } else {
-        0
+        (0, 0)
     };
 
     let section_table_offset = opt_offset + size_of_optional_header;
@@ -1000,7 +1007,7 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
     let (delayed_entries, delay_import_error) = if delay_dir_rva == 0 {
         (Vec::new(), None)
     } else {
-        parse_delay_imports(bytes, delay_dir_rva, backed_offset)
+        parse_delay_imports(bytes, delay_dir_rva, delay_dir_size, backed_offset)
     };
     let describe = |entry: ImportEntry| {
         let binding = registry.resolve(&entry.module, &entry.name);

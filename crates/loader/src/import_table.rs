@@ -49,6 +49,24 @@ pub struct ImportEntry {
     pub iat_rva: u32,
 }
 
+/// A delay-load descriptor field that must hold an RVA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DelayField {
+    DllName,
+    AddressTable,
+    NameTable,
+}
+
+impl fmt::Display for DelayField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::DllName => "DLL name",
+            Self::AddressTable => "import address table",
+            Self::NameTable => "import name table",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImportTableError {
     /// A structure at this RVA is not fully backed by section data.
@@ -72,8 +90,14 @@ pub enum ImportTableError {
     DelayVirtualAddresses {
         rva: u32,
     },
-    /// The delay-load descriptor at this RVA has no import name table.
-    DelayNamesMissing {
+    /// The delay-load descriptor at this RVA leaves a required field zero.
+    DelayFieldMissing {
+        rva: u32,
+        field: DelayField,
+    },
+    /// The declared delay-load directory ends at this RVA before its empty
+    /// descriptor.
+    DelayDirectoryEnd {
         rva: u32,
     },
     TooManyDescriptors,
@@ -102,9 +126,12 @@ impl fmt::Display for ImportTableError {
                 f,
                 "delay-load descriptor at RVA 0x{rva:08x} holds virtual addresses, not RVAs, and is not read"
             ),
-            Self::DelayNamesMissing { rva } => write!(
+            Self::DelayFieldMissing { rva, field } => {
+                write!(f, "delay-load descriptor at RVA 0x{rva:08x} has no {field}")
+            }
+            Self::DelayDirectoryEnd { rva } => write!(
                 f,
-                "delay-load descriptor at RVA 0x{rva:08x} has no import name table"
+                "delay-load directory ends at RVA 0x{rva:08x} before its empty descriptor"
             ),
             Self::TooManyDescriptors => write!(f, "more than {MAX_DESCRIPTORS} import descriptors"),
             Self::TooManyImports => write!(f, "more than {MAX_IMPORTS} imported symbols"),
@@ -202,13 +229,16 @@ fn collect<F: Fn(u32) -> Option<usize>>(
     Err(ImportTableError::TooManyDescriptors)
 }
 
-/// Parse the delay-load directory at `directory_rva`.
+/// Parse the delay-load directory of `directory_size` bytes at `directory_rva`.
 ///
+/// Only descriptors that lie wholly inside the declared directory are read,
+/// and the directory must hold the empty descriptor that ends the table.
 /// Each entry's `iat_rva` is its slot in the delay import address table.
 /// Returns every import before the first problem, and the problem.
 pub fn parse_delay_imports(
     bytes: &[u8],
     directory_rva: u32,
+    directory_size: u32,
     rva_to_offset: impl Fn(u32) -> Option<usize>,
 ) -> (Vec<ImportEntry>, Option<ImportTableError>) {
     let reader = Reader {
@@ -216,18 +246,24 @@ pub fn parse_delay_imports(
         rva_to_offset,
     };
     let mut entries = Vec::new();
-    let error = collect_delayed(&reader, directory_rva, &mut entries).err();
+    let error = collect_delayed(&reader, directory_rva, directory_size, &mut entries).err();
     (entries, error)
 }
 
 fn collect_delayed<F: Fn(u32) -> Option<usize>>(
     reader: &Reader<'_, F>,
     directory_rva: u32,
+    directory_size: u32,
     entries: &mut Vec<ImportEntry>,
 ) -> Result<(), ImportTableError> {
+    let end = directory_rva
+        .checked_add(directory_size)
+        .ok_or(ImportTableError::OutOfBounds { rva: directory_rva })?;
     let mut descriptor = directory_rva;
     for _ in 0..MAX_DESCRIPTORS {
-        // Reading the whole descriptor also proves its field RVAs do not overflow.
+        if end - descriptor < DELAY_DESCRIPTOR_LEN {
+            return Err(ImportTableError::DelayDirectoryEnd { rva: end });
+        }
         let fields = reader.array::<{ DELAY_DESCRIPTOR_LEN as usize }>(descriptor)?;
         // The table ends with an empty descriptor.
         if fields == [0; DELAY_DESCRIPTOR_LEN as usize] {
@@ -243,15 +279,28 @@ fn collect_delayed<F: Fn(u32) -> Option<usize>>(
         let name_rva = reader.u32(descriptor + 4)?;
         let address_rva = reader.u32(descriptor + 12)?;
         let names_rva = reader.u32(descriptor + 16)?;
-        // The address table holds thunk addresses, so it cannot stand in for names.
-        if names_rva == 0 {
-            return Err(ImportTableError::DelayNamesMissing { rva: descriptor });
+        // All three are required. The address table holds thunk addresses, so
+        // it cannot stand in for a missing name table.
+        for (field, rva) in [
+            (DelayField::DllName, name_rva),
+            (DelayField::AddressTable, address_rva),
+            (DelayField::NameTable, names_rva),
+        ] {
+            if rva == 0 {
+                return Err(ImportTableError::DelayFieldMissing {
+                    rva: descriptor,
+                    field,
+                });
+            }
         }
+        // Each must also start in section data, whether or not an import uses it.
+        reader.array::<1>(name_rva)?;
+        reader.array::<8>(address_rva)?;
+        reader.array::<8>(names_rva)?;
         let module = reader.name(name_rva)?;
         collect_symbols(reader, &module, names_rva, address_rva, true, entries)?;
-        descriptor = descriptor
-            .checked_add(DELAY_DESCRIPTOR_LEN)
-            .ok_or(ImportTableError::OutOfBounds { rva: descriptor })?;
+        // The declared end bounds this sum.
+        descriptor += DELAY_DESCRIPTOR_LEN;
     }
     Err(ImportTableError::TooManyDescriptors)
 }
