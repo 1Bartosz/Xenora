@@ -11,8 +11,9 @@
 //! 6.2 (Table 20 and 6.2.1), 6.2.5, 6.8 and 9.1. Nothing here comes from the
 //! ISA crate, the semantic registry, the decoder or the shader compiler. Every
 //! case runs on the reference interpreter `xenora_ref` and on the second
-//! interpreter `independent_ref`; the ignored test also runs the translated MSL
-//! on native Metal.
+//! interpreter `independent_ref`. The ignored native Metal test needs the
+//! translator's 16- and 64-bit forms; until then a CPU test checks that the
+//! production compiler rejects all 28.
 //!
 //! Readings of the guide (not hardware evidence):
 //! - Table 59: offsets F 0, LT 1, EQ 2, LE 3, GT 4, LG/NE 5, GE 6, TRU 7 with
@@ -256,9 +257,11 @@ const REJECTIONS16: usize = 4 + 2 + 2 + 9 + 9 + 1 + 4 + 1 + 1 + 1;
 /// 64-bit per form: 7 uninitialized pair halves, 2 pending loads on a high
 /// half, vcc (known and under empty EXEC), a literal with and without its
 /// dword, 2 odd SGPR bases and one under empty EXEC, v255 as either base and
-/// under empty EXEC, v255 as VSRC1 after an SGPR pair (also under empty EXEC), then as for 16-bit: 9 float, 9 special, a float under
-/// empty EXEC, SDWA/DPP 4, `_e64`, `v_cmpx`, vccz over a scalar instruction.
-const REJECTIONS64: usize = 7 + 2 + 2 + 2 + 3 + 3 + 2 + 9 + 9 + 1 + 4 + 1 + 1 + 1;
+/// under empty EXEC, v255 as VSRC1 after an SGPR pair (also under empty
+/// EXEC) and after an inline integer, then as for 16-bit: 9 float, 9 special,
+/// a float under empty EXEC, SDWA/DPP 4, `_e64`, `v_cmpx`, vccz over a scalar
+/// instruction.
+const REJECTIONS64: usize = 7 + 2 + 2 + 2 + 3 + 3 + 3 + 9 + 9 + 1 + 4 + 1 + 1 + 1;
 
 const LITERAL: u32 = 255;
 const VCC_LO: u32 = 106;
@@ -958,6 +961,10 @@ fn rejections() -> Vec<(String, Vec<u8>, usize)> {
                 "s[8:9], v255 as VSRC1 base under empty exec".into(),
                 program(&pair, Some(0), &[vopc(op, 8, 255)], &[]),
             );
+            reject(
+                "inline 1, v255 as VSRC1 base".into(),
+                program(&setup, None, &[vopc(op, 129, 255)], &[]),
+            );
         }
         for src0 in (240..=248).chain([107, 124, 125, 126, 127, 251, 252, 253, 254]) {
             reject(
@@ -1159,6 +1166,28 @@ fn vopc_wide_outside_the_contract_are_rejected() {
         assert_rejected_at(label, code, *offset, &LANES);
     }
     eprintln!("vopc_wide: {} rejections", rejections.len());
+}
+
+#[test]
+fn production_compiler_still_rejects_the_wide_compares() {
+    // docs/shaders/vector-compare.md 2a: the oracle runs ahead of the
+    // translator, which rejects all 28 forms at the compare until it
+    // implements them. This test fails once it does; then the Metal test
+    // below takes over.
+    for form in forms() {
+        let (setup, other) = if form.bits == 64 {
+            (lane_pair(7), 4)
+        } else {
+            (vmov(3, 7).to_vec(), 3)
+        };
+        let (code, offset) = program(&setup, None, &[vopc(form.op, vgpr(1), other)], &[]);
+        let at = match compile(Architecture::Gfx1030, &code) {
+            Err(CompileError::Decode(error)) => error.offset,
+            Err(CompileError::Verify { offset, .. }) => offset,
+            other => panic!("compiler accepted {}: {other:?}", form.name),
+        };
+        assert_eq!(at, offset, "compiler rejected {} elsewhere", form.name);
+    }
 }
 
 #[test]

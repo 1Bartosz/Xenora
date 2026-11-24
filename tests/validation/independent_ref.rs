@@ -27,8 +27,10 @@
 //! production operator. SOP2 arithmetic runs through a bit-serial ripple
 //! adder (subtraction as addition of the complement), not host integer ops.
 //!
-//! Wave32 VOPC integer compares (`v_cmp_{f,lt,eq,le,gt,ne,ge,t}_{i32,u32,i64,u64}_e32`
-//! and `v_cmp_{lt,eq,le,gt,ne,ge}_{i16,u16}_e32`, contract `docs/shaders/vector-compare.md`) need all lanes of a wave, so execution
+//! Wave32 VOPC integer compares
+//! (`v_cmp_{f,lt,eq,le,gt,ne,ge,t}_{i32,u32,i64,u64}_e32` and
+//! `v_cmp_{lt,eq,le,gt,ne,ge}_{i16,u16}_e32`, contract
+//! `docs/shaders/vector-compare.md`) need all lanes of a wave, so execution
 //! runs lockstep waves of 32 consecutive dispatch indices with wave-uniform
 //! scalar state and per-lane vector state. A lane-local failure stops only that
 //! lane and the lowest-index error is reported, so programs without compares

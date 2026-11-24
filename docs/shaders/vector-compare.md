@@ -252,11 +252,16 @@ programs, plus 2 mask-chain programs (252 in all), and the F/T fixture (253) mat
 run in `vopc_f_t_match_the_guide_on_native_metal`.
 
 The 16-bit and 64-bit oracle (`tests/validation/tests/vopc_wide.rs`) checks
-6,212 lane cases on both reference interpreters, plus 1,192 rejections and the
-13 neighbouring opcodes. Its native Metal test stays ignored until the
-translator implements these forms.
+6,212 lane cases on both reference interpreters, plus 1,208 rejections and the
+13 neighbouring opcodes, and that the production compiler still rejects all 28
+forms. Its native Metal test stays ignored (and skipped by `scripts/test-gpu.sh`)
+until the translator implements these forms. Deliberately broken copies of both
+interpreters (16-bit reads of 32 bits, swapped pair halves, zero-extended
+inline integers, flipped signedness, reads under empty EXEC and others) each
+fail it.
 
-A deliberately broken copy of each implementation fails these tests: the
+For the 32-bit forms, a deliberately broken copy of each implementation fails
+the tests above: the
 reference with unsigned-only compares or with the EXEC test removed; the
 second interpreter with unsigned-only compares or with no empty-EXEC rule;
 the translator with a stale VCC under empty EXEC (CPU), and, on Metal, with
