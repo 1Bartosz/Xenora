@@ -105,7 +105,7 @@ Merged after milestone 5. It carries #280 (#72), #281 (#66) and #283 (#65), publ
 - Compared: the integer fixture run through both trees in both engines. Upstream supports 142 instruction and engine pairs. They differ only where upstream stores no guest flags in the DBT (#64, #70), reads AH, CH, DH and BH as SPL, BPL, SIL and DIL (#68, including MOVZX and MOVSX in both engines), or writes eight bytes for a 32-bit store.
 - Gates: workspace 474 passed, 0 failed, 22 ignored; formatting, strict Clippy, all generator checks, repository audits, release build, GPU suite, demo and app gates exit 0. GPU: 80 passed, 0 failed, 1 ignored.
 
-#286 is open upstream for #270, which milestone 5 also fixes; theirs is published and takes precedence.
+Main `4db0b9c` (#286, #287) was merged next. #286 fixed #270 first; its test and its bounds check on section offsets are kept, and imports stay on the shared parser. Gates on that merge: workspace 477 passed, 0 failed, 22 ignored; GPU 84 passed, 0 failed, 1 ignored; formatting, strict Clippy, generator checks, audits, release build, demo and app gates exit 0.
 
 ## Known limitations
 

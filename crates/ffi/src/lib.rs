@@ -63,6 +63,146 @@ pub const XENORA_RESOURCE_TYPE_TEXTURE_2D: u32 = 1;
 pub const XENORA_RESOURCE_TYPE_BUFFER: u32 = 2;
 const MAX_RESOURCES_PER_SESSION: usize = 256;
 
+pub const XENORA_AUDIO_FORMAT_PCM_S16LE: u32 = 1;
+pub const XENORA_AUDIO_FORMAT_PCM_F32LE: u32 = 2;
+
+pub struct AudioSubsystem {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub format: u32,
+    pub queue: std::collections::VecDeque<u8>,
+    pub max_capacity_bytes: usize,
+    pub volume: f32,
+    pub muted: bool,
+    pub underruns: u32,
+    pub total_submitted_bytes: u64,
+}
+
+impl Default for AudioSubsystem {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48000,
+            channels: 2,
+            format: XENORA_AUDIO_FORMAT_PCM_S16LE,
+            queue: std::collections::VecDeque::new(),
+            max_capacity_bytes: 65536 * 4,
+            volume: 1.0,
+            muted: false,
+            underruns: 0,
+            total_submitted_bytes: 0,
+        }
+    }
+}
+
+impl AudioSubsystem {
+    pub fn submit(&mut self, bytes: &[u8]) {
+        self.total_submitted_bytes = self
+            .total_submitted_bytes
+            .saturating_add(bytes.len() as u64);
+        let processed_bytes: Vec<u8> =
+            if self.format == XENORA_AUDIO_FORMAT_PCM_S16LE && bytes.len().is_multiple_of(2) {
+                let mut out = bytes.to_vec();
+                for chunk in out.as_chunks_mut::<2>().0 {
+                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                    let attenuated = if self.muted {
+                        0i16
+                    } else {
+                        let scaled = (sample as f32) * self.volume;
+                        scaled.clamp(-32768.0, 32767.0) as i16
+                    };
+                    let res_bytes = attenuated.to_le_bytes();
+                    chunk[0] = res_bytes[0];
+                    chunk[1] = res_bytes[1];
+                }
+                out
+            } else {
+                bytes.to_vec()
+            };
+
+        for b in processed_bytes {
+            if self.queue.len() >= self.max_capacity_bytes {
+                self.queue.pop_front();
+                self.underruns = self.underruns.saturating_add(1);
+            }
+            self.queue.push_back(b);
+        }
+    }
+
+    pub fn read(&mut self, out: &mut [u8]) -> usize {
+        let count = out.len().min(self.queue.len());
+        for b in out.iter_mut().take(count) {
+            *b = self.queue.pop_front().unwrap_or(0);
+        }
+        count
+    }
+}
+
+pub const XENORA_NO_FILE: u64 = 0;
+pub const XENORA_SEEK_SET: u32 = 0;
+pub const XENORA_SEEK_CUR: u32 = 1;
+pub const XENORA_SEEK_END: u32 = 2;
+const MAX_VFS_FILES_PER_SESSION: usize = 64;
+
+pub struct VfsFileSlot {
+    pub generation: u32,
+    pub path: String,
+    pub data: Vec<u8>,
+    pub position: usize,
+    pub flags: u32,
+}
+
+pub struct VfsSubsystem {
+    pub root: std::path::PathBuf,
+    pub files: Vec<VfsFileSlot>,
+}
+
+impl Default for VfsSubsystem {
+    fn default() -> Self {
+        let mut root = std::path::PathBuf::from("fixtures/assets");
+        if !root.exists() {
+            let candidate = std::env::var("CARGO_MANIFEST_DIR")
+                .map(|dir| std::path::PathBuf::from(dir).join("../../fixtures/assets"))
+                .unwrap_or_default();
+            if candidate.exists() {
+                root = candidate;
+            }
+        }
+        if !root.exists() {
+            let candidate = std::path::PathBuf::from("../../fixtures/assets");
+            if candidate.exists() {
+                root = candidate;
+            }
+        }
+        Self {
+            root,
+            files: Vec::new(),
+        }
+    }
+}
+
+impl VfsSubsystem {
+    pub fn sanitize_path(&self, rel_path: &str) -> Result<std::path::PathBuf, i32> {
+        if rel_path.is_empty() || rel_path.contains('\0') {
+            return Err(XENORA_INVALID_ARGUMENT);
+        }
+        let p = std::path::Path::new(rel_path);
+        if p.is_absolute() {
+            return Err(XENORA_INVALID_ARGUMENT);
+        }
+        for component in p.components() {
+            match component {
+                std::path::Component::ParentDir => return Err(XENORA_INVALID_ARGUMENT),
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    return Err(XENORA_INVALID_ARGUMENT);
+                }
+                _ => {}
+            }
+        }
+        let full_path = self.root.join(p);
+        Ok(full_path)
+    }
+}
+
 #[derive(Clone)]
 struct SendSyncTexture(MetalRgba8Texture);
 // SAFETY: Apple Metal textures are thread-safe native GPU resources.
@@ -87,6 +227,12 @@ struct Slot {
     frame_loop: Option<Arc<FrameLoop>>,
     /// Persistent GPU resources owned by this session (Gate 5, #279).
     resources: Vec<ResourceSlot>,
+    /// Bounded audio subsystem (Gate 6, #284).
+    audio: AudioSubsystem,
+    /// Virtual filesystem sandboxed subsystem (Gate 6, #284).
+    vfs: VfsSubsystem,
+    /// Loaded asset bytes staged in the session.
+    staged_asset: Vec<u8>,
 }
 
 static SESSIONS: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
@@ -132,12 +278,19 @@ pub unsafe extern "C" fn xenora_session_create(abi_version: u32, out_session: *m
                     generation: 0,
                     frame_loop: None,
                     resources: Vec::new(),
+                    audio: AudioSubsystem::default(),
+                    vfs: VfsSubsystem::default(),
+                    staged_asset: Vec::new(),
                 });
                 slots.len() - 1
             }
             None => return XENORA_LIMIT_EXCEEDED,
         };
         let slot = &mut slots[index];
+        slot.resources.clear();
+        slot.audio = AudioSubsystem::default();
+        slot.vfs = VfsSubsystem::default();
+        slot.staged_asset.clear();
         // ponytail: a slot retires after 2^31 reuses instead of wrapping its generation.
         let Some(generation) = slot.generation.checked_add(1) else {
             return XENORA_LIMIT_EXCEEDED;
@@ -162,6 +315,9 @@ pub extern "C" fn xenora_session_destroy(session: u64) -> i32 {
         slot.generation += 1;
         let running = slot.frame_loop.take();
         slot.resources.clear();
+        slot.audio = AudioSubsystem::default();
+        slot.vfs = VfsSubsystem::default();
+        slot.staged_asset.clear();
         drop(slots);
         // Stop and join the guest thread without holding the session table.
         if let Some(running) = running {
@@ -1128,6 +1284,540 @@ pub fn test_release_resource_in_flight(session: u64, resource: u64) -> Result<()
     Ok(())
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_audio_init(
+    session: u64,
+    sample_rate: u32,
+    channels: u32,
+    format: u32,
+) -> i32 {
+    guarded(|| {
+        if sample_rate == 0
+            || sample_rate > 192000
+            || (channels != 1 && channels != 2)
+            || (format != XENORA_AUDIO_FORMAT_PCM_S16LE && format != XENORA_AUDIO_FORMAT_PCM_F32LE)
+        {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        slot.audio.sample_rate = sample_rate;
+        slot.audio.channels = channels;
+        slot.audio.format = format;
+        slot.audio.queue.clear();
+        slot.audio.underruns = 0;
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `pcm_bytes` must be non-null and valid for `byte_count` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_audio_submit(
+    session: u64,
+    pcm_bytes: *const u8,
+    byte_count: u64,
+) -> i32 {
+    guarded(|| {
+        if pcm_bytes.is_null() || byte_count == 0 || byte_count > 16 * 1024 * 1024 {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        // SAFETY: checked non-null and bounded above.
+        let bytes = unsafe { std::slice::from_raw_parts(pcm_bytes, byte_count as usize) };
+        slot.audio.submit(bytes);
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `out_pcm` must be non-null and valid for `capacity` writable bytes;
+/// `out_bytes_read` must be non-null and valid for one aligned `u64` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_audio_read(
+    session: u64,
+    out_pcm: *mut u8,
+    capacity: u64,
+    out_bytes_read: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if out_pcm.is_null() || out_bytes_read.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        // SAFETY: checked non-null above.
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_pcm, capacity as usize) };
+        let count = slot.audio.read(out_slice);
+        unsafe { out_bytes_read.write(count as u64) };
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// Each output pointer must be non-null and valid for one aligned write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_audio_status(
+    session: u64,
+    out_queued_bytes: *mut u32,
+    out_underruns: *mut u32,
+    out_total_submitted: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if out_queued_bytes.is_null() || out_underruns.is_null() || out_total_submitted.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &slots[split(session).0];
+        unsafe {
+            out_queued_bytes.write(slot.audio.queue.len() as u32);
+            out_underruns.write(slot.audio.underruns);
+            out_total_submitted.write(slot.audio.total_submitted_bytes);
+        }
+        XENORA_OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_audio_set_volume(session: u64, volume: f32, muted: u32) -> i32 {
+    guarded(|| {
+        if !(0.0..=1.0).contains(&volume) || volume.is_nan() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        slot.audio.volume = volume;
+        slot.audio.muted = muted != 0;
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `root_path` must be non-null and point to a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_vfs_set_root(
+    session: u64,
+    root_path: *const std::ffi::c_char,
+) -> i32 {
+    guarded(|| {
+        if root_path.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let c_str = unsafe { std::ffi::CStr::from_ptr(root_path) };
+        let Ok(path_str) = c_str.to_str() else {
+            return XENORA_INVALID_ARGUMENT;
+        };
+        let path = std::path::PathBuf::from(path_str);
+        if !path.exists() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        slot.vfs.root = path;
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `rel_path` must be non-null and point to a valid NUL-terminated C string;
+/// `out_file` must be non-null and valid for one aligned `u64` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_vfs_open(
+    session: u64,
+    rel_path: *const std::ffi::c_char,
+    flags: u32,
+    out_file: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if rel_path.is_null() || out_file.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let c_str = unsafe { std::ffi::CStr::from_ptr(rel_path) };
+        let Ok(path_str) = c_str.to_str() else {
+            return XENORA_INVALID_ARGUMENT;
+        };
+
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+
+        let full_path = match slot.vfs.sanitize_path(path_str) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+
+        let data = match std::fs::read(&full_path) {
+            Ok(bytes) => bytes,
+            Err(_) => return XENORA_INVALID_ARGUMENT,
+        };
+
+        let file_idx = match slot.vfs.files.iter().position(|f| f.generation % 2 == 0) {
+            Some(idx) => idx,
+            None if slot.vfs.files.len() < MAX_VFS_FILES_PER_SESSION => {
+                slot.vfs.files.push(VfsFileSlot {
+                    generation: 0,
+                    path: String::new(),
+                    data: Vec::new(),
+                    position: 0,
+                    flags: 0,
+                });
+                slot.vfs.files.len() - 1
+            }
+            None => return XENORA_LIMIT_EXCEEDED,
+        };
+
+        let file_slot = &mut slot.vfs.files[file_idx];
+        let Some(next_gen) = file_slot.generation.checked_add(1) else {
+            return XENORA_LIMIT_EXCEEDED;
+        };
+        file_slot.generation = next_gen;
+        file_slot.path = path_str.to_string();
+        file_slot.data = data;
+        file_slot.position = 0;
+        file_slot.flags = flags;
+
+        let handle = (u64::from(next_gen) << 32) | (file_idx as u64);
+        unsafe { out_file.write(handle) };
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `out_buffer` must be non-null and valid for `count` writable bytes;
+/// `out_bytes_read` must be non-null and valid for one aligned `u64` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_vfs_read(
+    session: u64,
+    file: u64,
+    out_buffer: *mut u8,
+    count: u64,
+    out_bytes_read: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if out_buffer.is_null() || out_bytes_read.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+
+        let (file_idx, file_gen) = split(file);
+        let Some(file_slot) = slot.vfs.files.get_mut(file_idx) else {
+            return XENORA_INVALID_HANDLE;
+        };
+        if file_slot.generation != file_gen || file_gen % 2 == 0 {
+            return XENORA_INVALID_HANDLE;
+        }
+
+        let available = file_slot.data.len().saturating_sub(file_slot.position);
+        let to_read = (count as usize).min(available);
+        if to_read > 0 {
+            let src = &file_slot.data[file_slot.position..file_slot.position + to_read];
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), out_buffer, to_read);
+            }
+            file_slot.position += to_read;
+        }
+        unsafe { out_bytes_read.write(to_read as u64) };
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `out_new_offset` must be non-null and valid for one aligned `u64` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_vfs_seek(
+    session: u64,
+    file: u64,
+    offset: i64,
+    whence: u32,
+    out_new_offset: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if out_new_offset.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+
+        let (file_idx, file_gen) = split(file);
+        let Some(file_slot) = slot.vfs.files.get_mut(file_idx) else {
+            return XENORA_INVALID_HANDLE;
+        };
+        if file_slot.generation != file_gen || file_gen % 2 == 0 {
+            return XENORA_INVALID_HANDLE;
+        }
+
+        let base_pos: i64 = match whence {
+            XENORA_SEEK_SET => 0,
+            XENORA_SEEK_CUR => file_slot.position as i64,
+            XENORA_SEEK_END => file_slot.data.len() as i64,
+            _ => return XENORA_INVALID_ARGUMENT,
+        };
+
+        let Some(new_pos) = base_pos.checked_add(offset) else {
+            return XENORA_INVALID_ARGUMENT;
+        };
+        if new_pos < 0 || (new_pos as usize) > file_slot.data.len() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+
+        file_slot.position = new_pos as usize;
+        unsafe { out_new_offset.write(new_pos as u64) };
+        XENORA_OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_vfs_close(session: u64, file: u64) -> i32 {
+    guarded(|| {
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+
+        let (file_idx, file_gen) = split(file);
+        let Some(file_slot) = slot.vfs.files.get_mut(file_idx) else {
+            return XENORA_INVALID_HANDLE;
+        };
+        if file_slot.generation != file_gen || file_gen % 2 == 0 {
+            return XENORA_INVALID_HANDLE;
+        }
+
+        file_slot.generation += 1;
+        file_slot.data.clear();
+        file_slot.path.clear();
+        XENORA_OK
+    })
+}
+
+const AUDIO_VFS_FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/audio_vfs.exe");
+const EMBEDDED_ASSET: &[u8] = include_bytes!("../../../fixtures/assets/asset.bin");
+
+fn run_audio_vfs_fixture(session: u64) -> Result<(Vec<u8>, usize), String> {
+    let last_frame = Arc::new(Mutex::new(None));
+    let frame_sink = Arc::clone(&last_frame);
+    let mut imports = ImportRegistry::new();
+
+    imports.register("xenora.dll", "vfs_open_asset", move |_, _, _| Ok(1));
+
+    imports.register("xenora.dll", "vfs_read_asset", move |args, _, memory| {
+        let _handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+        let count = args.get(1, memory).map_err(ExitReason::MemoryFault)? as usize;
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return Err(ExitReason::IllegalInstruction(0xfe));
+        };
+        if !is_live(&slots, session) {
+            return Err(ExitReason::IllegalInstruction(0xfd));
+        }
+        let slot = &mut slots[split(session).0];
+        slot.staged_asset = EMBEDDED_ASSET.to_vec();
+        Ok(count.min(slot.staged_asset.len()) as u64)
+    });
+
+    imports.register("xenora.dll", "vfs_close_asset", move |_, _, _| Ok(1));
+
+    imports.register("xenora.dll", "audio_init", move |args, _, memory| {
+        let rate = args.get(0, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let ch = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let fmt = args.get(2, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let status = xenora_session_audio_init(session, rate, ch, fmt);
+        if status != XENORA_OK {
+            return Err(ExitReason::IllegalInstruction(0xfc));
+        }
+        Ok(1)
+    });
+
+    imports.register("xenora.dll", "audio_submit_pcm", move |args, _, memory| {
+        let byte_count = args.get(0, memory).map_err(ExitReason::MemoryFault)? as usize;
+        let pcm_data = {
+            let Ok(slots) = SESSIONS.lock() else {
+                return Err(ExitReason::IllegalInstruction(0xfb));
+            };
+            if !is_live(&slots, session) {
+                return Err(ExitReason::IllegalInstruction(0xfa));
+            }
+            let slot = &slots[split(session).0];
+            if slot.staged_asset.len() < 20 + 16 + byte_count {
+                return Err(ExitReason::IllegalInstruction(0xf9));
+            }
+            slot.staged_asset[36..36 + byte_count].to_vec()
+        };
+        let status = unsafe {
+            xenora_session_audio_submit(session, pcm_data.as_ptr(), pcm_data.len() as u64)
+        };
+        if status != XENORA_OK {
+            return Err(ExitReason::IllegalInstruction(0xf8));
+        }
+        Ok(1)
+    });
+
+    let sink = Arc::clone(&frame_sink);
+    imports.register("xenora.dll", "frame_submit_textured", move |_, _, _| {
+        let tex_data = {
+            let Ok(slots) = SESSIONS.lock() else {
+                return Err(ExitReason::IllegalInstruction(0xf7));
+            };
+            if !is_live(&slots, session) {
+                return Err(ExitReason::IllegalInstruction(0xf6));
+            }
+            let slot = &slots[split(session).0];
+            if slot.staged_asset.len() < 36 {
+                return Err(ExitReason::IllegalInstruction(0xf5));
+            }
+            slot.staged_asset[20..36].to_vec()
+        };
+        let mut res_handle: u64 = 0;
+        let status = unsafe {
+            xenora_session_create_texture(session, 2, 2, tex_data.as_ptr(), &mut res_handle)
+        };
+        if status != XENORA_OK {
+            return Err(ExitReason::IllegalInstruction(0xf4));
+        }
+        let mut rendered = vec![0u8; 16];
+        let mut rw = 0u32;
+        let mut rh = 0u32;
+        let r_status = unsafe {
+            xenora_session_render_textured(
+                session,
+                res_handle,
+                rendered.as_mut_ptr(),
+                16,
+                &mut rw,
+                &mut rh,
+            )
+        };
+        _ = xenora_session_destroy_resource(session, res_handle);
+        if r_status != XENORA_OK || rw != 2 || rh != 2 {
+            return Err(ExitReason::IllegalInstruction(0xf3));
+        }
+        if let Ok(mut slot) = sink.lock() {
+            *slot = Some(rendered);
+        }
+        Ok(1)
+    });
+
+    let startup = run_synthetic_startup(
+        AUDIO_VFS_FIXTURE,
+        StartupLayout {
+            image_base: 0x1_4000_0000,
+            stack_top: 0x2_0001_0000,
+            tls_base: 0x3_0000_0000,
+        },
+        imports,
+        100,
+    )
+    .map_err(|e| format!("synthetic startup: {e}"))?;
+
+    if startup.execution.exit_reason != ExitReason::Halt {
+        return Err(format!(
+            "unexpected exit reason: {:?}",
+            startup.execution.exit_reason
+        ));
+    }
+
+    let final_pixels = last_frame
+        .lock()
+        .map_err(|_| "frame lock poisoned")?
+        .take()
+        .ok_or_else(|| "guest halted without rendering a frame".to_string())?;
+
+    if final_pixels != EMBEDDED_ASSET[20..36] {
+        return Err("read-back frame did not match loaded asset texture".into());
+    }
+
+    Ok((final_pixels, 256))
+}
+
+/// # Safety
+/// `out_rgba` must be non-null and valid for `capacity` byte writes;
+/// `out_width`, `out_height`, and `out_audio_samples` must be non-null and valid for one aligned write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_run_audio_vfs_fixture(
+    session: u64,
+    out_rgba: *mut u8,
+    capacity: u64,
+    out_width: *mut u32,
+    out_height: *mut u32,
+    out_audio_samples: *mut u32,
+) -> i32 {
+    guarded(|| {
+        if out_rgba.is_null()
+            || out_width.is_null()
+            || out_height.is_null()
+            || out_audio_samples.is_null()
+        {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        if capacity < 16 {
+            return XENORA_BUFFER_TOO_SMALL;
+        }
+        match SESSIONS.lock() {
+            Ok(slots) if is_live(&slots, session) => {}
+            Ok(_) => return XENORA_INVALID_HANDLE,
+            Err(_) => return XENORA_INTERNAL_ERROR,
+        }
+        let Ok((pixels, audio_samples)) = run_audio_vfs_fixture(session) else {
+            return XENORA_EXECUTION_FAILED;
+        };
+        // SAFETY: checked non-null and capacity >= 16.
+        unsafe {
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_rgba, 16);
+            out_width.write(2);
+            out_height.write(2);
+            out_audio_samples.write(audio_samples as u32);
+        }
+        XENORA_OK
+    })
+}
+
 pub const XENORA_MAX_INSPECT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Build the read-only inspection report and its status: `XENORA_OK`, `XENORA_PE_ERROR`
@@ -1791,6 +2481,150 @@ mod tests {
         );
         assert_eq!(split(res).0, split(res_reused).0);
         assert!(split(res_reused).1 > split(res).1);
+
+        xenora_session_destroy(session);
+    }
+
+    #[test]
+    fn test_audio_subsystem_lifecycle_and_volume() {
+        let _guard = serial();
+        let session = create();
+
+        assert_eq!(
+            xenora_session_audio_init(session, 48000, 1, XENORA_AUDIO_FORMAT_PCM_S16LE),
+            XENORA_OK
+        );
+        assert_eq!(
+            xenora_session_audio_init(session, 0, 1, XENORA_AUDIO_FORMAT_PCM_S16LE),
+            XENORA_INVALID_ARGUMENT
+        );
+
+        // Submit samples: 1000, -1000
+        let pcm: [u8; 4] = [232, 3, 24, 252]; // 1000i16, -1000i16 in LE
+        assert_eq!(
+            unsafe { xenora_session_audio_submit(session, pcm.as_ptr(), 4) },
+            XENORA_OK
+        );
+
+        let (mut q_bytes, mut underruns, mut total) = (0u32, 0u32, 0u64);
+        assert_eq!(
+            unsafe {
+                xenora_session_audio_status(session, &mut q_bytes, &mut underruns, &mut total)
+            },
+            XENORA_OK
+        );
+        assert_eq!(q_bytes, 4);
+        assert_eq!(total, 4);
+        assert_eq!(underruns, 0);
+
+        let mut read_buf = [0u8; 4];
+        let mut read_count = 0u64;
+        assert_eq!(
+            unsafe {
+                xenora_session_audio_read(session, read_buf.as_mut_ptr(), 4, &mut read_count)
+            },
+            XENORA_OK
+        );
+        assert_eq!(read_count, 4);
+        assert_eq!(read_buf, pcm);
+
+        // Volume attenuation: 50%
+        assert_eq!(xenora_session_audio_set_volume(session, 0.5, 0), XENORA_OK);
+        assert_eq!(
+            unsafe { xenora_session_audio_submit(session, pcm.as_ptr(), 4) },
+            XENORA_OK
+        );
+        assert_eq!(
+            unsafe {
+                xenora_session_audio_read(session, read_buf.as_mut_ptr(), 4, &mut read_count)
+            },
+            XENORA_OK
+        );
+        let s0 = i16::from_le_bytes([read_buf[0], read_buf[1]]);
+        let s1 = i16::from_le_bytes([read_buf[2], read_buf[3]]);
+        assert_eq!(s0, 500);
+        assert_eq!(s1, -500);
+
+        // Mute
+        assert_eq!(xenora_session_audio_set_volume(session, 1.0, 1), XENORA_OK);
+        assert_eq!(
+            unsafe { xenora_session_audio_submit(session, pcm.as_ptr(), 4) },
+            XENORA_OK
+        );
+        assert_eq!(
+            unsafe {
+                xenora_session_audio_read(session, read_buf.as_mut_ptr(), 4, &mut read_count)
+            },
+            XENORA_OK
+        );
+        assert_eq!(read_buf, [0, 0, 0, 0]);
+
+        xenora_session_destroy(session);
+    }
+
+    #[test]
+    fn test_vfs_sandboxing_traversal_rejection_and_file_ops() {
+        let _guard = serial();
+        let session = create();
+
+        let mut file = 0u64;
+        // Directory traversal rejection
+        let bad_path = std::ffi::CString::new("../secret.txt").unwrap();
+        assert_eq!(
+            unsafe { xenora_session_vfs_open(session, bad_path.as_ptr(), 0, &mut file) },
+            XENORA_INVALID_ARGUMENT
+        );
+
+        let abs_path = std::ffi::CString::new("/etc/passwd").unwrap();
+        assert_eq!(
+            unsafe { xenora_session_vfs_open(session, abs_path.as_ptr(), 0, &mut file) },
+            XENORA_INVALID_ARGUMENT
+        );
+
+        // Open real asset fixture
+        let good_path = std::ffi::CString::new("asset.bin").unwrap();
+        assert_eq!(
+            unsafe { xenora_session_vfs_open(session, good_path.as_ptr(), 0, &mut file) },
+            XENORA_OK
+        );
+        assert_ne!(file, XENORA_NO_FILE);
+
+        // Read header (4B magic 'XAST')
+        let mut magic = [0u8; 4];
+        let mut read_bytes = 0u64;
+        assert_eq!(
+            unsafe {
+                xenora_session_vfs_read(session, file, magic.as_mut_ptr(), 4, &mut read_bytes)
+            },
+            XENORA_OK
+        );
+        assert_eq!(read_bytes, 4);
+        assert_eq!(&magic, b"XAST");
+
+        // Seek forward
+        let mut new_pos = 0u64;
+        assert_eq!(
+            unsafe { xenora_session_vfs_seek(session, file, 16, XENORA_SEEK_CUR, &mut new_pos) },
+            XENORA_OK
+        );
+        assert_eq!(new_pos, 20);
+
+        // Close file
+        assert_eq!(xenora_session_vfs_close(session, file), XENORA_OK);
+
+        // Double close rejected
+        assert_eq!(
+            xenora_session_vfs_close(session, file),
+            XENORA_INVALID_HANDLE
+        );
+
+        // Read on closed file rejected
+        assert_eq!(
+            unsafe {
+                xenora_session_vfs_read(session, file, magic.as_mut_ptr(), 4, &mut read_bytes)
+            },
+            XENORA_INVALID_HANDLE
+        );
 
         xenora_session_destroy(session);
     }

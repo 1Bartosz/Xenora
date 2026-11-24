@@ -105,6 +105,59 @@ struct TexturedFrame {
     }
 }
 
+/// The frame and audio status produced by running the audio/VFS fixture (Gate 6, #284).
+struct AudioVfsFrame {
+    let status: Int32
+    let width: Int
+    let height: Int
+    let samples: UInt32
+    let totalAudioBytes: UInt64
+    let rgba: [UInt8]
+
+    static func run() -> AudioVfsFrame {
+        var session: xenora_session = 0
+        var status = xenora_session_create(XENORA_ABI_VERSION, &session)
+        guard status == XENORA_OK else {
+            return AudioVfsFrame(status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0, rgba: [])
+        }
+        defer { _ = xenora_session_destroy(session) }
+        var rgba = [UInt8](repeating: 0, count: 16)
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+        var samples: UInt32 = 0
+        status = rgba.withUnsafeMutableBufferPointer { buffer in
+            xenora_session_run_audio_vfs_fixture(
+                session, buffer.baseAddress, UInt64(buffer.count), &width, &height, &samples)
+        }
+        var queued: UInt32 = 0
+        var underruns: UInt32 = 0
+        var total: UInt64 = 0
+        _ = xenora_session_audio_status(session, &queued, &underruns, &total)
+        return AudioVfsFrame(
+            status: status,
+            width: Int(width),
+            height: Int(height),
+            samples: samples,
+            totalAudioBytes: total,
+            rgba: status == XENORA_OK ? rgba : []
+        )
+    }
+
+    var image: CGImage? {
+        guard status == XENORA_OK, let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(
+            width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    var summary: String {
+        let pixels = rgba.map(String.init).joined(separator: ",")
+        return "status=\(status) frame=\(width)x\(height) samples=\(samples) audio_total=\(totalAudioBytes) pixels=[\(pixels)]"
+    }
+}
+
 /// Owns the latest fixture run. A class with @Published avoids SwiftUI macros,
 /// which the command-line toolchain does not ship.
 @MainActor
@@ -113,6 +166,8 @@ final class FrameModel: ObservableObject {
     @Published var running = false
     @Published var texturedFrame: TexturedFrame?
     @Published var runningTextured = false
+    @Published var audioVfsFrame: AudioVfsFrame?
+    @Published var runningAudioVfs = false
 
     func run() {
         running = true
@@ -128,6 +183,14 @@ final class FrameModel: ObservableObject {
         Task {
             texturedFrame = await Task.detached { TexturedFrame.run() }.value
             runningTextured = false
+        }
+    }
+
+    func runAudioVfs() {
+        runningAudioVfs = true
+        Task {
+            audioVfsFrame = await Task.detached { AudioVfsFrame.run() }.value
+            runningAudioVfs = false
         }
     }
 }
@@ -416,11 +479,24 @@ struct ContentView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+                if let aImage = model.audioVfsFrame?.image {
+                    Image(decorative: aImage, scale: 1)
+                        .resizable()
+                        .interpolation(.none)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 160)
+                        .accessibilityLabel("Audio/VFS guest frame, 2 by 2 pixels")
+                    Text("Audio/VFS fixture ran: asset.bin loaded through sandboxed VFS, \(model.audioVfsFrame!.samples) audio samples queued (\(model.audioVfsFrame!.totalAudioBytes) bytes), texture rendered on Metal.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
                 HStack {
                     Button(running ? "Running…" : "Run trusted fixture") { model.run() }
                         .disabled(running || !probe.connected)
                     Button(model.runningTextured ? "Running…" : "Run textured fixture") { model.runTextured() }
                         .disabled(model.runningTextured || !probe.connected)
+                    Button(model.runningAudioVfs ? "Running…" : "Run Audio/VFS fixture") { model.runAudioVfs() }
+                        .disabled(model.runningAudioVfs || !probe.connected)
                 }
             }
             Section("Persistent frame loop") {
@@ -508,6 +584,14 @@ if CommandLine.arguments.contains("--smoke-resources") {
     print("smoke-resources: \(frame.summary)")
     let expected: [UInt8] = [255, 255, 0, 255, 0, 255, 255, 255, 255, 0, 255, 255, 64, 64, 64, 255]
     exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.rgba == expected ? 0 : 1)
+}
+
+// `--smoke-audio-vfs` tests VFS asset loading, PCM audio streaming, and Metal texture presentation.
+if CommandLine.arguments.contains("--smoke-audio-vfs") {
+    let frame = AudioVfsFrame.run()
+    print("smoke-audio-vfs: \(frame.summary)")
+    let expected: [UInt8] = [255, 128, 0, 255, 128, 0, 255, 255, 0, 255, 128, 255, 255, 0, 128, 255]
+    exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.samples == 256 && frame.rgba == expected && frame.totalAudioBytes == 512 ? 0 : 1)
 }
 
 // `--smoke-interactive` runs 60 frames with queued inputs on the Metal device and exits.

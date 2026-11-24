@@ -859,12 +859,21 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         });
     }
 
+    // Map an RVA to a file offset.
+    //
+    // The offset is derived from the section header, so on a truncated file it
+    // can point past the end of the buffer. Such an offset is not readable, so
+    // it is reported as unmapped rather than returned and sliced later.
     let rva_to_offset = |rva: u32| -> Option<usize> {
         for sec in &sections {
             let max_span = std::cmp::max(sec.virtual_size, sec.raw_data_size);
             if rva >= sec.virtual_address && rva < sec.virtual_address.saturating_add(max_span) {
                 let off_in_sec = (rva - sec.virtual_address) as usize;
-                return Some(sec.raw_data_ptr as usize + off_in_sec);
+                let off = sec.raw_data_ptr as usize + off_in_sec;
+                if off >= bytes.len() {
+                    return None;
+                }
+                return Some(off);
             }
         }
         None
