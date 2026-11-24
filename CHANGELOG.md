@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added guest CRT wide-string length and comparison using Windows 16-bit code units.
+
 - Added checked guest CRT byte string comparison with `strcmp` and `strncmp`.
 
 - Added bounded guest CRT byte fill, copy, move, and comparison services.

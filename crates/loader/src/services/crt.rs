@@ -10,19 +10,48 @@ const SCAN_BUDGET: u64 = 1_048_576;
 const UCRT: &str = "ucrtbase.dll";
 const CRT_STRING_API: &str = "api-ms-win-crt-string-l1-1-0.dll";
 
-fn string_length(memory: &GuestMemory, address: u64, limit: u64) -> Result<u64, ExitReason> {
-    if limit != 0 && address == 0 {
-        return Err(ExitReason::MemoryFault(MemoryError::UnmappedAddress(0)));
+#[derive(Clone, Copy)]
+enum StringUnit {
+    Byte,
+    Wide,
+}
+
+impl StringUnit {
+    fn width(self) -> u64 {
+        match self {
+            Self::Byte => 1,
+            Self::Wide => 2,
+        }
     }
-    for offset in 0..limit.min(SCAN_BUDGET) {
-        let address = address
-            .checked_add(offset)
+
+    fn read(self, memory: &GuestMemory, base: u64, offset: u64) -> Result<u16, ExitReason> {
+        if base == 0 {
+            return Err(ExitReason::MemoryFault(MemoryError::UnmappedAddress(0)));
+        }
+        let address = base
+            .checked_add(offset * self.width())
             .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
-        if memory.read_u8(address).map_err(ExitReason::MemoryFault)? == 0 {
+        match self {
+            Self::Byte => memory.read_u8(address).map(u16::from),
+            Self::Wide => memory.read_u16(address),
+        }
+        .map_err(ExitReason::MemoryFault)
+    }
+}
+
+fn string_length(
+    memory: &GuestMemory,
+    address: u64,
+    limit: u64,
+    unit: StringUnit,
+) -> Result<u64, ExitReason> {
+    let budget = SCAN_BUDGET / unit.width();
+    for offset in 0..limit.min(budget) {
+        if unit.read(memory, address, offset)? == 0 {
             return Ok(offset);
         }
     }
-    if limit <= SCAN_BUDGET {
+    if limit <= budget {
         return Ok(limit);
     }
     Err(ExitReason::IllegalInstruction(0xFE))
@@ -33,24 +62,17 @@ fn compare_strings(
     left: u64,
     right: u64,
     limit: u64,
+    unit: StringUnit,
 ) -> Result<u64, ExitReason> {
-    for offset in 0..limit.min(SCAN_BUDGET) {
-        let read = |base: u64| {
-            if base == 0 {
-                return Err(ExitReason::MemoryFault(MemoryError::UnmappedAddress(0)));
-            }
-            let address = base
-                .checked_add(offset)
-                .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
-            memory.read_u8(address).map_err(ExitReason::MemoryFault)
-        };
-        let a = read(left)?;
-        let b = read(right)?;
+    let budget = SCAN_BUDGET / unit.width();
+    for offset in 0..limit.min(budget) {
+        let a = unit.read(memory, left, offset)?;
+        let b = unit.read(memory, right, offset)?;
         if a != b || a == 0 {
             return Ok(u64::from((i32::from(a) - i32::from(b)) as u32));
         }
     }
-    if limit <= SCAN_BUDGET {
+    if limit <= budget {
         return Ok(0);
     }
     Err(ExitReason::IllegalInstruction(0xFE))
@@ -70,19 +92,27 @@ fn transfer_buffer(count: u64, fill: u8) -> Result<Vec<u8>, ExitReason> {
 }
 
 pub(super) fn register(registry: &mut ImportRegistry) {
-    registry.register(UCRT, "strlen", |args, _, memory| {
-        string_length(memory, args.rcx, u64::MAX)
-    });
-    registry.register(UCRT, "strnlen", |args, _, memory| {
-        string_length(memory, args.rcx, args.rdx)
-    });
-
-    registry.register(UCRT, "strcmp", |args, _, memory| {
-        compare_strings(memory, args.rcx, args.rdx, u64::MAX)
-    });
-    registry.register(UCRT, "strncmp", |args, _, memory| {
-        compare_strings(memory, args.rcx, args.rdx, args.r8)
-    });
+    for (length, bounded_length, compare, bounded_compare, unit) in [
+        ("strlen", "strnlen", "strcmp", "strncmp", StringUnit::Byte),
+        ("wcslen", "wcsnlen", "wcscmp", "wcsncmp", StringUnit::Wide),
+    ] {
+        registry.register(UCRT, length, move |args, _, memory| {
+            string_length(memory, args.rcx, u64::MAX, unit)
+        });
+        registry.register(UCRT, bounded_length, move |args, _, memory| {
+            string_length(memory, args.rcx, args.rdx, unit)
+        });
+        registry.register(UCRT, compare, move |args, _, memory| {
+            compare_strings(memory, args.rcx, args.rdx, u64::MAX, unit)
+        });
+        registry.register(UCRT, bounded_compare, move |args, _, memory| {
+            compare_strings(memory, args.rcx, args.rdx, args.r8, unit)
+        });
+        for symbol in [length, bounded_length, compare, bounded_compare] {
+            registry.alias(CRT_STRING_API, UCRT, symbol);
+            registry.set_status(UCRT, symbol, ServiceStatus::Partial);
+        }
+    }
 
     registry.register(UCRT, "memset", |args, _, memory| {
         if args.r8 != 0 {
@@ -129,9 +159,7 @@ pub(super) fn register(registry: &mut ImportRegistry) {
         Ok(u64::from(result as u32))
     });
 
-    for symbol in [
-        "strlen", "strnlen", "strcmp", "strncmp", "memset", "memcpy", "memmove", "memcmp",
-    ] {
+    for symbol in ["memset", "memcpy", "memmove", "memcmp"] {
         registry.alias(CRT_STRING_API, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
     }

@@ -140,7 +140,7 @@ References include Microsoft's
 [virtual allocation](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc),
 and [virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree) contracts.
 
-### CRT byte strings
+### CRT strings and byte memory
 
 The standard registry provides `strlen` and `strnlen` under UCRT and the CRT
 string API set. They count bytes using checked guest memory. The scan stops at
@@ -150,7 +150,9 @@ past 1 MiB reports an unsupported-service fault. See the
 
 The same modules expose `strcmp` and `strncmp`. These compare unsigned bytes
 and stop at the first difference, null byte, or supplied comparison bound.
-They share the 1 MiB scan budget.
+They share the 1 MiB scan budget. `wcslen`, `wcsnlen`, `wcscmp`, and
+`wcsncmp` apply the same rules to unsigned 16-bit Windows code units.
+Counts and bounds for the wide variants are in code units.
 
 The same modules expose `memset`, `memcpy`, `memmove`, and `memcmp` for spans
 up to 1 MiB. Each nonempty span must fit in one mapped guest region with the

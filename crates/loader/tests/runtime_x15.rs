@@ -1082,6 +1082,28 @@ fn test_guest_crt_string_comparison_through_iat() {
 }
 
 #[test]
+fn test_guest_crt_wide_strings_use_16_bit_units() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let slot = PROCESS_FIXTURE_OUTPUT;
+    for module in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {
+        for (symbol, args, expected) in [
+            ("wcslen", [slot, 0, 0], 4),
+            ("wcsnlen", [slot, 3, 0], 3),
+            ("wcsnlen", [slot, 7, 0], 4),
+            ("wcscmp", [slot + 8, slot, 0], -65535),
+            ("wcsncmp", [slot, slot + 2, 3], 0),
+            ("wcsncmp", [slot, slot + 2, 4], 65535),
+        ] {
+            let result = call_service_fixture(&state, module, symbol, &args);
+            assert_eq!(
+                result.execution.final_state.get(Register::Rax) as i32,
+                expected
+            );
+        }
+    }
+}
+
+#[test]
 fn test_guest_crt_string_length_through_iat() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     for module in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {

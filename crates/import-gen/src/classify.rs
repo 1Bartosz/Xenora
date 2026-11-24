@@ -206,7 +206,8 @@ impl SymbolDb {
         let m = "api-ms-win-crt-string-l1-1-0.dll";
         for module in [m, "ucrtbase.dll"] {
             for symbol in [
-                "strlen", "strnlen", "strcmp", "strncmp", "memset", "memcpy", "memmove", "memcmp",
+                "strlen", "strnlen", "strcmp", "strncmp", "wcslen", "wcsnlen", "wcscmp", "wcsncmp",
+                "memset", "memcpy", "memmove", "memcmp",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
@@ -234,11 +235,8 @@ impl SymbolDb {
             ("strspn", "strspn"),
             ("strstr", "strstr"),
             ("strtok", "strtok"),
-            ("wcslen", "wcslen"),
             ("wcscat", "wcscat"),
-            ("wcscmp", "wcscmp"),
             ("wcscpy", "wcscpy"),
-            ("wcsncmp", "wcsncmp"),
             ("wcsncpy", "wcsncpy"),
             ("wcsstr", "wcsstr"),
             ("wcstok", "wcstok"),
