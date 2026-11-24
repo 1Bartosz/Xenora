@@ -29,16 +29,24 @@
 //!   rule and 9.1 says for 64-bit addresses "ADDR has the LSBs, and ADDR+1 has
 //!   the MSBs", read here as the general VGPR pair order. `_I64` is two's
 //!   complement over all 64 bits, `_U64` unsigned.
-//! - Table 20: selectors 128-192 are the integers 0..64 and 193-208 are -1..-16;
-//!   they are values, so at 16 bits -1 is 0xffff and at 64 bits it is
-//!   0xffff_ffff_ffff_ffff (sign extended, also for `_U64`). The guide's
-//!   zero-extension rule for `_U64` (6.2.1) is about 32-bit literals, which
-//!   the subset rejects.
+//! - Table 20: selectors 128-192 are the integers 0..64 and 193-208 are -1..-16.
+//!   Read as values at the operand width, -1 is 0xffff at 16 bits and
+//!   0xffff_ffff_ffff_ffff at 64 bits (sign extended, also for `_U64`). The
+//!   guide lists the values, not their bit patterns, so the negative patterns
+//!   (above all for `_U64`) are a reading, not a quotation. 6.2.1's
+//!   zero-extension rule for unsigned 64-bit operands is headed "Literal
+//!   Expansion to 64 bits" and covers literals only.
 //! - Section 3.9: `VCC[n] = EXEC[n] & (test passed for thread[n])`, "VCC is
-//!   fully written"; in wave32 only VCC_LO contributes to VCCZ.
-//! - Not settled by the guide, so rejected (contract subset): literals for both
-//!   widths, VCC as a 64-bit source, odd SGPR bases, v255 as a pair base, and
-//!   any pair half that is not initialized under nonzero EXEC.
+//!   fully written"; in wave32 only VCC_LO contributes to VCCZ. Lanes past the
+//!   end of a partial final wave do not exist and give 0 (contract section 3).
+//! - Odd SGPR bases are illegal for 64-bit data (3.6.3 "Even-aligned SGPRs are
+//!   required"), so they are rejected. Literals are rejected by the contract
+//!   subset: for 16-bit forms the guide does not say which literal bits are
+//!   used; for 64-bit forms 6.2.1 defines an expansion, which the subset leaves
+//!   out. VCC as a 64-bit source and v255 as a pair base (v[255:256] does not
+//!   exist) are also outside the subset.
+//! - Under EXEC_LO = 0 the result is 0 (3.9); that no source is read then is
+//!   the contract's rule (section 5), not a guide statement.
 
 #[path = "operand_domains/harness.rs"]
 #[allow(dead_code)]
@@ -1131,6 +1139,26 @@ fn vopc_wide_outside_the_contract_are_rejected() {
         assert_rejected_at(label, code, *offset, &LANES);
     }
     eprintln!("vopc_wide: {} rejections", rejections.len());
+}
+
+#[test]
+fn pair_halves_are_checked_without_active_lanes() {
+    // Contract section 5: with EXEC_LO != 0 every source register is checked
+    // on every existing lane, even when no existing lane is active. Here the
+    // wave has 7 lanes and EXEC_LO = 0xffff_ff80 enables only absent lanes;
+    // the high half v2 of v[1:2] is uninitialized in each slot.
+    let input = &LANES[..7];
+    let mut n = 0;
+    for form in forms().into_iter().filter(|form| form.bits == 64) {
+        for (src0, vsrc1, slot) in [(vgpr(1), 4, "SRC0"), (vgpr(4), 1, "VSRC1")] {
+            let compare = [vopc(form.op, src0, vsrc1)];
+            let (code, offset) = program(&lane_pair(7), Some(0xffff_ff80), &compare, &[]);
+            let label = format!("{} v2 uninitialized in {slot}, no active lane", form.name);
+            assert_rejected_at(&label, &code, offset, input);
+            n += 1;
+        }
+    }
+    assert_eq!(n, F64 * 2);
 }
 
 #[test]
