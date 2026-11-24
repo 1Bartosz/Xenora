@@ -355,9 +355,19 @@ pub fn identify(bytes: &[u8]) -> Result<Identified, IdentifyError> {
             }
         }
         EncodingFamily::Vop3 | EncodingFamily::Vop3Sdst | EncodingFamily::Vop3p => {
-            trailer.literal = [source("SRC0"), source("SRC1"), source("SRC2")]
+            // An attribute field (XML OPR_ATTR) is not an operand selector: in the
+            // VOP3 interpolation forms SRC0 holds {attr_word, attr_chan, attr}
+            // bit-fields (AMD RDNA 2 ISA guide, section 10.4.2), so 255 there
+            // does not select a literal.
+            trailer.literal = ["SRC0", "SRC1", "SRC2"]
                 .into_iter()
-                .flatten()
+                .filter(|name| {
+                    !form
+                        .operands
+                        .iter()
+                        .any(|operand| operand.field == *name && operand.kind == "OPR_ATTR")
+                })
+                .filter_map(source)
                 .any(|value| value == SRC_LITERAL);
         }
         EncodingFamily::Mimg => {
