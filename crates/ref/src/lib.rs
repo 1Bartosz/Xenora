@@ -129,7 +129,7 @@ pub enum BranchCondition {
 ///
 /// AMD RDNA 2 XML descriptions: additions store the carry-out in SCC,
 /// subtractions the borrow; ADDC/SUBB add or subtract SCC; bitwise
-/// operations set SCC iff the result is nonzero.
+/// operations and shifts set SCC iff the result is nonzero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScalarAlu {
     Add,
@@ -142,6 +142,22 @@ pub enum ScalarAlu {
     And,
     Or,
     Xor,
+    /// RDNA 2 ISA guide 12.1: D = S0 & ~S1, SCC = (D != 0).
+    AndNot,
+    /// D = S0 | ~S1, SCC = (D != 0).
+    OrNot,
+    /// D = ~(S0 & S1), SCC = (D != 0).
+    Nand,
+    /// D = ~(S0 | S1), SCC = (D != 0).
+    Nor,
+    /// D = ~(S0 ^ S1), SCC = (D != 0).
+    Xnor,
+    /// D = S0 << S1[4:0], SCC = (D != 0).
+    ShiftLeft,
+    /// D = S0 >> S1[4:0] (logical), SCC = (D != 0).
+    ShiftRight,
+    /// D = signext(S0) >> S1[4:0], SCC = (D != 0).
+    ArithmeticShiftRight,
 }
 
 /// VOP2 operations decoded by the reference interpreter.
@@ -287,7 +303,7 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 left,
                 right,
                 low,
-                high @ (0x80..=0x82 | 0x87 | 0x88 | 0x89),
+                high @ (0x80..=0x82 | 0x87..=0x91),
                 tail @ ..,
             ] if (*left, *right) != (255, 255)
                 && low & 0x7f <= 105
@@ -302,7 +318,16 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                     (0x82, _) => ScalarAlu::SubtractWithBorrow,
                     (0x87, _) => ScalarAlu::And,
                     (0x88, _) => ScalarAlu::Or,
-                    _ => ScalarAlu::Xor,
+                    (0x89, _) => ScalarAlu::Xor,
+                    // Even opcodes 20-34 (bit 23 clear, checked above).
+                    (0x8a, _) => ScalarAlu::AndNot,
+                    (0x8b, _) => ScalarAlu::OrNot,
+                    (0x8c, _) => ScalarAlu::Nand,
+                    (0x8d, _) => ScalarAlu::Nor,
+                    (0x8e, _) => ScalarAlu::Xnor,
+                    (0x8f, _) => ScalarAlu::ShiftLeft,
+                    (0x90, _) => ScalarAlu::ShiftRight,
+                    _ => ScalarAlu::ArithmeticShiftRight,
                 };
                 let (left, left_length) = decode_scalar(*left, tail, offset)?;
                 let (right, right_length) = decode_scalar(*right, tail, offset)?;
@@ -693,6 +718,21 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                             _ => lhs ^ rhs,
                         };
                         (bits, bits != 0)
+                    }
+                    // Guide 12.1: shifts use only S1[4:0]; all set SCC = (D != 0).
+                    _ => {
+                        let (a, b) = (lhs as u32, rhs as u32);
+                        let bits = match kind {
+                            ScalarAlu::AndNot => a & !b,
+                            ScalarAlu::OrNot => a | !b,
+                            ScalarAlu::Nand => !(a & b),
+                            ScalarAlu::Nor => !(a | b),
+                            ScalarAlu::Xnor => !(a ^ b),
+                            ScalarAlu::ShiftLeft => a << (b & 0x1f),
+                            ScalarAlu::ShiftRight => a >> (b & 0x1f),
+                            _ => ((a as i32) >> (b & 0x1f)) as u32,
+                        };
+                        (i64::from(bits), bits != 0)
                     }
                 };
                 let value = exact.rem_euclid(1 << 32) as u32;
