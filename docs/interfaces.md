@@ -69,6 +69,18 @@ storage, invokes its callbacks and runs the entry point. The fixture entry point
 uses a Win64-aligned stack and terminates with HLT. The result includes the loaded
 guest memory and the entry execution outcome.
 
+Loading an image maps its headers as well as its sections. The first
+`SizeOfHeaders` bytes of the file are mapped read-only at the image base, as
+Windows maps them, in whole 4 KiB pages that are zero past the file bytes. In the
+mapped copy the optional header's `ImageBase` field holds the base the image was
+loaded at. A guest can read its own DOS header, section table and data
+directories there; it cannot write or execute them. The load is refused with
+`PeError::InvalidHeaderSize` when `SizeOfHeaders` is zero, ends before the
+section table does, runs past the end of the file, or its pages would reach into
+a section. The header pages count toward the 256 MiB mapping budget of one
+image. `ParsedPe::parse` does not make this check, so static inspection of a
+file is unchanged.
+
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. `missing_imports.csv` lists unresolved ordinary keys
 with their import address table relative virtual addresses. The full inventory,
