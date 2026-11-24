@@ -151,7 +151,9 @@ fixes the `scc` value:
 | `lshl_add` / `unsigned` | `carry_out` | `lshl_add_carry_u32` (with `shift_amount`) | no |
 | `compare` / `signed` or `unsigned` | `relation` | `eq_b32`, `ne_b32` (for both signednesses), `gt_i32`/`gt_u32`, `ge_*`, `lt_*`, `le_*` | no |
 
-Vector forms (operand rule `vop2_vgpr`, kind `vector`) use a separate table:
+Vector forms (operand rules `vop2_vgpr` and `vop2_vgpr2`, kind `vector`; both
+generate the one `VectorAluOp` enum, whose `operand_rule()` tells the decoder
+which rule a form uses) use a separate table:
 the pair picks the per-lane `VectorBinary` the MSL lowering uses, and `scc`
 must be `unchanged` (VOP2 integer forms write no SCC, VCC or EXEC):
 
@@ -161,6 +163,15 @@ must be `unchanged` (VOP2 integer forms write no SCC, VCC or EXEC):
 | `xnor` / `bitwise` | `Xnor` |
 | `min`, `max` / `signed` or `unsigned` | `MinSigned`, `MinUnsigned`, `MaxSigned`, `MaxUnsigned` |
 | `mul24`, `mul_hi24` / `signed` or `unsigned` | `Mul24Signed`, `Mul24Unsigned`, `MulHi24Signed`, `MulHi24Unsigned` |
+| `and`, `or`, `xor` / `bitwise` | `And`, `Or`, `Xor` |
+| `lshl`, `lshr` / `bitwise`, `ashr` / `signed` (with `shift_count_bits = 5`) | `ShiftLeft`, `ShiftRight`, `ArithmeticShiftRight` |
+
+`vop2_vgpr2` is the VGPR-only subset (SRC0 256-511) that the hand-written decoder
+accepted for `v_and_b32`, `v_or_b32`, `v_xor_b32`, `v_lshlrev_b32`, `v_lshrrev_b32`
+and `v_ashrrev_i32` before they moved into the registry (#215 M27); widening them
+to `vop2_vgpr` would be a behaviour change and needs its own oracle. The three
+shifts declare `source_order = "reversed"` (D = S1 shifted by S0[4:0]), so the
+generator checks the XML's unsigned count format on SRC0, not VSRC1.
 
 VOPC compares (operand rule `vopc_vcc`, kind `vector_compare`: SRC0 a
 `vector_source` as for VOP2, VSRC1 a VGPR, destination implicitly `vcc_lo`)
