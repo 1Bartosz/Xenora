@@ -757,11 +757,30 @@ fn test_d3d12_indexed_draw_fetches_start_and_base_vertex() {
             "{name}"
         );
     }
-    // Zero indices or zero instances draw nothing.
+    // A vertex buffer offset of two vertices does the base vertex's work.
+    seen.lock().unwrap().clear();
+    let ctx = &mut rig.ctx;
+    ctx.reset_command_list(rig.list, rig.alloc).unwrap();
+    ctx.cmd_set_viewport(rig.list, 16, 16).unwrap();
+    ctx.cmd_set_vertex_buffer(rig.list, rig.vb, 2 * INDEXED_STRIDE, INDEXED_STRIDE)
+        .unwrap();
+    ctx.cmd_set_index_buffer(rig.list, ib16, 0, R16_UINT)
+        .unwrap();
+    ctx.cmd_draw_indexed_instanced(rig.list, 3, 1, 4, 0, 0)
+        .unwrap();
+    ctx.close_command_list(rig.list).unwrap();
+    let outcome = ctx
+        .execute_command_list(rig.queue, rig.list, &rig.memory)
+        .expect("vertex buffer offset");
+    assert_eq!(outcome.draw_count, 1);
+    assert_eq!(*seen.lock().unwrap(), vec![INDEXED_TRIANGLE]);
+    // Zero indices or zero instances draw nothing and never call the backend.
+    seen.lock().unwrap().clear();
     for draw in [(0, 1, 0, 0), (3, 0, 0, 0)] {
         let outcome = run_indexed(&mut rig, (ib16, 0, R16_UINT), draw).unwrap();
         assert_eq!(outcome.draw_count, 0);
     }
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 /// Index format, offset, count, range, negative fetch and unknown or missing
