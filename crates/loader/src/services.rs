@@ -14,6 +14,7 @@ mod events;
 mod files;
 mod heap;
 mod modules;
+mod task_fixture;
 mod winsock;
 
 use crate::runtime::HResult;
@@ -172,6 +173,7 @@ pub struct ServicesState {
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
     winsock: Mutex<winsock::Winsock>,
+    task_fixture: Mutex<task_fixture::TaskFixture>,
     winsock_changed: Condvar,
     pub next_alloc_addr: AtomicU64,
     pub graphics: Arc<Mutex<crate::graphics::GraphicsContext>>,
@@ -188,6 +190,7 @@ impl ServicesState {
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
             winsock: Mutex::default(),
+            task_fixture: Mutex::default(),
             winsock_changed: Condvar::new(),
             next_alloc_addr: AtomicU64::new(0x0000_0002_0000_0000), // 8GB guest heap
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),
@@ -545,6 +548,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         ServiceStatus::Implemented,
     );
     winsock::register(registry, &state);
+    task_fixture::register(registry, &state);
     modules::register(registry, &state);
 }
 

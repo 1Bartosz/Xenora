@@ -10,6 +10,16 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaskId(u64);
 
+impl TaskId {
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// Why the queue could not accept a task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubmitError {

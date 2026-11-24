@@ -1122,6 +1122,47 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn guest_manual_tasks_deliver_results_once_through_imports() {
+    let clock = Arc::new(MockClock::new(0));
+    let state = Arc::new(ServicesState::new(clock.clone()));
+    let call = |symbol, args: &[u64]| {
+        let result = call_service_fixture(&state, "xenora_fixture.dll", symbol, args);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result
+    };
+    let value = |symbol, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    let first = value("SubmitFixtureTask", &[7, 0]);
+    let cancelled = value("SubmitFixtureTask", &[8, 0]);
+    let expired = value("SubmitFixtureTask", &[9, 1]);
+    let failed = value("SubmitFixtureTask", &[u64::MAX, 0]);
+    assert!(0 < first && first < cancelled && cancelled < expired && expired < failed);
+    let output = PROCESS_FIXTURE_STACK_TOP - 0x400;
+    assert_eq!(value("DispatchFixtureCompletion", &[output]), 0);
+    assert_eq!(value("CancelFixtureTask", &[cancelled]), 1);
+    assert_eq!(value("CancelFixtureTask", &[cancelled]), 0);
+    clock.advance(10_000);
+    for _ in 0..3 {
+        assert_eq!(value("DispatchFixtureWork", &[]), 1);
+    }
+    assert_eq!(value("DispatchFixtureWork", &[]), 0);
+    assert_eq!(value("DispatchFixtureCompletion", &[0]), 0);
+    for (id, status, expected_value) in [
+        (cancelled, 995, 0),
+        (first, 0, 49),
+        (expired, 1460, 0),
+        (failed, 87, 0),
+    ] {
+        let result = call("DispatchFixtureCompletion", &[output]);
+        assert_eq!(result.execution.final_state.get(Register::Rax), 1);
+        let memory = result.image.memory;
+        assert_eq!(memory.read_u64(output).unwrap(), id);
+        assert_eq!(memory.read_u32(output + 8).unwrap(), status);
+        assert_eq!(memory.read_u64(output + 16).unwrap(), expected_value);
+    }
+    assert_eq!(value("DispatchFixtureCompletion", &[output]), 0);
+}
+
+#[test]
 fn guest_winsock_lifecycle_balances_startup_and_invalidates_sockets() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let call = |symbol, args: &[u64]| {
