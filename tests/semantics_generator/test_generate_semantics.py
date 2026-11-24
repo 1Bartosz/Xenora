@@ -10,6 +10,8 @@ snapshot are only read, never edited. Run from the repository root:
 
 import copy
 import importlib.util
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -166,11 +168,34 @@ def snapshot():
                 ["VSRC1", data_format, "OPR_VGPR", 32, True, False, False, True],
             ],
         }
+    vop3 = {
+        "name": "ENC_VOP3",
+        "bits": 64,
+        "fields": [
+            ["VDST", [[0, 8]]], ["ABS", [[8, 3]]], ["OP_SEL", [[11, 4]]], ["CLAMP", [[15, 1]]],
+            ["OP", [[16, 10]]], ["ENCODING", [[26, 6]]], ["SRC0", [[32, 9]]], ["SRC1", [[41, 9]]],
+            ["SRC2", [[50, 9]]], ["OMOD", [[59, 2]]], ["NEG", [[61, 3]]],
+        ],
+        "identifier_mask": 0xFFFF0000,
+        "identifiers": [0xD4000000 | (op << 16) for op in (265, 273, 295)],
+    }
+    # Values copied from the AMD XML snapshot: VOP3 encodings of VOP2 forms.
+    for name, opcode, data_format in (
+        ("V_MUL_I32_I24", 265, I32), ("V_MIN_I32", 273, I32), ("V_SUBREV_NC_U32", 295, U32),
+    ):
+        variants[(name, "ENC_VOP3")] = {
+            "instruction": name, "encoding": "ENC_VOP3", "opcode": opcode,
+            "operands": [
+                ["VDST", data_format, "OPR_VGPR", 32, False, True, False, True],
+                ["SRC0", data_format, "OPR_SRC", 32, True, False, False, True],
+                ["SRC1", data_format, "OPR_SRC_NOLDS", 32, True, False, False, True],
+            ],
+        }
     return {
         "source": {"sha256": SHA},
         "encodings": {
             "ENC_SOP2": encoding, "ENC_SOPC": sopc, "ENC_SOP1": sop1, "ENC_VOP2": vop2,
-            "ENC_VOPC": vopc,
+            "ENC_VOPC": vopc, "ENC_VOP3": vop3,
         },
         "variants": variants,
     }
@@ -265,6 +290,25 @@ def vector_compares():
     return reg
 
 
+def variants():
+    reg = vectors()
+    rule = copy.deepcopy(gen.OPERAND_RULES["vop3_vgpr2"]["shape"])
+    rule["unsupported"] = sorted(gen.OPERAND_RULES["vop3_vgpr2"]["unsupported"])
+    reg["operand_rules"]["vop3_vgpr2"] = rule
+    reg["encoding_variant"] = [
+        _variant("V_MIN_I32", 273), _variant("V_SUBREV_NC_U32", 295),
+    ]
+    return reg
+
+
+def _variant(of, opcode):
+    return {
+        "of": of, "family": "VOP3", "opcode": opcode, "operands": "vop3_vgpr2",
+        "spec": [{"document": "guide", "section": "12.12", "page": 167}],
+        "verify": ["reference", "independent"],
+    }
+
+
 def compares():
     reg = registry()
     reg["form"] += [
@@ -326,6 +370,25 @@ class Validate(unittest.TestCase):
 
     def test_accepts_the_real_registry(self):
         self.assertEqual(gen.validate(gen.load_registry(), gen.load_snapshot()), [])
+
+    def test_a_reversed_shift_takes_its_count_from_src0(self):
+        # V_ASHRREV_I32: D = S1 >> S0[4:0]; the XML gives SRC0 FMT_NUM_U32 (the
+        # count) and VSRC1 FMT_NUM_I32. Without the declared reversed order the
+        # count check lands on VSRC1 and must fail.
+        reg = gen.load_registry()
+        form = next(f for f in reg["form"] if f["name"] == "V_ASHRREV_I32")
+        del form["source_order"]
+        errors = gen.validate(reg, gen.load_snapshot())
+        self.assertIn(
+            "V_ASHRREV_I32: control operand VSRC1 has XML format FMT_NUM_I32, not FMT_NUM_U32",
+            errors,
+        )
+
+    def test_rules_sharing_an_enum_render_it_once_with_each_forms_rule(self):
+        text = gen.render(gen.load_registry(), gen.load_snapshot())
+        self.assertEqual(text.count("pub enum VectorAluOp {"), 1)
+        self.assertIn("Self::AndB32 => OperandRule::Vop2Vgpr2,", text)
+        self.assertIn("Self::MinI32 => OperandRule::Vop2Vgpr,", text)
 
     # ---- top level ----
 
@@ -783,6 +846,155 @@ class Validate(unittest.TestCase):
         reg["documents"]["guide"]["file"] = "missing.pdf"
         self.rejects(reg, "document guide: differs from the pinned public document")
 
+    # ---- encoding variants ----
+
+    def test_accepts_encoding_variants(self):
+        self.assertEqual(self.errors(variants()), [])
+
+    def test_rejects_a_variant_of_an_undeclared_form(self):
+        reg = variants()
+        reg["encoding_variant"].append(_variant("V_MUL_HI_I32_I24", 266))
+        self.rejects(reg, "V_MUL_HI_I32_I24 (VOP3): encoding variant of an undeclared form")
+
+    def test_rejects_an_incomplete_or_unknown_variant_field(self):
+        reg = variants()
+        del reg["encoding_variant"][0]["spec"]
+        reg["encoding_variant"][1]["operation"] = "sub"
+        self.rejects(reg, "V_MIN_I32 (VOP3): incomplete encoding variant, missing ['spec']")
+        self.rejects(reg, "V_SUBREV_NC_U32 (VOP3): unknown keys ['operation']")
+
+    def test_rejects_a_variant_opcode_that_disagrees_with_the_xml(self):
+        reg = variants()
+        reg["encoding_variant"][0]["opcode"] = 265
+        self.rejects(reg, "V_MIN_I32: opcode 265 disagrees with the XML opcode 273")
+
+    def test_rejects_a_duplicate_variant_or_opcode(self):
+        reg = variants()
+        reg["encoding_variant"].append(_variant("V_MIN_I32", 273))
+        self.rejects(reg, "V_MIN_I32 (VOP3): duplicate encoding of V_MIN_I32")
+        self.rejects(reg, "V_MIN_I32 (VOP3): duplicate opcode ('VOP3', 273)")
+
+    def test_rejects_a_variant_in_its_forms_own_family(self):
+        reg = variants()
+        reg["encoding_variant"][0].update(family="VOP2", opcode=17, operands="vop2_vgpr")
+        self.rejects(reg, "V_MIN_I32 (VOP2): an encoding variant must use another family than its form")
+
+    def test_rejects_a_variant_rule_that_cannot_encode_the_form(self):
+        reg = variants()
+        reg["encoding_variant"][0]["operands"] = "sop2_sgpr"
+        self.rejects(reg, "V_MIN_I32 (VOP3): operand rule sop2_sgpr is for SOP2")
+        self.rejects(reg, "V_MIN_I32 (VOP3): operand rule sop2_sgpr cannot encode a vector form")
+
+    def test_rejects_a_form_that_uses_a_variant_only_rule(self):
+        reg = variants()
+        form(reg, "V_MIN_I32")["operands"] = "vop3_vgpr2"
+        self.rejects(reg, "V_MIN_I32: operand rule vop3_vgpr2 is only for encoding variants")
+
+    def test_checks_the_variant_xml_against_the_inherited_declaration(self):
+        snap = snapshot()
+        for row in snap["variants"][("V_MIN_I32", "ENC_VOP3")]["operands"]:
+            row[1] = U32
+        self.rejects(variants(), "V_MIN_I32: signedness signed contradicts XML format FMT_NUM_U32", snap)
+
+    def test_rejects_a_variant_destination_format_that_differs_from_the_form(self):
+        snap = snapshot()
+        snap["variants"][("V_MIN_I32", "ENC_VOP3")]["operands"][0][1] = "FMT_NUM_F32"
+        self.rejects(
+            variants(),
+            "V_MIN_I32 (VOP3): XML VDST format FMT_NUM_F32 differs from the form's VDST format FMT_NUM_I32",
+            snap,
+        )
+
+    def test_compares_variant_formats_by_role_not_row_order(self):
+        snap = snapshot()
+        # Give both encodings an unsigned destination and signed sources, then
+        # list the VOP3 rows in another order: by role they still match.
+        snap["variants"][("V_MIN_I32", "ENC_VOP2")]["operands"][0][1] = U32
+        rows = snap["variants"][("V_MIN_I32", "ENC_VOP3")]["operands"]
+        rows[0][1] = U32
+        rows[0], rows[1] = rows[1], rows[0]
+        self.assertEqual(self.errors(variants(), snap), [])
+        # A genuine mismatch on the second source is still reported by role.
+        rows[2][1] = U32
+        self.rejects(
+            variants(), "V_MIN_I32 (VOP3): XML SRC1 format FMT_NUM_U32 differs from the form's VSRC1", snap
+        )
+
+    def test_a_malformed_variant_rule_is_a_diagnostic(self):
+        for key, value in (("src", 1), ("dst", {"field": [], "class": "vgpr", "min": 0, "max": 255})):
+            with self.subTest(key=key):
+                reg = variants()
+                reg["operand_rules"]["vop3_vgpr2"][key] = value
+                self.rejects(
+                    reg, "operand rule vop3_vgpr2: declaration differs from the decoder's implemented rule"
+                )
+
+    def test_rejects_malformed_spec_and_verify_without_a_traceback(self):
+        cases = (
+            ("spec", 1, "spec must be a list of references"),
+            ("spec", [[]], "spec reference needs exactly document, section, page"),
+            ("spec", [{"document": [], "section": "1", "page": 1}], "spec document must be a name"),
+            ("verify", 1, "invalid verification requirements"),
+            ("verify", [[]], "invalid verification requirements"),
+        )
+        for key, value, fragment in cases:
+            with self.subTest(key=key, value=value):
+                reg = variants()
+                reg["encoding_variant"][0][key] = value
+                self.rejects(reg, fragment)
+        for key, value, fragment in cases:
+            with self.subTest(form=True, key=key, value=value):
+                reg = variants()
+                form(reg, "V_MIN_I32")[key] = value
+                expected = "verify must be a list of evidence names" if key == "verify" else fragment
+                self.rejects(reg, expected)
+
+    def test_rejects_malformed_variant_fields_without_a_traceback(self):
+        for key in ("of", "operands", "family"):
+            with self.subTest(key=key):
+                reg = variants()
+                reg["encoding_variant"][0][key] = []
+                self.rejects(reg, f"[{key!r}] must be strings")
+
+    def test_a_variant_of_an_incomplete_form_reports_the_form_not_a_traceback(self):
+        reg = variants()
+        base = next(f for f in reg["form"] if f["name"] == reg["encoding_variant"][0]["of"])
+        del base["width"]
+        errors = self.errors(reg)
+        self.assertTrue(any("missing ['width']" in error for error in errors), errors)
+        self.assertTrue(any("is incomplete" in error for error in errors), errors)
+
+    def test_a_variant_of_an_incomplete_first_duplicate_is_a_diagnostic(self):
+        reg = variants()
+        base = next(f for f in reg["form"] if f["name"] == reg["encoding_variant"][0]["of"])
+        incomplete = copy.deepcopy(base)
+        del incomplete["width"]
+        reg["form"].insert(reg["form"].index(base), incomplete)
+        errors = self.errors(reg)
+        self.assertTrue(any("missing ['width']" in error for error in errors), errors)
+
+    def test_a_non_array_or_non_table_variant_is_a_diagnostic(self):
+        reg = variants()
+        reg["encoding_variant"] = 1
+        self.rejects(reg, "encoding_variant must be an array of tables")
+        reg = variants()
+        reg["encoding_variant"].append(1)
+        self.rejects(reg, "must be a table, got 1")
+
+    def test_renders_variant_dispatch_and_rows(self):
+        text = gen.render(variants(), snapshot())
+        self.assertIn("pub enum VectorAluVop3Op {", text)
+        self.assertIn("pub const fn from_word(word: u32) -> Option<Self> {", text.split("pub enum VectorAluVop3Op", 1)[1])
+        self.assertIn("if word & 0xfc00_0000 != 0xd400_0000 {", text)
+        self.assertIn("273 => Some(Self::AddU32),", text)  # V_MIN_I32's variant name
+        self.assertIn("Self::AddU32 => VectorAluOp::AddU32,", text)
+        self.assertIn('Self::SubrevNcU32 => "v_subrev_nc_u32_e64",', text)
+        self.assertIn('("V_MIN_I32", EncodingFamily::Vop3),', text)
+        self.assertIn("operands: OperandRule::Vop3Vgpr2,", text)
+        # The VOP3 row inherits SUBREV's reversed sources.
+        row = text.split('name: "V_SUBREV_NC_U32",\n        family: EncodingFamily::Vop3,', 1)[1]
+        self.assertIn("swap_sources: true,", row.split("}", 1)[0])
+
     def test_rejects_an_unenforced_wave_restriction(self):
         reg = registry()
         reg["form"][0]["wave"] = "wave32"
@@ -1037,6 +1249,135 @@ class Render(unittest.TestCase):
         self.assertEqual(text, gen.RUST.read_text(encoding="utf-8"))
 
 
+class LoadRegistry(unittest.TestCase):
+    """The root file plus its per-family files merge into one registry."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        (self.dir / "rdna2").mkdir()
+
+    def write(self, root_extra, files):
+        (self.dir / "rdna2.toml").write_text(
+            "schema = 1\n" + root_extra, encoding="utf-8"
+        )
+        for name, text in files.items():
+            (self.dir / "rdna2" / name).write_text(text, encoding="utf-8")
+        return self.dir / "rdna2.toml"
+
+    RULE = '[operand_rules.{name}]\nfamily = "{family}"\n'
+    FORM = '[[form]]\nname = "{name}"\nfamily = "{family}"\n'
+
+    def fails(self, root, fragment):
+        with self.assertRaises(gen.RegistryError) as raised:
+            gen.load_registry(root)
+        self.assertIn(fragment, str(raised.exception))
+
+    def test_a_standalone_registry_needs_no_family_directory(self):
+        (self.dir / "rdna2").rmdir()
+        root = self.write('[[form]]\nname = "S_ADD_U32"\nfamily = "SOP2"\n', {})
+        self.assertEqual(gen.load_registry(root)["form"][0]["name"], "S_ADD_U32")
+        root.write_text("schema = 1\ninclude = []\n", encoding="utf-8")
+        self.assertEqual(gen.load_registry(root)["form"], [])
+
+    def test_a_malformed_variant_list_is_a_registry_error(self):
+        self.fails(self.write("encoding_variant = 1\n", {}), "encoding_variant must be an array")
+        root = self.write('include = ["rdna2/vop3.toml"]\n', {"vop3.toml": "encoding_variant = 1\n"})
+        self.fails(root, "vop3.toml: encoding_variant must be an array")
+
+    def test_the_real_split_registry_equals_one_concatenated_file(self):
+        registry = gen.load_registry()
+        self.assertNotIn("include", registry)
+        families = [form["family"] for form in registry["form"]]
+        # Each family is one contiguous run, in include order.
+        runs = [family for index, family in enumerate(families) if index == 0 or families[index - 1] != family]
+        self.assertEqual(len(runs), len(set(runs)))
+        declared = set(runs) | {variant["family"] for variant in registry.get("encoding_variant", [])}
+        for name, rule in registry["operand_rules"].items():
+            self.assertIn(rule["family"], declared, name)
+        # The whole merged result equals the files concatenated by hand: every
+        # form, rule and variant, in order, with nothing dropped or reordered.
+        import tomllib
+
+        with open(gen.REGISTRY, "rb") as handle:
+            expected = tomllib.load(handle)
+        includes = expected.pop("include")
+        expected.setdefault("operand_rules", {})
+        expected.setdefault("form", [])
+        for include in includes:
+            with open(gen.REGISTRY.parent / include, "rb") as handle:
+                part = tomllib.load(handle)
+            expected["operand_rules"].update(part.get("operand_rules", {}))
+            expected["form"] += part.get("form", [])
+            if "encoding_variant" in part:
+                expected.setdefault("encoding_variant", []).extend(part["encoding_variant"])
+        self.assertEqual(registry, expected)
+
+    def test_merges_family_files_in_include_order(self):
+        root = self.write('include = ["rdna2/vop2.toml", "rdna2/sop2.toml"]\n', {
+            "vop2.toml": self.RULE.format(name="v", family="VOP2") + self.FORM.format(name="B", family="VOP2"),
+            "sop2.toml": self.FORM.format(name="A", family="SOP2") + self.FORM.format(name="C", family="SOP2"),
+        })
+        registry = gen.load_registry(root)
+        self.assertEqual([form["name"] for form in registry["form"]], ["B", "A", "C"])
+        self.assertEqual(list(registry["operand_rules"]), ["v"])
+
+    def test_rejects_a_form_of_another_family(self):
+        root = self.write('include = ["rdna2/sop2.toml"]\n', {
+            "sop2.toml": self.FORM.format(name="V_X", family="VOP2"),
+        })
+        self.fails(root, "rdna2/sop2.toml: form V_X is not a SOP2 form")
+
+    def test_rejects_a_rule_of_another_family(self):
+        root = self.write('include = ["rdna2/sop2.toml"]\n', {
+            "sop2.toml": self.RULE.format(name="r", family="SOPC"),
+        })
+        self.fails(root, "rdna2/sop2.toml: operand rule r is not a SOP2 rule")
+
+    def test_rejects_a_rule_declared_in_two_files(self):
+        root = self.write('include = ["rdna2/sop2.toml", "rdna2/sop1.toml"]\n', {
+            "sop2.toml": self.RULE.format(name="r", family="SOP2"),
+            "sop1.toml": self.RULE.format(name="r", family="SOP1"),
+        })
+        self.fails(root, "rdna2/sop1.toml: operand rule r is declared twice")
+
+    def test_rejects_root_keys_in_a_family_file(self):
+        root = self.write('include = ["rdna2/sop2.toml"]\n', {"sop2.toml": "schema = 1\n"})
+        self.fails(root, "rdna2/sop2.toml: keys ['schema'] belong in the root file")
+
+    def test_rejects_includes_outside_the_family_directory(self):
+        for include in ("../sop2.toml", "./rdna2/sop2.toml", "other/sop2.toml", "rdna2/SOP2.toml",
+                        "rdna2/sub/sop2.toml"):
+            with self.subTest(include=include):
+                root = self.write(f'include = ["{include}"]\n', {"sop2.toml": ""})
+                self.fails(root, f"include {include!r} is not rdna2/<family>.toml")
+
+    def test_rejects_a_family_file_that_is_a_link(self):
+        outside = self.dir / "outside.toml"
+        outside.write_text("", encoding="utf-8")
+        (self.dir / "rdna2" / "sop2.toml").symlink_to(outside)
+        root = self.write('include = ["rdna2/sop2.toml"]\n', {})
+        self.fails(root, "included family file rdna2/sop2.toml is a link or outside rdna2/")
+
+    def test_rejects_a_linked_directory_or_a_hard_link_alias(self):
+        root = self.write('include = ["rdna2/sop2.toml", "rdna2/vop2.toml"]\n', {"sop2.toml": ""})
+        os.link(self.dir / "rdna2" / "sop2.toml", self.dir / "rdna2" / "vop2.toml")
+        self.fails(root, "included family file rdna2/vop2.toml is another name for an included file")
+        outside = self.dir / "outside"
+        (self.dir / "rdna2").rename(outside)
+        (self.dir / "rdna2").symlink_to(outside, target_is_directory=True)
+        self.fails(root, "the family directory rdna2/ is a link")
+        (self.dir / "rdna2").unlink()
+        (self.dir / "rdna2").symlink_to(self.dir / "rdna2", target_is_directory=True)
+        self.fails(root, "the family directory rdna2/ is a link")
+
+    def test_rejects_a_missing_or_repeated_include(self):
+        self.fails(self.write('include = ["rdna2/sop2.toml"]\n', {}), "included family file rdna2/sop2.toml does not exist")
+        root = self.write('include = ["rdna2/sop2.toml", "rdna2/sop2.toml"]\n', {"sop2.toml": ""})
+        self.fails(root, "a family file is included twice")
+
+
 class CommandLine(unittest.TestCase):
     def run_cli(self, *arguments):
         return subprocess.run(
@@ -1072,6 +1413,7 @@ class CommandLine(unittest.TestCase):
 
     def test_invalid_registry_fails_every_mode_without_writing(self):
         bad = self.dir / "rdna2.toml"
+        shutil.copytree(gen.REGISTRY.parent / "rdna2", self.dir / "rdna2")
         text = gen.REGISTRY.read_text(encoding="utf-8")
         bad.write_text(text.replace("\nschema = 1\n", "\nschema = 2\n", 1), encoding="utf-8")
         output = self.dir / "out.rs"

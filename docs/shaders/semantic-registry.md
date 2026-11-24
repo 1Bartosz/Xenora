@@ -12,7 +12,8 @@ The registry covers the nine SOP2 forms listed in [SOP2 scalar ALU](scalar-alu.m
 
 | File | Role |
 | --- | --- |
-| `crates/isa/semantics/rdna2.toml` | The registry. Data only: every value comes from a closed vocabulary. |
+| `crates/isa/semantics/rdna2.toml` | The registry root: schema, architecture, the snapshot hash, the cited documents and the ordered `include` list of family files. |
+| `crates/isa/semantics/rdna2/<family>.toml` | One file per encoding family (`sop2.toml`, `sopc.toml`, `sop1.toml`, `vop2.toml`, `vopc.toml`, `vop3.toml`): that family's operand rules, forms and encoding variants only. Data only: every value comes from a closed vocabulary. |
 | `crates/isa/generate_semantics.py` | Validates the registry and writes the Rust tables. Python 3.11 or newer, standard library only. |
 | `crates/isa/data/rdna2.jsonl` | Pinned snapshot of the AMD machine-readable ISA XML, used to cross-check identity and operands. |
 | `crates/isa/src/semantics_gen.rs` | Generated output. Never edit it by hand. |
@@ -20,9 +21,65 @@ The registry covers the nine SOP2 forms listed in [SOP2 scalar ALU](scalar-alu.m
 | `crates/isa/src/primitive.rs` | The shared integer primitives that the generated `evaluate` calls. |
 | `tests/semantics_generator/` | Unit tests for the generator. |
 
+## Family files
+
+The root lists its family files under `include`. The generator merges them in
+that order, and forms keep their order within each file, so the merged registry
+equals one file with the parts concatenated (splitting the original single file
+left `semantics_gen.rs` byte-identical). A family file may hold only
+`[operand_rules.*]`, `[[form]]` and `[[encoding_variant]]` entries of the family
+it is named after: `rdna2/vop2.toml` holds VOP2 rules and forms and nothing else.
+Each include must be `rdna2/<lower-case family>.toml`, a regular file in that directory (not a link). The loader rejects a form,
+rule or variant of another family, a rule declared in two files, root keys in a
+family file, any other include path, and a missing or repeated include. The
+coverage report and the RDNA2 planner use the same loader. Work on different
+families therefore never edits the same registry file. To add a family, create
+`rdna2/<family>.toml` and append it to `include`; the generated order (and so
+the generated file) changes only where the new file is placed.
+
+## Encoding variants
+
+An `[[encoding_variant]]` is another encoding of a form that is already declared,
+such as the VOP3 (`_e64`) encoding of a VOP2 form. It is pure data in the family
+file of its encoding (`rdna2/vop3.toml`) and has exactly these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `of` | The `name` of the declared base form |
+| `family` | The encoding family of this variant; must differ from the form's |
+| `opcode` | The XML opcode in that family |
+| `operands` | An operand rule of that family whose kind can encode the base form (today `vop3_vgpr2` for VOP2 vector forms) |
+| `spec`, `verify` | As for a form |
+
+Everything else (operation, signedness, effects, source order) is inherited
+from the base form, and the XML check runs on that inherited declaration with
+the variant's family, opcode and operand rule, so the VOP3 operand widths and
+formats must agree with it. The generator emits one enum per variant rule (`VectorAluVop3Op` for
+`vop3_vgpr2`) holding exactly the declared variants, with `from_word` (encoding
+bits, then an explicit match on the OP field), `base()` (the inherited form),
+`assembly_name()` and `semantics()`, and one `FORMS` row per variant after the
+forms. Because the enum has no undeclared members, an instruction cannot name a
+VOP3 encoding that does not exist. Every explicit XML operand of the variant,
+destination included, must have the data format of the base operand in the same
+role (destination, then the sources in rule order). A variant-only rule says so
+in the data (`variant_only = true`), so the RDNA2 planner does not count it as a
+rule that can host new forms. A
+variant-only rule (one marked `variant_of` in the generator) cannot be used by a
+form. The validator rejects a variant of an undeclared form, one in the form's
+own family, a duplicate encoding of a form or a duplicate `(family, opcode)`, a
+rule that cannot encode the form, missing or unknown fields, and any XML
+disagreement.
+
+`vop3_vgpr2` is the subset the decoder accepted for `v_add_nc_u32_e64` before
+the registry: VGPR destination, two VGPR sources, ABS, OP_SEL, CLAMP, OMOD and
+NEG clear, and SRC2 the assembler's unused inline zero. `v_add_nc_u32_e64` is its
+first variant; adding the VOP3 encoding of another VOP2 form under this rule is
+one `[[encoding_variant]]` entry. Wider VOP3 operand rules (scalar and inline
+sources, legal modifiers) come with the VOP3 batch.
+
 ## Fields
 
-The top of the file holds:
+The root file holds:
 
 - `schema`: must be `1`.
 - `architecture`: must be `"gfx1030"`.
@@ -33,12 +90,13 @@ The top of the file holds:
   `guide` (the AMD RDNA 2 ISA reference guide) and `xml` (the AMD
   machine-readable ISA) are allowed, and each must match the title and file
   pinned in the generator, so a citation cannot point at another file.
-- `[operand_rules.<name>]`: an operand rule shared by a whole family. The
-  decoder implements each rule once, and the generator only accepts a rule
-  whose declaration matches the decoder's implementation exactly. Today there
-  is one rule, `sop2_sgpr`: an SGPR destination `s0`-`s105`, two scalar sources
+- `[operand_rules.<name>]`: an operand rule of one family, shared by its forms.
+  The decoder implements each rule once, and the generator only accepts a rule
+  whose declaration matches the decoder's implementation exactly. A family may
+  have several rules (VOP2 has `vop2_vgpr` and the VGPR-only `vop2_vgpr2`). For
+  example `sop2_sgpr` is an SGPR destination `s0`-`s105`, two scalar sources
   (an SGPR, an inline integer -16 to 64, or a literal word) and at most one
-  literal. Its `unsupported` list names the encodings the rule rejects, which
+  literal. A rule's `unsupported` list names the encodings it rejects, which
   stay unsupported instead of being guessed. The list must name exactly the
   encodings the decoder rejects.
 
@@ -59,7 +117,7 @@ error.
 | `relation` | Compares only: the relation tested with S0 on the left | `eq`, `lg` (not equal), `gt`, `ge`, `lt`, `le`; required for `compare`, rejected elsewhere |
 | `source_order` | Vector forms only: `reversed` when the guide computes `op(S1, S0)` (the XML records no operand order); absent otherwise | `reversed` |
 | `shift_amount` | `lshl_add` only: the fixed left shift of S0 before the add | `1` to `4`; required for `lshl_add`, rejected elsewhere |
-| `shift_count_bits` | Shifts only: the low bits of S1 used as the count. The generator masks S1 with it, and the XML must list S1 as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
+| `shift_count_bits` | Shifts only: the low bits of the count source used as the count: S1, or S0 for a vector form with `source_order = "reversed"`. Scalar forms mask it in the generated evaluation, vector forms in their MSL template; the XML must list the count source as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
 | `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `relation` (SOPC compares only), `selected_src0` (min and max: S0 won the strict compare, so a tie gives 0), `unchanged` |
 | `vcc`, `exec` | Effect on VCC and EXEC, stated rather than implied | `unchanged`; `vcc` is `lane_mask` exactly for the VOPC compares (VCC_LO bit n = EXEC[n] & test, fully written; VCC_HI unknown afterwards, see [vector-compare.md](vector-compare.md)); `exec` must be `unchanged` (no EXEC-writing contract yet) |
 | `wave` | Wave sizes the form is valid in | `wave32` exactly for the VOPC compares (their one entry point is the Wave32 compute fixture ABI, vector-compare.md section 2), `any` for everything else; the decoder has no wave-size input, so no other form may claim `wave32` |
@@ -94,7 +152,9 @@ fixes the `scc` value:
 | `lshl_add` / `unsigned` | `carry_out` | `lshl_add_carry_u32` (with `shift_amount`) | no |
 | `compare` / `signed` or `unsigned` | `relation` | `eq_b32`, `ne_b32` (for both signednesses), `gt_i32`/`gt_u32`, `ge_*`, `lt_*`, `le_*` | no |
 
-Vector forms (operand rule `vop2_vgpr`, kind `vector`) use a separate table:
+Vector forms (operand rules `vop2_vgpr` and `vop2_vgpr2`, kind `vector`; both
+generate the one `VectorAluOp` enum, whose `operand_rule()` tells the decoder
+which rule a form uses) use a separate table:
 the pair picks the per-lane `VectorBinary` the MSL lowering uses, and `scc`
 must be `unchanged` (VOP2 integer forms write no SCC, VCC or EXEC):
 
@@ -104,6 +164,15 @@ must be `unchanged` (VOP2 integer forms write no SCC, VCC or EXEC):
 | `xnor` / `bitwise` | `Xnor` |
 | `min`, `max` / `signed` or `unsigned` | `MinSigned`, `MinUnsigned`, `MaxSigned`, `MaxUnsigned` |
 | `mul24`, `mul_hi24` / `signed` or `unsigned` | `Mul24Signed`, `Mul24Unsigned`, `MulHi24Signed`, `MulHi24Unsigned` |
+| `and`, `or`, `xor` / `bitwise` | `And`, `Or`, `Xor` |
+| `lshl`, `lshr` / `bitwise`, `ashr` / `signed` (with `shift_count_bits = 5`) | `ShiftLeft`, `ShiftRight`, `ArithmeticShiftRight` |
+
+`vop2_vgpr2` is the VGPR-only subset (SRC0 256-511) that the hand-written decoder
+accepted for `v_and_b32`, `v_or_b32`, `v_xor_b32`, `v_lshlrev_b32`, `v_lshrrev_b32`
+and `v_ashrrev_i32` before they moved into the registry (#215 M27); widening them
+to `vop2_vgpr` would be a behaviour change and needs its own oracle. The three
+shifts declare `source_order = "reversed"` (D = S1 shifted by S0[4:0]), so the
+generator checks the XML's unsigned count format on SRC0, not VSRC1.
 
 VOPC compares (operand rule `vopc_vcc`, kind `vector_compare`: SRC0 a
 `vector_source` as for VOP2, VSRC1 a VGPR, destination implicitly `vcc_lo`)

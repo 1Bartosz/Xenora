@@ -67,6 +67,7 @@ class Inventory:
 # Planning does not claim or edit these paths.
 DEFAULT_PERMITTED_FILES = (
     "crates/isa/semantics/rdna2.toml",
+    "crates/isa/semantics/rdna2/",
     "crates/isa/src/semantics_gen.rs",
     "crates/decoder/src/lib.rs",
     "crates/shader/",
@@ -87,7 +88,8 @@ DEFAULT_ACCEPTANCE = (
 def load_inventories(root: Path) -> dict[str, Any]:
     sc = _load_coverage_module(root)
     identified = sc["load_snapshot"](root)
-    registry = tomllib.loads((root / sc["REGISTRY"]).read_text(encoding="utf-8"))
+    # The root registry includes per-family files; merge them as the coverage report does.
+    registry = sc["load_registry"](root / sc["REGISTRY"])
     decoder = sc["parse_decoder"]((root / sc["DECODER"]).read_text(encoding="utf-8"))
     generated = sc["parse_generated"]((root / sc["GENERATED"]).read_text(encoding="utf-8"))
     decoder_forms = set(decoder) | set(generated)
@@ -198,6 +200,12 @@ def classify_unsupported(
     registry = data["registry"]
     rules = data["rules"]
     ops = _declared_ops(registry)
+    # A rule declared `variant_only` re-encodes declared forms (for example the
+    # VOP3 encoding of a VOP2 form) and cannot host a new form of its family.
+    variant_only_rules = {
+        name for name, rule in registry.get("operand_rules", {}).items()
+        if isinstance(rule, dict) and rule.get("variant_only") is True
+    }
     family_widths: dict[str, set[int]] = defaultdict(set)
     family_types: dict[str, set[str]] = defaultdict(set)
     for form in registry.get("form", []):
@@ -219,7 +227,9 @@ def classify_unsupported(
             continue
         opcode = identified[(family, name)]
         reusable = sorted(op for op in ops if op)
-        family_rule_names = [n for n, (fam, _) in rules.items() if fam == family]
+        family_rule_names = [
+            n for n, (fam, _) in rules.items() if fam == family and n not in variant_only_rules
+        ]
         missing_rules = []
         if not family_rule_names:
             missing_rules.append(f"no operand_rules for family {family}")

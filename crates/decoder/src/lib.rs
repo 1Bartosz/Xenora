@@ -4,18 +4,18 @@ use std::fmt;
 
 pub use xenora_isa::{
     Architecture, CompareRelation, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp,
-    ScalarCompareOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorCompareOp, VectorSource,
+    ScalarCompareOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp,
+    VectorSource,
 };
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
     S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32,
-    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
-    V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32, VCC_LO,
+    V_INTERP_P1_F32, V_INTERP_P2_F32, V_MOV_B32, V_MUL_F32, VCC_LO,
 };
 
 use xenora_isa::meta::EncodingFamily;
-use xenora_isa::semantics::FORM_IDS;
 pub use xenora_isa::semantics::VectorBinary;
+use xenora_isa::semantics::{FORM_IDS, OperandRule};
 
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
 /// operand combination: the hand-written forms below followed by every form of
@@ -40,7 +40,7 @@ const fn concat_forms<const N: usize>() -> [(&'static str, EncodingFamily); N] {
 }
 
 /// Decoded forms not yet described by the semantic registry.
-const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 24] = [
+const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 17] = [
     ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
     ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
     ("EXP", EncodingFamily::Exp),
@@ -54,17 +54,10 @@ const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 24] = [
     ("S_WAITCNT", EncodingFamily::Sopp),
     ("S_WAITCNT_VSCNT", EncodingFamily::Sopk),
     ("V_ADD_F32", EncodingFamily::Vop2),
-    ("V_ADD_NC_U32", EncodingFamily::Vop3),
-    ("V_AND_B32", EncodingFamily::Vop2),
-    ("V_ASHRREV_I32", EncodingFamily::Vop2),
     ("V_INTERP_P1_F32", EncodingFamily::Vintrp),
     ("V_INTERP_P2_F32", EncodingFamily::Vintrp),
-    ("V_LSHLREV_B32", EncodingFamily::Vop2),
-    ("V_LSHRREV_B32", EncodingFamily::Vop2),
     ("V_MOV_B32", EncodingFamily::Vop1),
     ("V_MUL_F32", EncodingFamily::Vop2),
-    ("V_OR_B32", EncodingFamily::Vop2),
-    ("V_XOR_B32", EncodingFamily::Vop2),
 ];
 
 /// A successfully decoded instruction and its location in the input stream.
@@ -327,10 +320,9 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     if let Some(op) = VectorCompareOp::from_word(first) {
         return vector_compare(op, first, bytes);
     }
-    if V_ADD_NC_U32.matches(first) {
-        let len = V_ADD_NC_U32.byte_len();
-        let second = word(bytes, len)?;
-        return Ok((add_u32(first, second)?, len));
+    if let Some(op) = VectorAluVop3Op::from_word(first) {
+        let second = word(bytes, 8)?;
+        return Ok((vop3_vgpr2(op, first, second)?, 8));
     }
     if S_MOV_B32.matches(first) {
         let dst = ((first >> 16) & 0x7f) as u8;
@@ -402,7 +394,14 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         // VOP2: SRC0 in bits 0-8, VSRC1 in bits 9-16, VDST in bits 17-24.
         let dst = ((first >> 17) & 0xff) as u8;
         let src1 = ((first >> 9) & 0xff) as u8;
-        let (src0, len) = vector_src0(first, bytes, op.assembly_name())?;
+        let (src0, len) = match op.operand_rule() {
+            // Operand rule `vop2_vgpr2`: SRC0 must select a VGPR (256-511).
+            OperandRule::Vop2Vgpr2 => {
+                let (_, src0, _) = vop2_registers(first, op.assembly_name())?;
+                (VectorSource::Register(src0), 4)
+            }
+            _ => vector_src0(first, bytes, op.assembly_name())?,
+        };
         return Ok((
             Instruction::VectorAlu {
                 op,
@@ -411,48 +410,6 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
                 src1,
             },
             len,
-        ));
-    }
-    if V_LSHLREV_B32.matches(first) {
-        let (dst, src0, src1) = vop2_registers(first, "v_lshlrev_b32_e32")?;
-        return Ok((
-            Instruction::VectorLshlrevB32 { dst, src0, src1 },
-            V_LSHLREV_B32.byte_len(),
-        ));
-    }
-    if V_ASHRREV_I32.matches(first) {
-        let (dst, src0, src1) = vop2_registers(first, "v_ashrrev_i32_e32")?;
-        return Ok((
-            Instruction::VectorAshrrevI32 { dst, src0, src1 },
-            V_ASHRREV_I32.byte_len(),
-        ));
-    }
-    if V_LSHRREV_B32.matches(first) {
-        let (dst, src0, src1) = vop2_registers(first, "v_lshrrev_b32_e32")?;
-        return Ok((
-            Instruction::VectorLshrrevB32 { dst, src0, src1 },
-            V_LSHRREV_B32.byte_len(),
-        ));
-    }
-    if V_AND_B32.matches(first) {
-        let (dst, src0, src1) = vop2_registers(first, "v_and_b32_e32")?;
-        return Ok((
-            Instruction::VectorAndB32 { dst, src0, src1 },
-            V_AND_B32.byte_len(),
-        ));
-    }
-    if V_OR_B32.matches(first) {
-        let (dst, src0, src1) = vop2_registers(first, "v_or_b32_e32")?;
-        return Ok((
-            Instruction::VectorOrB32 { dst, src0, src1 },
-            V_OR_B32.byte_len(),
-        ));
-    }
-    if V_XOR_B32.matches(first) {
-        let (dst, src0, src1) = vop2_registers(first, "v_xor_b32_e32")?;
-        return Ok((
-            Instruction::VectorXorB32 { dst, src0, src1 },
-            V_XOR_B32.byte_len(),
         ));
     }
     if V_ADD_F32.matches(first) {
@@ -747,18 +704,25 @@ fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKi
     Ok((Instruction::MoveB32 { dst, src }, len))
 }
 
-fn add_u32(first: u32, second: u32) -> Result<Instruction, DecodeErrorKind> {
+/// Operand rule `vop3_vgpr2`: VDST in bits 0-7 of the first word, SRC0 and SRC1
+/// in bits 0-8 and 9-17 of the second (RDNA 2 ISA section 13.3.4, VOP3A). Both sources
+/// are VGPRs, ABS, OP_SEL, CLAMP, OMOD and NEG are clear, and the unused SRC2 is
+/// the gfx1030 assembler's inline-zero operand encoding.
+fn vop3_vgpr2(
+    op: VectorAluVop3Op,
+    first: u32,
+    second: u32,
+) -> Result<Instruction, DecodeErrorKind> {
     let src0 = second & 0x1ff;
     let src1 = (second >> 9) & 0x1ff;
-    // All output and input modifiers are clear. The unused third source uses
-    // the gfx1030 assembler's inline-zero operand encoding.
     if first & 0xff00 != 0 || second >> 18 != 128 || src0 < 256 || src1 < 256 {
         return Err(unsupported(
-            "v_add_nc_u32_e64",
+            op.assembly_name(),
             "expected two VGPR sources and no modifiers",
         ));
     }
-    Ok(Instruction::AddNoCarryU32 {
+    Ok(Instruction::VectorAluVop3 {
+        op,
         dst: first as u8,
         src0: src0 as u8,
         src1: src1 as u8,

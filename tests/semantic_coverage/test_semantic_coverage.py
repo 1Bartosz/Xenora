@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from audit import semantic_coverage as coverage
 
@@ -66,6 +68,11 @@ class SemanticCoverageTests(unittest.TestCase):
         # S_ADD_U32 is declared in the registry but absent from the compiled tables.
         self.assertEqual(self.counts()["Decoder-supported"], 1)
 
+    def test_a_variant_without_its_form_is_an_error_not_a_traceback(self):
+        self.registry["encoding_variant"] = [{"family": "VOP3", "opcode": 1, "operands": "x"}]
+        with self.assertRaisesRegex(ValueError, "every encoding_variant needs"):
+            coverage.read_declarations(self.registry, self.identified)
+
     def test_generated_table_parser(self):
         source = (
             "pub const FORM_IDS: [(&str, EncodingFamily); 1] = [\n"
@@ -111,6 +118,24 @@ class SemanticCoverageTests(unittest.TestCase):
         ), {("SOP2", "S_ADD_U32")})
         with self.assertRaisesRegex(ValueError, "unrecognized SEMANTIC_FORMS entry"):
             coverage.parse_decoder(f"{header}\n    unknown!(),\n];")
+
+
+class RegistryLoading(unittest.TestCase):
+    def test_family_file_guards_apply_to_the_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "rdna2.toml"
+            (Path(tmp) / "rdna2").mkdir()
+            root.write_text('schema = 1\ninclude = ["rdna2/sop2.toml"]\n', encoding="utf-8")
+            (Path(tmp) / "rdna2" / "sop2.toml").write_text(
+                '[[form]]\nname = "V_X"\nfamily = "VOP2"\n', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "form V_X is not a SOP2 form"):
+                coverage.load_registry(root)
+
+    def test_loads_the_real_split_registry(self):
+        registry = coverage.load_registry(coverage.ROOT / coverage.REGISTRY)
+        self.assertNotIn("include", registry)
+        self.assertGreater(len(registry["form"]), 0)
 
 
 if __name__ == "__main__":

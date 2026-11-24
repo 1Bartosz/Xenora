@@ -119,6 +119,18 @@ pub enum VectorBinary {
     MulHi24Signed,
     /// Bits 63:32 of `a[23:0] * b[23:0]`.
     MulHi24Unsigned,
+    /// `a & b`.
+    And,
+    /// `a | b`.
+    Or,
+    /// `a ^ b`.
+    Xor,
+    /// `a << (b & 31)`.
+    ShiftLeft,
+    /// Logical `a >> (b & 31)`.
+    ShiftRight,
+    /// Arithmetic (sign-filling) `a >> (b & 31)`.
+    ArithmeticShiftRight,
 }
 
 /// How the operands are interpreted. `Bitwise` exactly when the operation is logical.
@@ -196,10 +208,17 @@ pub enum OperandRule {
     /// s0-s105, `vcc_lo`, an inline integer -16..64 or a literal word; VSRC1 is a
     /// VGPR. Everything else is rejected as unsupported.
     VopcVcc,
+    /// VOP3 encoding of a VOP2 vector form: VDST is v0-v255, SRC0 and SRC1 are
+    /// VGPRs, no input or output modifiers, SRC2 unused. Everything else is
+    /// rejected as unsupported.
+    Vop3Vgpr2,
     /// VOP2 vector: VDST is v0-v255; SRC0 is a VGPR, s0-s105, `vcc_lo`, an inline
     /// integer -16..64 or a literal word; VSRC1 is a VGPR. Everything else is
     /// rejected as unsupported.
     Vop2Vgpr,
+    /// VOP2 vector, VGPR sources only: VDST is v0-v255; SRC0 and VSRC1 are VGPRs.
+    /// Everything else (SGPR, inline, literal SRC0) is rejected as unsupported.
+    Vop2Vgpr2,
 }
 
 /// Evidence a form needs before it counts as verified.
