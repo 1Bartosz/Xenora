@@ -754,6 +754,18 @@ if CommandLine.arguments.contains("--smoke-resources") {
 }
 
 // `--smoke-audio-vfs` tests VFS asset loading, PCM audio streaming, and Metal texture presentation.
+if CommandLine.arguments.contains("--smoke-audio-mix") {
+    do {
+        let result = try measureAudioMixFixture()
+        print("smoke-audio-mix: frames=\(result.frames) mean=\(result.mean) toneAmplitude=\(result.toneAmplitude)")
+        exit(result.frames == 4_800 && abs(result.mean - 0.125) < 0.005
+             && abs(result.toneAmplitude - 0.25) < 0.005 ? 0 : 1)
+    } catch {
+        print("smoke-audio-mix: \(error)")
+        exit(1)
+    }
+}
+
 if CommandLine.arguments.contains("--list-audio-outputs") {
     do {
         let devices = try audioOutputDevices()
