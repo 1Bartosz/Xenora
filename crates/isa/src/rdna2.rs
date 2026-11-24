@@ -50,6 +50,41 @@ pub const S_CMP_EQ_U32: Opcode = Opcode {
     bits: 0xbf060000,
     bytes: 4,
 };
+pub const S_ADD_U32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x80000000,
+    bytes: 4,
+};
+pub const S_SUB_U32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x80800000,
+    bytes: 4,
+};
+pub const S_ADDC_U32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x82000000,
+    bytes: 4,
+};
+pub const S_SUBB_U32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x82800000,
+    bytes: 4,
+};
+pub const S_AND_B32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x87000000,
+    bytes: 4,
+};
+pub const S_OR_B32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x88000000,
+    bytes: 4,
+};
+pub const S_XOR_B32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x89000000,
+    bytes: 4,
+};
 pub const S_CBRANCH_SCC0: Opcode = Opcode {
     mask: 0xffff0000,
     bits: 0xbf840000,

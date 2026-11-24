@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use xenora_decoder::{
-    Architecture, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction, ScalarSource,
-    VectorSource, decode, decode_at,
+    Architecture, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction, ScalarAluOp,
+    ScalarSource, VectorSource, decode, decode_at,
 };
-use xenora_ref::{BranchCondition, Op, Source, VectorAlu};
+use xenora_ref::{BranchCondition, Op, ScalarAlu, Source, VectorAlu};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
 const BITWISE_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/bitwise-branch.bin");
@@ -97,7 +97,7 @@ fn rejects_other_opcodes_and_noncanonical_operands() {
         (&[0xe070_2000, 0x801b_0100], "buffer_store_dword"),
         (&[0xbf8c_3f71], "s_waitcnt"),
         (&[0xbbfd_0001], "s_waitcnt_vscnt"),
-        (&[0x7e04_0200], "v_mov_b32_e32"),
+        (&[0x7e04_026a], "v_mov_b32_e32"), // VCC_LO is outside the SGPR subset.
         (&[0x7e04_02fa, 0], "v_mov_b32_e32"),
         (&[0xd525_8001, 0x0202_0501], "v_add_nc_u32_e64"),
         (&[0xd525_0001, 0x0202_0480], "v_add_nc_u32_e64"),
@@ -281,6 +281,7 @@ fn reference_source(vector: VectorSource) -> Source {
     match vector {
         VectorSource::Register(reg) => Source::Register(reg),
         VectorSource::Immediate(bits) => Source::Immediate(bits),
+        VectorSource::Scalar(_) => unreachable!("mapped to Op::MoveScalar"),
     }
 }
 
@@ -313,7 +314,30 @@ fn reference_op(instruction: Instruction) -> Op {
         },
         Instruction::WaitLoad => Op::WaitRead,
         Instruction::WaitStore => Op::WaitWrite,
+        Instruction::MoveB32 {
+            dst,
+            src: VectorSource::Scalar(src),
+        } => Op::MoveScalar(dst, src),
         Instruction::MoveB32 { dst, src } => Op::Move(dst, reference_source(src)),
+        Instruction::ScalarAlu {
+            op,
+            dst,
+            src0,
+            src1,
+        } => Op::Scalar(
+            match op {
+                ScalarAluOp::AddU32 => ScalarAlu::Add,
+                ScalarAluOp::SubU32 => ScalarAlu::Subtract,
+                ScalarAluOp::AddcU32 => ScalarAlu::AddWithCarry,
+                ScalarAluOp::SubbU32 => ScalarAlu::SubtractWithBorrow,
+                ScalarAluOp::AndB32 => ScalarAlu::And,
+                ScalarAluOp::OrB32 => ScalarAlu::Or,
+                ScalarAluOp::XorB32 => ScalarAlu::Xor,
+            },
+            dst,
+            reference_scalar(src0),
+            reference_scalar(src1),
+        ),
         Instruction::AddNoCarryU32 { dst, src0, src1 } => Op::Add(dst, src0, src1),
         Instruction::ScalarMoveB32 { dst, src } => Op::ScalarMove(dst, reference_scalar(src)),
         Instruction::ScalarCompareEqU32 { src0, src1 } => {
@@ -383,12 +407,13 @@ fn compares_fixture_instructions_against_llvm() {
         OR_FIXTURE,
         SHIFT_FIXTURE,
         include_bytes!("../../../fixtures/rdna2/ashr.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-alu.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 21, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 28, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -433,6 +458,18 @@ fn assemble_matrix() -> Vec<u8> {
         v_mov_b32_e32 v255, lit(0x1)
         s_mov_b32 s105, lit(0x1)
         s_cmp_eq_u32 s105, lit(0x1)
+        s_add_u32 s105, s104, 0xdeadbeef
+        s_add_u32 s8, -16, 64
+        s_sub_u32 s105, s1, s2
+        s_sub_u32 s9, 0xdeadbeef, -16
+        s_addc_u32 s104, 0xdeadbeef, s105
+        s_subb_u32 s0, s0, s0
+        s_and_b32 s1, -1, s2
+        s_or_b32 s103, s3, 0x80000000
+        s_xor_b32 s102, s104, -16
+        s_xor_b32 s7, s7, lit(0x1)
+        v_mov_b32_e32 v255, s105
+        v_mov_b32_e32 v0, s0
     ",
     );
     use std::fmt::Write as _;
@@ -440,6 +477,7 @@ fn assemble_matrix() -> Vec<u8> {
         writeln!(assembly, "v_mov_b32_e32 v255, {value}").unwrap();
         writeln!(assembly, "s_mov_b32 s105, {value}").unwrap();
         writeln!(assembly, "s_cmp_eq_u32 {value}, {value}").unwrap();
+        writeln!(assembly, "s_add_u32 s10, {value}, s11").unwrap();
     }
     assembly.push_str("s_endpgm\n");
     let output = llvm_mc(&[], assembly.as_bytes());
@@ -563,7 +601,15 @@ fn distinguishes_llvm_invalid_encodings_from_xenora_subset_rejections() {
         &[0xd516_0001],
     ];
     let outside_subset: &[&[u32]] = &[
-        &[0x7e04_0200],                                        // VOP1 SGPR source
+        &[0x7e04_026a],                                        // VOP1 VCC_LO source
+        &[0x8108_0908],                                        // s_add_i32: SCC rule not pinned
+        &[0x8188_0908],                                        // s_sub_i32: SCC rule not pinned
+        &[0x8788_0908],                                        // s_and_b64
+        &[0x8008_ffff, 0x1234_5678],                           // SOP2 with two literal sources
+        &[0x806c_0908],                                        // SOP2 TTMP destination
+        &[0x807e_0908],                                        // SOP2 EXEC_LO destination
+        &[0x806a_0908],                                        // SOP2 VCC_LO destination
+        &[0x8008_096a],                                        // SOP2 VCC_LO source
         &[0x3803_fe80],                                        // OR with an inline SRC0
         &[0x3803_fe08],                                        // OR with an SGPR SRC0
         &[0x3803_feff, 0xdead_beef],                           // OR with a literal SRC0
@@ -650,6 +696,18 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
                 None => operand.to_owned(),
             };
             format!("{mnemonic} {}, {}", scalar(left), scalar(right))
+        }
+        "s_add_u32" | "s_sub_u32" | "s_addc_u32" | "s_subb_u32" | "s_and_b32" | "s_or_b32"
+        | "s_xor_b32" => {
+            let scalar = |operand: &str| match literal_bits(operand) {
+                Some(bits) => match bits as i32 {
+                    inline @ -16..=64 => inline.to_string(),
+                    _ => format!("0x{bits:x}"),
+                },
+                None => operand.to_owned(),
+            };
+            let operands: Vec<_> = operands.split(", ").map(scalar).collect();
+            format!("{mnemonic} {}", operands.join(", "))
         }
         _ => assembly.to_owned(),
     }
