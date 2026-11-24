@@ -38,6 +38,7 @@ fn test_manifest_and_codegen_pipeline() {
     let csv_content = r#""module","symbol_or_ordinal","iat_rva"
 "api-ms-win-crt-math-l1-1-0.dll","acos",0x1000
 "api-ms-win-crt-string-l1-1-0.dll","tolower",0x1008
+"API-MS-WIN-CRT-STRING-L1-1-0.DLL","tolower",0x1048
 "api-ms-win-core-processthreads-l1-1-0.dll","CreateThread",0x1010
 "custom.dll","UnknownCustomFunc",0x1018
 "kernel32.dll","QueryPerformanceCounter",0x1020
@@ -53,27 +54,34 @@ fn test_manifest_and_codegen_pipeline() {
     std::fs::write(&csv_file, csv_content).unwrap();
 
     let records = parse_csv(csv_file.to_str().unwrap()).unwrap();
-    assert_eq!(records.len(), 9);
+    assert_eq!(records.len(), 10);
 
     let db = SymbolDb::builtin();
     let manifest = Manifest::build(&records, &db);
     let summary = manifest.summary();
 
-    assert_eq!(*summary.get("crt-native").unwrap_or(&0), 2);
+    assert_eq!(*summary.get("crt-native").unwrap_or(&0), 3);
     assert_eq!(*summary.get("win32-stub").unwrap_or(&0), 1);
     assert_eq!(*summary.get("manual").unwrap_or(&0), 1);
 
     assert_eq!(summary.get("standard-service"), Some(&5));
-    assert_eq!(manifest.generatable().count(), 3);
+    assert_eq!(manifest.generatable().count(), 4);
 
     let files = generate(&manifest, &db);
     assert!(files.crt_rs.contains("register_generated_crt_services"));
-    assert!(files.crt_rs.contains("tolower"));
+    assert_eq!(files.crt_rs.matches("\"tolower\"").count(), 1);
     let acos = files.crt_rs.split_once("\"acos\"").unwrap().1;
-    let (acos, _) = acos.split_once("registry.register_with_status").unwrap();
+    let acos = acos.split("registry.register_with_status").next().unwrap();
     assert!(acos.contains("ServiceStatus::Stub"));
     assert!(acos.contains("Err(ExitReason::IllegalInstruction(0xFE))"));
-    assert!(!files.tests_rs.contains("generated_test_acos"));
+    assert!(files.tests_rs.contains("generated_test_acos"));
+    assert!(
+        files
+            .tests_rs
+            .contains("generated_crt::register_generated_crt_services")
+    );
+    assert!(files.tests_rs.contains("(service.handler)"));
+    assert!(files.tests_rs.contains("generated_test_createthread"));
     assert!(files.stubs_rs.contains("CreateThread"));
     assert!(!files.stubs_rs.contains("QueryPerformance"));
     assert!(!files.stubs_rs.contains("GetThreadId"));
