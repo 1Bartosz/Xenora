@@ -79,12 +79,15 @@ def apply_actions(repo, actions):
         n = str(a["issue"])
         for label in a["add_labels"]:
             gh("label", "create", label, "-R", repo, "--force", "--color", "BFD4F2")
-        args = ["issue", "edit", n, "-R", repo]
-        for l in a["add_labels"]:
-            args += ["--add-label", l]
-        for l in a["remove_labels"]:
-            args += ["--remove-label", l]
-        if len(args) > 4:
+        # Comment-only actions (for example claim refusals) must not call `gh issue edit`:
+        # `["issue", "edit", n, "-R", repo]` is already five tokens, so a length check is not
+        # enough to detect missing label flags and newer gh rejects a no-op edit.
+        if a["add_labels"] or a["remove_labels"]:
+            args = ["issue", "edit", n, "-R", repo]
+            for l in a["add_labels"]:
+                args += ["--add-label", l]
+            for l in a["remove_labels"]:
+                args += ["--remove-label", l]
             gh(*args)
         if a["comment"]:
             gh("issue", "comment", n, "-R", repo, "--body", a["comment"])
