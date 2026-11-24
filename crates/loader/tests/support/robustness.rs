@@ -30,8 +30,10 @@ const UNMAPPED: u64 = 0xDEAD_0000;
 const MAX_CALLS: usize = 48;
 
 /// Argument encoding mode that reuses an earlier handler result (handles).
+#[allow(dead_code)] // used by the stable-toolchain regression test
 pub const ARG_REUSE_RESULT: u8 = 8;
 /// Argument encoding mode that supplies zero.
+#[allow(dead_code)] // used by the stable-toolchain regression test
 pub const ARG_ZERO: u8 = 0;
 
 /// Services that wait on real time, run guest code or reach native Metal are
@@ -74,11 +76,13 @@ impl Driver {
         Self { services }
     }
 
+    #[allow(dead_code)] // used by the stable-toolchain regression test
     pub fn service_count(&self) -> usize {
         self.services.len()
     }
 
     /// Index of `module!symbol` in the driver's sorted service table.
+    #[allow(dead_code)] // used by the stable-toolchain regression test
     pub fn service_index(&self, module: &str, symbol: &str) -> Option<usize> {
         self.services
             .iter()
@@ -91,6 +95,7 @@ impl Driver {
     ///
     /// Each entry is `(service_index, [arg_mode; 7])`. Argument offsets are
     /// zero; a trailing byte per call supplies the GS-base choice.
+    #[allow(dead_code)] // used by the stable-toolchain regression test
     pub fn encode_sequence(&self, calls: &[(usize, [u8; 7])]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(calls.len() * (2 + 7 * 3 + 1));
         for &(index, modes) in calls {

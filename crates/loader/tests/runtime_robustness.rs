@@ -77,3 +77,12 @@ fn encoded_sequences_invoke_handlers_and_reuse_handles() {
     assert_eq!(stats.calls, 4);
     assert_eq!(stats.distinct_services, 4);
 }
+
+#[test]
+fn xmem_alloc_oom_artifact_fails_closed() {
+    // libFuzzer OOM from a ~3.7 GiB XMemAlloc before the virtual budget gated
+    // the mapping (fuzz/artifacts/runtime_services/oom-022d4084...).
+    let driver = Driver::new();
+    let stats = driver.run(&[242, 2, 24, 0, 248, 8, 9, 9, 8, 0, 0, 129, 191]);
+    assert!(stats.calls >= 1, "{stats:?}");
+}

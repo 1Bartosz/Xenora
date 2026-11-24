@@ -440,8 +440,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         }
 
         let page_size = 4096usize;
-        // Huge or overflowing sizes fail the allocation instead of panicking
-        // in debug builds (the fuzz harness feeds u64::MAX-sized requests).
+        // Huge or overflowing sizes fail closed. Unbounded map_region would
+        // try to malloc multi-gigabyte host buffers (libFuzzer OOM on
+        // ~3.7 GiB); route through the virtual budget instead.
         let Some(aligned_size) = size
             .checked_add(page_size - 1)
             .map(|rounded| rounded & !(page_size - 1))
@@ -453,14 +454,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             .next_alloc_addr
             .fetch_add(aligned_size as u64, Ordering::SeqCst);
 
-        if mem
-            .map_region(alloc_addr, aligned_size, MemoryPermissions::READ_WRITE)
-            .is_err()
-        {
-            return Ok(0);
-        }
-
-        Ok(alloc_addr)
+        Ok(mem
+            .map_virtual_allocation(alloc_addr, aligned_size, MemoryPermissions::READ_WRITE)
+            .unwrap_or(0))
     };
     registry.register("xmem.dll", "XMemAlloc", handler);
     registry.set_status("xmem.dll", "XMemAlloc", ServiceStatus::Partial);
