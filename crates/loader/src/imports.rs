@@ -196,6 +196,9 @@ fn trampoline_address(index: usize) -> u64 {
 }
 
 const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
+/// Return address placed under a process entry point. Reaching it ends the
+/// process with EAX as its exit status.
+pub const ENTRY_RETURN: u64 = CALLBACK_RETURN - IMPORT_TRAMPOLINE_STRIDE;
 const MAX_CALLBACK_DEPTH: usize = 32;
 
 pub(crate) struct GuestCallback {
@@ -635,6 +638,7 @@ impl ImportRegistry {
     /// Check if target RIP matches a synthetic service trampoline.
     pub fn is_service_trampoline(&self, rip: u64) -> bool {
         rip == CALLBACK_RETURN
+            || rip == ENTRY_RETURN
             || self.trampoline_to_service.contains_key(&rip)
             || self.dynamic_trampolines.get(rip).is_some()
     }
@@ -646,6 +650,22 @@ impl ImportRegistry {
         cpu: &mut CpuState,
         memory: &mut GuestMemory,
     ) -> Result<(), ExitReason> {
+        if rip == ENTRY_RETURN {
+            // The entry point returned. Its result is the exit status, and it
+            // goes through ExitProcess when that is registered so both ways of
+            // ending do the same cleanup.
+            let status = cpu.get(Register::Rax) as u32;
+            let exit = ExitReason::ProcessExit(status);
+            let Some(index) = self.index("kernel32.dll", &ImportName::Name("ExitProcess".into()))
+            else {
+                return Err(exit);
+            };
+            let mut args = Win64Args::new(cpu);
+            args.rcx = u64::from(status);
+            return Err((self.handlers[index].handler)(&args, cpu, memory)
+                .err()
+                .unwrap_or(exit));
+        }
         if rip == CALLBACK_RETURN {
             let key = (cpu.gs_base, cpu.get(Register::Rsp));
             let frame = memory

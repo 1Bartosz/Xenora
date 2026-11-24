@@ -66,8 +66,21 @@ returns owned words after command completion or a stage-specific error.
 fixture, guest memory addresses, a service registry and an entry instruction
 budget. It maps and rebases the image, binds imports, initializes thread-local
 storage, invokes its callbacks and runs the entry point. The fixture entry point
-uses a Win64-aligned stack and terminates with HLT. The result includes the loaded
-guest memory and the entry execution outcome.
+uses a Win64-aligned stack. It may end with HLT, call `ExitProcess`, or return.
+The result includes the loaded guest memory and the entry execution outcome.
+
+A guest ends its process through `kernel32.dll!ExitProcess`, also reachable as
+`api-ms-win-core-processthreads-l1-1-0.dll!ExitProcess`. Execution stops with
+`ExitReason::ProcessExit(status)`, where the status is the full 32-bit value
+the guest passed. Only the guest stops: the host process is not ended. A
+returning entry point does the same with EAX as the status, which matches
+Windows while the process has one thread. The exit closes every guest handle.
+Files stay on the synthetic `C:` drive, guest memory stays mapped so the host
+can inspect it, and `atexit` functions are not run: that belongs to the C
+runtime's `exit`, which is not implemented. `ServicesState::exit_status`
+reports the status. After an exit the `DbtEngine` that ran the guest executes
+no further guest instruction and answers every later `run` with the same
+`ProcessExit`. A service callback that was in progress is never resumed.
 
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. `missing_imports.csv` lists unresolved ordinary keys

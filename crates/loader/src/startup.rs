@@ -153,7 +153,9 @@ pub fn run_synthetic_startup_with_observer(
     });
 
     // Model function entry with the Win64 32-byte home area and return slot.
-    // The synthetic entry point terminates with HLT.
+    // An entry point may end with HLT, call ExitProcess, or return: the
+    // return slot holds the address that ends the process with EAX.
+    memory.write_u64_bypass(layout.stack_top - 40, crate::imports::ENTRY_RETURN)?;
     let mut entry_cpu = CpuState::new(image.entry_point, layout.stack_top - 40);
     entry_cpu.gs_base = teb_base;
     let execution = engine.run(&mut entry_cpu, memory, entry_budget);
