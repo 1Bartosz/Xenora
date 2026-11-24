@@ -204,7 +204,7 @@ def snapshot_from_xml(data):
             }
             # Extension variants keep only what classifies them; their
             # operands repeat the base form with a literal, SDWA, DPP or NSA word.
-            if encoding_name in BASE_ENCODINGS:
+            if encoding_name in BASE_ENCODINGS or condition == "default":
                 record.update({
                     "flags": sorted(flag for flag, value in flags.items() if value),
                     "group": text(group, "Name"),
@@ -256,22 +256,33 @@ def forms_from_snapshot(snapshot):
                 entry.add("always_literal")
             entry.add(kind)
 
+    based = {(variant["instruction"], variant["encoding"]) for variant in variants if variant["encoding"] in BASE_ENCODINGS}
     forms = []
     for variant in variants:
         encoding_name = variant["encoding"]
-        if encoding_name not in BASE_ENCODINGS:
+        identity = encoding_name
+        if encoding_name in EXTENSIONS:
+            # A few instructions exist only with a literal (S_SETREG_IMM32_B32,
+            # V_FMAMK_F32, ...): the XML lists them under the literal encoding's
+            # default condition and gives them no base variant.
+            base, kind = EXTENSIONS[encoding_name]
+            if kind != "literal" or variant["condition"] != "default" or (variant["instruction"], base) in based:
+                continue
+            encoding_name = base
+        elif encoding_name not in BASE_ENCODINGS:
             continue
         # Three VOP1/VOP3 relative moves name the excluded extensions instead of "default".
         if variant["condition"] != "default" and not variant["condition"].startswith("Nothas_"):
             fail(f"{variant['instruction']} has non-default base condition {variant['condition']}")
         encoding = encodings[encoding_name]
+        id_encoding = encodings[identity]
         fields = dict((name, ranges) for name, ranges in encoding["fields"])
         prefix_mask, _ = place(0, fields["ENCODING"])
-        prefixes = {identifier & prefix_mask for identifier in encoding["identifiers"]}
+        prefixes = {identifier & prefix_mask for identifier in id_encoding["identifiers"]}
         if len(prefixes) != 1:
             fail(f"{encoding_name} has an ambiguous encoding prefix")
         prefix = prefixes.pop()
-        id_mask = encoding["identifier_mask"]
+        id_mask = id_encoding["identifier_mask"] & 0xFFFFFFFF
         opcode = variant["opcode"]
         if "OP" in fields:
             op_mask, op_bits = place(opcode, fields["OP"])
@@ -285,7 +296,7 @@ def forms_from_snapshot(snapshot):
         # first-dword identifiers cannot express; carry it separately.
         low = 0xFFFFFFFF
         candidates = sorted({
-            identifier for identifier in encoding["identifiers"]
+            identifier & 0xFFFFFFFF for identifier in id_encoding["identifiers"]
             if identifier & (prefix_mask | op_mask) & low == (prefix | op_bits) & low
         })
         if len(candidates) != 1:

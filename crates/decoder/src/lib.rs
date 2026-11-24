@@ -56,6 +56,20 @@ pub struct DecodedInstruction {
     pub instruction: Instruction,
 }
 
+impl DecodedInstruction {
+    /// Destination byte offset of a branch, from the start of the stream.
+    #[must_use]
+    pub fn branch_target(&self) -> Option<usize> {
+        match self.instruction {
+            Instruction::Branch { target }
+            | Instruction::BranchSccZero { target }
+            | Instruction::BranchExecZero { target }
+            | Instruction::BranchVccZero { target } => Some(target),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for DecodedInstruction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{:04x}: {}", self.offset, self.instruction)
@@ -140,26 +154,15 @@ pub fn decode(
     architecture: Architecture,
     bytes: &[u8],
 ) -> Result<Vec<DecodedInstruction>, DecodeError> {
-    let decode_instruction = match architecture {
-        Architecture::Gfx1030 => decode_gfx1030,
-    };
     let mut result = Vec::new();
     let mut offset = 0;
     while offset < bytes.len() {
-        let (instruction, byte_len) = decode_instruction(&bytes[offset..], offset)
-            .map_err(|kind| DecodeError { offset, kind })?;
-        result.push(DecodedInstruction {
-            offset,
-            byte_len,
-            instruction,
-        });
-        offset += usize::from(byte_len);
+        let decoded = decode_at(architecture, bytes, offset)?;
+        offset += usize::from(decoded.byte_len);
+        result.push(decoded);
     }
     for decoded in &result {
-        if let Instruction::Branch { target }
-        | Instruction::BranchSccZero { target }
-        | Instruction::BranchExecZero { target }
-        | Instruction::BranchVccZero { target } = decoded.instruction
+        if let Some(target) = decoded.branch_target()
             && result
                 .binary_search_by_key(&target, |item| item.offset)
                 .is_err()
@@ -171,6 +174,32 @@ pub fn decode(
         }
     }
     Ok(result)
+}
+
+/// Decodes the one instruction that starts at `offset` in `bytes`. Branch
+/// targets are stream offsets, but whether they land on an instruction
+/// boundary is left to the caller, which knows the rest of the stream.
+///
+/// # Errors
+///
+/// Returns `offset` with a truncated instruction, unsupported opcode or
+/// unsupported form. An `offset` at or past the end is truncated.
+pub fn decode_at(
+    architecture: Architecture,
+    bytes: &[u8],
+    offset: usize,
+) -> Result<DecodedInstruction, DecodeError> {
+    let decode_instruction = match architecture {
+        Architecture::Gfx1030 => decode_gfx1030,
+    };
+    let rest = bytes.get(offset..).unwrap_or_default();
+    let (instruction, byte_len) =
+        decode_instruction(rest, offset).map_err(|kind| DecodeError { offset, kind })?;
+    Ok(DecodedInstruction {
+        offset,
+        byte_len,
+        instruction,
+    })
 }
 
 fn word(bytes: &[u8], end: u8) -> Result<u32, DecodeErrorKind> {
