@@ -49,6 +49,7 @@ OPERATIONS = {
     "min": "Minimum", "max": "Maximum", "cselect": "Select", "bfm": "BitfieldMask",
     "mul": "Multiply", "mul_hi": "MultiplyHigh", "bfe": "BitfieldExtract",
     "absdiff": "AbsoluteDifference", "lshl_add": "ShiftLeftAdd",
+    "mul24": "Multiply24", "mul_hi24": "MultiplyHigh24",
 }
 # Unary operations read one source; they need an operand rule of the unary kind.
 UNARY = {"not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs"}
@@ -77,7 +78,9 @@ LOGICAL = {
     "and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor",
     "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "cselect", "bfm",
 }
-ARITHMETIC = {"add", "sub", "min", "max", "mul", "mul_hi", "bfe", "absdiff", "lshl_add"}
+ARITHMETIC = {
+    "add", "sub", "min", "max", "mul", "mul_hi", "bfe", "absdiff", "lshl_add", "mul24", "mul_hi24",
+}
 SHIFTS = {"lshl", "lshr", "ashr"}
 # Operations whose S1 is an unsigned control word (a shift count or a bit-field
 # descriptor), so the XML gives it FMT_NUM_U32 whatever the form's signedness.
@@ -95,6 +98,10 @@ SHIFT_KEY = "shift_count_bits"
 # Shift-and-add declares its fixed S0 shift (required for lshl_add only).
 SHIFT_AMOUNT_KEY = "shift_amount"
 SHIFT_AMOUNTS = {1, 2, 3, 4}
+# Vector forms whose guide pseudocode reads S1 before S0 (D = op(S1, S0))
+# declare it; the XML records no operand order.
+SOURCE_ORDER_KEY = "source_order"
+SOURCE_ORDERS = {"reversed"}
 SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise"}
 CARRY_IN = {"none": "None", "scc": "Scc"}
 SCC = {
@@ -176,12 +183,31 @@ PRIMITIVES = {
     ("lshl_add", "unsigned"): ("carry_out", "lshl_add_carry_u32", False),
 }
 
+# Vector (VOP2) forms: (operation, signedness) -> the per-lane VectorBinary their
+# MSL lowering uses. They write no SCC, VCC or EXEC, so scc must be unchanged.
+VECTOR_PRIMITIVES = {
+    ("add", "unsigned"): "Add",
+    ("sub", "unsigned"): "Sub",
+    ("xnor", "bitwise"): "Xnor",
+    ("min", "signed"): "MinSigned",
+    ("min", "unsigned"): "MinUnsigned",
+    ("max", "signed"): "MaxSigned",
+    ("max", "unsigned"): "MaxUnsigned",
+    ("mul24", "signed"): "Mul24Signed",
+    ("mul24", "unsigned"): "Mul24Unsigned",
+    ("mul_hi24", "signed"): "MulHi24Signed",
+    ("mul_hi24", "unsigned"): "MulHi24Unsigned",
+}
+
 # Operand rules the decoder implements, each exactly once. A registry rule must
 # match one of these shapes; anything else is an unimplemented rule.
 UNSUPPORTED_COMBOS = {
     "dst_vcc", "dst_exec", "dst_ttmp", "dst_m0", "dst_null", "src_vcc", "src_exec",
     "src_m0", "src_ttmp", "src_float_inline", "src_special", "two_literals",
 }
+# Every combo name a rule may list (VOP2 also names vcc_hi and NULL sources,
+# which SOP2 groups under src_vcc and src_special).
+ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null"}
 OPERAND_RULES = {
     "sop2_sgpr": {
         "rust": "Sop2Sgpr",
@@ -226,6 +252,26 @@ OPERAND_RULES = {
         # One source, so two literals cannot occur; the rest are rejected.
         "unsupported": {combo for combo in UNSUPPORTED_COMBOS if combo != "two_literals"},
         "kind": "unary",
+    },
+    "vop2_vgpr": {
+        "rust": "Vop2Vgpr",
+        "enum": "VectorAluOp",
+        "shape": {
+            "family": "VOP2",
+            "dst": {"field": "VDST", "class": "vgpr", "min": 0, "max": 255},
+            "src": [
+                {"field": "SRC0", "class": "vector_source"},
+                {"field": "VSRC1", "class": "vgpr"},
+            ],
+            "max_literals": 1,
+        },
+        # vector_source = VGPR, s0-s105, vcc_lo, inline integer -16..64 or a
+        # literal; the decoder rejects these SRC0 selectors.
+        "unsupported": {
+            "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_float_inline",
+            "src_special",
+        },
+        "kind": "vector",
     },
 }
 
@@ -274,7 +320,7 @@ def _check_rule(name, rule, errors):
         errors.append(f"operand rule {name}: not implemented by the decoder")
         return
     unsupported = rule.get("unsupported", [])
-    unknown = sorted(set(unsupported) - UNSUPPORTED_COMBOS)
+    unknown = sorted(set(unsupported) - ALL_COMBOS)
     if unknown:
         errors.append(f"operand rule {name}: unknown unsupported combos {unknown}")
     if len(set(unsupported)) != len(unsupported):
@@ -309,12 +355,19 @@ def _check_xml(form, rule, snapshot, errors):
         errors.append(f"{label}: opcode {form['opcode']} is not an identifier of {encoding_name}")
     operands = {}
     scc_in = scc_out = False
+    implicit = set()
     for field, data_format, kind, size, is_input, is_output, _implicit, _encoded in variant["operands"]:
         if kind == "OPR_SSRC_SPECIAL_SCC":
             scc_in |= is_input
             scc_out |= is_output
         elif field:
             operands[field] = (data_format, size, is_input, is_output)
+        else:
+            implicit.add(kind)
+    # The vocabulary can state only SCC effects (vcc and exec are "unchanged"),
+    # so any other implicit XML operand, such as VCC, is undeclared.
+    if implicit:
+        errors.append(f"{label}: XML implicit operands {sorted(implicit)} are not declared")
     if scc_in != (form["carry_in"] == "scc"):
         errors.append(f"{label}: carry_in {form['carry_in']} contradicts the XML SCC input")
     if scc_out != (form["scc"] != "unchanged"):
@@ -395,7 +448,8 @@ def validate(registry, snapshot):
         label = form.get("name", f"form #{index}")
         missing = sorted(FORM_KEYS - set(form))
         extra = sorted(
-            set(form) - FORM_KEYS - {SHIFT_KEY, SHIFT_AMOUNT_KEY, RELATION_KEY, SOURCE_BITS_KEY}
+            set(form) - FORM_KEYS
+            - {SHIFT_KEY, SHIFT_AMOUNT_KEY, RELATION_KEY, SOURCE_BITS_KEY, SOURCE_ORDER_KEY}
         )
         if missing:
             errors.append(f"{label}: incomplete, missing {missing}")
@@ -424,10 +478,12 @@ def validate(registry, snapshot):
         for key, value in (
             ("name", form["name"]),
             ("opcode", (form["family"], form["opcode"])),
-            ("variant", form["variant"]),
+            # Variants are names in their operand rule's enum.
+            ("variant", (_rule_enum(form), form["variant"])),
         ):
             if value in seen[key]:
-                errors.append(f"{label}: duplicate {key} {value}")
+                shown = form["variant"] if key == "variant" else value
+                errors.append(f"{label}: duplicate {key} {shown}")
             seen[key].add(value)
         if (form["operation"] in LOGICAL and form["signedness"] != "bitwise") or (
             form["operation"] in ARITHMETIC and form["signedness"] == "bitwise"
@@ -451,6 +507,12 @@ def validate(registry, snapshot):
                 )
         elif SHIFT_AMOUNT_KEY in form:
             errors.append(f"{label}: {SHIFT_AMOUNT_KEY} on a non-lshl_add operation")
+        if SOURCE_ORDER_KEY in form:
+            order = form[SOURCE_ORDER_KEY]
+            if not isinstance(order, str) or order not in SOURCE_ORDERS:
+                errors.append(f"{label}: unknown {SOURCE_ORDER_KEY} {order!r}")
+            elif _rule_kind(form) != "vector":
+                errors.append(f"{label}: {SOURCE_ORDER_KEY} on a non-vector form")
         if form["operation"] in SCC_READERS and form["carry_in"] != "scc":
             errors.append(f"{label}: operation {form['operation']} reads SCC (requires carry_in scc)")
         if form["operation"] == "sext":
@@ -470,6 +532,11 @@ def validate(registry, snapshot):
             if form["carry_in"] != "none":
                 errors.append(f"{label}: carry_in {form['carry_in']} contradicts compare")
             primitive = ("relation", None, False)
+        elif _rule_kind(form) == "vector":
+            if RELATION_KEY in form:
+                errors.append(f"{label}: {RELATION_KEY} on a non-compare operation")
+            lowering = VECTOR_PRIMITIVES.get((form["operation"], form["signedness"]))
+            primitive = None if lowering is None else ("unchanged", lowering, False)
         else:
             if RELATION_KEY in form:
                 errors.append(f"{label}: {RELATION_KEY} on a non-compare operation")
@@ -492,7 +559,9 @@ def validate(registry, snapshot):
             errors.append(f"{label}: operand rule {form['operands']} is for {rule.get('family')}")
         elif form["operands"] in OPERAND_RULES and OPERAND_RULES[form["operands"]]["kind"] != (
             "compare" if form["operation"] == "compare"
-            else "unary" if form["operation"] in UNARY else "alu"
+            else "unary" if form["operation"] in UNARY
+            else "vector" if _rule_kind(form) == "vector" and form["operation"] not in UNARY
+            else "alu"
         ):
             errors.append(f"{label}: operation {form['operation']} does not fit rule {form['operands']}")
         _check_spec(label, form["spec"], documents, errors)
@@ -505,6 +574,23 @@ def validate(registry, snapshot):
             errors.append(f"{label}: duplicate verification requirement")
         _check_xml(form, rule, snapshot, errors)
     return errors
+
+
+def _implemented_rule(form):
+    operands = form.get("operands")
+    return OPERAND_RULES.get(operands) if isinstance(operands, str) else None
+
+
+def _rule_kind(form):
+    """The implemented kind of the form's operand rule, or None if unknown."""
+    rule = _implemented_rule(form)
+    return rule["kind"] if rule else None
+
+
+def _rule_enum(form):
+    """The generated enum of the form's operand rule, or None if unknown."""
+    rule = _implemented_rule(form)
+    return rule["enum"] if rule else None
 
 
 def _check_spec(label, spec, documents, errors):
@@ -538,7 +624,7 @@ def render(registry, snapshot):
         "use crate::primitive;",
         "use crate::semantics::{",
         "    CarryIn, Document, Evidence, FormSemantics, MaskEffect, Operation, OperandRule, SccEffect,",
-        "    Signedness, SpecRef, Wave,",
+        "    Signedness, SpecRef, VectorBinary, Wave,",
         "};",
         "use crate::CompareRelation;",
         "",
@@ -579,6 +665,7 @@ def render(registry, snapshot):
             f"        width: {form['width']},",
             f"        shift_count_bits: {form.get(SHIFT_KEY, 0)},",
             f"        shift_amount: {form.get(SHIFT_AMOUNT_KEY, 0)},",
+            f"        swap_sources: {'true' if SOURCE_ORDER_KEY in form else 'false'},",
             f"        source_bits: {form.get(SOURCE_BITS_KEY, form['width'])},",
             "        relation: "
             + (f"Some(CompareRelation::{RELATIONS[form[RELATION_KEY]]})," if RELATION_KEY in form else "None,"),
@@ -710,6 +797,41 @@ def _render_enum(rule_name, forms, snapshot, positions):
                     "                (value, Some(scc))",
                     "            }",
                 ]
+        out += ["        }", "    }", "}"]
+        return out
+    if kind == "vector":
+        out += [
+            "",
+            "    /// Assembler name of the 32-bit (VOP2) encoding, as LLVM prints it.",
+            "    pub const fn assembly_name(self) -> &'static str {",
+            "        match self {",
+        ]
+        out += [f"            Self::{form['variant']} => \"{form['name'].lower()}_e32\"," for form in forms]
+        out += [
+            "        }",
+            "    }",
+            "",
+            "    /// The per-lane operation its MSL lowering uses.",
+            "    pub const fn lowering(self) -> VectorBinary {",
+            "        match self {",
+        ]
+        out += [
+            f"            Self::{form['variant']} => "
+            f"VectorBinary::{VECTOR_PRIMITIVES[(form['operation'], form['signedness'])]},"
+            for form in forms
+        ]
+        out += [
+            "        }",
+            "    }",
+            "",
+            "    /// Whether the operation reads its sources reversed (`D = op(S1, S0)`).",
+            "    pub const fn swaps_sources(self) -> bool {",
+            "        match self {",
+        ]
+        out += [
+            f"            Self::{form['variant']} => {'true' if SOURCE_ORDER_KEY in form else 'false'},"
+            for form in forms
+        ]
         out += ["        }", "    }", "}"]
         return out
     if kind == "compare":

@@ -119,9 +119,34 @@ def snapshot():
         variants[(name, "ENC_SOP1")] = {
             "instruction": name, "encoding": "ENC_SOP1", "opcode": opcode, "operands": operands,
         }
+    vop2 = {
+        "name": "ENC_VOP2",
+        "bits": 32,
+        "fields": [
+            ["SRC0", [[0, 9]]], ["VSRC1", [[9, 8]]], ["VDST", [[17, 8]]], ["OP", [[25, 6]]],
+            ["ENCODING", [[31, 1]]],
+        ],
+        "identifier_mask": 0xFE000000,
+        "identifiers": [op << 25 for op in (9, 17, 39)],
+    }
+
+    def vector(data_format):
+        return [
+            ["VDST", data_format, "OPR_VGPR", 32, False, True, False, True],
+            ["SRC0", data_format, "OPR_SRC", 32, True, False, False, True],
+            ["VSRC1", data_format, "OPR_VGPR", 32, True, False, False, True],
+        ]
+
+    for name, opcode, data_format in (
+        ("V_MUL_I32_I24", 9, I32), ("V_MIN_I32", 17, I32), ("V_SUBREV_NC_U32", 39, U32),
+    ):
+        variants[(name, "ENC_VOP2")] = {
+            "instruction": name, "encoding": "ENC_VOP2", "opcode": opcode,
+            "operands": vector(data_format),
+        }
     return {
         "source": {"sha256": SHA},
-        "encodings": {"ENC_SOP2": encoding, "ENC_SOPC": sopc, "ENC_SOP1": sop1},
+        "encodings": {"ENC_SOP2": encoding, "ENC_SOPC": sopc, "ENC_SOP1": sop1, "ENC_VOP2": vop2},
         "variants": variants,
     }
 
@@ -168,6 +193,26 @@ def ariths():
             shift_amount=2,
         ),
         _form("S_MUL_HI_U32", 53, "MulHiU32", "mul_hi", "unsigned", "unchanged"),
+    ]
+    return reg
+
+
+def vectors():
+    reg = registry()
+    rule = copy.deepcopy(gen.OPERAND_RULES["vop2_vgpr"]["shape"])
+    rule["unsupported"] = sorted(gen.OPERAND_RULES["vop2_vgpr"]["unsupported"])
+    reg["operand_rules"]["vop2_vgpr"] = rule
+
+    def vector(name, opcode, variant, operation, signedness, **extra):
+        form = _form(name, opcode, variant, operation, signedness, "unchanged")
+        form.update(family="VOP2", operands="vop2_vgpr", **extra)
+        return form
+
+    reg["form"] += [
+        vector("V_MUL_I32_I24", 9, "MulI32I24", "mul24", "signed"),
+        # The same variant name as a scalar form: variants are per enum.
+        vector("V_MIN_I32", 17, "AddU32", "min", "signed"),
+        vector("V_SUBREV_NC_U32", 39, "SubrevNcU32", "sub", "unsigned", source_order="reversed"),
     ]
     return reg
 
@@ -395,8 +440,8 @@ class Validate(unittest.TestCase):
 
     def test_rejects_operand_rule_the_decoder_does_not_implement(self):
         reg = registry()
-        reg["operand_rules"]["vop2_vgpr"] = {"family": "VOP2"}
-        self.rejects(reg, "operand rule vop2_vgpr: not implemented by the decoder")
+        reg["operand_rules"]["vop3_vgpr"] = {"family": "VOP3"}
+        self.rejects(reg, "operand rule vop3_vgpr: not implemented by the decoder")
 
     def test_rejects_operand_rule_shape_differing_from_the_decoder(self):
         reg = registry()
@@ -558,6 +603,68 @@ class Validate(unittest.TestCase):
         self.assertIn("Self::CselectB32 => false,", text.split("fn writes_scc", 1)[1].split("}", 1)[0])
         self.assertIn("shift_amount: 2,", text)
         self.assertIn("scc: SccEffect::SelectedSrc0,", text)
+
+    def test_accepts_vectors(self):
+        self.assertEqual(self.errors(vectors()), [])
+
+    def test_rejects_a_vector_form_that_writes_scc(self):
+        reg = vectors()
+        form(reg, "V_MIN_I32")["scc"] = "selected_src0"
+        self.rejects(reg, "V_MIN_I32: scc selected_src0 contradicts min/signed (requires unchanged)")
+
+    def test_rejects_a_scalar_only_operation_under_the_vector_rule(self):
+        reg = vectors()
+        form(reg, "V_MUL_I32_I24")["operation"] = "mul"
+        self.rejects(reg, "V_MUL_I32_I24: no primitive implements mul/signed")
+
+    def test_rejects_a_vector_only_operation_under_a_scalar_rule(self):
+        reg = registry()
+        form(reg, "S_ADD_I32")["operation"] = "mul24"
+        self.rejects(reg, "S_ADD_I32: no primitive implements mul24/signed")
+
+    def test_rejects_a_bitwise_24_bit_multiply(self):
+        reg = vectors()
+        form(reg, "V_MUL_I32_I24")["signedness"] = "bitwise"
+        self.rejects(reg, "V_MUL_I32_I24: signedness bitwise contradicts operation mul24")
+
+    def test_rejects_a_source_order_on_a_scalar_form(self):
+        reg = vectors()
+        form(reg, "S_ADD_U32")["source_order"] = "reversed"
+        self.rejects(reg, "S_ADD_U32: source_order on a non-vector form")
+
+    def test_rejects_an_unknown_source_order(self):
+        for order in ("normal", True, ["reversed"]):
+            with self.subTest(order=order):
+                reg = vectors()
+                form(reg, "V_SUBREV_NC_U32")["source_order"] = order
+                self.rejects(reg, f"V_SUBREV_NC_U32: unknown source_order {order!r}")
+
+    def test_rejects_a_duplicate_variant_within_one_enum(self):
+        reg = vectors()
+        form(reg, "V_SUBREV_NC_U32")["variant"] = "MulI32I24"
+        self.rejects(reg, "V_SUBREV_NC_U32: duplicate variant MulI32I24")
+
+    def test_rejects_a_vector_rule_without_its_null_rejection(self):
+        reg = vectors()
+        reg["operand_rules"]["vop2_vgpr"]["unsupported"].remove("src_null")
+        self.rejects(reg, "operand rule vop2_vgpr: unsupported combos differ from those the decoder rejects")
+
+    def test_rejects_an_implicit_vcc_operand_in_the_xml(self):
+        snap = snapshot()
+        snap["variants"][("V_MIN_I32", "ENC_VOP2")]["operands"].append(
+            ["", "FMT_NUM_B32", "OPR_VCC", 32, True, False, True, False]
+        )
+        self.rejects(vectors(), "V_MIN_I32: XML implicit operands ['OPR_VCC'] are not declared", snap)
+
+    def test_renders_vector_lowering_and_source_order(self):
+        text = gen.render(vectors(), snapshot())
+        self.assertIn("pub enum VectorAluOp {", text)
+        self.assertIn("if word & 0x8000_0000 != 0x0000_0000 {", text)
+        self.assertIn("Self::MulI32I24 => VectorBinary::Mul24Signed,", text)
+        self.assertIn("Self::SubrevNcU32 => VectorBinary::Sub,", text)
+        self.assertIn("Self::SubrevNcU32 => true,", text.split("fn swaps_sources", 1)[1])
+        self.assertIn('Self::AddU32 => "v_min_i32_e32",', text)
+        self.assertIn("swap_sources: true,", text)
 
     def test_accepts_compares(self):
         self.assertEqual(self.errors(compares()), [])

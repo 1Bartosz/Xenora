@@ -69,6 +69,9 @@ pub enum Op {
         condition: BranchCondition,
     },
     Vector(VectorAlu, u8, u8, u8),
+    /// VOP2 32-bit integer form: VDST, SRC0 (VGPR, SGPR, `vcc_lo`, inline
+    /// integer or literal) and VSRC1. Writes neither VCC nor SCC.
+    VectorInteger(VectorInteger, u8, CompareSource, u8),
     End,
 }
 
@@ -107,7 +110,7 @@ impl Comparison {
     }
 }
 
-/// First source of a VOPC compare.
+/// First source of a VOPC compare or a VOP2 integer form.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompareSource {
     /// VGPR index.
@@ -234,6 +237,90 @@ pub enum VectorAlu {
     Xor,
     FloatAdd,
     FloatMultiply,
+}
+
+/// VOP2 32-bit integer forms with a general SRC0 (AMD RDNA 2 ISA guide
+/// section 12.7). None has a carry-in or carry-out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VectorInteger {
+    /// 9 / 11: D = low 32 bits of S0[23:0] * S1[23:0], sign-extended from
+    /// bit 23 when `signed`.
+    Multiply24 { signed: bool },
+    /// 10 / 12: D = bits 63:32 of the same 48-bit product.
+    MultiplyHigh24 { signed: bool },
+    /// 17 / 19: D = S0 < S1 ? S0 : S1.
+    Minimum { signed: bool },
+    /// 18 / 20: D = S0 >= S1 ? S0 : S1.
+    Maximum { signed: bool },
+    /// 30: D = ~(S0 ^ S1).
+    Xnor,
+    /// 37: D = S0 + S1.
+    Add,
+    /// 38: D = S0 - S1.
+    Subtract,
+    /// 39: D = S1 - S0.
+    SubtractReverse,
+}
+
+impl VectorInteger {
+    /// Opcode bits 30-25 of the VOP2 word.
+    fn from_opcode(opcode: u8) -> Option<Self> {
+        Some(match opcode {
+            9 => Self::Multiply24 { signed: true },
+            10 => Self::MultiplyHigh24 { signed: true },
+            11 => Self::Multiply24 { signed: false },
+            12 => Self::MultiplyHigh24 { signed: false },
+            17 => Self::Minimum { signed: true },
+            18 => Self::Maximum { signed: true },
+            19 => Self::Minimum { signed: false },
+            20 => Self::Maximum { signed: false },
+            30 => Self::Xnor,
+            37 => Self::Add,
+            38 => Self::Subtract,
+            39 => Self::SubtractReverse,
+            _ => return None,
+        })
+    }
+
+    /// D for S0 = `a`, S1 = `b`, from exact i64 arithmetic reduced modulo 2^32.
+    fn apply(self, a: u32, b: u32) -> u32 {
+        let field = |bits: u32, signed: bool| {
+            if signed {
+                i64::from(((bits << 8) as i32) >> 8)
+            } else {
+                i64::from(bits & 0x00ff_ffff)
+            }
+        };
+        let widen = |bits: u32, signed: bool| {
+            if signed {
+                i64::from(bits as i32)
+            } else {
+                i64::from(bits)
+            }
+        };
+        match self {
+            Self::Multiply24 { signed } => (field(a, signed) * field(b, signed)) as u32,
+            Self::MultiplyHigh24 { signed } => ((field(a, signed) * field(b, signed)) >> 32) as u32,
+            Self::Minimum { signed } => {
+                if widen(a, signed) < widen(b, signed) {
+                    a
+                } else {
+                    b
+                }
+            }
+            Self::Maximum { signed } => {
+                if widen(a, signed) >= widen(b, signed) {
+                    a
+                } else {
+                    b
+                }
+            }
+            Self::Xnor => !(a ^ b),
+            Self::Add => a.wrapping_add(b),
+            Self::Subtract => a.wrapping_sub(b),
+            Self::SubtractReverse => b.wrapping_sub(a),
+        }
+    }
 }
 
 /// Execute original little-endian gfx1030 bytes with the synthetic binding ABI.
@@ -501,24 +588,21 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                     signed: opcode < 192,
                 };
                 let vsrc1 = (packed >> 1) | ((upper & 1) << 7);
-                let selector = u16::from(*lo) | (u16::from(packed & 1) << 8);
-                let (src0, length) = match selector {
-                    0..=106 => (CompareSource::Scalar(*lo), 4),
-                    128..=192 => (CompareSource::Immediate(u32::from(selector - 128)), 4),
-                    193..=208 => (
-                        CompareSource::Immediate(0_u32.wrapping_sub(u32::from(selector - 192))),
-                        4,
-                    ),
-                    255 => {
-                        let literal = tail
-                            .first_chunk::<4>()
-                            .ok_or_else(|| error(offset, "truncated literal"))?;
-                        (CompareSource::Immediate(u32::from_le_bytes(*literal)), 8)
-                    }
-                    256..=511 => (CompareSource::Vector(*lo), 4),
-                    _ => return Err(error(offset, "unsupported VOPC source")),
-                };
+                let (src0, length) =
+                    decode_vector_source(*lo, *packed, tail, offset, "unsupported VOPC source")?;
                 (Op::Compare(comparison, src0, vsrc1), length)
+            }
+            // VOP2 integer forms (bit 31 = 0): OP bits 25-30, VDST 17-24,
+            // VSRC1 9-16, SRC0 0-8.
+            [lo, packed, upper, tag @ 0x00..=0x7b, tail @ ..]
+                if VectorInteger::from_opcode(tag >> 1).is_some() =>
+            {
+                let kind = VectorInteger::from_opcode(tag >> 1).unwrap();
+                let dst = (upper >> 1) | ((tag & 1) << 7);
+                let vsrc1 = (packed >> 1) | ((upper & 1) << 7);
+                let (src0, length) =
+                    decode_vector_source(*lo, *packed, tail, offset, "unsupported VOP2 source")?;
+                (Op::VectorInteger(kind, dst, src0, vsrc1), length)
             }
             [lo, packed, upper, tag @ 0x7e..=0x7f, tail @ ..]
                 if packed & 0xfe == 2 && upper & 1 == 0 =>
@@ -602,6 +686,34 @@ fn decode_scalar(
         }
         _ => Err(error(offset, "unsupported scalar source")),
     }
+}
+
+/// A vector SRC0 selector (bits 0-8: `lo` and bit 0 of `packed`): s0-s105 or
+/// `vcc_lo` (106), an inline integer, a literal dword from `tail`, or a VGPR.
+fn decode_vector_source(
+    lo: u8,
+    packed: u8,
+    tail: &[u8],
+    offset: usize,
+    unsupported: &'static str,
+) -> Result<(CompareSource, usize), ReferenceError> {
+    let selector = u16::from(lo) | (u16::from(packed & 1) << 8);
+    Ok(match selector {
+        0..=106 => (CompareSource::Scalar(lo), 4),
+        128..=192 => (CompareSource::Immediate(u32::from(selector - 128)), 4),
+        193..=208 => (
+            CompareSource::Immediate(0_u32.wrapping_sub(u32::from(selector - 192))),
+            4,
+        ),
+        255 => {
+            let literal = tail
+                .first_chunk::<4>()
+                .ok_or_else(|| error(offset, "truncated literal"))?;
+            (CompareSource::Immediate(u32::from_le_bytes(*literal)), 8)
+        }
+        256..=511 => (CompareSource::Vector(lo), 4),
+        _ => return Err(error(offset, unsupported)),
+    })
 }
 
 fn vector_alu(op: VectorAlu, a: u32, b: u32, offset: usize) -> Result<u32, ReferenceError> {
@@ -694,7 +806,8 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                 Op::Move(dst, _)
                 | Op::MoveScalar(dst, _)
                 | Op::Add(dst, ..)
-                | Op::Vector(_, dst, ..) => {
+                | Op::Vector(_, dst, ..)
+                | Op::VectorInteger(_, dst, ..) => {
                     if exec != 0
                         && registers
                             .iter()
@@ -774,6 +887,31 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                 for lane in (0..lanes).filter(|&lane| executes(lane)) {
                     let value = vector_alu(operator, read(lane, lhs)?, read(lane, rhs)?, offset)?;
                     results[lane] = Some((dst, value));
+                }
+            }
+            Op::VectorInteger(kind, dst, src0, src1) => {
+                if exec != 0 {
+                    // As for a compare, sources are checked once for the wave,
+                    // whichever present lanes are active.
+                    let check = |register: u8| {
+                        (0..lanes).try_for_each(|lane| read(lane, register).map(|_| ()))
+                    };
+                    match src0 {
+                        CompareSource::Vector(register) => check(register)?,
+                        CompareSource::Scalar(register) => {
+                            read_scalar(Source::Register(register))?;
+                        }
+                        CompareSource::Immediate(_) => {}
+                    }
+                    check(src1)?;
+                }
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    let s0 = match src0 {
+                        CompareSource::Vector(register) => read(lane, register)?,
+                        CompareSource::Scalar(register) => read_scalar(Source::Register(register))?,
+                        CompareSource::Immediate(bits) => bits,
+                    };
+                    results[lane] = Some((dst, kind.apply(s0, read(lane, src1)?)));
                 }
             }
             Op::ScalarMove(dst, src) => {

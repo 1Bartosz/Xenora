@@ -780,6 +780,62 @@ mod review {
     const SCALAR_ARITH_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-arith.bin");
     // Hand-derived in fixtures/rdna2/scalar-arith.s from the guide's 12.1 pseudocode.
     const SCALAR_ARITH_KEY: u32 = 0x8115_7dfe;
+    const VECTOR_INTEGER_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/vector-integer.bin");
+
+    /// fixtures/rdna2/vector-integer.s for one lane input `x`, written from the
+    /// guide's 12.7 pseudocode: exact products of the 24-bit fields (sign-
+    /// extended for the I24 forms), D = the low or high 32 bits.
+    fn vector_integer_key(x: u32) -> u32 {
+        let i24 = |v: u32| i64::from(((v << 8) as i32) >> 8);
+        let u24 = |v: u32| i64::from(v & 0x00ff_ffff);
+        let low = |product: i64| product as u32;
+        let high = |product: i64| (product >> 32) as u32;
+        let s8 = 0x0080_0001_u32;
+        let v2 = low(i24(x) * -3);
+        let v3 = high(i24(s8) * i24(x));
+        let v4 = low(0x0012_3456 * u24(x));
+        let v5 = high(u24(s8) * u24(x));
+        let v6 = (x as i32).min(v2 as i32) as u32;
+        let v7 = 5_i32.max(x as i32) as u32;
+        let v8 = v3.min(x);
+        let v9 = s8.max(x);
+        let v10 = !(v4 ^ v5);
+        let v11 = v6.wrapping_add(v7);
+        let v12 = v8.wrapping_sub(v9);
+        let v13 = v11.wrapping_sub(v10);
+        v2 ^ v3 ^ v4 ^ v5 ^ v6 ^ v7 ^ v8 ^ v9 ^ v10 ^ v11 ^ v12 ^ v13
+    }
+
+    /// LLVM-assembled: v_cmp_ne_u32_e32 vcc_lo, 0, v1 then
+    /// v_add_nc_u32_e32 v2, vcc_lo, v1, with the usual load and store.
+    const VCC_LANE_ADD: [u32; 9] = [
+        0xe030_2000,
+        0x8000_0100,
+        0xbf8c_3f70,
+        0x7d8a_0280,
+        0x4a04_026a,
+        0xe070_2000,
+        0x8001_0200,
+        0xbbfd_0000,
+        0xbf81_0000,
+    ];
+
+    /// Lane inputs covering both 24-bit signs, the bits above 23, zero and the
+    /// signed and unsigned extremes.
+    const VECTOR_INTEGER_INPUT: [u32; 12] = [
+        0,
+        1,
+        5,
+        0x007f_ffff,
+        0x0080_0000,
+        0x00ff_ffff,
+        0x0123_4567,
+        0x7fff_ffff,
+        0x8000_0000,
+        0x89ab_cdef,
+        0xff80_0001,
+        u32::MAX,
+    ];
     // SOP2 opcodes of the supported subset (RDNA 2 XML opcode table).
     const SOP2_OPCODES: [u32; 9] = [0, 1, 2, 3, 4, 5, 14, 16, 18];
     const SCALAR_VALUES: [u32; 10] = [
@@ -924,6 +980,64 @@ mod review {
             .unwrap();
         set[at] = 0x81;
         verify(&set, &input, Some(&[0; 5]));
+    }
+
+    #[test]
+    fn vector_integer_fixture_computes_each_lane_from_its_input() {
+        let expected: Vec<_> = VECTOR_INTEGER_INPUT
+            .iter()
+            .map(|&x| vector_integer_key(x))
+            .collect();
+        verify(
+            VECTOR_INTEGER_FIXTURE,
+            &VECTOR_INTEGER_INPUT,
+            Some(&expected),
+        );
+        // The results stay runtime per-lane values: the only constants are the
+        // six uniform SRC0 operands (-3, s8 three times, the literal and 5), and
+        // the twelve lane inputs give twelve different results.
+        let compiled = compile(Architecture::Gfx1030, VECTOR_INTEGER_FIXTURE).unwrap();
+        assert!(compiled.ir.contains("mul24.i32 t1, t0"), "{}", compiled.ir);
+        assert!(compiled.msl.contains("mulhi("), "{}", compiled.msl);
+        assert_eq!(
+            compiled.ir.matches(" = const.u32 ").count(),
+            6,
+            "{}",
+            compiled.ir
+        );
+        let distinct: std::collections::BTreeSet<_> = expected.iter().collect();
+        assert_eq!(distinct.len(), expected.len());
+    }
+
+    #[test]
+    fn vector_integer_reads_a_lane_derived_vcc_lo() {
+        // LLVM: v_cmp_ne_u32_e32 vcc_lo, 0, v1; v_add_nc_u32_e32 v2, vcc_lo, v1.
+        // Lane 0 (x = 0) fails the compare and lane 1 (x = 7) passes, so the
+        // mask is 0b10 and every lane adds 2.
+        let code = words(&VCC_LANE_ADD);
+        verify(&code, &[0, 7], Some(&[2, 9]));
+        verify(&code, &[7, 7], Some(&[10, 10]));
+    }
+
+    #[test]
+    fn vector_integer_is_refused_in_a_runtime_vccz_skip_region() {
+        // LLVM: v_mov_b32 v2, 0; v_cmp_ne_u32 vcc_lo, 0, v1; s_cbranch_vccz
+        // over v_add_nc_u32_e32 v2, vcc_lo, v1 (at 0x18), whatever the mask.
+        let code = words(&[
+            0xe030_2000,
+            0x8000_0100,
+            0xbf8c_3f70,
+            0x7e04_0280,
+            0x7d8a_0280,
+            0xbf86_0001,
+            0x4a04_026a,
+            0xe070_2000,
+            0x8001_0200,
+            0xbbfd_0000,
+            0xbf81_0000,
+        ]);
+        rejected_at_with(&code, 0x18, &[0, 7]);
+        rejected_at_with(&code, 0x18, &[7, 7]);
     }
 
     #[test]
@@ -1173,6 +1287,12 @@ mod review {
         assert_eq!(run(SCALAR_UNARY_FIXTURE, &input), unary);
         let arith: Vec<_> = input.iter().map(|word| word ^ SCALAR_ARITH_KEY).collect();
         assert_eq!(run(SCALAR_ARITH_FIXTURE, &input), arith);
+        let lanes: Vec<_> = VECTOR_INTEGER_INPUT
+            .iter()
+            .map(|&x| vector_integer_key(x))
+            .collect();
+        assert_eq!(run(VECTOR_INTEGER_FIXTURE, &VECTOR_INTEGER_INPUT), lanes);
+        assert_eq!(run(&words(&VCC_LANE_ADD), &[0, 7]), [2, 9]);
         let mut vectors = sop2_vectors();
         vectors.extend(sop2_operand_cases());
         vectors.extend(signed_immediate_overflows());
@@ -1180,8 +1300,8 @@ mod review {
             assert_eq!(&run(code, &[0, u32::MAX]), expected);
         }
         eprintln!(
-            "{} SOP2 programs matched on native Metal",
-            vectors.len() + 5
+            "{} SOP2 programs and fixtures matched on native Metal",
+            vectors.len() + 7
         );
     }
 
