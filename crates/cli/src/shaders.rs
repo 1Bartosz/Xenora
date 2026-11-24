@@ -230,6 +230,14 @@ mod tests {
     }
 
     #[test]
+    fn add_fixture_is_fully_semantic() {
+        let listing = listing(include_bytes!("../../../fixtures/rdna2/add.bin"));
+        assert_eq!(listing.failure, None);
+        assert_eq!(listing.rows.len(), 7);
+        assert_eq!(listing.unsupported, 0);
+    }
+
+    #[test]
     fn branch_targets_are_checked_against_the_whole_stream() {
         // s_branch 1 skips one word; s_cbranch_scc0 1 lands inside the
         // two-word v_mov_b32 literal form; s_endpgm.
