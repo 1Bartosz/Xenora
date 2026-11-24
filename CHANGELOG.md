@@ -19,6 +19,7 @@ remains unsupported.
 - Import manifests now report emitted adapters, stubs, and existing runtime bindings separately from catalog classifications.
 
 - Generated import conformance tests now execute emitted service handlers and verify unsupported stubs.
+- Added `python3 -m qa rdna2 rank` to the read-only RDNA2 planner: it groups undeclared gfx1030 forms by the piece of work that would unlock them (an encoding variant of a declared form, a new operand rule, or a new primitive, from XML identity and operand shape only) and ranks the groups by forms per estimated cost, excluding claimed scopes, with `--no-float` to leave out floating-point groups until the FP contract exists (part of #215).
 - Added authoritative read-only x86-64 CPU inventory CLI (`python3 -m qa cpu-inventory`) over `crates/loader/x86/instructions.toml` via `generate_x86.load`, with opcode-map/prefix/operand summaries, native vs shared-semantic operation partitions from `dbt.rs`, fixture mnemonic evidence and a separate unsupported catalog. Does not count candidates as implemented. Covered by `tests/qa/test_cpu_inventory.py`.
 - Added typed runtime inventory CLI (`python3 -m qa runtime-inventory`) over `crates/loader/runtime/services.txt`, reporting implemented/partial/stub services separately from API-set aliases and leaving independently-verified empty unless recorded. Covered by `tests/qa/test_runtime_inventory.py`.
 
