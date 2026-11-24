@@ -2,6 +2,7 @@
 
 mod demo;
 mod runner;
+mod shaders;
 
 use std::process::ExitCode;
 
@@ -40,6 +41,7 @@ fn main() -> ExitCode {
         },
         Some("run") => runner::command(std::env::args_os().skip(2)),
         Some("imports") => imports_command(std::env::args().skip(2).collect()),
+        Some("shaders") => shaders::command(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("probe") => {
             let args: Vec<String> = std::env::args().collect();
             let mut pe_path: Option<String> = None;
@@ -132,7 +134,7 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: xenora <info|demo|inspect|probe|run|imports>");
+            eprintln!("usage: xenora <info|demo|inspect|probe|run|imports|shaders>");
             ExitCode::from(2)
         }
     }

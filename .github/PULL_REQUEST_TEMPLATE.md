@@ -1,6 +1,8 @@
 ## Summary
 
-<!-- What changes, and why? Link an issue if relevant. -->
+<!-- What changes, and why? -->
+
+Closes #<!-- the issue you claimed -->
 
 ## Implementation and evidence
 
@@ -23,6 +25,7 @@
 
 ## Checklist
 
+- [ ] I claimed the linked issue before starting, and the claim was still mine when I opened this pull request.
 - [ ] I reviewed the changes and disclosed material AI assistance below, if applicable.
 - [ ] The change preserves native ARM64 and Metal-first requirements.
 - [ ] I added relevant tests or explained why they are not applicable.
