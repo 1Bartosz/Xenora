@@ -768,6 +768,9 @@ mod review {
     }
 
     const SCALAR_ALU_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-alu.bin");
+    const SCALAR_LOGIC_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-logic.bin");
+    // Hand-derived in fixtures/rdna2/scalar-logic.s from the guide's 12.1 pseudocode.
+    const SCALAR_LOGIC_KEY: u32 = 0x887f_00f8;
     // SOP2 opcodes of the supported subset (RDNA 2 XML opcode table).
     const SOP2_OPCODES: [u32; 9] = [0, 1, 2, 3, 4, 5, 14, 16, 18];
     const SCALAR_VALUES: [u32; 10] = [
@@ -866,6 +869,24 @@ mod review {
         let mut nonzero = SCALAR_ALU_FIXTURE.to_vec();
         assert_eq!(nonzero[0x39], 0x8f);
         nonzero[0x39] = 0x9f;
+        verify(&nonzero, &input, Some(&[0; 5]));
+    }
+
+    #[test]
+    fn scalar_logic_fixture_chains_registry_logical_and_shift_forms() {
+        let input = [0, 1, u32::MAX, SCALAR_LOGIC_KEY, 0x1234_5678];
+        let expected: Vec<_> = input.iter().map(|word| word ^ SCALAR_LOGIC_KEY).collect();
+        verify(SCALAR_LOGIC_FIXTURE, &input, Some(&expected));
+        let compiled = compile(Architecture::Gfx1030, SCALAR_LOGIC_FIXTURE).unwrap();
+        assert!(compiled.disassembly.contains("s_ashr_i32 s17, s15, 31"));
+        // The SCC-zero edge is observable: with a shift count of 30 instead of
+        // 31, s17 = 0x787ffff8 >> 30 = 1, SCC = 1, and v2 = 0.
+        let mut nonzero = SCALAR_LOGIC_FIXTURE.to_vec();
+        let at = nonzero
+            .windows(4)
+            .position(|word| word == [0x0f, 0x9f, 0x11, 0x91])
+            .unwrap();
+        nonzero[at + 1] = 0x9e;
         verify(&nonzero, &input, Some(&[0; 5]));
     }
 
@@ -1089,6 +1110,8 @@ mod review {
         let input: Vec<u32> = (0..64).map(|lane| lane * 0x0101_0101).collect();
         let expected: Vec<_> = input.iter().map(|word| word ^ 0x0000_000e).collect();
         assert_eq!(run(SCALAR_ALU_FIXTURE, &input), expected);
+        let logic: Vec<_> = input.iter().map(|word| word ^ SCALAR_LOGIC_KEY).collect();
+        assert_eq!(run(SCALAR_LOGIC_FIXTURE, &input), logic);
         let mut vectors = sop2_vectors();
         vectors.extend(sop2_operand_cases());
         vectors.extend(signed_immediate_overflows());
@@ -1097,7 +1120,7 @@ mod review {
         }
         eprintln!(
             "{} SOP2 programs matched on native Metal",
-            vectors.len() + 1
+            vectors.len() + 2
         );
     }
 

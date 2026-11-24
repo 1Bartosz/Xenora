@@ -230,3 +230,145 @@ wave = "any"
 operands = "sop2_sgpr"
 spec = [{ document = "guide", section = "12.1", page = 102 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+# ---- Stage C: further SOP2 logical and shift forms (#215) ----
+# Shifts use the low shift_count_bits of S1 as the count (guide 12.1 pseudocode).
+
+[[form]]
+name = "S_ANDN2_B32"
+family = "SOP2"
+opcode = 20
+variant = "Andn2B32"
+operation = "andn2"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_ORN2_B32"
+family = "SOP2"
+opcode = 22
+variant = "Orn2B32"
+operation = "orn2"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_NAND_B32"
+family = "SOP2"
+opcode = 24
+variant = "NandB32"
+operation = "nand"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_NOR_B32"
+family = "SOP2"
+opcode = 26
+variant = "NorB32"
+operation = "nor"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_XNOR_B32"
+family = "SOP2"
+opcode = 28
+variant = "XnorB32"
+operation = "xnor"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_LSHL_B32"
+family = "SOP2"
+opcode = 30
+variant = "LshlB32"
+operation = "lshl"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+shift_count_bits = 5
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_LSHR_B32"
+family = "SOP2"
+opcode = 32
+variant = "LshrB32"
+operation = "lshr"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+shift_count_bits = 5
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_ASHR_I32"
+family = "SOP2"
+opcode = 34
+variant = "AshrI32"
+operation = "ashr"
+signedness = "signed"
+carry_in = "none"
+width = 32
+shift_count_bits = 5
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]

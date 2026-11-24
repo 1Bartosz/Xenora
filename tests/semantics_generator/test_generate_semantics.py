@@ -32,11 +32,11 @@ U32 = "FMT_NUM_U32"
 I32 = "FMT_NUM_I32"
 
 
-def _operands(data_format, scc_in=False):
+def _operands(data_format, scc_in=False, src1_format=None):
     rows = [
         ["SDST", data_format, "OPR_SDST", 32, False, True, False, True],
         ["SSRC0", data_format, "OPR_SSRC_NOLDS", 32, True, False, False, True],
-        ["SSRC1", data_format, "OPR_SSRC_NOLDS", 32, True, False, False, True],
+        ["SSRC1", src1_format or data_format, "OPR_SSRC_NOLDS", 32, True, False, False, True],
         ["", "FMT_NUM_B1", "OPR_SSRC_SPECIAL_SCC", 1, False, True, True, True],
     ]
     if scc_in:
@@ -54,7 +54,7 @@ def snapshot():
             ["OP", [[23, 7]]], ["ENCODING", [[30, 2]]],
         ],
         "identifier_mask": 0xFF800000,
-        "identifiers": [sop2_base | (op << 23) for op in (0, 2, 4, 14)],
+        "identifiers": [sop2_base | (op << 23) for op in (0, 2, 4, 14, 34)],
     }
     variants = {}
     for name, opcode, operands in (
@@ -62,6 +62,8 @@ def snapshot():
         ("S_ADD_I32", 2, _operands(I32)),
         ("S_ADDC_U32", 4, _operands(U32, scc_in=True)),
         ("S_AND_B32", 14, _operands(U32)),
+        # The XML gives S_ASHR_I32 a signed S0 and an unsigned shift count.
+        ("S_ASHR_I32", 34, _operands(I32, src1_format=U32)),
     ):
         variants[(name, "ENC_SOP2")] = {
             "instruction": name, "encoding": "ENC_SOP2", "opcode": opcode, "operands": operands,
@@ -94,6 +96,10 @@ def registry():
             _form("S_ADD_I32", 2, "AddI32", "add", "signed", "signed_overflow"),
             _form("S_ADDC_U32", 4, "AddcU32", "add", "unsigned", "carry_out", carry_in="scc"),
             _form("S_AND_B32", 14, "AndB32", "and", "bitwise", "nonzero"),
+            dict(
+                _form("S_ASHR_I32", 34, "AshrI32", "ashr", "signed", "nonzero"),
+                shift_count_bits=5,
+            ),
         ],
     }
 
@@ -288,6 +294,37 @@ class Validate(unittest.TestCase):
         reg["operand_rules"]["sop2_sgpr"]["max_literals"] = 2
         self.rejects(reg, "operand rule sop2_sgpr: declaration differs")
 
+    def test_rejects_a_shift_without_a_count_width(self):
+        reg = registry()
+        del reg["form"][-1]["shift_count_bits"]
+        self.rejects(reg, "S_ASHR_I32: shift_count_bits must be log2 of the width (32), got None")
+
+    def test_rejects_a_wrong_count_width(self):
+        reg = registry()
+        reg["form"][-1]["shift_count_bits"] = 6
+        self.rejects(reg, "S_ASHR_I32: shift_count_bits must be log2 of the width (32), got 6")
+
+    def test_rejects_a_count_width_on_a_non_shift(self):
+        reg = registry()
+        reg["form"][0]["shift_count_bits"] = 5
+        self.rejects(reg, "S_ADD_U32: shift_count_bits on a non-shift operation")
+
+    def test_rejects_a_signed_shift_count_in_the_xml(self):
+        snap = snapshot()
+        snap["variants"][("S_ASHR_I32", "ENC_SOP2")]["operands"] = _operands(I32)
+        self.rejects(registry(), "S_ASHR_I32: shift count SSRC1 has signed XML format", snap)
+
+    def test_rejects_an_unsigned_arithmetic_shift(self):
+        reg = registry()
+        reg["form"][-1]["signedness"] = "unsigned"
+        self.rejects(reg, "S_ASHR_I32: no primitive implements ashr/unsigned")
+
+    def test_renders_the_declared_count_mask(self):
+        self.assertIn(
+            "Self::AshrI32 => primitive::ashr_nonzero_i32(src0, src1 & 0x1f),",
+            gen.render(registry(), snapshot()),
+        )
+
     def test_rejects_an_incomplete_unsupported_list(self):
         reg = registry()
         reg["operand_rules"]["sop2_sgpr"]["unsupported"].remove("two_literals")
@@ -431,7 +468,7 @@ class Render(unittest.TestCase):
         body = text.split("match word & ", 1)[1].split("_ => None", 1)[0]
         words = [line.split(" => ")[0].strip() for line in body.splitlines()[1:] if "=>" in line]
         self.assertEqual(words, sorted(words))
-        self.assertEqual(len(words), 4)
+        self.assertEqual(len(words), 5)
 
     def test_real_registry_renders_the_committed_file(self):
         text = gen.render(gen.load_registry(), gen.load_snapshot())

@@ -1,6 +1,6 @@
 # SOP2 scalar ALU subset
 
-Xenora decodes and executes nine gfx1030 SOP2 forms. Each takes 32-bit
+Xenora decodes and executes seventeen gfx1030 SOP2 forms. Each takes 32-bit
 operands, writes a normal SGPR (s0-s105) and sets SCC.
 
 | Form | D | SCC |
@@ -14,10 +14,23 @@ operands, writes a normal SGPR (s0-s105) and sets SCC.
 | `s_and_b32` | S0 & S1 | D != 0 |
 | `s_or_b32` | S0 \| S1 | D != 0 |
 | `s_xor_b32` | S0 ^ S1 | D != 0 |
+| `s_andn2_b32` | S0 & ~S1 | D != 0 |
+| `s_orn2_b32` | S0 \| ~S1 | D != 0 |
+| `s_nand_b32` | ~(S0 & S1) | D != 0 |
+| `s_nor_b32` | ~(S0 \| S1) | D != 0 |
+| `s_xnor_b32` | ~(S0 ^ S1) | D != 0 |
+| `s_lshl_b32` | S0 << S1[4:0] | D != 0 |
+| `s_lshr_b32` | S0 >> S1[4:0], zero fill | D != 0 |
+| `s_ashr_i32` | S0 >> S1[4:0], sign fill | D != 0 |
+
+The last eight were added through the semantic registry alone: one TOML entry
+each, with no hand-written Rust per form. Shifts use only the low five bits of
+S1 as the count, as the guide's pseudocode states (section 12.1); higher bits are
+ignored.
 
 Sources are normal SGPRs, inline integers (-16 to 64) or one literal word.
 
-These nine forms are declared as data in the semantic registry,
+These forms are declared as data in the semantic registry,
 `crates/isa/semantics/rdna2.toml`: opcode, operation, signedness, carry-in,
 SCC effect, operand rule and guide references. `crates/isa/generate_semantics.py`
 checks each declaration against the pinned AMD XML snapshot and rejects

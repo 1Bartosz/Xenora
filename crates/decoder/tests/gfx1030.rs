@@ -434,13 +434,14 @@ fn compares_fixture_instructions_against_llvm() {
         SHIFT_FIXTURE,
         include_bytes!("../../../fixtures/rdna2/ashr.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-alu.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-logic.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 42, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 50, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()

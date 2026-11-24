@@ -30,6 +30,22 @@ pub enum Operation {
     Or,
     /// Bitwise exclusive OR.
     Xor,
+    /// Bitwise AND with the complement of S1.
+    AndNot,
+    /// Bitwise OR with the complement of S1.
+    OrNot,
+    /// Complement of bitwise AND.
+    Nand,
+    /// Complement of bitwise OR.
+    Nor,
+    /// Complement of bitwise exclusive OR.
+    Xnor,
+    /// Shift S0 left by the masked count in S1, filling with zeros.
+    ShiftLeft,
+    /// Shift S0 right by the masked count in S1, filling with zeros.
+    LogicalShiftRight,
+    /// Shift S0 right by the masked count in S1, filling with its sign bit.
+    ArithmeticShiftRight,
 }
 
 /// How the operands are interpreted. `Bitwise` exactly when the operation is logical.
@@ -141,6 +157,8 @@ pub struct FormSemantics {
     pub carry_in: CarryIn,
     /// Operand and result width in bits.
     pub width: u8,
+    /// Low bits of S1 used as the shift count by shift operations; 0 otherwise.
+    pub shift_count_bits: u8,
     /// SCC write.
     pub scc: SccEffect,
     /// VCC write.
