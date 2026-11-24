@@ -135,8 +135,10 @@ const EXEC_MASKS: [u32; 7] = [
 /// VCC_LO before the compare in the EXEC cases: bits inside and outside every
 /// mask above, so a partial VCC update would show.
 const STALE_VCC: u32 = 0xa5a5_c33c;
+/// XORed with v1 to give every lane its own old v2 before a masked move.
+const OLD: u32 = 0x0bad_f00d;
 
-const COUNTS: [(&str, usize); 11] = [
+const COUNTS: [(&str, usize); 12] = [
     ("vopc domain", 4 * 8 * 2),
     ("vopc aliasing", 4 * 2),
     ("vopc inline integer", 4 * 81),
@@ -147,13 +149,14 @@ const COUNTS: [(&str, usize); 11] = [
     ("vopc exec", 4 * (7 + 2)),
     ("vopc empty exec reads nothing", 4 * 3),
     ("vopc partial wave", 4 * 3),
-    ("vopc vccz branch", 4 * 3),
+    ("vopc vccz branch", 4 * 4),
+    ("vopc exec unchanged", 4 * 2),
 ];
-/// Per form: 4 uninitialized sources, a missing literal, 9 float inline
+/// Per form: 4 uninitialized sources, 2 sources with a load outstanding, a missing literal, 9 float inline
 /// constants, 9 other special SRC0 selectors, a float constant under empty
 /// EXEC, SDWA, DPP16 and two DPP8 forms, the VOP3 `_e64` form, the matching
 /// `v_cmpx`, and a lane-derived F result branching over a scalar instruction.
-const REJECTIONS: usize = 4 * (4 + 1 + 9 + 9 + 1 + 4 + 1 + 1 + 1);
+const REJECTIONS: usize = 4 * (4 + 2 + 1 + 9 + 9 + 1 + 4 + 1 + 1 + 1);
 
 const LITERAL: u32 = 255;
 const VCC_LO: u32 = 106;
@@ -429,6 +432,41 @@ fn cases() -> Vec<Case> {
                 if mask == 0 { 0 } else { mask ^ x }
             }));
         }
+        // Under EXEC_LO = 0 the result is a known 0 (contract section 5), so
+        // the branch is resolved statically and may skip a scalar
+        // instruction (`s_mov_b32 s8, 0`); it is taken, v2 = 0.
+        let tail = [VCCZ_OVER_ONE, 0xbe88_0380];
+        let (code, _) = program(&vmov(3, 5), Some(0), &[vopc(op, vgpr(1), 3)], &tail);
+        let label = "exec 0, then s_cbranch_vccz over s_mov".into();
+        cases.push(case(entry, family, label, code, lanes(), |_, _, _| 0));
+        // EXEC_LO is unchanged by the compare (contract section 3): v2 =
+        // vcc_lo runs under the compare's partial EXEC, so active lanes take
+        // VCC_LO and inactive lanes keep their own old v2 = v1 ^ OLD.
+        let family = "vopc exec unchanged";
+        for exec in [0x5555_5555, 0x8000_0001] {
+            let mut code = PREFIX.to_vec();
+            code.extend(vmov(3, 5));
+            code.extend(vmov(5, OLD));
+            code.push(29 << 25 | 2 << 17 | 1 << 9 | vgpr(5)); // v_xor_b32 v2, v5, v1
+            code.extend(smov(EXEC_LO, exec));
+            code.extend([vopc(op, vgpr(1), 3), READ_VCC, FULL_EXEC]);
+            code.extend(STORE_V2);
+            let label = format!("exec {exec:#x}, v2 = vcc_lo before EXEC is restored");
+            cases.push(case(
+                entry,
+                family,
+                label,
+                words(&code),
+                lanes(),
+                |n, x, p| {
+                    if exec >> (n % 32) & 1 == 1 {
+                        vcc(form, exec, p, |k| (v1(k), 5))
+                    } else {
+                        x ^ OLD
+                    }
+                },
+            ));
+        }
     }
     cases
 }
@@ -453,6 +491,19 @@ fn rejections() -> Vec<(String, Vec<u8>, usize)> {
                 label.into(),
                 program(&setup, None, &[vopc(op, src0, vsrc1)], &[]),
             );
+        }
+        // A source whose VGPR has a load outstanding (no wait after
+        // `buffer_load_dword v3`): refused at the compare.
+        for (src0, vsrc1, label) in [(vgpr(1), 3, "VSRC1"), (vgpr(3), 1, "SRC0")] {
+            let mut code = PREFIX.to_vec();
+            code.extend(setup);
+            code.extend([0xe030_2000, 0x8000_0300]);
+            let offset = 4 * code.len();
+            code.push(vopc(op, src0, vsrc1));
+            code.extend([READ_VCC, 0xbf8c_3f70]);
+            code.extend(STORE_V2);
+            let label = format!("v3 load outstanding as {label}");
+            reject(label, (words(&code), offset));
         }
         // A literal SRC0 with no literal dword: the program ends at the word.
         let mut code = PREFIX.to_vec();
@@ -620,7 +671,11 @@ fn other_constant_compares_stay_unsupported() {
     // V_CMP_F_I64 160, V_CMP_T_I64 167, V_CMPX_F_I64 176, V_CMPX_T_I64 183,
     // V_CMP_F_U64 224, V_CMP_T_U64 231, V_CMPX_F_U64 240, V_CMPX_T_U64 247.
     let setup = vmov(3, 7);
-    for op in [0, 15, 16, 31, 160, 167, 176, 183, 224, 231, 240, 247] {
+    // Also the neighbours of the two 32-bit integer groups: 127 and 191 (not
+    // in Table 61), 136 V_CMP_CLASS_F32 and 200 V_CMP_F_F16.
+    for op in [
+        0, 15, 16, 31, 127, 136, 160, 167, 176, 183, 191, 200, 224, 231, 240, 247,
+    ] {
         let (code, offset) = program(&setup, None, &[vopc(op, vgpr(1), 3)], &[]);
         assert_rejected_at(&format!("opcode {op}"), &code, offset, &lanes());
     }
