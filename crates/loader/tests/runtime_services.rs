@@ -340,6 +340,7 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
         "WSAPoll",
         "getsockname",
         "getpeername",
+        "getsockopt",
         "inet_pton",
         "inet_ntop",
         "htons",
@@ -371,6 +372,9 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
             .zip(args)
         {
             cpu.set(register, value);
+        }
+        if let Some(&fifth) = args.get(4) {
+            memory.write_u64(STACK_TOP + 32, fifth).unwrap();
         }
         let result = engine.run(&mut cpu, memory, 8);
         assert_eq!(result.exit_reason, ExitReason::Halt, "{symbol}");
@@ -426,6 +430,30 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
     assert_ne!(receiver, u64::MAX);
     assert_ne!(sender, u64::MAX);
     assert_ne!(sender, receiver);
+    for (option, expected) in [(0x1008, 2), (0x2003, 65_507)] {
+        memory.write_u32(address_length, 8).unwrap();
+        assert_eq!(
+            call(
+                &mut memory,
+                "getsockopt",
+                &[sender, 0xffff, option, incoming, address_length]
+            ),
+            0
+        );
+        assert_eq!(memory.read_u32(incoming).unwrap(), expected);
+        assert_eq!(memory.read_u32(address_length).unwrap(), 4);
+    }
+    memory.write_u32(address_length, 3).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "getsockopt",
+            &[sender, 0xffff, 0x1008, incoming, address_length]
+        ),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10014);
+    assert_eq!(memory.read_u32(incoming).unwrap(), 65_507);
     assert_eq!(call(&mut memory, "bind", &[receiver, address, 16]), 0);
     memory.write_u32(address_length, 15).unwrap();
     assert_eq!(
