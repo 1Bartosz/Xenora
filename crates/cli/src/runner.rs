@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use xenora_loader::startup::{StartupEvent, StartupLayout, run_synthetic_startup_with_observer};
-use xenora_loader::{ExitReason, ImportRegistry, Register};
+use xenora_loader::{
+    ExitReason, ImportRegistry, Register, ServicesState, SystemClock, register_standard_services,
+};
 use xenora_metal::NativeCompute;
 use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
@@ -175,6 +177,10 @@ fn run_worker(options: &Options) -> Result<(), Box<dyn Error>> {
     let capture = Arc::new(Mutex::new(None));
     let draw_capture = Arc::clone(&capture);
     let mut imports = ImportRegistry::new();
+    register_standard_services(
+        &mut imports,
+        Arc::new(ServicesState::new(Arc::new(SystemClock))),
+    );
     let trace = options.trace;
     imports.register("xenora.dll", "fixture_draw", move |args, _, memory| {
         let ticket_address = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
