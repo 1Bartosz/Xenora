@@ -183,9 +183,25 @@ impl Arm64Assembler {
         self.emit(0x93401c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
     }
 
+    /// SXTB (32-bit/sign-extended): SXTB Wd, Wn (SBFM Wd, Wn, #0, #7)
+    ///
+    /// Writing the 32-bit destination form clears bits 63:32 of the
+    /// destination register, which is what a 32-bit x86 destination requires.
+    pub fn sxtb_32(&mut self, wd: u8, wn: u8) {
+        self.emit(0x13001c00 | ((wn as u32 & 0x1f) << 5) | (wd as u32 & 0x1f));
+    }
+
     /// SXTH (64-bit/sign-extended): SXTH Xd, Wn (SBFM Xd, Xn, #0, #15)
     pub fn sxth_64(&mut self, xd: u8, wn: u8) {
         self.emit(0x93403c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
+    }
+
+    /// SXTH (32-bit/sign-extended): SXTH Wd, Wn (SBFM Wd, Wn, #0, #15)
+    ///
+    /// Writing the 32-bit destination form clears bits 63:32 of the
+    /// destination register, which is what a 32-bit x86 destination requires.
+    pub fn sxth_32(&mut self, wd: u8, wn: u8) {
+        self.emit(0x13003c00 | ((wn as u32 & 0x1f) << 5) | (wd as u32 & 0x1f));
     }
 
     /// ADD (extended/shifted register, 32-bit): ADD Wd, Wn, Wm
