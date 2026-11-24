@@ -337,6 +337,8 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
         "recv",
         "WSAGetLastError",
         "WSACleanup",
+        "inet_pton",
+        "htons",
     ];
     let imports = symbols.map(|symbol| ("ws2_32.dll", Symbol::Name(symbol)));
     let image = build(&imports);
@@ -373,15 +375,33 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
     let address = SCRATCH + 0x200;
     let outgoing = SCRATCH + 0x220;
     let incoming = SCRATCH + 0x240;
+    let text = SCRATCH + 0x260;
+    memory.write_u16(address, 2).unwrap();
+    let port = call(&mut memory, "htons", &[5000]);
+    memory.write_u16(address + 2, port as u16).unwrap();
+    memory.write_bytes(text, b"127.0.0.1\0").unwrap();
+    assert_eq!(call(&mut memory, "inet_pton", &[2, text, address + 4]), 1);
+    assert_eq!(
+        memory.read_u32(address + 4).unwrap().to_le_bytes(),
+        [127, 0, 0, 1]
+    );
+    memory.write_bytes(text, b"127.0.0.999\0").unwrap();
+    assert_eq!(call(&mut memory, "inet_pton", &[2, text, address + 4]), 0);
+    assert_eq!(
+        memory.read_u32(address + 4).unwrap().to_le_bytes(),
+        [127, 0, 0, 1]
+    );
+    assert_eq!(
+        call(&mut memory, "inet_pton", &[23, text, address + 4]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10047);
     assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, SCRATCH]), 0);
     let receiver = call(&mut memory, "socket", &[2, 2, 17]);
     let sender = call(&mut memory, "socket", &[2, 2, 17]);
     assert_ne!(receiver, u64::MAX);
     assert_ne!(sender, u64::MAX);
     assert_ne!(sender, receiver);
-    let mut endpoint = [0; 16];
-    endpoint[..8].copy_from_slice(&[2, 0, 0x13, 0x88, 127, 0, 0, 1]);
-    memory.write_bytes(address, &endpoint).unwrap();
     assert_eq!(call(&mut memory, "bind", &[receiver, address, 16]), 0);
     assert_eq!(call(&mut memory, "connect", &[sender, address, 16]), 0);
     memory.write_bytes(outgoing, b"loop").unwrap();

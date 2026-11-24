@@ -175,6 +175,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(0)
     });
 
+    register_address_conversion(registry, state);
     register_loopback(registry, state);
 
     let get = Arc::clone(state);
@@ -189,6 +190,62 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     for symbol in ["WSAStartup", "WSACleanup", "socket", "closesocket"] {
         registry.set_status(MODULE, symbol, ServiceStatus::Partial);
     }
+}
+
+fn register_address_conversion(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    for symbol in ["htons", "ntohs"] {
+        registry.register(MODULE, symbol, |args, _, _| {
+            Ok(u64::from((args.rcx as u16).swap_bytes()))
+        });
+    }
+    for symbol in ["htonl", "ntohl"] {
+        registry.register(MODULE, symbol, |args, _, _| {
+            Ok(u64::from((args.rcx as u32).swap_bytes()))
+        });
+    }
+    let state = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "inet_pton",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let fail = |error| state.fail(cpu.gs_base, error, SOCKET_ERROR);
+            if args.rcx as u32 != 2 {
+                return fail(WSAEAFNOSUPPORT);
+            }
+            if args.rdx == 0 || args.r8 == 0 {
+                return fail(WSAEFAULT);
+            }
+            // The longest dotted decimal IPv4 spelling is 15 bytes plus NUL.
+            let mut text = [0; 15];
+            for len in 0..=text.len() {
+                let Some(address) = args.rdx.checked_add(len as u64) else {
+                    return fail(WSAEFAULT);
+                };
+                let Ok(byte) = memory.read_u8(address) else {
+                    return fail(WSAEFAULT);
+                };
+                if byte == 0 {
+                    let Some(ip) = std::str::from_utf8(&text[..len])
+                        .ok()
+                        .and_then(|text| text.parse::<std::net::Ipv4Addr>().ok())
+                    else {
+                        return Ok(0);
+                    };
+                    return if memory.write_bytes(args.r8, &ip.octets()).is_ok() {
+                        Ok(1)
+                    } else {
+                        fail(WSAEFAULT)
+                    };
+                }
+                if len == text.len() {
+                    break;
+                }
+                text[len] = byte;
+            }
+            Ok(0)
+        },
+    );
 }
 
 fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
