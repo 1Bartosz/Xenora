@@ -208,15 +208,16 @@ const COUNTS: [(&str, usize); 17] = [
     ("vop1 no vcc or scc write", 5 * 5),
     ("swap lane pairs", 5 * 2),
     ("swap same register", 1),
-    ("swap max register", 2),
+    ("swap max register", 4),
     ("swap exec", 7 * 2),
     ("swap partial wave", 3),
-    ("swap no vcc or scc write", 4),
+    ("swap no vcc or scc write", 5),
 ];
 /// Per one-source form: a missing literal and every SRC0 selector outside the
 /// supported subset (107-127 and 209-254, with the SDWA and DPP extension
-/// dword where one belongs); for V_SWAP_B32 every selector 0-255.
-const REJECTIONS: usize = 5 * (1 + 21 + 46) + 256;
+/// dword where one belongs); for V_SWAP_B32 every selector 0-255; and for
+/// all six a read of and a write to a VGPR with a load outstanding.
+const REJECTIONS: usize = 5 * (1 + 21 + 46) + 256 + 6 * 2;
 
 const LITERAL: u32 = 255;
 const VCC_LO: u32 = 106;
@@ -541,6 +542,13 @@ fn swap_cases(cases: &mut Vec<Case>) {
         lanes(),
         |_, x| x,
     ));
+    // The other register of each pair, so both writes are seen.
+    let code = program(&vmov(255, b), &[vop1(SWAP, 255, vgpr(1))], &[], 255);
+    let label = "v255, v1, read v255".into();
+    cases.push(case(name, family, label, code, lanes(), |_, x| x));
+    let code = program(&vmov(255, b), &[vop1(SWAP, 1, vgpr(255))], &[], 1);
+    let label = "v1, v255, read v1".into();
+    cases.push(case(name, family, label, code, lanes(), |_, _| b));
     // EXEC: v4 = v1 ^ OLD; active lanes exchange, inactive lanes keep both.
     let mut setup = vmov(5, OLD).to_vec();
     setup.push(vxor(4, 5, 1));
@@ -605,6 +613,20 @@ fn swap_cases(cases: &mut Vec<Case>) {
             }));
         }
     }
+    // Partial EXEC with VCC_LO bits inside and outside EXEC, so a VCC write
+    // limited to active lanes, or one derived from the swapped data, shows.
+    let (exec, vcc) = (0x0f0f_0f0f, 0x0000_00f3);
+    let mut before = setup.clone();
+    before.extend(smov(VCC_LO, vcc));
+    before.push(SCC_SET);
+    before.extend(smov(126, exec));
+    let mut after = vec![FULL_EXEC, 0x7e04_0304]; // v2 = v4
+    after.extend(FLAG_TAIL);
+    let code = program(&before, &alu, &after, 2);
+    let label = format!("exec {exec:#x}, vcc_lo {vcc:#x}, scc true");
+    cases.push(case(name, family, label, code, lanes(), |n, x| {
+        masked(exec, n, x, x ^ OLD) ^ vcc ^ masked(exec, n, x ^ OLD, x)
+    }));
 }
 
 fn cases() -> Vec<Case> {
@@ -660,8 +682,24 @@ fn rejections() -> Vec<(String, Vec<u8>, usize)> {
         let code = program(&swap_setup, &alu, &[], 2);
         all.push((format!("{SWAP_NAME} src0 {src0}"), code, swap_offset));
     }
+    // v3 with a load into it outstanding (no wait): read as SRC0, then
+    // written as VDST (the swap also reads it as VDST).
+    let mut pending = swap_setup.clone();
+    pending.extend(PENDING_LOAD_V3);
+    let pending_offset = alu_offset(&pending);
+    let ops = FORMS.iter().map(|&(form, name)| (form as u32, name));
+    for (op, name) in ops.chain([(SWAP, SWAP_NAME)]) {
+        for (dst, src0, what) in [(2, 3, "read"), (3, if op == SWAP { 2 } else { 1 }, "write")] {
+            let code = program(&pending, &[vop1(op, dst, vgpr(src0))], &[], 2);
+            let label = format!("{name} {what} of v3 with its load outstanding");
+            all.push((label, code, pending_offset));
+        }
+    }
     all
 }
+
+/// `buffer_load_dword v3, v0, s[0:3], 0 idxen` without the wait.
+const PENDING_LOAD_V3: [u32; 2] = [0xe030_2000, 0x8000_0300];
 
 fn assert_rejected_at(label: &str, code: &[u8], offset: usize, input: &[u32]) {
     match xenora_ref::execute(code, input) {
@@ -761,6 +799,19 @@ fn unsupported_vop1_integer_encodings_are_rejected() {
         assert_rejected_at(label, code, *offset, &lanes());
     }
     eprintln!("vop1_integer: {} rejections", rejections.len());
+}
+
+#[test]
+fn swap_scalar_sources_fail_to_decode() {
+    // The SRC0 refusal is a decode error, not a failed read of an
+    // uninitialized SGPR or VCC_LO at run time.
+    for src0 in 0..=255 {
+        let code = words(&[vop1(SWAP, 2, src0), 7, 0xbf81_0000]);
+        match xenora_ref::decode(&code) {
+            Err(error) => assert_eq!(error.offset, 0, "src0 {src0}: {error:?}"),
+            Ok(program) => panic!("reference decoded v_swap_b32 src0 {src0}: {program:?}"),
+        }
+    }
 }
 
 #[test]
