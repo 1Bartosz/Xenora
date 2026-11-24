@@ -6,12 +6,12 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::sel;
 use objc2_metal::{
-    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction,
-    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLFunction, MTLIndexType,
-    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLShaderValidation, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
-    MTLTextureUsage, MTLViewport,
+    MTLBlendFactor, MTLBlendOperation, MTLClearColor, MTLColorWriteMask, MTLCommandBuffer,
+    MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLDepthStencilDescriptor,
+    MTLDepthStencilState, MTLDevice, MTLFunction, MTLIndexType, MTLLoadAction, MTLOrigin,
+    MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLShaderValidation, MTLSize,
+    MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
 };
 
 use xenora_texture::{Bc1Subresource, Bc1Upload};
@@ -1079,5 +1079,287 @@ fn whole(width: usize, height: usize) -> MTLRegion {
             height,
             depth: 1,
         },
+    }
+}
+
+/// A blend factor, as Metal defines it for the RGB and the alpha channel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlendFactor {
+    Zero,
+    One,
+    SourceColor,
+    OneMinusSourceColor,
+    SourceAlpha,
+    OneMinusSourceAlpha,
+    DestinationColor,
+    OneMinusDestinationColor,
+    DestinationAlpha,
+    OneMinusDestinationAlpha,
+}
+
+impl BlendFactor {
+    fn metal(self) -> MTLBlendFactor {
+        match self {
+            Self::Zero => MTLBlendFactor::Zero,
+            Self::One => MTLBlendFactor::One,
+            Self::SourceColor => MTLBlendFactor::SourceColor,
+            Self::OneMinusSourceColor => MTLBlendFactor::OneMinusSourceColor,
+            Self::SourceAlpha => MTLBlendFactor::SourceAlpha,
+            Self::OneMinusSourceAlpha => MTLBlendFactor::OneMinusSourceAlpha,
+            Self::DestinationColor => MTLBlendFactor::DestinationColor,
+            Self::OneMinusDestinationColor => MTLBlendFactor::OneMinusDestinationColor,
+            Self::DestinationAlpha => MTLBlendFactor::DestinationAlpha,
+            Self::OneMinusDestinationAlpha => MTLBlendFactor::OneMinusDestinationAlpha,
+        }
+    }
+}
+
+/// A blend operation combining the weighted source and destination; `Min`
+/// and `Max` take the unweighted values and ignore the factors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlendOperation {
+    Add,
+    Subtract,
+    ReverseSubtract,
+    Min,
+    Max,
+}
+
+impl BlendOperation {
+    fn metal(self) -> MTLBlendOperation {
+        match self {
+            Self::Add => MTLBlendOperation::Add,
+            Self::Subtract => MTLBlendOperation::Subtract,
+            Self::ReverseSubtract => MTLBlendOperation::ReverseSubtract,
+            Self::Min => MTLBlendOperation::Min,
+            Self::Max => MTLBlendOperation::Max,
+        }
+    }
+}
+
+/// Separate RGB and alpha blend equations of one draw.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlendState {
+    pub source_rgb: BlendFactor,
+    pub destination_rgb: BlendFactor,
+    pub rgb_operation: BlendOperation,
+    pub source_alpha: BlendFactor,
+    pub destination_alpha: BlendFactor,
+    pub alpha_operation: BlendOperation,
+}
+
+/// The colour channels a draw writes; the others keep the stored value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ColorWriteMask {
+    pub red: bool,
+    pub green: bool,
+    pub blue: bool,
+    pub alpha: bool,
+}
+
+impl ColorWriteMask {
+    pub const ALL: Self = Self {
+        red: true,
+        green: true,
+        blue: true,
+        alpha: true,
+    };
+
+    fn metal(self) -> MTLColorWriteMask {
+        [
+            (self.red, MTLColorWriteMask::Red),
+            (self.green, MTLColorWriteMask::Green),
+            (self.blue, MTLColorWriteMask::Blue),
+            (self.alpha, MTLColorWriteMask::Alpha),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .fold(MTLColorWriteMask::None, |mask, (_, bit)| mask | bit)
+    }
+}
+
+/// One flat-coloured triangle of a blend pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlendDraw {
+    pub positions: [[f32; 4]; 3],
+    pub color: [u8; 4],
+    /// `None` disables blending: the source replaces the masked channels.
+    pub blend: Option<BlendState>,
+    pub write_mask: ColorWriteMask,
+}
+
+/// An offscreen pass of up to 16 triangles drawn in order into a cleared
+/// RGBA8Unorm target without depth attachment.
+#[derive(Clone, Copy, Debug)]
+pub struct BlendPass<'a> {
+    pub extent: [usize; 2],
+    pub clear_color: [u8; 4],
+    pub draws: &'a [BlendDraw],
+}
+
+impl NativeCompute {
+    /// Draw a blended, write-masked offscreen pass and read back its colour.
+    ///
+    /// Blend state and write mask are pipeline state in Metal, so each draw
+    /// gets its own pipeline built from exactly the draw's settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid extent, too many draws, non-finite
+    /// positions, or Metal setup or execution failure.
+    pub fn render_blend(&self, pass: &BlendPass<'_>) -> Result<Vec<u8>, MetalError> {
+        let [width, height] = pass.extent;
+        let pixels = width
+            .checked_mul(height)
+            .filter(|&count| (1..=MAX_PIXELS).contains(&count))
+            .ok_or_else(|| MetalError::new("render bounds", "expected 1..=4096 pixels"))?;
+        if pass.draws.len() > MAX_DEPTH_DRAWS {
+            return Err(MetalError::new("blend pass", "expected at most 16 draws"));
+        }
+        if pass
+            .draws
+            .iter()
+            .flat_map(|draw| draw.positions.as_flattened())
+            .any(|value| !value.is_finite())
+        {
+            return Err(MetalError::new(
+                "render input",
+                "expected finite vertex data",
+            ));
+        }
+
+        autoreleasepool(|_| {
+            let options = compile_options()?;
+            let library = self.compile_library(DEPTH_SOURCE, &options)?;
+            let vertex = find_function(&library, "depth_vertex")?;
+            let fragment = find_function(&library, "depth_flat")?;
+            let pipelines = pass
+                .draws
+                .iter()
+                .map(|draw| self.blend_pipeline(&vertex, &fragment, draw))
+                .collect::<Result<Vec<_>, _>>()?;
+            let color = self.new_target(
+                PIXEL_FORMAT,
+                width,
+                height,
+                MTLStorageMode::Shared,
+                MTLTextureUsage::RenderTarget,
+            )?;
+            let pass_descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
+            // SAFETY: Slot zero is the only color attachment for this pass.
+            let attachment = unsafe {
+                pass_descriptor
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
+            attachment.setTexture(Some(&color));
+            attachment.setLoadAction(MTLLoadAction::Clear);
+            let [red, green, blue, alpha] = pass.clear_color.map(|value| f64::from(value) / 255.0);
+            attachment.setClearColor(MTLClearColor {
+                red,
+                green,
+                blue,
+                alpha,
+            });
+            attachment.setStoreAction(MTLStoreAction::Store);
+            let words: Vec<u32> = pass
+                .draws
+                .iter()
+                .flat_map(|draw| draw.positions.as_flattened())
+                .map(|value| value.to_bits())
+                .collect();
+            let positions = (!words.is_empty())
+                .then(|| self.new_buffer(&words))
+                .transpose()?;
+            let command = self.queue.commandBuffer().ok_or_else(|| {
+                MetalError::new("commandBuffer", "render command buffer creation failed")
+            })?;
+            let encoder = command
+                .renderCommandEncoderWithDescriptor(&pass_descriptor)
+                .ok_or_else(|| {
+                    MetalError::new(
+                        "renderCommandEncoderWithDescriptor",
+                        "render encoder creation failed",
+                    )
+                })?;
+            encoder.setViewport(MTLViewport {
+                originX: 0.0,
+                originY: 0.0,
+                width: width as f64,
+                height: height as f64,
+                znear: 0.0,
+                zfar: 1.0,
+            });
+            for (index, (draw, pipeline)) in pass.draws.iter().zip(&pipelines).enumerate() {
+                encoder.setRenderPipelineState(pipeline);
+                let rgba = draw.color.map(|value| f32::from(value) / 255.0);
+                // SAFETY: The position buffer holds three float4s per draw and
+                // the vertex stage reads only this draw's three. The fragment
+                // constant is copied by Metal and matches the declared float4.
+                unsafe {
+                    encoder.setVertexBuffer_offset_atIndex(positions.as_deref(), index * 48, 0);
+                    encoder.setFragmentBytes_length_atIndex(
+                        NonNull::from(&rgba).cast(),
+                        size_of_val(&rgba),
+                        0,
+                    );
+                    encoder.drawPrimitives_vertexStart_vertexCount(
+                        MTLPrimitiveType::Triangle,
+                        0,
+                        3,
+                    );
+                }
+            }
+            encoder.endEncoding();
+            complete_command(&command)?;
+
+            let mut output = vec![0; pixels * 4];
+            // SAFETY: GPU writes have completed, and the initialized output
+            // allocation fits the entire shared texture with tightly packed rows.
+            unsafe {
+                color.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                    NonNull::from(output.as_mut_slice()).cast(),
+                    width * 4,
+                    whole(width, height),
+                    0,
+                );
+            }
+            Ok(output)
+        })
+    }
+
+    fn blend_pipeline(
+        &self,
+        vertex: &ProtocolObject<dyn MTLFunction>,
+        fragment: &ProtocolObject<dyn MTLFunction>,
+        draw: &BlendDraw,
+    ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, MetalError> {
+        let descriptor = MTLRenderPipelineDescriptor::new();
+        descriptor.setVertexFunction(Some(vertex));
+        descriptor.setFragmentFunction(Some(fragment));
+        // SAFETY: Slot zero is the only color attachment for this pipeline.
+        let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        attachment.setPixelFormat(PIXEL_FORMAT);
+        attachment.setWriteMask(draw.write_mask.metal());
+        attachment.setBlendingEnabled(draw.blend.is_some());
+        if let Some(blend) = draw.blend {
+            attachment.setSourceRGBBlendFactor(blend.source_rgb.metal());
+            attachment.setDestinationRGBBlendFactor(blend.destination_rgb.metal());
+            attachment.setRgbBlendOperation(blend.rgb_operation.metal());
+            attachment.setSourceAlphaBlendFactor(blend.source_alpha.metal());
+            attachment.setDestinationAlphaBlendFactor(blend.destination_alpha.metal());
+            attachment.setAlphaBlendOperation(blend.alpha_operation.metal());
+        }
+        let pipeline = self
+            .device
+            .newRenderPipelineStateWithDescriptor_error(&descriptor)
+            .map_err(|error| {
+                MetalError::new(
+                    "newRenderPipelineStateWithDescriptor",
+                    error.localizedDescription().to_string(),
+                )
+            })?;
+        verify_render_validation(&pipeline)?;
+        Ok(pipeline)
     }
 }

@@ -24,8 +24,9 @@ use xenora_texture::{
 mod render;
 
 pub use render::{
-    DepthCompare, DepthDraw, DepthFill, DepthOutput, DepthPass, DepthState, IndexBuffer,
-    IndexedDraw, IndexedPass,
+    BlendDraw, BlendFactor, BlendOperation, BlendPass, BlendState, ColorWriteMask, DepthCompare,
+    DepthDraw, DepthFill, DepthOutput, DepthPass, DepthState, IndexBuffer, IndexedDraw,
+    IndexedPass,
 };
 
 const MAX_THREADS_PER_GROUP: usize = 64;
