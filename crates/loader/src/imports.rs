@@ -163,6 +163,13 @@ pub struct ServiceDescriptor {
 pub(crate) struct DynamicTrampolines(Arc<RwLock<HashMap<u64, usize>>>);
 
 impl DynamicTrampolines {
+    pub(crate) fn revoke(&self, indices: impl Iterator<Item = usize>) {
+        let mut entries = self.0.write().expect("dynamic service trampolines");
+        for index in indices {
+            entries.remove(&trampoline_address(index));
+        }
+    }
+
     pub(crate) fn expose(&self, index: usize) -> u64 {
         let address = trampoline_address(index);
         self.0

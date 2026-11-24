@@ -2,12 +2,12 @@
 
 //! Module and export lookup for built-in guest services.
 
-use super::{ERROR_INVALID_HANDLE, KERNEL32, ServicesState};
+use super::{ERROR_INVALID_HANDLE, ERROR_NOT_ENOUGH_MEMORY, KERNEL32, ServicesState};
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{GuestMemory, MemoryError};
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const LOADER_API: &str = "api-ms-win-core-libraryloader-l1-2-0.dll";
 const UCRT: &str = "ucrtbase.dll";
@@ -19,6 +19,7 @@ const MODULE_BASE: u64 = 0x0000_0007_e000_0000;
 struct Modules {
     names: BTreeMap<String, u64>,
     exports: BTreeMap<(u64, String), usize>,
+    references: Mutex<BTreeMap<u64, u32>>,
 }
 
 fn read_name(
@@ -50,7 +51,13 @@ fn read_name(
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     let modules = Arc::new(OnceLock::<Modules>::new());
-    for (symbol, wide) in [("GetModuleHandleA", false), ("GetModuleHandleW", true)] {
+    let named_operations = [
+        ("GetModuleHandleA", false, false),
+        ("GetModuleHandleW", true, false),
+        ("LoadLibraryA", false, true),
+        ("LoadLibraryW", true, true),
+    ];
+    for (symbol, wide, load) in named_operations {
         let state = Arc::clone(state);
         let modules = Arc::clone(&modules);
         registry.register(KERNEL32, symbol, move |args, _, memory| {
@@ -66,19 +73,54 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 name.push_str(".dll");
             }
             let modules = modules.get().expect("built-in module catalog");
-            match modules.names.get(&name) {
-                Some(&handle) => Ok(handle),
-                None => state.fail(MODULE_NOT_FOUND, 0),
+            let Some(&handle) = modules.names.get(&name) else {
+                return state.fail(MODULE_NOT_FOUND, 0);
+            };
+            let mut references = modules.references.lock().expect("module references");
+            if load {
+                let count = references.entry(handle).or_default();
+                let Some(next) = count.checked_add(1) else {
+                    return state.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+                };
+                *count = next;
+            } else if handle != MODULE_BASE && !references.contains_key(&handle) {
+                return state.fail(MODULE_NOT_FOUND, 0);
             }
+            Ok(handle)
         });
     }
+
+    let release = Arc::clone(&modules);
+    let release_state = Arc::clone(state);
+    let release_trampolines = registry.dynamic_trampolines();
+    registry.register(KERNEL32, "FreeLibrary", move |args, _, _| {
+        let modules = release.get().expect("built-in module catalog");
+        let mut references = modules.references.lock().expect("module references");
+        let Some(count) = references.get_mut(&args.rcx) else {
+            return release_state.fail(ERROR_INVALID_HANDLE, 0);
+        };
+        *count -= 1;
+        if *count == 0 {
+            references.remove(&args.rcx);
+            if args.rcx != MODULE_BASE {
+                release_trampolines.revoke(
+                    modules
+                        .exports
+                        .iter()
+                        .filter_map(|((handle, _), &index)| (*handle == args.rcx).then_some(index)),
+                );
+            }
+        }
+        Ok(1)
+    });
 
     let lookup = Arc::clone(&modules);
     let trampolines = registry.dynamic_trampolines();
     let state = Arc::clone(state);
     registry.register(KERNEL32, "GetProcAddress", move |args, _, memory| {
         let modules = lookup.get().expect("built-in module catalog");
-        if !matches!(args.rcx, MODULE_BASE | UCRT_HANDLE) {
+        let references = modules.references.lock().expect("module references");
+        if args.rcx != MODULE_BASE && !references.contains_key(&args.rcx) {
             return state.fail(ERROR_INVALID_HANDLE, 0);
         }
         // Ordinal entries require an independently verified export catalog.
@@ -95,12 +137,18 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
     });
 
-    for symbol in ["GetModuleHandleA", "GetModuleHandleW", "GetProcAddress"] {
+    for symbol in named_operations
+        .map(|(symbol, _, _)| symbol)
+        .into_iter()
+        .chain(["GetProcAddress", "FreeLibrary"])
+    {
         registry.alias(LOADER_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
 
     let mut catalog = Modules::default();
+    // Preserve the startup UCRT binding. Kernel services are resident.
+    catalog.references.get_mut().unwrap().insert(UCRT_HANDLE, 1);
     for (module, handle) in [(KERNEL32, MODULE_BASE), (UCRT, UCRT_HANDLE)] {
         catalog.names.insert(module.to_owned(), handle);
         for (name, symbol, status) in registry.iter_registered() {
@@ -121,3 +169,53 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 }
 
 const UCRT_HANDLE: u64 = MODULE_BASE + 0x10000;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::{MockClock, register_standard_services};
+
+    #[test]
+    fn guest_module_references_control_dynamic_export_lifetime() {
+        let mut registry = ImportRegistry::new();
+        register_standard_services(
+            &mut registry,
+            Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),
+        );
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region(0x10000, 4096, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory.write_bytes(0x10000, b"UCRTBASE\0").unwrap();
+        memory.write_bytes(0x10100, b"sqrt\0").unwrap();
+        memory.write_bytes(0x10200, b"/unknown.dll\0").unwrap();
+        let mut call = |symbol: &str, first, second| {
+            let mut cpu = CpuState::default();
+            cpu.set(Register::Rcx, first);
+            cpu.set(Register::Rdx, second);
+            let service = registry
+                .resolve(LOADER_API, &ImportName::Name(symbol.to_owned()))
+                .unwrap();
+            (service.handler)(&Win64Args::new(&cpu), &mut cpu, &mut memory).unwrap()
+        };
+        assert_eq!(call("LoadLibraryA", 0x10200, 0), 0);
+        let handle = call("GetModuleHandleA", 0x10000, 0);
+        assert_ne!(handle, 0);
+        assert_eq!(call("LoadLibraryA", 0x10000, 0), handle);
+        let export = call("GetProcAddress", handle, 0x10100);
+        assert!(registry.is_service_trampoline(export));
+        assert_eq!(call("FreeLibrary", handle, 0), 1);
+        assert!(registry.is_service_trampoline(export));
+        assert_eq!(call("FreeLibrary", handle, 0), 1);
+        assert!(!registry.is_service_trampoline(export));
+        assert_eq!(call("GetModuleHandleA", 0x10000, 0), 0);
+        assert_eq!(call("GetProcAddress", handle, 0x10100), 0);
+        assert_eq!(call("FreeLibrary", handle, 0), 0);
+        assert_eq!(call("LoadLibraryA", 0x10000, 0), handle);
+        assert_ne!(call("GetProcAddress", handle, 0x10100), 0);
+    }
+}
