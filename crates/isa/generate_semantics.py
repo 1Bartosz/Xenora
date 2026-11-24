@@ -38,8 +38,24 @@ FORM_KEYS = {
 }
 TOP_KEYS = {"schema", "architecture", "source_sha256", "documents", "operand_rules", "form"}
 
-OPERATIONS = {"add": "Add", "sub": "Sub", "and": "And", "or": "Or", "xor": "Xor"}
-LOGICAL = {"and", "or", "xor"}
+OPERATIONS = {
+    "add": "Add", "sub": "Sub", "and": "And", "or": "Or", "xor": "Xor",
+    "andn2": "AndNot", "orn2": "OrNot", "nand": "Nand", "nor": "Nor", "xnor": "Xnor",
+    "lshl": "ShiftLeft", "lshr": "LogicalShiftRight", "ashr": "ArithmeticShiftRight",
+}
+# Logical operations take untyped bits; arithmetic ones never do. Shifts take
+# the signedness their primitive names, and their S1 is an unsigned count.
+LOGICAL = {"and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor"}
+ARITHMETIC = {"add", "sub"}
+SHIFTS = {"lshl", "lshr", "ashr"}
+# XML number formats a source may have for each declared signedness.
+SOURCE_FORMATS = {
+    "signed": {"FMT_NUM_I32"},
+    "unsigned": {"FMT_NUM_U32"},
+    "bitwise": {"FMT_NUM_U32", "FMT_NUM_B32"},
+}
+# Optional keys: required exactly when the condition holds.
+SHIFT_KEY = "shift_count_bits"
 SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise"}
 CARRY_IN = {"none": "None", "scc": "Scc"}
 SCC = {
@@ -86,6 +102,14 @@ PRIMITIVES = {
     ("and", "bitwise"): ("nonzero", "and_nonzero_b32", False),
     ("or", "bitwise"): ("nonzero", "or_nonzero_b32", False),
     ("xor", "bitwise"): ("nonzero", "xor_nonzero_b32", False),
+    ("andn2", "bitwise"): ("nonzero", "andn2_nonzero_b32", False),
+    ("orn2", "bitwise"): ("nonzero", "orn2_nonzero_b32", False),
+    ("nand", "bitwise"): ("nonzero", "nand_nonzero_b32", False),
+    ("nor", "bitwise"): ("nonzero", "nor_nonzero_b32", False),
+    ("xnor", "bitwise"): ("nonzero", "xnor_nonzero_b32", False),
+    ("lshl", "bitwise"): ("nonzero", "lshl_nonzero_b32", False),
+    ("lshr", "unsigned"): ("nonzero", "lshr_nonzero_b32", False),
+    ("ashr", "signed"): ("nonzero", "ashr_nonzero_i32", False),
 }
 
 # Operand rules the decoder implements, each exactly once. A registry rule must
@@ -205,6 +229,7 @@ def _check_xml(form, rule, snapshot, errors):
     if rule is None:
         return
     fields = [(rule["dst"]["field"], False)] + [(src["field"], True) for src in rule["src"]]
+    count_field = rule["src"][1]["field"] if form["operation"] in SHIFTS else None
     for field, is_source in fields:
         if field not in operands:
             errors.append(f"{label}: XML has no operand {field}")
@@ -214,8 +239,12 @@ def _check_xml(form, rule, snapshot, errors):
             errors.append(f"{label}: {field} is {size} bits in the XML, declared {form['width']}")
         if (is_input, is_output) != (is_source, not is_source):
             errors.append(f"{label}: {field} direction disagrees with the XML")
-        signed_format = data_format.startswith("FMT_NUM_I")
-        if is_source and signed_format != (form["signedness"] == "signed"):
+        if field == count_field:
+            if data_format != "FMT_NUM_U32":
+                errors.append(
+                    f"{label}: shift count {field} has XML format {data_format}, not FMT_NUM_U32"
+                )
+        elif is_source and data_format not in SOURCE_FORMATS.get(form["signedness"], ()):
             errors.append(
                 f"{label}: signedness {form['signedness']} contradicts XML format {data_format}"
             )
@@ -261,7 +290,7 @@ def validate(registry, snapshot):
     for index, form in enumerate(forms):
         label = form.get("name", f"form #{index}")
         missing = sorted(FORM_KEYS - set(form))
-        extra = sorted(set(form) - FORM_KEYS)
+        extra = sorted(set(form) - FORM_KEYS - {SHIFT_KEY})
         if missing:
             errors.append(f"{label}: incomplete, missing {missing}")
         if extra:
@@ -294,10 +323,20 @@ def validate(registry, snapshot):
             if value in seen[key]:
                 errors.append(f"{label}: duplicate {key} {value}")
             seen[key].add(value)
-        if (form["signedness"] == "bitwise") != (form["operation"] in LOGICAL):
+        if (form["operation"] in LOGICAL and form["signedness"] != "bitwise") or (
+            form["operation"] in ARITHMETIC and form["signedness"] == "bitwise"
+        ):
             errors.append(
                 f"{label}: signedness {form['signedness']} contradicts operation {form['operation']}"
             )
+        if form["operation"] in SHIFTS:
+            bits = form.get(SHIFT_KEY)
+            if type(bits) is not int or not 0 < bits < 32 or (1 << bits) != form["width"]:
+                errors.append(
+                    f"{label}: {SHIFT_KEY} must be log2 of the width ({form['width']}), got {bits!r}"
+                )
+        elif SHIFT_KEY in form:
+            errors.append(f"{label}: {SHIFT_KEY} on a non-shift operation")
         primitive = PRIMITIVES.get((form["operation"], form["signedness"]))
         if primitive is None:
             errors.append(f"{label}: no primitive implements {form['operation']}/{form['signedness']}")
@@ -396,6 +435,7 @@ def render(registry, snapshot):
             f"        signedness: Signedness::{SIGNEDNESS[form['signedness']]},",
             f"        carry_in: CarryIn::{CARRY_IN[form['carry_in']]},",
             f"        width: {form['width']},",
+            f"        shift_count_bits: {form.get(SHIFT_KEY, 0)},",
             f"        scc: SccEffect::{SCC[form['scc']]},",
             f"        vcc: MaskEffect::{MASK[form['vcc']]},",
             f"        exec: MaskEffect::{MASK[form['exec']]},",
@@ -414,6 +454,16 @@ def _render_enum(rule_name, forms, snapshot, positions):
     family = forms[0]["family"]
     encoding = snapshot["encodings"][_family_encoding(family)]
     mask = encoding["identifier_mask"]
+    (offset, size), = dict((name, ranges) for name, ranges in encoding["fields"])["OP"]
+    op_mask = ((1 << size) - 1) << offset
+    fixed_mask = mask & ~op_mask
+    fixed_bits = encoding["identifiers"][0] & fixed_mask
+    # Every identifier of the family must share the fixed bits, or the split
+    # into an encoding test plus an OP match would change which words match.
+    if any(identifier & fixed_mask != fixed_bits for identifier in encoding["identifiers"]) or (
+        mask & op_mask != op_mask
+    ):
+        raise ValueError(f"{family}: identifiers do not split into fixed bits and OP")
     out = [
         "",
         f"/// {family} operations declared in the semantic registry (operand rule `{rule_name}`).",
@@ -427,8 +477,19 @@ def _render_enum(rule_name, forms, snapshot, positions):
             f"{form['signedness']} {form['operation']}{carry}, SCC = {form['scc']}.",
             f"    {form['variant']},",
         ]
+    by_opcode = {form["opcode"]: form["variant"] for form in forms}
     out += [
         "}",
+        "",
+        f"/// {enum} by {family} OP field value; `None` for undeclared opcodes.",
+        f"const BY_OPCODE: [Option<{enum}>; {1 << size}] = [",
+    ]
+    out += [
+        f"    Some({enum}::{by_opcode[opcode]})," if opcode in by_opcode else "    None,"
+        for opcode in range(1 << size)
+    ]
+    out += [
+        "];",
         "",
         f"impl {enum} {{",
         "    /// Every operation, in registry order.",
@@ -438,15 +499,13 @@ def _render_enum(rule_name, forms, snapshot, positions):
     out += [
         "    ];",
         "",
-        f"    /// Selects the operation from a first instruction word (mask 0x{mask:09_x}).",
+        f"    /// Selects the operation from a first instruction word: the {family} encoding",
+        f"    /// bits (mask 0x{fixed_mask:09_x}) and then the OP field (bits {offset}-{offset + size - 1}).",
         "    pub const fn from_word(word: u32) -> Option<Self> {",
-        f"        match word & 0x{mask:09_x} {{",
-    ]
-    for form in sorted(forms, key=lambda item: item["opcode"]):
-        out.append(f"            0x{_identifier(encoding, form['opcode']):09_x} => Some(Self::{form['variant']}),")
-    out += [
-        "            _ => None,",
+        f"        if word & 0x{fixed_mask:09_x} != 0x{fixed_bits:09_x} {{",
+        "            return None;",
         "        }",
+        f"        BY_OPCODE[((word >> {offset}) & 0x{(1 << size) - 1:x}) as usize]",
         "    }",
         "",
         "    /// Lower-case mnemonic.",
@@ -489,6 +548,9 @@ def _render_enum(rule_name, forms, snapshot, positions):
         if takes_carry:
             argument = "carry_in" if form["carry_in"] == "scc" else "false"
             call = f"primitive::{function}(src0, src1, {argument})"
+        elif form["operation"] in SHIFTS:
+            mask = (1 << form[SHIFT_KEY]) - 1
+            call = f"primitive::{function}(src0, src1 & 0x{mask:x})"
         else:
             call = f"primitive::{function}(src0, src1)"
         out.append(f"            Self::{form['variant']} => {call},")

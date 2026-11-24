@@ -281,6 +281,20 @@ fn scalar_alu_results_reach_the_kernel_as_constants() {
 }
 
 #[test]
+fn scalar_logic_results_reach_the_kernel_as_constants() {
+    let code = include_bytes!("../../../fixtures/rdna2/scalar-logic.bin");
+    let compiled = compile(Architecture::Gfx1030, code).unwrap();
+    assert_eq!(
+        compiled.ir,
+        include_str!("../../../fixtures/golden/scalar-logic.ir")
+    );
+    assert_eq!(
+        compiled.msl,
+        include_str!("../../../fixtures/golden/scalar-logic.metal")
+    );
+}
+
+#[test]
 fn vector_compares_lower_to_per_thread_wave_masks_and_selects() {
     let code = include_bytes!("../../../fixtures/rdna2/vector-compare.bin");
     let result = compile(Architecture::Gfx1030, code).unwrap();

@@ -49,3 +49,52 @@ pub const fn xor_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
     let value = a ^ b;
     (value, value != 0)
 }
+
+/// Bitwise `a & !b` and whether the result is nonzero.
+pub const fn andn2_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
+    let value = a & !b;
+    (value, value != 0)
+}
+
+/// Bitwise `a | !b` and whether the result is nonzero.
+pub const fn orn2_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
+    let value = a | !b;
+    (value, value != 0)
+}
+
+/// Bitwise `!(a & b)` and whether the result is nonzero.
+pub const fn nand_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
+    let value = !(a & b);
+    (value, value != 0)
+}
+
+/// Bitwise `!(a | b)` and whether the result is nonzero.
+pub const fn nor_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
+    let value = !(a | b);
+    (value, value != 0)
+}
+
+/// Bitwise `!(a ^ b)` and whether the result is nonzero.
+pub const fn xnor_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
+    let value = !(a ^ b);
+    (value, value != 0)
+}
+
+/// `a << count` and whether the result is nonzero. The caller masks the count
+/// to the declared count width, so `count` is below 32.
+pub const fn lshl_nonzero_b32(a: u32, count: u32) -> (u32, bool) {
+    let value = a << count;
+    (value, value != 0)
+}
+
+/// Logical `a >> count` (zero fill) and whether the result is nonzero; `count` is below 32.
+pub const fn lshr_nonzero_b32(a: u32, count: u32) -> (u32, bool) {
+    let value = a >> count;
+    (value, value != 0)
+}
+
+/// Arithmetic `a >> count` (sign fill) and whether the result is nonzero; `count` is below 32.
+pub const fn ashr_nonzero_i32(a: u32, count: u32) -> (u32, bool) {
+    let value = ((a as i32) >> count) as u32;
+    (value, value != 0)
+}
