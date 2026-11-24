@@ -48,6 +48,12 @@ OPERATIONS = {
 LOGICAL = {"and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor"}
 ARITHMETIC = {"add", "sub"}
 SHIFTS = {"lshl", "lshr", "ashr"}
+# XML number formats a source may have for each declared signedness.
+SOURCE_FORMATS = {
+    "signed": {"FMT_NUM_I32"},
+    "unsigned": {"FMT_NUM_U32"},
+    "bitwise": {"FMT_NUM_U32", "FMT_NUM_B32"},
+}
 # Optional keys: required exactly when the condition holds.
 SHIFT_KEY = "shift_count_bits"
 SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise"}
@@ -233,11 +239,12 @@ def _check_xml(form, rule, snapshot, errors):
             errors.append(f"{label}: {field} is {size} bits in the XML, declared {form['width']}")
         if (is_input, is_output) != (is_source, not is_source):
             errors.append(f"{label}: {field} direction disagrees with the XML")
-        signed_format = data_format.startswith("FMT_NUM_I")
         if field == count_field:
-            if signed_format:
-                errors.append(f"{label}: shift count {field} has signed XML format {data_format}")
-        elif is_source and signed_format != (form["signedness"] == "signed"):
+            if data_format != "FMT_NUM_U32":
+                errors.append(
+                    f"{label}: shift count {field} has XML format {data_format}, not FMT_NUM_U32"
+                )
+        elif is_source and data_format not in SOURCE_FORMATS.get(form["signedness"], ()):
             errors.append(
                 f"{label}: signedness {form['signedness']} contradicts XML format {data_format}"
             )
@@ -324,7 +331,7 @@ def validate(registry, snapshot):
             )
         if form["operation"] in SHIFTS:
             bits = form.get(SHIFT_KEY)
-            if type(bits) is not int or (1 << bits) != form["width"]:
+            if type(bits) is not int or not 0 < bits < 32 or (1 << bits) != form["width"]:
                 errors.append(
                     f"{label}: {SHIFT_KEY} must be log2 of the width ({form['width']}), got {bits!r}"
                 )

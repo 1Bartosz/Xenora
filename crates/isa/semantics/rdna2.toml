@@ -248,7 +248,7 @@ vcc = "unchanged"
 exec = "unchanged"
 wave = "any"
 operands = "sop2_sgpr"
-spec = [{ document = "guide", section = "12.1", page = 102 }]
+spec = [{ document = "guide", section = "12.1", page = 103 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
 [[form]]
@@ -265,7 +265,7 @@ vcc = "unchanged"
 exec = "unchanged"
 wave = "any"
 operands = "sop2_sgpr"
-spec = [{ document = "guide", section = "12.1", page = 102 }]
+spec = [{ document = "guide", section = "12.1", page = 103 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
 [[form]]
@@ -282,7 +282,7 @@ vcc = "unchanged"
 exec = "unchanged"
 wave = "any"
 operands = "sop2_sgpr"
-spec = [{ document = "guide", section = "12.1", page = 102 }]
+spec = [{ document = "guide", section = "12.1", page = 104 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
 [[form]]
@@ -299,7 +299,7 @@ vcc = "unchanged"
 exec = "unchanged"
 wave = "any"
 operands = "sop2_sgpr"
-spec = [{ document = "guide", section = "12.1", page = 102 }]
+spec = [{ document = "guide", section = "12.1", page = 104 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
 [[form]]
@@ -316,7 +316,7 @@ vcc = "unchanged"
 exec = "unchanged"
 wave = "any"
 operands = "sop2_sgpr"
-spec = [{ document = "guide", section = "12.1", page = 102 }]
+spec = [{ document = "guide", section = "12.1", page = 104 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
 [[form]]
@@ -334,7 +334,7 @@ vcc = "unchanged"
 exec = "unchanged"
 wave = "any"
 operands = "sop2_sgpr"
-spec = [{ document = "guide", section = "12.1", page = 102 }]
+spec = [{ document = "guide", section = "12.1", page = 104 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
 [[form]]
@@ -352,7 +352,7 @@ vcc = "unchanged"
 exec = "unchanged"
 wave = "any"
 operands = "sop2_sgpr"
-spec = [{ document = "guide", section = "12.1", page = 102 }]
+spec = [{ document = "guide", section = "12.1", page = 104 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
 [[form]]
@@ -370,5 +370,5 @@ vcc = "unchanged"
 exec = "unchanged"
 wave = "any"
 operands = "sop2_sgpr"
-spec = [{ document = "guide", section = "12.1", page = 102 }]
+spec = [{ document = "guide", section = "12.1", page = 104 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]

@@ -497,7 +497,7 @@ pub static FORMS: [FormSemantics; 17] = [
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
-        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }],
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 103 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
@@ -514,7 +514,7 @@ pub static FORMS: [FormSemantics; 17] = [
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
-        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }],
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 103 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
@@ -531,7 +531,7 @@ pub static FORMS: [FormSemantics; 17] = [
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
-        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }],
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 104 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
@@ -548,7 +548,7 @@ pub static FORMS: [FormSemantics; 17] = [
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
-        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }],
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 104 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
@@ -565,7 +565,7 @@ pub static FORMS: [FormSemantics; 17] = [
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
-        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }],
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 104 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
@@ -582,7 +582,7 @@ pub static FORMS: [FormSemantics; 17] = [
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
-        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }],
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 104 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
@@ -599,7 +599,7 @@ pub static FORMS: [FormSemantics; 17] = [
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
-        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }],
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 104 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
@@ -616,7 +616,7 @@ pub static FORMS: [FormSemantics; 17] = [
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
-        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }],
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 104 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
 ];

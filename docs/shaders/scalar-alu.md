@@ -98,7 +98,7 @@ literal operands, bitwise results that set and clear SCC, and an
 Its expected output, input ^ 0x0000000e,
 was derived by hand.
 
-`tests/validation/known_answers.rs` runs every supported form over 10 boundary
+`tests/validation/known_answers.rs` runs the first nine forms over 10 boundary
 operands squared, with SCC clear and set. That is 1,800 programs. The same file
 covers aliasing, inline and literal operands, and rejected forms. Expected
 values come from exact integer definitions in the test. Three implementations
@@ -106,6 +106,13 @@ must agree with them:
 - the translator (resolved branch and emitted constant);
 - the reference interpreter (exact integers, reduced modulo 2^32);
 - the independent interpreter (a bit-serial ripple-carry adder).
+
+The eight logical and shift forms added through the registry have their own
+suite, `tests/validation/tests/sop2_stage_c.rs`: 6,896 cases whose expected
+values were derived from the guide separately from the registry, checked on
+both CPU interpreters and, through the translator, on native Metal. The
+LLVM-assembled `fixtures/rdna2/scalar-logic.s` (expected input ^ 0x887f00f8)
+runs on all three and on native Metal.
 
 `scalar_alu_native_metal_known_answers` runs the fixture, the 1,800 programs
 and the aliasing and immediate cases on native Metal with API and shader

@@ -312,7 +312,24 @@ class Validate(unittest.TestCase):
     def test_rejects_a_signed_shift_count_in_the_xml(self):
         snap = snapshot()
         snap["variants"][("S_ASHR_I32", "ENC_SOP2")]["operands"] = _operands(I32)
-        self.rejects(registry(), "S_ASHR_I32: shift count SSRC1 has signed XML format", snap)
+        self.rejects(registry(), "S_ASHR_I32: shift count SSRC1 has XML format FMT_NUM_I32", snap)
+
+    def test_rejects_a_float_shift_count_in_the_xml(self):
+        snap = snapshot()
+        snap["variants"][("S_ASHR_I32", "ENC_SOP2")]["operands"] = _operands(
+            I32, src1_format="FMT_NUM_F32"
+        )
+        self.rejects(registry(), "S_ASHR_I32: shift count SSRC1 has XML format FMT_NUM_F32", snap)
+
+    def test_rejects_a_float_source_format(self):
+        snap = snapshot()
+        snap["variants"][("S_AND_B32", "ENC_SOP2")]["operands"] = _operands("FMT_NUM_F32")
+        self.rejects(registry(), "S_AND_B32: signedness bitwise contradicts XML format FMT_NUM_F32", snap)
+
+    def test_rejects_a_negative_count_width(self):
+        reg = registry()
+        reg["form"][-1]["shift_count_bits"] = -1
+        self.rejects(reg, "S_ASHR_I32: shift_count_bits must be log2 of the width (32), got -1")
 
     def test_rejects_an_unsigned_arithmetic_shift(self):
         reg = registry()
