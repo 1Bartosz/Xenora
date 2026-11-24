@@ -55,8 +55,9 @@ error.
 | `signedness` | How operands are read | `unsigned`, `signed`, `bitwise` (always `bitwise` for the logical operations, never for `add` and `sub`; shifts take their primitive's signedness) |
 | `carry_in` | Whether the form reads SCC as carry-in or borrow-in | `none`, `scc` (`scc` only for unsigned `add` and `sub`) |
 | `width` | Operand and result width in bits | `32` |
+| `relation` | Compares only: the relation tested with S0 on the left | `eq`, `lg` (not equal), `gt`, `ge`, `lt`, `le`; required for `compare`, rejected elsewhere |
 | `shift_count_bits` | Shifts only: the low bits of S1 used as the count. The generator masks S1 with it, and the XML must list S1 as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
-| `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `unchanged` |
+| `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `relation` (compares only), `unchanged` |
 | `vcc`, `exec` | Effect on VCC and EXEC, stated rather than implied | `unchanged` |
 | `wave` | Wave sizes the form is valid in | `any` (`wave32` is in the vocabulary but rejected until the decoder can enforce it) |
 | `operands` | Name of an `[operand_rules]` entry for the same family | e.g. `sop2_sgpr` |
@@ -76,6 +77,10 @@ fixes the `scc` value:
 | `lshl` / `bitwise` | `nonzero` | `lshl_nonzero_b32` | no |
 | `lshr` / `unsigned` | `nonzero` | `lshr_nonzero_b32` | no |
 | `ashr` / `signed` | `nonzero` | `ashr_nonzero_i32` | no |
+| `compare` / `signed` or `unsigned` | `relation` | `eq_b32`, `ne_b32` (for both signednesses), `gt_i32`/`gt_u32`, `ge_*`, `lt_*`, `le_*` | no |
+
+A compare must use an operand rule of the compare kind (`sopc_scalar`: two
+sources, no destination), and an ALU operation must not.
 
 Behaviour is chosen only from these declared fields, never from the mnemonic.
 

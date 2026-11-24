@@ -17,7 +17,6 @@ VARIANTS = (
     ("V_ADD_NC_U32", "ENC_VOP3"),
     ("S_ENDPGM", "ENC_SOPP"),
     ("S_MOV_B32", "ENC_SOP1"),
-    ("S_CMP_EQ_U32", "ENC_SOPC"),
     ("S_CBRANCH_SCC0", "ENC_SOPP"),
     ("S_CBRANCH_EXECZ", "ENC_SOPP"),
     ("S_CBRANCH_VCCZ", "ENC_SOPP"),

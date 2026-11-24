@@ -42,6 +42,23 @@ OPERATIONS = {
     "add": "Add", "sub": "Sub", "and": "And", "or": "Or", "xor": "Xor",
     "andn2": "AndNot", "orn2": "OrNot", "nand": "Nand", "nor": "Nor", "xnor": "Xnor",
     "lshl": "ShiftLeft", "lshr": "LogicalShiftRight", "ashr": "ArithmeticShiftRight",
+    "compare": "Compare",
+}
+# Compares take a relation (S0 on the left) and set SCC to whether it holds.
+RELATION_KEY = "relation"
+RELATIONS = {
+    "eq": "Equal", "lg": "NotEqual", "gt": "Greater", "ge": "GreaterOrEqual",
+    "lt": "Less", "le": "LessOrEqual",
+}
+# (relation, signedness) -> primitive. Equality does not depend on signedness,
+# so both declared signednesses of EQ and LG share one primitive.
+COMPARE_PRIMITIVES = {
+    ("eq", "signed"): "eq_b32", ("eq", "unsigned"): "eq_b32",
+    ("lg", "signed"): "ne_b32", ("lg", "unsigned"): "ne_b32",
+    ("gt", "signed"): "gt_i32", ("gt", "unsigned"): "gt_u32",
+    ("ge", "signed"): "ge_i32", ("ge", "unsigned"): "ge_u32",
+    ("lt", "signed"): "lt_i32", ("lt", "unsigned"): "lt_u32",
+    ("le", "signed"): "le_i32", ("le", "unsigned"): "le_u32",
 }
 # Logical operations take untyped bits; arithmetic ones never do. Shifts take
 # the signedness their primitive names, and their S1 is an unsigned count.
@@ -64,6 +81,7 @@ SCC = {
     "borrow": "Borrow",
     "signed_overflow": "SignedOverflow",
     "nonzero": "Nonzero",
+    "relation": "Relation",
 }
 MASK = {"unchanged": "Unchanged"}
 WAVE = {"any": "Any", "wave32": "Wave32"}
@@ -133,6 +151,22 @@ OPERAND_RULES = {
         },
         # Every one of these is rejected by the decoder's SOP2 operand checks.
         "unsupported": UNSUPPORTED_COMBOS,
+        "kind": "alu",
+    },
+    "sopc_scalar": {
+        "rust": "SopcScalar",
+        "enum": "ScalarCompareOp",
+        "shape": {
+            "family": "SOPC",
+            "src": [
+                {"field": "SSRC0", "class": "scalar_source"},
+                {"field": "SSRC1", "class": "scalar_source"},
+            ],
+            "max_literals": 1,
+        },
+        # SOPC has no destination field; the decoder rejects these sources.
+        "unsupported": {combo for combo in UNSUPPORTED_COMBOS if not combo.startswith("dst_")},
+        "kind": "compare",
     },
 }
 
@@ -228,8 +262,14 @@ def _check_xml(form, rule, snapshot, errors):
         errors.append(f"{label}: scc {form['scc']} contradicts the XML SCC output")
     if rule is None:
         return
-    fields = [(rule["dst"]["field"], False)] + [(src["field"], True) for src in rule["src"]]
-    count_field = rule["src"][1]["field"] if form["operation"] in SHIFTS else None
+    if not isinstance(rule.get("src"), list) or not all(
+        isinstance(src, dict) and isinstance(src.get("field"), str) for src in rule["src"]
+    ) or ("dst" in rule and not (isinstance(rule["dst"], dict) and "field" in rule["dst"])):
+        return  # the rule check already reported the malformed shape
+    fields = [(rule["dst"]["field"], False)] if "dst" in rule else []
+    fields += [(src["field"], True) for src in rule["src"]]
+    shift = form["operation"] in SHIFTS and len(rule["src"]) > 1
+    count_field = rule["src"][1]["field"] if shift else None
     for field, is_source in fields:
         if field not in operands:
             errors.append(f"{label}: XML has no operand {field}")
@@ -290,7 +330,7 @@ def validate(registry, snapshot):
     for index, form in enumerate(forms):
         label = form.get("name", f"form #{index}")
         missing = sorted(FORM_KEYS - set(form))
-        extra = sorted(set(form) - FORM_KEYS - {SHIFT_KEY})
+        extra = sorted(set(form) - FORM_KEYS - {SHIFT_KEY, RELATION_KEY})
         if missing:
             errors.append(f"{label}: incomplete, missing {missing}")
         if extra:
@@ -337,7 +377,21 @@ def validate(registry, snapshot):
                 )
         elif SHIFT_KEY in form:
             errors.append(f"{label}: {SHIFT_KEY} on a non-shift operation")
-        primitive = PRIMITIVES.get((form["operation"], form["signedness"]))
+        if form["operation"] == "compare":
+            relation = form.get(RELATION_KEY)
+            if not isinstance(relation, str) or relation not in RELATIONS:
+                errors.append(f"{label}: unknown or missing {RELATION_KEY} {relation!r}")
+            elif (relation, form["signedness"]) not in COMPARE_PRIMITIVES:
+                errors.append(f"{label}: no primitive implements {relation}/{form['signedness']}")
+            if form["scc"] != "relation":
+                errors.append(f"{label}: scc {form['scc']} contradicts compare (requires relation)")
+            if form["carry_in"] != "none":
+                errors.append(f"{label}: carry_in {form['carry_in']} contradicts compare")
+            primitive = ("relation", None, False)
+        else:
+            if RELATION_KEY in form:
+                errors.append(f"{label}: {RELATION_KEY} on a non-compare operation")
+            primitive = PRIMITIVES.get((form["operation"], form["signedness"]))
         if primitive is None:
             errors.append(f"{label}: no primitive implements {form['operation']}/{form['signedness']}")
         else:
@@ -354,6 +408,10 @@ def validate(registry, snapshot):
             errors.append(f"{label}: unknown operand rule {form['operands']!r}")
         elif rule.get("family") != form["family"]:
             errors.append(f"{label}: operand rule {form['operands']} is for {rule.get('family')}")
+        elif form["operands"] in OPERAND_RULES and (
+            (OPERAND_RULES[form["operands"]]["kind"] == "compare") != (form["operation"] == "compare")
+        ):
+            errors.append(f"{label}: operation {form['operation']} does not fit rule {form['operands']}")
         _check_spec(label, form["spec"], documents, errors)
         verify = form["verify"]
         if not verify:
@@ -399,6 +457,7 @@ def render(registry, snapshot):
         "    CarryIn, Document, Evidence, FormSemantics, MaskEffect, Operation, OperandRule, SccEffect,",
         "    Signedness, SpecRef, Wave,",
         "};",
+        "use crate::CompareRelation;",
         "",
         "/// Registry schema of the generated tables.",
         f"pub const GENERATED_SCHEMA: u32 = {registry['schema']};",
@@ -436,6 +495,8 @@ def render(registry, snapshot):
             f"        carry_in: CarryIn::{CARRY_IN[form['carry_in']]},",
             f"        width: {form['width']},",
             f"        shift_count_bits: {form.get(SHIFT_KEY, 0)},",
+            "        relation: "
+            + (f"Some(CompareRelation::{RELATIONS[form[RELATION_KEY]]})," if RELATION_KEY in form else "None,"),
             f"        scc: SccEffect::{SCC[form['scc']]},",
             f"        vcc: MaskEffect::{MASK[form['vcc']]},",
             f"        exec: MaskEffect::{MASK[form['exec']]},",
@@ -451,6 +512,8 @@ def render(registry, snapshot):
 
 def _render_enum(rule_name, forms, snapshot, positions):
     enum = OPERAND_RULES[rule_name]["enum"]
+    kind = OPERAND_RULES[rule_name]["kind"]
+    table = re.sub(r"(?<!^)(?=[A-Z])", "_", enum).upper() + "_BY_OPCODE"
     family = forms[0]["family"]
     encoding = snapshot["encodings"][_family_encoding(family)]
     mask = encoding["identifier_mask"]
@@ -472,9 +535,10 @@ def _render_enum(rule_name, forms, snapshot, positions):
     ]
     for form in forms:
         carry = " plus SCC" if form["carry_in"] == "scc" else ""
+        what = form["operation"] if kind == "alu" else f"compare {form[RELATION_KEY]}"
         out += [
             f"    /// `{form['name'].lower()}` ({family} opcode {form['opcode']}): "
-            f"{form['signedness']} {form['operation']}{carry}, SCC = {form['scc']}.",
+            f"{form['signedness']} {what}{carry}, SCC = {form['scc']}.",
             f"    {form['variant']},",
         ]
     by_opcode = {form["opcode"]: form["variant"] for form in forms}
@@ -482,7 +546,7 @@ def _render_enum(rule_name, forms, snapshot, positions):
         "}",
         "",
         f"/// {enum} by {family} OP field value; `None` for undeclared opcodes.",
-        f"const BY_OPCODE: [Option<{enum}>; {1 << size}] = [",
+        f"const {table}: [Option<{enum}>; {1 << size}] = [",
     ]
     out += [
         f"    Some({enum}::{by_opcode[opcode]})," if opcode in by_opcode else "    None,"
@@ -505,7 +569,7 @@ def _render_enum(rule_name, forms, snapshot, positions):
         f"        if word & 0x{fixed_mask:09_x} != 0x{fixed_bits:09_x} {{",
         "            return None;",
         "        }",
-        f"        BY_OPCODE[((word >> {offset}) & 0x{(1 << size) - 1:x}) as usize]",
+        f"        {table}[((word >> {offset}) & 0x{(1 << size) - 1:x}) as usize]",
         "    }",
         "",
         "    /// Lower-case mnemonic.",
@@ -517,6 +581,41 @@ def _render_enum(rule_name, forms, snapshot, positions):
         "        }",
         "    }",
         "",
+        "    /// The validated registry row.",
+        "    pub fn semantics(self) -> &'static FormSemantics {",
+        "        &FORMS[match self {",
+    ]
+    out += [f"            Self::{form['variant']} => {positions[form['name']]}," for form in forms]
+    out += [
+        "        }]",
+        "    }",
+    ]
+    if kind == "compare":
+        out += [
+            "",
+            "    /// The relation tested, with S0 on the left.",
+            "    pub const fn relation(self) -> CompareRelation {",
+            "        match self {",
+        ]
+        out += [
+            f"            Self::{form['variant']} => CompareRelation::{RELATIONS[form[RELATION_KEY]]},"
+            for form in forms
+        ]
+        out += [
+            "        }",
+            "    }",
+            "",
+            "    /// The new SCC: whether the relation holds for S0 and S1.",
+            "    pub const fn test(self, src0: u32, src1: u32) -> bool {",
+            "        match self {",
+        ]
+        for form in forms:
+            function = COMPARE_PRIMITIVES[(form[RELATION_KEY], form["signedness"])]
+            out.append(f"            Self::{form['variant']} => primitive::{function}(src0, src1),")
+        out += ["        }", "    }", "}"]
+        return out
+    out += [
+        "",
         "    /// Whether the operation reads SCC as a carry-in or borrow-in.",
         "    pub const fn reads_scc(self) -> bool {",
         "        match self {",
@@ -527,15 +626,6 @@ def _render_enum(rule_name, forms, snapshot, positions):
     ]
     out += [
         "        }",
-        "    }",
-        "",
-        "    /// The validated registry row.",
-        "    pub fn semantics(self) -> &'static FormSemantics {",
-        "        &FORMS[match self {",
-    ]
-    out += [f"            Self::{form['variant']} => {positions[form['name']]}," for form in forms]
-    out += [
-        "        }]",
         "    }",
         "",
         "    /// The result and the new SCC, with `carry_in` the SCC read by forms that",

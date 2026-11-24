@@ -6,6 +6,7 @@ use xenora_decoder::{
     Architecture, CompareRelation, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction,
     ScalarAluOp, ScalarSource, VectorSource, decode, decode_at,
 };
+use xenora_isa::semantics::Signedness;
 use xenora_ref::{BranchCondition, CompareSource, Comparison, Op, ScalarAlu, Source, VectorAlu};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
@@ -355,8 +356,21 @@ fn reference_op(instruction: Instruction) -> Op {
         ),
         Instruction::AddNoCarryU32 { dst, src0, src1 } => Op::Add(dst, src0, src1),
         Instruction::ScalarMoveB32 { dst, src } => Op::ScalarMove(dst, reference_scalar(src)),
-        Instruction::ScalarCompareEqU32 { src0, src1 } => {
-            Op::CompareEqual(reference_scalar(src0), reference_scalar(src1))
+        Instruction::ScalarCompare { op, src0, src1 } => {
+            let (src0, src1) = (reference_scalar(src0), reference_scalar(src1));
+            // The reference keeps CompareEqual for EQ and uses its VOPC relation
+            // offsets (LT 1, EQ 2, LE 3, GT 4, NE 5, GE 6) for the rest.
+            match op.relation() {
+                CompareRelation::Equal => Op::CompareEqual(src0, src1),
+                relation => Op::ScalarCompare(
+                    Comparison {
+                        offset: relation as u8 + 1,
+                        signed: op.semantics().signedness == Signedness::Signed,
+                    },
+                    src0,
+                    src1,
+                ),
+            }
         }
         Instruction::BranchSccZero { target } => Op::Branch {
             target,
@@ -443,13 +457,14 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/ashr.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-alu.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-logic.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 50, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 61, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()

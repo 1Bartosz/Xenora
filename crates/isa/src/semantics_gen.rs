@@ -7,6 +7,7 @@ use crate::semantics::{
     CarryIn, Document, Evidence, FormSemantics, MaskEffect, Operation, OperandRule, SccEffect,
     Signedness, SpecRef, Wave,
 };
+use crate::CompareRelation;
 
 /// Registry schema of the generated tables.
 pub const GENERATED_SCHEMA: u32 = 1;
@@ -51,7 +52,7 @@ pub enum ScalarAluOp {
 }
 
 /// ScalarAluOp by SOP2 OP field value; `None` for undeclared opcodes.
-const BY_OPCODE: [Option<ScalarAluOp>; 128] = [
+const SCALAR_ALU_OP_BY_OPCODE: [Option<ScalarAluOp>; 128] = [
     Some(ScalarAluOp::AddU32),
     Some(ScalarAluOp::SubU32),
     Some(ScalarAluOp::AddI32),
@@ -210,7 +211,7 @@ impl ScalarAluOp {
         if word & 0xc000_0000 != 0x8000_0000 {
             return None;
         }
-        BY_OPCODE[((word >> 23) & 0x7f) as usize]
+        SCALAR_ALU_OP_BY_OPCODE[((word >> 23) & 0x7f) as usize]
     }
 
     /// Lower-case mnemonic.
@@ -236,29 +237,6 @@ impl ScalarAluOp {
         }
     }
 
-    /// Whether the operation reads SCC as a carry-in or borrow-in.
-    pub const fn reads_scc(self) -> bool {
-        match self {
-            Self::AddU32 => false,
-            Self::SubU32 => false,
-            Self::AddI32 => false,
-            Self::SubI32 => false,
-            Self::AddcU32 => true,
-            Self::SubbU32 => true,
-            Self::AndB32 => false,
-            Self::OrB32 => false,
-            Self::XorB32 => false,
-            Self::Andn2B32 => false,
-            Self::Orn2B32 => false,
-            Self::NandB32 => false,
-            Self::NorB32 => false,
-            Self::XnorB32 => false,
-            Self::LshlB32 => false,
-            Self::LshrB32 => false,
-            Self::AshrI32 => false,
-        }
-    }
-
     /// The validated registry row.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
@@ -280,6 +258,29 @@ impl ScalarAluOp {
             Self::LshrB32 => 15,
             Self::AshrI32 => 16,
         }]
+    }
+
+    /// Whether the operation reads SCC as a carry-in or borrow-in.
+    pub const fn reads_scc(self) -> bool {
+        match self {
+            Self::AddU32 => false,
+            Self::SubU32 => false,
+            Self::AddI32 => false,
+            Self::SubI32 => false,
+            Self::AddcU32 => true,
+            Self::SubbU32 => true,
+            Self::AndB32 => false,
+            Self::OrB32 => false,
+            Self::XorB32 => false,
+            Self::Andn2B32 => false,
+            Self::Orn2B32 => false,
+            Self::NandB32 => false,
+            Self::NorB32 => false,
+            Self::XnorB32 => false,
+            Self::LshlB32 => false,
+            Self::LshrB32 => false,
+            Self::AshrI32 => false,
+        }
     }
 
     /// The result and the new SCC, with `carry_in` the SCC read by forms that
@@ -307,8 +308,268 @@ impl ScalarAluOp {
     }
 }
 
+/// SOPC operations declared in the semantic registry (operand rule `sopc_scalar`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScalarCompareOp {
+    /// `s_cmp_eq_i32` (SOPC opcode 0): signed compare eq, SCC = relation.
+    CmpEqI32,
+    /// `s_cmp_lg_i32` (SOPC opcode 1): signed compare lg, SCC = relation.
+    CmpLgI32,
+    /// `s_cmp_gt_i32` (SOPC opcode 2): signed compare gt, SCC = relation.
+    CmpGtI32,
+    /// `s_cmp_ge_i32` (SOPC opcode 3): signed compare ge, SCC = relation.
+    CmpGeI32,
+    /// `s_cmp_lt_i32` (SOPC opcode 4): signed compare lt, SCC = relation.
+    CmpLtI32,
+    /// `s_cmp_le_i32` (SOPC opcode 5): signed compare le, SCC = relation.
+    CmpLeI32,
+    /// `s_cmp_eq_u32` (SOPC opcode 6): unsigned compare eq, SCC = relation.
+    CmpEqU32,
+    /// `s_cmp_lg_u32` (SOPC opcode 7): unsigned compare lg, SCC = relation.
+    CmpLgU32,
+    /// `s_cmp_gt_u32` (SOPC opcode 8): unsigned compare gt, SCC = relation.
+    CmpGtU32,
+    /// `s_cmp_ge_u32` (SOPC opcode 9): unsigned compare ge, SCC = relation.
+    CmpGeU32,
+    /// `s_cmp_lt_u32` (SOPC opcode 10): unsigned compare lt, SCC = relation.
+    CmpLtU32,
+    /// `s_cmp_le_u32` (SOPC opcode 11): unsigned compare le, SCC = relation.
+    CmpLeU32,
+}
+
+/// ScalarCompareOp by SOPC OP field value; `None` for undeclared opcodes.
+const SCALAR_COMPARE_OP_BY_OPCODE: [Option<ScalarCompareOp>; 128] = [
+    Some(ScalarCompareOp::CmpEqI32),
+    Some(ScalarCompareOp::CmpLgI32),
+    Some(ScalarCompareOp::CmpGtI32),
+    Some(ScalarCompareOp::CmpGeI32),
+    Some(ScalarCompareOp::CmpLtI32),
+    Some(ScalarCompareOp::CmpLeI32),
+    Some(ScalarCompareOp::CmpEqU32),
+    Some(ScalarCompareOp::CmpLgU32),
+    Some(ScalarCompareOp::CmpGtU32),
+    Some(ScalarCompareOp::CmpGeU32),
+    Some(ScalarCompareOp::CmpLtU32),
+    Some(ScalarCompareOp::CmpLeU32),
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+];
+
+impl ScalarCompareOp {
+    /// Every operation, in registry order.
+    pub const ALL: [Self; 12] = [
+        Self::CmpEqI32,
+        Self::CmpLgI32,
+        Self::CmpGtI32,
+        Self::CmpGeI32,
+        Self::CmpLtI32,
+        Self::CmpLeI32,
+        Self::CmpEqU32,
+        Self::CmpLgU32,
+        Self::CmpGtU32,
+        Self::CmpGeU32,
+        Self::CmpLtU32,
+        Self::CmpLeU32,
+    ];
+
+    /// Selects the operation from a first instruction word: the SOPC encoding
+    /// bits (mask 0xff80_0000) and then the OP field (bits 16-22).
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if word & 0xff80_0000 != 0xbf00_0000 {
+            return None;
+        }
+        SCALAR_COMPARE_OP_BY_OPCODE[((word >> 16) & 0x7f) as usize]
+    }
+
+    /// Lower-case mnemonic.
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::CmpEqI32 => "s_cmp_eq_i32",
+            Self::CmpLgI32 => "s_cmp_lg_i32",
+            Self::CmpGtI32 => "s_cmp_gt_i32",
+            Self::CmpGeI32 => "s_cmp_ge_i32",
+            Self::CmpLtI32 => "s_cmp_lt_i32",
+            Self::CmpLeI32 => "s_cmp_le_i32",
+            Self::CmpEqU32 => "s_cmp_eq_u32",
+            Self::CmpLgU32 => "s_cmp_lg_u32",
+            Self::CmpGtU32 => "s_cmp_gt_u32",
+            Self::CmpGeU32 => "s_cmp_ge_u32",
+            Self::CmpLtU32 => "s_cmp_lt_u32",
+            Self::CmpLeU32 => "s_cmp_le_u32",
+        }
+    }
+
+    /// The validated registry row.
+    pub fn semantics(self) -> &'static FormSemantics {
+        &FORMS[match self {
+            Self::CmpEqI32 => 17,
+            Self::CmpLgI32 => 18,
+            Self::CmpGtI32 => 19,
+            Self::CmpGeI32 => 20,
+            Self::CmpLtI32 => 21,
+            Self::CmpLeI32 => 22,
+            Self::CmpEqU32 => 23,
+            Self::CmpLgU32 => 24,
+            Self::CmpGtU32 => 25,
+            Self::CmpGeU32 => 26,
+            Self::CmpLtU32 => 27,
+            Self::CmpLeU32 => 28,
+        }]
+    }
+
+    /// The relation tested, with S0 on the left.
+    pub const fn relation(self) -> CompareRelation {
+        match self {
+            Self::CmpEqI32 => CompareRelation::Equal,
+            Self::CmpLgI32 => CompareRelation::NotEqual,
+            Self::CmpGtI32 => CompareRelation::Greater,
+            Self::CmpGeI32 => CompareRelation::GreaterOrEqual,
+            Self::CmpLtI32 => CompareRelation::Less,
+            Self::CmpLeI32 => CompareRelation::LessOrEqual,
+            Self::CmpEqU32 => CompareRelation::Equal,
+            Self::CmpLgU32 => CompareRelation::NotEqual,
+            Self::CmpGtU32 => CompareRelation::Greater,
+            Self::CmpGeU32 => CompareRelation::GreaterOrEqual,
+            Self::CmpLtU32 => CompareRelation::Less,
+            Self::CmpLeU32 => CompareRelation::LessOrEqual,
+        }
+    }
+
+    /// The new SCC: whether the relation holds for S0 and S1.
+    pub const fn test(self, src0: u32, src1: u32) -> bool {
+        match self {
+            Self::CmpEqI32 => primitive::eq_b32(src0, src1),
+            Self::CmpLgI32 => primitive::ne_b32(src0, src1),
+            Self::CmpGtI32 => primitive::gt_i32(src0, src1),
+            Self::CmpGeI32 => primitive::ge_i32(src0, src1),
+            Self::CmpLtI32 => primitive::lt_i32(src0, src1),
+            Self::CmpLeI32 => primitive::le_i32(src0, src1),
+            Self::CmpEqU32 => primitive::eq_b32(src0, src1),
+            Self::CmpLgU32 => primitive::ne_b32(src0, src1),
+            Self::CmpGtU32 => primitive::gt_u32(src0, src1),
+            Self::CmpGeU32 => primitive::ge_u32(src0, src1),
+            Self::CmpLtU32 => primitive::lt_u32(src0, src1),
+            Self::CmpLeU32 => primitive::le_u32(src0, src1),
+        }
+    }
+}
+
 /// Identity of every registry form, in registry order.
-pub const FORM_IDS: [(&str, EncodingFamily); 17] = [
+pub const FORM_IDS: [(&str, EncodingFamily); 29] = [
     ("S_ADD_U32", EncodingFamily::Sop2),
     ("S_SUB_U32", EncodingFamily::Sop2),
     ("S_ADD_I32", EncodingFamily::Sop2),
@@ -326,10 +587,22 @@ pub const FORM_IDS: [(&str, EncodingFamily); 17] = [
     ("S_LSHL_B32", EncodingFamily::Sop2),
     ("S_LSHR_B32", EncodingFamily::Sop2),
     ("S_ASHR_I32", EncodingFamily::Sop2),
+    ("S_CMP_EQ_I32", EncodingFamily::Sopc),
+    ("S_CMP_LG_I32", EncodingFamily::Sopc),
+    ("S_CMP_GT_I32", EncodingFamily::Sopc),
+    ("S_CMP_GE_I32", EncodingFamily::Sopc),
+    ("S_CMP_LT_I32", EncodingFamily::Sopc),
+    ("S_CMP_LE_I32", EncodingFamily::Sopc),
+    ("S_CMP_EQ_U32", EncodingFamily::Sopc),
+    ("S_CMP_LG_U32", EncodingFamily::Sopc),
+    ("S_CMP_GT_U32", EncodingFamily::Sopc),
+    ("S_CMP_GE_U32", EncodingFamily::Sopc),
+    ("S_CMP_LT_U32", EncodingFamily::Sopc),
+    ("S_CMP_LE_U32", EncodingFamily::Sopc),
 ];
 
 /// One validated row per registry form, in registry order.
-pub static FORMS: [FormSemantics; 17] = [
+pub static FORMS: [FormSemantics; 29] = [
     FormSemantics {
         name: "S_ADD_U32",
         family: EncodingFamily::Sop2,
@@ -339,6 +612,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::CarryOut,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -356,6 +630,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Borrow,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -373,6 +648,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::SignedOverflow,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -390,6 +666,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::SignedOverflow,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -407,6 +684,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::Scc,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::CarryOut,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -424,6 +702,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::Scc,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Borrow,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -441,6 +720,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -458,6 +738,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -475,6 +756,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -492,6 +774,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -509,6 +792,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -526,6 +810,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -543,6 +828,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -560,6 +846,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -577,6 +864,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 5,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -594,6 +882,7 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 5,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
@@ -611,12 +900,229 @@ pub static FORMS: [FormSemantics; 17] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 5,
+        relation: None,
         scc: SccEffect::Nonzero,
         vcc: MaskEffect::Unchanged,
         exec: MaskEffect::Unchanged,
         wave: Wave::Any,
         operands: OperandRule::Sop2Sgpr,
         spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 104 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_EQ_I32",
+        family: EncodingFamily::Sopc,
+        opcode: 0,
+        operation: Operation::Compare,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::Equal),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_LG_I32",
+        family: EncodingFamily::Sopc,
+        opcode: 1,
+        operation: Operation::Compare,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::NotEqual),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_GT_I32",
+        family: EncodingFamily::Sopc,
+        opcode: 2,
+        operation: Operation::Compare,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::Greater),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_GE_I32",
+        family: EncodingFamily::Sopc,
+        opcode: 3,
+        operation: Operation::Compare,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::GreaterOrEqual),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_LT_I32",
+        family: EncodingFamily::Sopc,
+        opcode: 4,
+        operation: Operation::Compare,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::Less),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_LE_I32",
+        family: EncodingFamily::Sopc,
+        opcode: 5,
+        operation: Operation::Compare,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::LessOrEqual),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_EQ_U32",
+        family: EncodingFamily::Sopc,
+        opcode: 6,
+        operation: Operation::Compare,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::Equal),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_LG_U32",
+        family: EncodingFamily::Sopc,
+        opcode: 7,
+        operation: Operation::Compare,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::NotEqual),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_GT_U32",
+        family: EncodingFamily::Sopc,
+        opcode: 8,
+        operation: Operation::Compare,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::Greater),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_GE_U32",
+        family: EncodingFamily::Sopc,
+        opcode: 9,
+        operation: Operation::Compare,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::GreaterOrEqual),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_LT_U32",
+        family: EncodingFamily::Sopc,
+        opcode: 10,
+        operation: Operation::Compare,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::Less),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CMP_LE_U32",
+        family: EncodingFamily::Sopc,
+        opcode: 11,
+        operation: Operation::Compare,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        relation: Some(CompareRelation::LessOrEqual),
+        scc: SccEffect::Relation,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::SopcScalar,
+        spec: &[SpecRef { document: Document::Guide, section: "12.4", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
 ];

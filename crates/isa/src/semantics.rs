@@ -9,6 +9,7 @@
 //! The reference interpreter (`crates/ref`) and the independent interpreter
 //! (`tests/validation/independent_ref.rs`) must not use this module.
 
+use crate::CompareRelation;
 use crate::meta::EncodingFamily;
 
 pub use crate::semantics_gen::{FORM_IDS, FORMS, GENERATED_SCHEMA};
@@ -46,6 +47,8 @@ pub enum Operation {
     LogicalShiftRight,
     /// Shift S0 right by the masked count in S1, filling with its sign bit.
     ArithmeticShiftRight,
+    /// Compare S0 with S1 under the form's relation; writes only SCC.
+    Compare,
 }
 
 /// How the operands are interpreted. `Bitwise` exactly when the operation is logical.
@@ -81,6 +84,8 @@ pub enum SccEffect {
     SignedOverflow,
     /// The result is not zero.
     Nonzero,
+    /// The compare's relation holds for S0 and S1.
+    Relation,
 }
 
 /// What a form writes to VCC or EXEC. Stage A forms leave both unchanged.
@@ -105,6 +110,9 @@ pub enum OperandRule {
     /// SOP2: SDST is s0-s105; SSRC0/SSRC1 are s0-s105, inline integers -16..64
     /// or one literal word. Everything else is rejected as unsupported.
     Sop2Sgpr,
+    /// SOPC: no destination; SSRC0/SSRC1 as for SOP2 sources (s0-s105, inline
+    /// integers -16..64 or one literal word). Everything else is rejected.
+    SopcScalar,
 }
 
 /// Evidence a form needs before it counts as verified.
@@ -136,7 +144,7 @@ pub struct SpecRef {
     pub document: Document,
     /// Section number, for example `"12.1"`.
     pub section: &'static str,
-    /// Page in the document, 0 when not paginated.
+    /// Page in the document, or 0 when the page has not been recorded.
     pub page: u16,
 }
 
@@ -159,6 +167,8 @@ pub struct FormSemantics {
     pub width: u8,
     /// Low bits of S1 used as the shift count by shift operations; 0 otherwise.
     pub shift_count_bits: u8,
+    /// The relation tested by compares (S0 on the left); `None` otherwise.
+    pub relation: Option<CompareRelation>,
     /// SCC write.
     pub scc: SccEffect,
     /// VCC write.

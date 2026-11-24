@@ -771,6 +771,9 @@ mod review {
     const SCALAR_LOGIC_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-logic.bin");
     // Hand-derived in fixtures/rdna2/scalar-logic.s from the guide's 12.1 pseudocode.
     const SCALAR_LOGIC_KEY: u32 = 0x887f_00f8;
+    const SCALAR_COMPARE_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-compare.bin");
+    // Hand-derived in fixtures/rdna2/scalar-compare.s from the guide's 12.4 pseudocode.
+    const SCALAR_COMPARE_KEY: u32 = 0x0000_0d5b;
     // SOP2 opcodes of the supported subset (RDNA 2 XML opcode table).
     const SOP2_OPCODES: [u32; 9] = [0, 1, 2, 3, 4, 5, 14, 16, 18];
     const SCALAR_VALUES: [u32; 10] = [
@@ -888,6 +891,15 @@ mod review {
             .unwrap();
         nonzero[at + 1] = 0x9e;
         verify(&nonzero, &input, Some(&[0; 5]));
+    }
+
+    #[test]
+    fn scalar_compare_fixture_records_every_registry_compare() {
+        let input = [0, 1, u32::MAX, SCALAR_COMPARE_KEY, 0x1234_5678];
+        let expected: Vec<_> = input.iter().map(|word| word ^ SCALAR_COMPARE_KEY).collect();
+        verify(SCALAR_COMPARE_FIXTURE, &input, Some(&expected));
+        let compiled = compile(Architecture::Gfx1030, SCALAR_COMPARE_FIXTURE).unwrap();
+        assert!(compiled.disassembly.contains("s_cmp_le_u32 s9, 64"));
     }
 
     /// The translator's own folding: v2 = D as a constant, and the SCC-zero edge
@@ -1112,6 +1124,8 @@ mod review {
         assert_eq!(run(SCALAR_ALU_FIXTURE, &input), expected);
         let logic: Vec<_> = input.iter().map(|word| word ^ SCALAR_LOGIC_KEY).collect();
         assert_eq!(run(SCALAR_LOGIC_FIXTURE, &input), logic);
+        let compares: Vec<_> = input.iter().map(|word| word ^ SCALAR_COMPARE_KEY).collect();
+        assert_eq!(run(SCALAR_COMPARE_FIXTURE, &input), compares);
         let mut vectors = sop2_vectors();
         vectors.extend(sop2_operand_cases());
         vectors.extend(signed_immediate_overflows());
@@ -1120,7 +1134,7 @@ mod review {
         }
         eprintln!(
             "{} SOP2 programs matched on native Metal",
-            vectors.len() + 2
+            vectors.len() + 3
         );
     }
 
