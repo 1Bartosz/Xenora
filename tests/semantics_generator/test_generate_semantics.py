@@ -68,7 +68,25 @@ def snapshot():
         variants[(name, "ENC_SOP2")] = {
             "instruction": name, "encoding": "ENC_SOP2", "opcode": opcode, "operands": operands,
         }
-    return {"source": {"sha256": SHA}, "encodings": {"ENC_SOP2": encoding}, "variants": variants}
+    sopc = {
+        "name": "ENC_SOPC",
+        "bits": 32,
+        "fields": [
+            ["SSRC0", [[0, 8]]], ["SSRC1", [[8, 8]]], ["OP", [[16, 7]]], ["ENCODING", [[23, 9]]],
+        ],
+        "identifier_mask": 0xFFFF0000,
+        "identifiers": [0xBF000000 | (op << 16) for op in (4, 10)],
+    }
+    for name, opcode, data_format in (("S_CMP_LT_I32", 4, I32), ("S_CMP_LT_U32", 10, U32)):
+        variants[(name, "ENC_SOPC")] = {
+            "instruction": name, "encoding": "ENC_SOPC", "opcode": opcode,
+            "operands": _operands(data_format)[1:],
+        }
+    return {
+        "source": {"sha256": SHA},
+        "encodings": {"ENC_SOP2": encoding, "ENC_SOPC": sopc},
+        "variants": variants,
+    }
 
 
 def _form(name, opcode, variant, operation, signedness, scc, carry_in="none"):
@@ -82,15 +100,32 @@ def _form(name, opcode, variant, operation, signedness, scc, carry_in="none"):
     }
 
 
+def compares():
+    reg = registry()
+    reg["form"] += [
+        _compare("S_CMP_LT_I32", 4, "CmpLtI32", "lt", "signed"),
+        _compare("S_CMP_LT_U32", 10, "CmpLtU32", "lt", "unsigned"),
+    ]
+    return reg
+
+
+def _compare(name, opcode, variant, relation, signedness):
+    form = _form(name, opcode, variant, "compare", signedness, "relation")
+    form.update(family="SOPC", relation=relation, operands="sopc_scalar")
+    return form
+
+
 def registry():
     rule = copy.deepcopy(gen.OPERAND_RULES["sop2_sgpr"]["shape"])
     rule["unsupported"] = sorted(gen.UNSUPPORTED_COMBOS)
+    compare_rule = copy.deepcopy(gen.OPERAND_RULES["sopc_scalar"]["shape"])
+    compare_rule["unsupported"] = sorted(gen.OPERAND_RULES["sopc_scalar"]["unsupported"])
     return {
         "schema": 1,
         "architecture": "gfx1030",
         "source_sha256": SHA,
         "documents": copy.deepcopy(gen.PINNED_DOCUMENTS),
-        "operand_rules": {"sop2_sgpr": rule},
+        "operand_rules": {"sop2_sgpr": rule, "sopc_scalar": compare_rule},
         "form": [
             _form("S_ADD_U32", 0, "AddU32", "add", "unsigned", "carry_out"),
             _form("S_ADD_I32", 2, "AddI32", "add", "signed", "signed_overflow"),
@@ -239,7 +274,9 @@ class Validate(unittest.TestCase):
         reg = registry()
         form(reg, "S_ADD_U32")["family"] = "SOPC"
         self.rejects(reg, "S_ADD_U32: operand rule sop2_sgpr is for SOP2")
-        self.rejects(reg, "S_ADD_U32: family SOPC has no XML encoding ENC_SOPC")
+        self.rejects(reg, "S_ADD_U32: no default ENC_SOPC variant in the XML snapshot")
+        form(reg, "S_ADD_U32")["family"] = "SOPK"
+        self.rejects(reg, "S_ADD_U32: family SOPK has no XML encoding ENC_SOPK")
 
     def test_rejects_form_absent_from_the_xml(self):
         reg = registry()
@@ -341,6 +378,53 @@ class Validate(unittest.TestCase):
             "Self::AshrI32 => primitive::ashr_nonzero_i32(src0, src1 & 0x1f),",
             gen.render(registry(), snapshot()),
         )
+
+    def test_accepts_compares(self):
+        self.assertEqual(self.errors(compares()), [])
+
+    def test_rejects_a_compare_without_a_relation(self):
+        reg = compares()
+        del reg["form"][-1]["relation"]
+        self.rejects(reg, "S_CMP_LT_U32: unknown or missing relation None")
+
+    def test_rejects_an_unknown_relation(self):
+        reg = compares()
+        reg["form"][-1]["relation"] = "ne"
+        self.rejects(reg, "S_CMP_LT_U32: unknown or missing relation 'ne'")
+
+    def test_rejects_a_relation_on_a_non_compare(self):
+        reg = compares()
+        reg["form"][0]["relation"] = "lt"
+        self.rejects(reg, "S_ADD_U32: relation on a non-compare operation")
+
+    def test_rejects_a_compare_with_another_scc_effect(self):
+        reg = compares()
+        reg["form"][-1]["scc"] = "nonzero"
+        self.rejects(reg, "S_CMP_LT_U32: scc nonzero contradicts compare (requires relation)")
+
+    def test_rejects_a_bitwise_compare(self):
+        reg = compares()
+        reg["form"][-1]["signedness"] = "bitwise"
+        self.rejects(reg, "S_CMP_LT_U32: no primitive implements lt/bitwise")
+
+    def test_rejects_a_compare_whose_signedness_contradicts_the_xml(self):
+        reg = compares()
+        reg["form"][-1]["signedness"] = "signed"
+        self.rejects(reg, "S_CMP_LT_U32: signedness signed contradicts XML format FMT_NUM_U32")
+
+    def test_rejects_a_compare_under_an_alu_rule(self):
+        reg = compares()
+        reg["form"][0]["operation"] = "compare"
+        reg["form"][0]["relation"] = "lt"
+        reg["form"][0]["scc"] = "relation"
+        self.rejects(reg, "S_ADD_U32: operation compare does not fit rule sop2_sgpr")
+
+    def test_renders_compare_dispatch_and_relation(self):
+        text = gen.render(compares(), snapshot())
+        self.assertIn("if word & 0xff80_0000 != 0xbf00_0000 {", text)
+        self.assertIn("Self::CmpLtI32 => primitive::lt_i32(src0, src1),", text)
+        self.assertIn("Self::CmpLtU32 => primitive::lt_u32(src0, src1),", text)
+        self.assertIn("relation: Some(CompareRelation::Less),", text)
 
     def test_rejects_an_incomplete_unsupported_list(self):
         reg = registry()
@@ -482,14 +566,14 @@ class Render(unittest.TestCase):
         reg = registry()
         reg["form"].reverse()
         text = gen.render(reg, snapshot())
-        body = text.split("const BY_OPCODE: [Option<ScalarAluOp>; 128] = [", 1)[1].split("];", 1)[0]
+        body = text.split("const SCALAR_ALU_OP_BY_OPCODE: [Option<ScalarAluOp>; 128] = [", 1)[1].split("];", 1)[0]
         rows = [line.strip() for line in body.splitlines() if line.strip()]
         self.assertEqual(len(rows), 128)
         declared = {index: row for index, row in enumerate(rows) if row != "None,"}
         self.assertEqual(sorted(declared), [0, 2, 4, 14, 34])
         self.assertEqual(declared[34], "Some(ScalarAluOp::AshrI32),")
         self.assertIn("if word & 0xc000_0000 != 0x8000_0000 {", text)
-        self.assertIn("BY_OPCODE[((word >> 23) & 0x7f) as usize]", text)
+        self.assertIn("SCALAR_ALU_OP_BY_OPCODE[((word >> 23) & 0x7f) as usize]", text)
 
     def test_rejects_identifiers_that_do_not_share_the_encoding_bits(self):
         snap = snapshot()

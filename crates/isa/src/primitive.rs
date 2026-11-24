@@ -98,3 +98,53 @@ pub const fn ashr_nonzero_i32(a: u32, count: u32) -> (u32, bool) {
     let value = ((a as i32) >> count) as u32;
     (value, value != 0)
 }
+
+/// `a == b` on the raw bits; signedness does not matter for equality.
+pub const fn eq_b32(a: u32, b: u32) -> bool {
+    a == b
+}
+
+/// `a != b` on the raw bits (the guide's LG, "less or greater").
+pub const fn ne_b32(a: u32, b: u32) -> bool {
+    a != b
+}
+
+/// Two's-complement `a > b`.
+pub const fn gt_i32(a: u32, b: u32) -> bool {
+    (a as i32) > (b as i32)
+}
+
+/// Two's-complement `a >= b`.
+pub const fn ge_i32(a: u32, b: u32) -> bool {
+    (a as i32) >= (b as i32)
+}
+
+/// Two's-complement `a < b`.
+pub const fn lt_i32(a: u32, b: u32) -> bool {
+    (a as i32) < (b as i32)
+}
+
+/// Two's-complement `a <= b`.
+pub const fn le_i32(a: u32, b: u32) -> bool {
+    (a as i32) <= (b as i32)
+}
+
+/// Unsigned `a > b`.
+pub const fn gt_u32(a: u32, b: u32) -> bool {
+    a > b
+}
+
+/// Unsigned `a >= b`.
+pub const fn ge_u32(a: u32, b: u32) -> bool {
+    a >= b
+}
+
+/// Unsigned `a < b`.
+pub const fn lt_u32(a: u32, b: u32) -> bool {
+    a < b
+}
+
+/// Unsigned `a <= b`.
+pub const fn le_u32(a: u32, b: u32) -> bool {
+    a <= b
+}

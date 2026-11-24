@@ -12,13 +12,13 @@ mod rdna2_meta;
 mod semantics_gen;
 pub use rdna2::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
-    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT,
-    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_CMP_EQ_I32, V_CMP_EQ_U32, V_CMP_GE_I32,
-    V_CMP_GE_U32, V_CMP_GT_I32, V_CMP_GT_U32, V_CMP_LE_I32, V_CMP_LE_U32, V_CMP_LT_I32,
-    V_CMP_LT_U32, V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
-    V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32,
+    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_CMP_EQ_I32, V_CMP_EQ_U32, V_CMP_GE_I32, V_CMP_GE_U32,
+    V_CMP_GT_I32, V_CMP_GT_U32, V_CMP_LE_I32, V_CMP_LE_U32, V_CMP_LT_I32, V_CMP_LT_U32,
+    V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32, V_LSHRREV_B32,
+    V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
-pub use semantics_gen::ScalarAluOp;
+pub use semantics_gen::{ScalarAluOp, ScalarCompareOp};
 
 /// SGPR index of `vcc_lo`, the Wave32 vector condition code.
 pub const VCC_LO: u8 = 106;
@@ -216,8 +216,9 @@ pub enum Instruction {
         src0: ScalarSource,
         src1: ScalarSource,
     },
-    /// SOPC 32-bit equality comparison writing SCC.
-    ScalarCompareEqU32 {
+    /// SOPC 32-bit integer compare writing only SCC.
+    ScalarCompare {
+        op: ScalarCompareOp,
         src0: ScalarSource,
         src1: ScalarSource,
     },
@@ -307,7 +308,7 @@ impl Instruction {
             Self::AddNoCarryU32 { .. } => "v_add_nc_u32_e64",
             Self::ScalarMoveB32 { .. } => "s_mov_b32",
             Self::ScalarAlu { op, .. } => op.mnemonic(),
-            Self::ScalarCompareEqU32 { .. } => "s_cmp_eq_u32",
+            Self::ScalarCompare { op, .. } => op.mnemonic(),
             Self::VectorCompare { op, .. } => op.mnemonic(),
             Self::BranchSccZero { .. } => "s_cbranch_scc0",
             Self::BranchExecZero { .. } => "s_cbranch_execz",
@@ -376,7 +377,7 @@ impl fmt::Display for Instruction {
             Self::ScalarAlu {
                 dst, src0, src1, ..
             } => write!(formatter, " {}, {src0}, {src1}", ScalarDestination(dst)),
-            Self::ScalarCompareEqU32 { src0, src1 } => write!(formatter, " {src0}, {src1}"),
+            Self::ScalarCompare { src0, src1, .. } => write!(formatter, " {src0}, {src1}"),
             Self::VectorCompare { src0, src1, .. } => {
                 write!(formatter, " vcc_lo, {src0}, v{src1}")
             }

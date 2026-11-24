@@ -45,11 +45,6 @@ pub const S_MOV_B32: Opcode = Opcode {
     bits: 0xbe800300,
     bytes: 4,
 };
-pub const S_CMP_EQ_U32: Opcode = Opcode {
-    mask: 0xffff0000,
-    bits: 0xbf060000,
-    bytes: 4,
-};
 pub const S_CBRANCH_SCC0: Opcode = Opcode {
     mask: 0xffff0000,
     bits: 0xbf840000,

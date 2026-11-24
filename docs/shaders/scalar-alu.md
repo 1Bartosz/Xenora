@@ -78,7 +78,7 @@ the registry.
 ## How it runs
 
 Scalar state in a compute fixture is wave-uniform and known while the code is
-translated. As with `s_mov_b32` and `s_cmp_eq_u32`, the translator evaluates
+translated. As with `s_mov_b32` and the SOPC compares, the translator evaluates
 SOP2 forms itself. It resolves SCC-dependent branches and emits SGPR values
 read by `v_mov_b32_e32` as constants (`fixtures/golden/scalar-alu.ir`). So the
 IR and MSL contain the results, not scalar instructions.
@@ -118,3 +118,20 @@ runs on all three and on native Metal.
 and the aliasing and immediate cases on native Metal with API and shader
 validation. `scripts/test-gpu.sh` runs it. This is local evidence from one
 Apple M5 Pro; independent acceptance is pending.
+
+## SOPC compares
+
+The twelve 32-bit SOPC integer compares `s_cmp_{eq,lg,gt,ge,lt,le}_{i32,u32}`
+are declared in the same registry (operand rule `sopc_scalar`). Each sets only
+SCC, to whether the relation holds with SSRC0 on the left; LG means not equal.
+EQ and LG give the same result for `_i32` and `_u32`; GT, GE, LT and LE compare
+two's-complement values for `_i32` and unsigned values for `_u32` (guide section
+12.4). Sources follow the SOP2 rule: normal SGPRs, inline integers or one
+literal. Both sources selecting the literal encoding (255) is rejected for SOPC
+as for SOP2; whether the guide allows one shared literal there was not settled.
+
+`tests/validation/tests/sopc_stage_d.rs` checks 7,824 cases, with expected
+values derived from the guide separately from the registry, plus 348 rejected
+programs, on both CPU interpreters and, through the translator, on native
+Metal. `fixtures/rdna2/scalar-compare.s` (LLVM-assembled, expected input ^
+0x00000d5b) records every compare's SCC through an `s_cbranch_scc0` per form.

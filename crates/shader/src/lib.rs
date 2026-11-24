@@ -832,8 +832,8 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 scc = Some(flag);
                 continue;
             }
-            Instruction::ScalarCompareEqU32 { src0, src1 } => {
-                scc = Some(read_scalar(src0)? == read_scalar(src1)?);
+            Instruction::ScalarCompare { op, src0, src1 } => {
+                scc = Some(op.test(read_scalar(src0)?, read_scalar(src1)?));
                 continue;
             }
             // docs/shaders/vector-compare.md sections 3 and 5.
