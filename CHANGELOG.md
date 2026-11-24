@@ -189,6 +189,7 @@ remains unsupported.
   native DBT.
 
 ### Fixed
+- Fixed the native dependency audit reading Cargo JSON in the process locale encoding, so UTF-8 paths and diagnostics are accepted under an ASCII locale (#363).
 - Made the static probe and the binder share one bounded import parser, after the truncated-name fix for #270. Truncated, unterminated, empty or non-ASCII names, reserved bits and endless tables are reported by the probe and refused by the binder.
 - Fixed import binding writing some slots before finding an unresolved import, and service calls taking effect before an unreadable return address was noticed. A service that changes a nonvolatile register, including XMM6 to XMM15, now stops the guest (part of #201).
 - Fixed older import-generator templates that reported success for unimplemented wrappers, used a nonexistent exit reason, and read floating-point arguments from integer registers.

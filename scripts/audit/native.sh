@@ -20,7 +20,7 @@ import subprocess
 
 executables = set()
 for filename in ("native-build.jsonl", "native-tests.jsonl"):
-    for line in (Path("artifacts") / filename).read_text().splitlines():
+    for line in (Path("artifacts") / filename).read_text(encoding="utf-8").splitlines():
         entry = json.loads(line)
         if entry.get("executable"):
             executables.add(entry["executable"])
