@@ -42,6 +42,7 @@ def main(argv):
     s = sub.add_parser("apply"); s.add_argument("--repo", required=True); s.add_argument("--actions", required=True)
     s = sub.add_parser("audit"); s.add_argument("--state", required=True)
     s = sub.add_parser("summary"); s.add_argument("--state", required=True); s.add_argument("--text", action="store_true")
+    s.add_argument("--now", default="", help="UTC time YYYY-MM-DDTHH:MM:SSZ (overrides parent --now)")
     s = sub.add_parser("pr-check"); s.add_argument("--state", required=True)
     s = sub.add_parser("acceptance"); s.add_argument("--issue", required=True); s.add_argument("--comments", required=True)
     s = sub.add_parser("task"); s.add_argument("--issue", required=True)
