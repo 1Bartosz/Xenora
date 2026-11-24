@@ -155,7 +155,7 @@ The generated `ScalarAluOp::evaluate` now returns `(u32, Option<bool>)`, with
 `tests/validation/tests/sop2_arith.rs` checks 21,070 cases, with expected values
 derived from the guide (including its ABSDIFF examples) separately from the
 registry, on both CPU interpreters and, through the translator, on native
-Metal; its 593 rejected programs are checked on the CPU interpreters and the
+Metal; its 597 rejected programs are checked on the CPU interpreters and the
 compiler. `fixtures/rdna2/scalar-arith.s` (LLVM-assembled, expected input ^
 0x81157dfe) chains all sixteen, including a min tie and CSELECT on both SCC
 values, and shows SCC surviving the forms that do not write it.

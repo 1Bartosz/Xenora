@@ -31,7 +31,7 @@ mod independent_ref;
 use std::collections::BTreeMap;
 
 use harness::{Case, words};
-use xenora_shader::{Architecture, compile};
+use xenora_shader::{Architecture, CompileError, compile};
 
 /// The sixteen forms with their ENC_SOP2 opcodes (guide 12.1).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -229,7 +229,7 @@ const COUNTS: [(&str, usize); 7] = [
 ];
 /// Per form: two literals, 6 destinations and 15 sources in each slot outside
 /// the supported subset; and CSELECT with SCC never written.
-const REJECTIONS: usize = 16 * (1 + 6 + 2 * 15) + 1;
+const REJECTIONS: usize = 16 * (1 + 6 + 2 * 15) + 1 + 4;
 
 /// ENCODING 0b10 in bits 30-31, OP 23-29, SDST 16-22, SSRC1 8-15, SSRC0 0-7
 /// (guide 13.1.1).
@@ -430,6 +430,20 @@ fn rejections() -> Vec<(String, Vec<u8>, usize)> {
     // CSELECT reads SCC; here nothing has written it.
     let code = program(&init, None, &[sop2(Form::Cselect as u32, 10, 8, 9)], 10);
     all.push(("s_cselect_b32 with SCC unset".into(), code, ALU_OFFSET - 4));
+    // The forms that leave SCC unchanged must keep it unset, so a CSELECT after
+    // them is still refused (at the CSELECT, the second ALU word).
+    for form in [Form::Bfm, Form::Mul, Form::MulHiU32, Form::MulHiI32] {
+        let alu = [
+            sop2(form as u32, 10, 8, 9),
+            sop2(Form::Cselect as u32, 11, 8, 9),
+        ];
+        let code = program(&init, None, &alu, 11);
+        all.push((
+            format!("{form:?} then s_cselect_b32 with SCC unset"),
+            code,
+            ALU_OFFSET,
+        ));
+    }
     all
 }
 
@@ -555,11 +569,15 @@ fn other_sop2_opcodes_stay_unsupported() {
 fn sop2_arith_forms_match_the_guide_on_native_metal() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
-    for (label, code, _) in rejections() {
-        assert!(
-            compile(Architecture::Gfx1030, &code).is_err(),
-            "compiler accepted {label}"
-        );
+    for (label, code, offset) in rejections() {
+        // Refused at the same word as by the interpreters, so a later failure
+        // cannot stand in.
+        let at = match compile(Architecture::Gfx1030, &code) {
+            Err(CompileError::Decode(error)) => error.offset,
+            Err(CompileError::Verify { offset, .. }) => offset,
+            other => panic!("compiler did not reject {label}: {other:?}"),
+        };
+        assert_eq!(at, offset, "compiler rejected {label} elsewhere");
     }
     let cases = checked_cases();
     let (failures, programs) = harness::check_metal(&cases);
