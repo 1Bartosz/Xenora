@@ -246,6 +246,15 @@ impl<'a> Interpreter<'a> {
 
     /// Single-step execution. Returns Ok(Some(ExitReason)) on clean exit (HLT/SYSCALL).
     pub fn step(&mut self) -> Result<Option<ExitReason>, ExitReason> {
+        let start = self.cpu.rip;
+        let result = self.execute_instruction();
+        if result.is_err() {
+            self.cpu.rip = start;
+        }
+        result
+    }
+
+    fn execute_instruction(&mut self) -> Result<Option<ExitReason>, ExitReason> {
         let mut rex_w = false;
         let mut rex_r = false;
         let mut rex_b = false;
