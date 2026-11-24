@@ -11,6 +11,9 @@ remains unsupported.
 
 ### Added
 
+- Added complete gfx1030 instruction metadata generated from AMD's public RDNA 2 XML: 1,465 base forms across 21 encoding families with fields, operands, flags and allowed extension words. A committed, normalised snapshot lets `crates/isa/generate_rdna2_meta.py --check` verify the generated table offline; CI runs it.
+- Added `xenora_isa::meta::identify`, which finds any gfx1030 instruction's form and exact length, including literal, SDWA, DPP and NSA words, and rejects truncated, unassigned and disallowed-extension encodings. It agrees with every LLVM-assembled fixture and with LLVM 23.1.6 on a probe set covering each family and extension word. Identification does not make an instruction executable: 25 forms have semantic decoding.
+- Added `xenora shaders coverage [--json]` and `xenora shaders inspect <file>` for per-family coverage and stream listings that separate decoding failures from unsupported semantics. Each instruction is decoded at its stream offset and branch targets are checked against the whole stream's boundaries, so supported branches are no longer misreported as unsupported operands. `xenora_decoder::decode_at` decodes a single instruction for such callers.
 - Added an agent task queue for the cpu, gpu, runtime, shared and qa areas: an *Agent task* issue form with priority and interface fields, a workflow that decides `/claim`, `/release`, `/reassign`, `/progress`, `/blocked`, `/unblock` and `/approve-acceptance` comments one at a time (dependency, cycle and file-overlap checks, 24-hour leases renewed by progress), a pull request check (linked claimed task, file ownership, overlap with other pull requests, independent `/verified <head sha>`), `scripts/agent-queue.sh` and `scripts/agent-sync.sh` (upstream fetch every 12 minutes, task branches in separate worktrees) and a machine-readable queue summary. The rules are standard-library Python in `scripts/agent_queue/` with unit tests in `tests/agent_queue/`; issue text is never executed and acceptance commands need maintainer approval. Only comments that start with a command start a job, so ordinary pull request comments never re-run verification, and only an accepted `/verified <full head sha>` evaluates the check again; and each claim run decides every unanswered command in order, so commands whose pending runs GitHub cancelled are still answered. See `docs/coordination/agent-tasks.md`. Unit tests pass locally; the workflows have not run on GitHub yet, and the pull request check stays advisory (it never blocks a merge) until a live smoke test and the migration of existing issues are done.
 - Added explicit claim-before-work rules for contributors and coding agents to `AGENTS.md`, `CONTRIBUTING.md` and the pull request template: check for existing claims, claim with `/claim`, keep a 24-hour lease alive with `/progress`, `/release` when stopping, and link the claimed issue. Without the claim workflow, the earliest valid claim comment wins.
 - Added a CPU decoder for a bounded subset of BC6H (signed and unsigned HDR) in
@@ -19,12 +22,16 @@ remains unsupported.
   zero as specified. The ten two-subset modes are rejected with `Bc6hError::UnsupportedMode`
   and are not implemented. Tests check hand-derived values and 128 known-answer vectors from a
   separate clean-room reference decoder.
-- Added a CPU BC7 block decoder to `xenora-texture` (`decode_bc7`, `bc7_mode`, `BC7_SUPPORTED_MODES`), written
-  from Khronos Data Format Specification 1.3 section 20.1. It decodes all eight modes (partitions, P-bits, anchor
-  indices, 2/3/4-bit indices, rotation and index selection) to RGBA8 and returns zero for blocks whose low byte is
-  zero, as the specification requires. Hand-derived tests and 430 known-answer vectors from a separate clean-room
-  reference decoder pass locally. This is CPU decoding only: there is no native Metal BC7 path, and agreement with
-  a spec-derived reference is not agreement with Xbox hardware.
+- Added native Metal upload and readback of BC4 and BC5 textures (UNORM and SNORM):
+  `xenora-texture` gains a pitched `BcChannelUpload`, and `NativeCompute::read_bc_channel_upload`
+  sends the original blocks to `BC4_R*` or `BC5_RG*` textures when the device reports BC
+  support, failing with `supportsBCTextureCompression` otherwise. GPU tests cover six- and
+  eight-value interpolation, equal and extreme endpoints (signed -128 reads as -1.0), red-green
+  channel order, padded row and slice pitches, two layers and two mips against the CPU decoders
+  and hand-derived anchors. On an Apple M5 Pro interpolated codes were within 1.71 codes of the
+  exact values and up to two codes from the truncating CPU reference.
+  Edge levels of 5×3 and 1×1 and invalid payloads (zero extents, short, oversized or
+  block-count-mismatched buffers) are covered.
 - Added native Metal upload and readback of BC2 and BC3 textures: `xenora-texture` gains a
   pitched `BcAlphaUpload` for 16-byte blocks, and `NativeCompute::read_bc_alpha_upload` sends
   the original blocks to `BC2_RGBA` or `BC3_RGBA` textures when the device reports BC support.
@@ -49,6 +56,7 @@ remains unsupported.
 
 ### Changed
 
+- Simplified the claim rules in `AGENTS.md`, `CONTRIBUTING.md` and the pull request template at the maintainer's request: claim an issue by replying on it in plain words, never claim over an existing claim, and treat a claim as stale only after about one week without a pull request. The task-queue lease (`lease_hours` in `.github/agent-queue.json`) is now 168 hours to match, and `docs/coordination/agent-tasks.md` marks the queue commands as optional.
 - The static PE probe now marks x86-64 SIB memory addressing as DBT-supported, matching the
   native DBT.
 

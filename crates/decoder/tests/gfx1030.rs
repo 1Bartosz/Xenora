@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 
 use xenora_decoder::{
     Architecture, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction, ScalarSource,
-    VectorSource, decode,
+    VectorSource, decode, decode_at,
 };
 use xenora_ref::{BranchCondition, Op, Source, VectorAlu};
 
@@ -784,5 +784,31 @@ fn accepts_scalar_destination_105_and_vgpr_zero_add_sources() {
             src0: 0,
             src1: 0
         }
+    );
+}
+
+#[test]
+fn decode_at_resolves_branch_targets_from_the_stream_offset() {
+    let decoded = decode_at(Architecture::Gfx1030, BITWISE_FIXTURE, 0x1c).unwrap();
+    assert_eq!(decoded.offset, 0x1c);
+    assert_eq!(decoded.byte_len, 4);
+    assert_eq!(decoded.branch_target(), Some(0x3c));
+    // Alone, the same branch still reports its stream target; only the whole
+    // stream can say whether that target is an instruction boundary.
+    let isolated = decode_at(Architecture::Gfx1030, &BITWISE_FIXTURE[..0x20], 0x1c).unwrap();
+    assert_eq!(isolated.branch_target(), Some(0x3c));
+    assert_eq!(
+        decode_at(
+            Architecture::Gfx1030,
+            BITWISE_FIXTURE,
+            BITWISE_FIXTURE.len()
+        ),
+        Err(DecodeError {
+            offset: BITWISE_FIXTURE.len(),
+            kind: DecodeErrorKind::Truncated {
+                needed: 4,
+                available: 0
+            },
+        })
     );
 }

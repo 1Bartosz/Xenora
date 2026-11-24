@@ -114,6 +114,72 @@ impl<'a> BcAlphaUpload<'a> {
     }
 }
 
+/// A single- or dual-channel block-compressed format: BC4 stores one 8-byte
+/// red block, BC5 a red block followed by a green block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BcChannelFormat {
+    Bc4Unorm,
+    Bc4Snorm,
+    Bc5Unorm,
+    Bc5Snorm,
+}
+
+impl BcChannelFormat {
+    /// Size of one block in bytes.
+    pub const fn block_bytes(self) -> usize {
+        match self {
+            Self::Bc4Unorm | Self::Bc4Snorm => 8,
+            Self::Bc5Unorm | Self::Bc5Snorm => 16,
+        }
+    }
+}
+
+/// A layer-major BC4 or BC5 upload with the same pitch rules as
+/// [`Bc1UploadDesc`], measured in the format's block size.
+#[derive(Clone, Copy, Debug)]
+pub struct BcChannelUploadDesc {
+    pub width: usize,
+    pub height: usize,
+    pub mips: u32,
+    pub layers: usize,
+    pub format: BcChannelFormat,
+    pub row_pitch: usize,
+    pub slice_pitch: usize,
+}
+
+#[derive(Debug)]
+pub struct BcChannelUpload<'a> {
+    bytes: &'a [u8],
+    desc: BcChannelUploadDesc,
+}
+
+impl<'a> BcChannelUpload<'a> {
+    pub fn new(bytes: &'a [u8], desc: BcChannelUploadDesc) -> Result<Self, TextureError> {
+        Self::layout(desc).validate(bytes.len(), desc.format.block_bytes())?;
+        Ok(Self { bytes, desc })
+    }
+
+    pub fn format(&self) -> BcChannelFormat {
+        self.desc.format
+    }
+
+    /// Selects one level; the returned rows hold blocks of this format.
+    pub fn subresource(&self, layer: usize, mip: u32) -> Result<Bc1Subresource<'a>, TextureError> {
+        Self::layout(self.desc).subresource(self.bytes, layer, mip)
+    }
+
+    fn layout(desc: BcChannelUploadDesc) -> PitchedLayout {
+        PitchedLayout {
+            width: desc.width,
+            height: desc.height,
+            mips: desc.mips,
+            layers: desc.layers,
+            row_pitch: desc.row_pitch,
+            slice_pitch: desc.slice_pitch,
+        }
+    }
+}
+
 /// Format-independent pitch rules shared by the pitched uploads.
 struct PitchedLayout {
     width: usize,
@@ -382,5 +448,66 @@ mod tests {
             .unwrap_err(),
             TextureError::SizeOverflow
         );
+    }
+
+    #[test]
+    fn sizes_bc4_and_bc5_pitches_by_their_block() {
+        let desc = BcChannelUploadDesc {
+            width: 5,
+            height: 5,
+            mips: 2,
+            layers: 2,
+            format: BcChannelFormat::Bc4Unorm,
+            row_pitch: 24,
+            slice_pitch: 56,
+        };
+        let mut bytes = [0; 224];
+        bytes[144] = 0x3c; // Layer 1, mip 0, row 1, block 1.
+        let upload = BcChannelUpload::new(&bytes, desc).unwrap();
+        assert_eq!(upload.format(), BcChannelFormat::Bc4Unorm);
+        let base = upload.subresource(1, 0).unwrap();
+        assert_eq!((base.bytes.len(), base.bytes[32]), (48, 0x3c));
+        // A BC4 pitch holds only half a BC5 row, and 24 is not a 16-byte multiple.
+        for format in [BcChannelFormat::Bc5Unorm, BcChannelFormat::Bc5Snorm] {
+            assert_eq!(
+                BcChannelUpload::new(&bytes, BcChannelUploadDesc { format, ..desc }).unwrap_err(),
+                TextureError::InvalidLayout
+            );
+        }
+        let bc5 = BcChannelUploadDesc {
+            format: BcChannelFormat::Bc5Snorm,
+            row_pitch: 48,
+            slice_pitch: 112,
+            ..desc
+        };
+        let bytes = [0; 448];
+        assert_eq!(
+            BcChannelUpload::new(&bytes, bc5)
+                .unwrap()
+                .subresource(1, 1)
+                .unwrap()
+                .bytes
+                .len(),
+            48
+        );
+        // Short, oversized, and one block too few or too many for the layout.
+        for len in [447, 449, 432, 464] {
+            assert_eq!(
+                BcChannelUpload::new(&vec![0; len], bc5).unwrap_err(),
+                TextureError::InvalidByteLength
+            );
+        }
+        for desc in [
+            BcChannelUploadDesc { width: 0, ..bc5 },
+            BcChannelUploadDesc { height: 0, ..bc5 },
+            BcChannelUploadDesc { layers: 0, ..bc5 },
+            BcChannelUploadDesc { mips: 0, ..bc5 },
+            BcChannelUploadDesc { mips: 4, ..bc5 },
+        ] {
+            assert_eq!(
+                BcChannelUpload::new(&bytes, desc).unwrap_err(),
+                TextureError::InvalidLayout
+            );
+        }
     }
 }
