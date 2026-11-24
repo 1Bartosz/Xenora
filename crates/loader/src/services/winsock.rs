@@ -29,6 +29,7 @@ const WSAEMFILE: u32 = 10024;
 const WSAENOTSOCK: u32 = 10038;
 const WSAEPROTONOSUPPORT: u32 = 10043;
 const WSAESOCKTNOSUPPORT: u32 = 10044;
+const WSAEOPNOTSUPP: u32 = 10045;
 const WSAEAFNOSUPPORT: u32 = 10047;
 const WSASYSNOTREADY: u32 = 10091;
 const WSAVERNOTSUPPORTED: u32 = 10092;
@@ -177,6 +178,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 
     register_address_conversion(registry, state);
     register_loopback(registry, state);
+    register_poll(registry, state);
 
     let get = Arc::clone(state);
     registry.register(MODULE, "WSAGetLastError", move |_, cpu, _| {
@@ -352,6 +354,75 @@ fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
                 Ok(copied as u64)
             })();
             socket_result(&recv, cpu.gs_base, result)
+        },
+    );
+}
+
+fn register_poll(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    const POLLFD_SIZE: usize = 16;
+    const POLLNVAL: u16 = 0x0004;
+    const POLLWRNORM: u16 = 0x0010;
+    const POLLRDNORM: u16 = 0x0100;
+    const POLLRDBAND: u16 = 0x0200;
+
+    let state = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WSAPoll",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let net = state.winsock.lock().expect("guest Winsock state");
+            let result = (|| {
+                if net.refs == 0 {
+                    return Err(WSANOTINITIALISED);
+                }
+                let count = args.rdx as u32 as usize;
+                if !(1..=MAX_SOCKETS).contains(&count) {
+                    return Err(WSAEINVAL);
+                }
+                if args.r8 as u32 != 0 {
+                    return Err(WSAEOPNOTSUPP);
+                }
+                if args.rcx == 0 {
+                    return Err(WSAEFAULT);
+                }
+                let mut storage = [0; MAX_SOCKETS * POLLFD_SIZE];
+                let descriptors = &mut storage[..count * POLLFD_SIZE];
+                memory
+                    .read_bytes(args.rcx, descriptors)
+                    .map_err(|_| WSAEFAULT)?;
+                let mut ready = 0;
+                for fd in descriptors.as_chunks_mut::<POLLFD_SIZE>().0 {
+                    let handle = u64::from_le_bytes(fd[..8].try_into().expect("socket handle"));
+                    let events = u16::from_le_bytes([fd[8], fd[9]]);
+                    if events & !(POLLWRNORM | POLLRDNORM | POLLRDBAND) != 0 {
+                        return Err(WSAEINVAL);
+                    }
+                    let mut result = POLLNVAL;
+                    if let Some(socket) = net.sockets.get(&handle) {
+                        result = 0;
+                        if !socket.pending.is_empty() {
+                            result |= events & POLLRDNORM;
+                        }
+                        if let Some(peer) = socket.peer
+                            && !net.sockets.values().any(|target| {
+                                target.port == Some(peer)
+                                    && target.peer.is_none_or(|port| Some(port) == socket.port)
+                                    && target.pending.len() == MAX_PENDING_DATAGRAMS
+                            })
+                        {
+                            result |= events & POLLWRNORM;
+                        }
+                    }
+                    fd[10..12].copy_from_slice(&result.to_le_bytes());
+                    ready += u64::from(result != 0);
+                }
+                memory
+                    .write_bytes(args.rcx, descriptors)
+                    .map_err(|_| WSAEFAULT)?;
+                Ok(ready)
+            })();
+            socket_result(&state, cpu.gs_base, result)
         },
     );
 }

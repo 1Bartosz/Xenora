@@ -337,6 +337,7 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
         "recv",
         "WSAGetLastError",
         "WSACleanup",
+        "WSAPoll",
         "inet_pton",
         "htons",
     ];
@@ -376,6 +377,7 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
     let outgoing = SCRATCH + 0x220;
     let incoming = SCRATCH + 0x240;
     let text = SCRATCH + 0x260;
+    let poll = SCRATCH + 0x280;
     memory.write_u16(address, 2).unwrap();
     let port = call(&mut memory, "htons", &[5000]);
     memory.write_u16(address + 2, port as u16).unwrap();
@@ -404,6 +406,13 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
     assert_ne!(sender, receiver);
     assert_eq!(call(&mut memory, "bind", &[receiver, address, 16]), 0);
     assert_eq!(call(&mut memory, "connect", &[sender, address, 16]), 0);
+    memory.write_u64(poll, receiver).unwrap();
+    memory.write_u16(poll + 8, 0x0100).unwrap();
+    memory.write_u64(poll + 16, sender).unwrap();
+    memory.write_u16(poll + 24, 0x0010).unwrap();
+    assert_eq!(call(&mut memory, "WSAPoll", &[poll, 2, 0]), 1);
+    assert_eq!(memory.read_u16(poll + 10).unwrap(), 0);
+    assert_eq!(memory.read_u16(poll + 26).unwrap(), 0x0010);
     memory.write_bytes(outgoing, b"loop").unwrap();
     for _ in 0..16 {
         assert_eq!(call(&mut memory, "send", &[sender, outgoing, 4, 0]), 4);
@@ -413,6 +422,9 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
         u64::from(u32::MAX)
     );
     assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10055);
+    assert_eq!(call(&mut memory, "WSAPoll", &[poll, 2, 0]), 1);
+    assert_eq!(memory.read_u16(poll + 10).unwrap(), 0x0100);
+    assert_eq!(memory.read_u16(poll + 26).unwrap(), 0);
     for _ in 0..16 {
         assert_eq!(call(&mut memory, "recv", &[receiver, incoming, 4, 0]), 4);
         let mut received = [0; 4];
@@ -425,6 +437,9 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
         u64::from(u32::MAX)
     );
     assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10035);
+    assert_eq!(call(&mut memory, "WSAPoll", &[poll, 2, 0]), 1);
+    assert_eq!(memory.read_u16(poll + 10).unwrap(), 0);
+    assert_eq!(memory.read_u16(poll + 26).unwrap(), 0x0010);
     assert_eq!(call(&mut memory, "WSACleanup", &[]), 0);
 }
 
