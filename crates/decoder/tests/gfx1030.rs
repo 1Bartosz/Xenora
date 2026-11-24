@@ -4,11 +4,12 @@ use std::process::{Command, Stdio};
 
 use xenora_decoder::{
     Architecture, CompareRelation, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction,
-    ScalarAluOp, ScalarSource, ScalarUnaryOp, VectorSource, decode, decode_at,
+    ScalarAluOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorSource, decode, decode_at,
 };
 use xenora_isa::semantics::Signedness;
 use xenora_ref::{
     BranchCondition, CompareSource, Comparison, Op, ScalarAlu, ScalarUnary, Source, VectorAlu,
+    VectorInteger,
 };
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
@@ -470,6 +471,34 @@ fn reference_op(instruction: Instruction) -> Op {
             },
             src1,
         ),
+        Instruction::VectorAlu {
+            op,
+            dst,
+            src0,
+            src1,
+        } => Op::VectorInteger(
+            match op {
+                VectorAluOp::MulI32I24 => VectorInteger::Multiply24 { signed: true },
+                VectorAluOp::MulHiI32I24 => VectorInteger::MultiplyHigh24 { signed: true },
+                VectorAluOp::MulU32U24 => VectorInteger::Multiply24 { signed: false },
+                VectorAluOp::MulHiU32U24 => VectorInteger::MultiplyHigh24 { signed: false },
+                VectorAluOp::MinI32 => VectorInteger::Minimum { signed: true },
+                VectorAluOp::MaxI32 => VectorInteger::Maximum { signed: true },
+                VectorAluOp::MinU32 => VectorInteger::Minimum { signed: false },
+                VectorAluOp::MaxU32 => VectorInteger::Maximum { signed: false },
+                VectorAluOp::XnorB32 => VectorInteger::Xnor,
+                VectorAluOp::AddNcU32 => VectorInteger::Add,
+                VectorAluOp::SubNcU32 => VectorInteger::Subtract,
+                VectorAluOp::SubrevNcU32 => VectorInteger::SubtractReverse,
+            },
+            dst,
+            match src0 {
+                VectorSource::Register(reg) => CompareSource::Vector(reg),
+                VectorSource::Scalar(reg) => CompareSource::Scalar(reg),
+                VectorSource::Immediate(bits) => CompareSource::Immediate(bits),
+            },
+            src1,
+        ),
         Instruction::EndProgram => Op::End,
     }
 }
@@ -495,13 +524,14 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/scalar-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-unary.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-arith.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-integer.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 88, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 100, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -785,7 +815,13 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
             let target = next_offset + displacement * 4;
             format!("{mnemonic} -> 0x{target:04x}")
         }
-        mnemonic if mnemonic.starts_with("v_cmp_") => {
+        // VOPC and the registry VOP2 forms print SRC0 (the second operand) as bits.
+        mnemonic
+            if mnemonic.starts_with("v_cmp_")
+                || VectorAluOp::ALL
+                    .iter()
+                    .any(|op| op.assembly_name() == mnemonic) =>
+        {
             let mut parts: Vec<String> = operands.split(", ").map(str::to_owned).collect();
             parts[1] = match literal_bits(&parts[1]) {
                 Some(bits) => format!("0x{bits:x}"),

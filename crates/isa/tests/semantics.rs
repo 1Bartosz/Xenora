@@ -2,7 +2,7 @@
 
 use xenora_isa::meta::{EncodingFamily, FORMS as META_FORMS};
 use xenora_isa::semantics::{CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, SCHEMA, SccEffect};
-use xenora_isa::{ScalarAluOp, ScalarCompareOp, ScalarUnaryOp};
+use xenora_isa::{ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp};
 
 #[test]
 fn generated_tables_match_the_schema_and_the_metadata_forms() {
@@ -84,5 +84,22 @@ fn scalar_unary_dispatch_selects_exactly_the_registry_sop1_forms() {
     // s_mov_b32 (opcode 3) stays hand-written, so it must not be dispatched here.
     dispatch_selects_exactly(EncodingFamily::Sop1, |word| {
         ScalarUnaryOp::from_word(word).map(|op| op.semantics().name)
+    });
+}
+
+#[test]
+fn vector_alu_dispatch_selects_exactly_the_registry_vop2_forms() {
+    for op in VectorAluOp::ALL {
+        let row = op.semantics();
+        assert_eq!(row.family, EncodingFamily::Vop2);
+        assert_eq!(row.name.to_ascii_lowercase(), op.mnemonic());
+        assert_eq!(op.assembly_name(), format!("{}_e32", op.mnemonic()));
+        assert_eq!(op.swaps_sources(), row.swap_sources);
+        assert_eq!(row.scc, SccEffect::Unchanged);
+    }
+    // The hand-written VOP2 forms (v_and_b32, v_add_f32, ...) must not be
+    // dispatched here.
+    dispatch_selects_exactly(EncodingFamily::Vop2, |word| {
+        VectorAluOp::from_word(word).map(|op| op.semantics().name)
     });
 }

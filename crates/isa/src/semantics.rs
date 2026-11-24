@@ -86,6 +86,39 @@ pub enum Operation {
     AbsoluteDifference,
     /// `(S0 << shift_amount) + S1`.
     ShiftLeftAdd,
+    /// Low 32 bits of the product of S0[23:0] and S1[23:0] (sign-extended when signed).
+    Multiply24,
+    /// Bits 63:32 of the product of S0[23:0] and S1[23:0] (sign-extended when signed).
+    MultiplyHigh24,
+}
+
+/// The per-lane integer operation a vector form lowers to. One reusable MSL
+/// template exists per variant; a form selects it through its declared
+/// operation and signedness, never through its opcode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VectorBinary {
+    /// Wrapping `a + b`.
+    Add,
+    /// Wrapping `a - b`.
+    Sub,
+    /// `!(a ^ b)`.
+    Xnor,
+    /// Two's-complement minimum.
+    MinSigned,
+    /// Unsigned minimum.
+    MinUnsigned,
+    /// Two's-complement maximum.
+    MaxSigned,
+    /// Unsigned maximum.
+    MaxUnsigned,
+    /// Low 32 bits of `sext(a[23:0]) * sext(b[23:0])`.
+    Mul24Signed,
+    /// Low 32 bits of `a[23:0] * b[23:0]`.
+    Mul24Unsigned,
+    /// Bits 63:32 of `sext(a[23:0]) * sext(b[23:0])`.
+    MulHi24Signed,
+    /// Bits 63:32 of `a[23:0] * b[23:0]`.
+    MulHi24Unsigned,
 }
 
 /// How the operands are interpreted. `Bitwise` exactly when the operation is logical.
@@ -155,6 +188,10 @@ pub enum OperandRule {
     /// SOP1 unary: SDST is s0-s105; SSRC0 is s0-s105, an inline integer -16..64 or
     /// a literal word. Everything else is rejected as unsupported.
     Sop1Sgpr,
+    /// VOP2 vector: VDST is v0-v255; SRC0 is a VGPR, s0-s105, `vcc_lo`, an inline
+    /// integer -16..64 or a literal word; VSRC1 is a VGPR. Everything else is
+    /// rejected as unsupported.
+    Vop2Vgpr,
 }
 
 /// Evidence a form needs before it counts as verified.
@@ -211,6 +248,8 @@ pub struct FormSemantics {
     pub shift_count_bits: u8,
     /// Fixed left shift of S0 for shift-and-add operations (1 to 4); 0 otherwise.
     pub shift_amount: u8,
+    /// Whether the operation reads its sources in reverse order (`D = op(S1, S0)`).
+    pub swap_sources: bool,
     /// Low bits of S0 that the operation reads: `width`, or 8 or 16 for sign extension.
     pub source_bits: u8,
     /// The relation tested by compares (S0 on the left); `None` otherwise.
