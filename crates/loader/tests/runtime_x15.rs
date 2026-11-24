@@ -1143,6 +1143,9 @@ fn guest_gdk_manual_queue_handles_have_independent_lifetimes() {
     };
     let first = open("XTaskQueueCreate", &[0, 0, output]);
     let second = open("XTaskQueueDuplicateHandle", &[first, output]);
+    let work = open("XTaskQueueGetPort", &[first, 0, output]);
+    let completion = open("XTaskQueueGetPort", &[first, 1, output]);
+    assert_ne!(work, completion);
     assert_ne!(first, second);
     call("XTaskQueueCloseHandle", &[first]);
     let stale = call("XTaskQueueDuplicateHandle", &[first, output]);
@@ -1150,8 +1153,16 @@ fn guest_gdk_manual_queue_handles_have_independent_lifetimes() {
     assert_eq!(stale.image.memory.read_u64(output).unwrap(), 0);
     let third = open("XTaskQueueDuplicateHandle", &[second, output]);
     assert!(third > second);
+    assert_eq!(open("XTaskQueueGetPort", &[third, 0, output]), work);
+    let composite = open("XTaskQueueCreateComposite", &[work, work, output]);
     call("XTaskQueueCloseHandle", &[second]);
     call("XTaskQueueCloseHandle", &[third]);
+    assert_eq!(open("XTaskQueueGetPort", &[composite, 1, output]), work);
+    let stale = call("XTaskQueueCreateComposite", &[work, completion, output]);
+    assert_eq!(stale.execution.final_state.get(Register::Rax), 0x8007_0006);
+    call("XTaskQueueCloseHandle", &[composite]);
+    let stale = call("XTaskQueueCreateComposite", &[work, work, output]);
+    assert_eq!(stale.execution.final_state.get(Register::Rax), 0x8007_0006);
     let next = open("XTaskQueueCreate", &[0, 0, output]);
     assert!(next > third);
 }

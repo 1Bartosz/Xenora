@@ -18,13 +18,13 @@ const MANUAL: u32 = 0;
 #[derive(Default)]
 pub(super) struct QueueHandles {
     last_id: u64,
-    queues: BTreeMap<u64, u64>,
+    queues: BTreeMap<u64, [u64; 2]>,
 }
 
 impl QueueHandles {
     fn open(
         &mut self,
-        object: Option<u64>,
+        ports: Option<[u64; 2]>,
         output: u64,
         memory: &mut GuestMemory,
     ) -> Result<(), u32> {
@@ -44,7 +44,10 @@ impl QueueHandles {
             .write_u64(output, handle)
             .map_err(|_| ERROR_INVALID_PARAMETER)?;
         self.last_id = next;
-        self.queues.insert(handle, object.unwrap_or(handle));
+        self.queues.insert(
+            handle,
+            ports.unwrap_or([0x5157_0000_0000_0000 | next, 0x5143_0000_0000_0000 | next]),
+        );
         Ok(())
     }
 }
@@ -98,6 +101,47 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 .queues
                 .remove(&args.rcx);
             Ok(0)
+        },
+    );
+
+    let get = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "XTaskQueueGetPort",
+        ServiceStatus::Partial,
+        move |args, _, memory| {
+            let result = (|| {
+                let queues = get.gdk_queues.lock().expect("GDK queue handle table");
+                let ports = queues.queues.get(&args.rcx).ok_or(ERROR_INVALID_HANDLE)?;
+                let port = ports
+                    .get(args.rdx as u32 as usize)
+                    .ok_or(ERROR_INVALID_PARAMETER)?;
+                if args.r8 == 0 {
+                    return Err(ERROR_INVALID_PARAMETER);
+                }
+                memory
+                    .write_u64(args.r8, *port)
+                    .map_err(|_| ERROR_INVALID_PARAMETER)
+            })();
+            Ok(guest_hresult(result))
+        },
+    );
+
+    let composite = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "XTaskQueueCreateComposite",
+        ServiceStatus::Partial,
+        move |args, _, memory| {
+            let mut queues = composite.gdk_queues.lock().expect("GDK queue handle table");
+            let ports = [args.rcx, args.rdx];
+            if ports
+                .iter()
+                .any(|port| !queues.queues.values().any(|live| live.contains(port)))
+            {
+                return Ok(guest_hresult(Err(ERROR_INVALID_HANDLE)));
+            }
+            Ok(guest_hresult(queues.open(Some(ports), args.r8, memory)))
         },
     );
 }
