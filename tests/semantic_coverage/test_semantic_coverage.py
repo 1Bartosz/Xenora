@@ -74,6 +74,12 @@ class SemanticCoverageTests(unittest.TestCase):
         self.assertEqual(coverage.parse_generated(source), {("SOP2", "S_ADD_U32")})
         with self.assertRaisesRegex(ValueError, "length mismatch"):
             coverage.parse_generated(source.replace("; 1]", "; 2]"))
+        duplicated = source.replace("; 1]", "; 2]").replace(
+            '    ("S_ADD_U32", EncodingFamily::Sop2),\n',
+            '    ("S_ADD_U32", EncodingFamily::Sop2),\n' * 2,
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate FORM_IDS entry"):
+            coverage.parse_generated(duplicated)
 
     def test_stub_or_unrecognized_lowering_fails(self):
         for lowering in ("stub", "MSL placeholder add", "MSL unimplemented", "something new"):

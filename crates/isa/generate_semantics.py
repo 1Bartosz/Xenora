@@ -61,6 +61,19 @@ EVIDENCE = {
     "llvm_encoding": "LlvmEncoding",
 }
 DOCUMENTS = {"guide": "Guide", "xml": "Xml"}
+# The public documents spec references may cite, pinned so a citation cannot
+# silently point at another file.
+PINNED_DOCUMENTS = {
+    "guide": {
+        "title": "AMD RDNA 2 Instruction Set Architecture Reference Guide",
+        "file": "rdna2-shader-instruction-set-architecture.pdf",
+        "pages": 291,
+    },
+    "xml": {
+        "title": "AMD RDNA 2 machine-readable ISA (pinned XML)",
+        "file": "amdgpu_isa_rdna2.xml",
+    },
+}
 WIDTHS = {32}
 
 # (operation, signedness) -> (required SCC effect, primitive, takes carry-in).
@@ -224,7 +237,7 @@ def validate(registry, snapshot):
     unknown = sorted(set(registry) - TOP_KEYS)
     if unknown:
         errors.append(f"unknown top-level keys {unknown}")
-    if registry.get("schema") != SCHEMA:
+    if type(registry.get("schema")) is not int or registry["schema"] != SCHEMA:
         errors.append(f"schema {registry.get('schema')!r} is not {SCHEMA}")
     if registry.get("architecture") != ARCHITECTURE:
         errors.append(f"architecture {registry.get('architecture')!r} is not {ARCHITECTURE}")
@@ -234,10 +247,8 @@ def validate(registry, snapshot):
     for name, document in documents.items():
         if name not in DOCUMENTS:
             errors.append(f"unknown document {name}")
-        elif not (isinstance(document, dict) and isinstance(document.get("title"), str)
-                  and document["title"] and isinstance(document.get("file"), str)
-                  and document["file"]):
-            errors.append(f"document {name}: needs a title and a file")
+        elif document != PINNED_DOCUMENTS[name]:
+            errors.append(f"document {name}: differs from the pinned public document")
     if "guide" not in documents:
         errors.append("the guide document is not declared")
     rules = registry.get("operand_rules", {})

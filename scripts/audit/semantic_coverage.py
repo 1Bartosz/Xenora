@@ -122,9 +122,12 @@ def parse_generated(source):
     if len(starts) != 1:
         raise ValueError(f"{GENERATED}: expected one FORM_IDS declaration")
     forms = set()
+    rows = 0
     for number, line in enumerate(lines[starts[0] + 1:], starts[0] + 2):
         line = line.strip()
         if line == "];":
+            if rows != len(forms):
+                raise ValueError(f"{GENERATED}:{number}: duplicate FORM_IDS entry")
             if len(forms) != int(GENERATED_HEADER.fullmatch(lines[starts[0]].strip())[1]):
                 raise ValueError(f"{GENERATED}:{number}: FORM_IDS length mismatch")
             return forms
@@ -132,6 +135,7 @@ def parse_generated(source):
         if not entry:
             raise ValueError(f"{GENERATED}:{number}: unrecognized FORM_IDS entry {line!r}")
         forms.add((entry[2].upper(), entry[1]))
+        rows += 1
     raise ValueError(f"{GENERATED}: unterminated FORM_IDS")
 
 
@@ -218,7 +222,7 @@ def collect_coverage(identified, registry, decoder, status):
         # compile-time resolution also implements that path for the form.
         if (
             lowering.startswith(("msl ", "resolved ", "verified ", "constant or ", "per-thread "))
-            and not re.search(r"\b(?:stub|placeholder|planned|unsupported|pending|todo|unimplemented|not implemented)\b", lowering)
+            and not re.search(r"\b(?:stub|placeholder|planned|unsupported|pending|todo|unimplemented|not implemented|not yet)\b", lowering)
         ):
             lowered.add(key)
         elif lowering:
