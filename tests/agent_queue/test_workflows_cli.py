@@ -63,6 +63,60 @@ class Workflows(unittest.TestCase):
         self.assertNotRegex(text, r"github\.event\.pull_request\.head|ref:\s*\$\{\{")
         self.assertIn("pull_request_target", text)
 
+    def job(self, name, job):
+        """Text of one job block: from `  <job>:` to the next two-space-indented key."""
+        m = re.search(r"(?ms)^  %s:\n(.*?)(?=^  \S|\Z)" % re.escape(job), self.read(name))
+        self.assertIsNotNone(m, "%s: job %s" % (name, job))
+        return m.group(1)
+
+    def job_if(self, name, job):
+        return re.search(r"(?m)^    if: (.*)$", self.job(name, job)).group(1)
+
+    def test_only_command_comments_start_runs(self):
+        # Ordinary comments must not start a claim run or a verification re-run.
+        self.assertIn("startsWith(github.event.comment.body, '/verified')", self.job_if("agent-pr-checks.yml", "verify"))
+        self.assertIn("startsWith(github.event.comment.body, '/')", self.job_if("agent-claims.yml", "command"))
+        self.assertNotIn("issue_comment", self.job_if("agent-pr-checks.yml", "check"))
+
+    def test_claim_jobs_share_one_group_and_replay(self):
+        for job in ("command", "audit"):
+            text = self.job("agent-claims.yml", job)
+            self.assertRegex(text, r"group: agent-queue\n\s+cancel-in-progress: false", job)
+            # Pending runs can be cancelled by newer ones, so every run replays unanswered commands.
+            self.assertIn("agent_queue replay", text, job)
+            self.assertIn("--recent-commands", text, job)
+        self.assertNotIn("agent_queue decide", self.job("agent-claims.yml", "command"))
+
+    def test_rerun_needs_an_accepted_verification(self):
+        text = self.job("agent-pr-checks.yml", "verify")
+        self.assertIn('if ! python3 -m agent_queue should-rerun --actions "$RUNNER_TEMP/actions.json"; then exit 0; fi', text)
+        self.assertLess(text.index("agent_queue should-rerun"), text.index("agent_queue pr-check"))
+        # The check is evaluated in this job: pull_request_target runs cannot be found by head SHA.
+        self.assertNotIn("gh run", text)
+        self.assertNotIn("actions: write", text)
+        self.assertIn("::warning title=Agent PR check (advisory)::", text)
+
+    def test_should_rerun_exit_codes(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "a.json")
+            for actions, code in (([], 1), ([{"issue": 4, "add_labels": [], "remove_labels": [], "comment": "refused"}], 1),
+                                  ([{"issue": 4, "add_labels": [], "remove_labels": [], "comment": "ok", "rerun_check": True}], 0)):
+                dump(actions, p)
+                self.assertEqual(Cli.run_cli(self, "should-rerun", "--actions", p).returncode, code, actions)
+
+    def test_verify_runs_one_at_a_time_per_pull_request(self):
+        text = self.job("agent-pr-checks.yml", "verify")
+        self.assertRegex(text, r"group: agent-verify-\$\{\{ github\.event\.issue\.number \}\}\n\s+cancel-in-progress: false")
+
+    def test_pr_check_is_advisory(self):
+        # Exit status 1 (problems found) only warns until the live smoke test and issue migration.
+        text = self.job("agent-pr-checks.yml", "check")
+        found = re.search(r'if \[ "\$status" -eq 1 \]; then\n(.*?)\n\s+elif \[ "\$status" -ne 0 \]; then\n\s+exit "\$status"', text, re.S)
+        self.assertIsNotNone(found, text)
+        self.assertIn("::warning title=Agent PR check (advisory)::", found.group(1))
+        self.assertNotIn("exit", found.group(1))
+        self.assertEqual(text.count("exit "), 1)
+
     def test_actions_pinned_by_sha(self):
         for name in QUEUE_WORKFLOWS:
             for use in re.findall(r"uses:\s*(\S+)", self.read(name)):
