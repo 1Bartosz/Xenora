@@ -34,12 +34,19 @@ fn semantic(family: EncodingFamily) -> usize {
 /// with their length; "semantic" forms decode into executable instructions.
 /// Reference, Metal and native GPU evidence per form stays in docs/status.toml.
 fn coverage(json: bool) -> ExitCode {
+    print!("{}", coverage_report(json));
+    ExitCode::SUCCESS
+}
+
+fn coverage_report(json: bool) -> String {
+    use std::fmt::Write as _;
     let rows: Vec<_> = meta::inventory()
         .into_iter()
         .map(|(family, discovered)| (family, discovered, semantic(family)))
         .collect();
     let total: usize = rows.iter().map(|row| row.1).sum();
     let supported: usize = rows.iter().map(|row| row.2).sum();
+    let mut out = String::new();
     if json {
         let families: Vec<String> = rows
             .iter()
@@ -50,20 +57,31 @@ fn coverage(json: bool) -> ExitCode {
                 )
             })
             .collect();
-        println!(
+        writeln!(
+            out,
             "{{\"architecture\":\"gfx1030\",\"source_sha256\":\"{}\",\"discovered\":{total},\"semantic\":{supported},\"families\":[{}]}}",
             meta::SOURCE_SHA256,
             families.join(",")
-        );
+        )
+        .unwrap();
     } else {
-        println!("{:<10} {:>10} {:>9}", "family", "discovered", "semantic");
+        writeln!(
+            out,
+            "{:<10} {:>10} {:>9}",
+            "family", "discovered", "semantic"
+        )
+        .unwrap();
         for (family, discovered, semantic) in &rows {
-            println!("{:<10} {discovered:>10} {semantic:>9}", family.name());
+            writeln!(out, "{:<10} {discovered:>10} {semantic:>9}", family.name()).unwrap();
         }
-        println!("{:<10} {total:>10} {supported:>9}", "total");
-        println!("Semantic forms decode for the operand subsets in docs/status.toml only.");
+        writeln!(out, "{:<10} {total:>10} {supported:>9}", "total").unwrap();
+        writeln!(
+            out,
+            "Semantic forms decode for the operand subsets in docs/status.toml only."
+        )
+        .unwrap();
     }
-    ExitCode::SUCCESS
+    out
 }
 
 fn inspect(path: &str) -> ExitCode {
@@ -156,7 +174,38 @@ fn listing(bytes: &[u8]) -> Listing {
 
 #[cfg(test)]
 mod tests {
-    use super::listing;
+    use super::{coverage_report, listing};
+    use xenora_decoder::SEMANTIC_FORMS;
+    use xenora_isa::meta::{EncodingFamily, FORMS};
+
+    #[test]
+    fn coverage_totals_match_the_generated_table() {
+        let json = coverage_report(true);
+        let totals = format!(
+            "\"discovered\":{},\"semantic\":{},\"families\":[",
+            FORMS.len(),
+            SEMANTIC_FORMS.len()
+        );
+        assert!(json.contains(&totals), "{json}");
+        let families: Vec<usize> = json
+            .split("{\"family\":")
+            .skip(1)
+            .map(|row| {
+                let count = row.split("\"discovered\":").nth(1).unwrap();
+                count[..count.find(',').unwrap()].parse().unwrap()
+            })
+            .collect();
+        assert_eq!(families.len(), EncodingFamily::ALL.len());
+        assert_eq!(families.iter().sum::<usize>(), FORMS.len());
+        let text = coverage_report(false);
+        let total = format!(
+            "{:<10} {:>10} {:>9}\n",
+            "total",
+            FORMS.len(),
+            SEMANTIC_FORMS.len()
+        );
+        assert!(text.contains(&total), "{text}");
+    }
 
     fn program(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()

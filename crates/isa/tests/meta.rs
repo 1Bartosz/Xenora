@@ -155,6 +155,33 @@ fn every_form_identifies_as_itself() {
 }
 
 #[test]
+fn documented_form_counts_match_the_generated_table() {
+    let count = FORMS.len();
+    let count = format!("{},{:03}", count / 1000, count % 1000);
+    let families = EncodingFamily::ALL.len();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (file, claim) in [
+        (
+            "docs/research/rdna2.md",
+            format!("{count} forms in {families} encoding families"),
+        ),
+        (
+            "CHANGELOG.md",
+            format!("{count} base forms across {families} encoding families"),
+        ),
+    ] {
+        let text = fs::read_to_string(root.join(file)).unwrap();
+        assert!(
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(&claim),
+            "{file} must state \"{claim}\""
+        );
+    }
+}
+
+#[test]
 fn first_word_opcode_table_agrees_with_full_metadata() {
     use xenora_isa::{BUFFER_LOAD_DWORD, S_ENDPGM, V_ADD_F32, V_ADD_NC_U32, V_MOV_B32};
     for (opcode, name, family) in [
