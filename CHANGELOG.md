@@ -43,6 +43,8 @@ remains unsupported.
 
 - Added guest mutexes, critical sections, SRW locks, condition variables, synchronous one-time initialization, interlocked SLists, and TLS and FLS slots. Ownership is per guest thread (TEB). Calls that would have to block stop the guest with an explicit runtime-limit fault, because there is no guest scheduler yet. An original PE32+ fixture calls every service through its import table, using two guest TEBs. See `docs/interfaces.md`.
 
+- Added services that call guest code and continue when it returns. The import dispatcher can run a sequence of guest callbacks on a checked stack frame, verifying the Win64 nonvolatile registers after each one. The CRT uses this for `qsort`, `qsort_s`, `bsearch`, `bsearch_s`, `_initterm` and `_initterm_e`. Kernel32 uses it for `InitOnceExecuteOnce` and `FlsFree` cleanup callbacks. Original guest comparators and initializers in a PE32+ fixture verify ordering, stop-on-failure and register preservation.
+
 - Fixed the import generator classifying the synchronization API-set entries for `CreateSemaphoreA`, `CreateSemaphoreW` and `ReleaseSemaphore` as stubs, which overrode the runtime handlers. A CLI test now checks that every generator entry marked as a standard service resolves to a registered, non-stub loader handler.
 
 - Added guest module lookup and named symbol resolution for built-in Kernel32 and UCRT services.

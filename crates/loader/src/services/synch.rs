@@ -11,7 +11,7 @@ use super::{
     ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, KERNEL32, ServicesState,
 };
 use crate::cpu::ExitReason;
-use crate::imports::{ImportRegistry, ServiceStatus};
+use crate::imports::{CallbackStart, CallbackStep, CallbackTask, ImportRegistry, ServiceStatus};
 use crate::memory::{GuestMemory, MemoryError};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -88,6 +88,65 @@ impl SrwLock {
 
 struct FlsSlot {
     callback: u64,
+}
+
+struct FlsCleanup {
+    callback: u64,
+    values: std::vec::IntoIter<u64>,
+}
+
+impl CallbackTask for FlsCleanup {
+    fn resume(&mut self, _: u64, _: u64, _: &mut GuestMemory) -> Result<CallbackStep, ExitReason> {
+        Ok(match self.values.next() {
+            Some(value) => CallbackStep::Call {
+                entry: self.callback,
+                args: [value, 0, 0, 0],
+            },
+            None => CallbackStep::Return(1),
+        })
+    }
+}
+
+/// `InitOnceExecuteOnce` after its initializer returns. The initializer wrote
+/// its context to the service's scratch word.
+struct InitOnceExecution {
+    state: Arc<ServicesState>,
+    once: u64,
+    context: u64,
+    scratch: u64,
+}
+
+impl CallbackTask for InitOnceExecution {
+    fn resume(
+        &mut self,
+        result: u64,
+        teb: u64,
+        memory: &mut GuestMemory,
+    ) -> Result<CallbackStep, ExitReason> {
+        let succeeded = result as u32 != 0;
+        let produced = memory.read_u64(self.scratch).map_err(fault)?;
+        let mut synch = self
+            .state
+            .synch
+            .lock()
+            .expect("guest synchronization state");
+        synch.init_once_pending.remove(&self.once);
+        if !succeeded || produced & INIT_ONCE_CTX_RESERVED_MASK != 0 {
+            memory.write_u64(self.once, 0).map_err(fault)?;
+            drop(synch);
+            if succeeded {
+                self.state.set_last_error(teb, ERROR_INVALID_PARAMETER);
+            }
+            return Ok(CallbackStep::Return(0));
+        }
+        memory
+            .write_u64(self.once, produced | INIT_ONCE_COMPLETE)
+            .map_err(fault)?;
+        if self.context != 0 {
+            memory.write_u64(self.context, produced).map_err(fault)?;
+        }
+        Ok(CallbackStep::Return(1))
+    }
 }
 
 #[derive(Default)]
@@ -648,10 +707,47 @@ fn register_init_once(registry: &mut ImportRegistry, state: &Arc<ServicesState>)
         Ok(1)
     });
 
+    let s = Arc::clone(state);
+    registry.register_callback_task(
+        KERNEL32,
+        "InitOnceExecuteOnce",
+        ServiceStatus::Partial,
+        move |args, teb, mem, scratch| {
+            let (once, initializer, parameter, context) = (args.rcx, args.rdx, args.r8, args.r9);
+            let value = check_word(mem, once)?;
+            if value & INIT_ONCE_CTX_RESERVED_MASK == INIT_ONCE_COMPLETE {
+                if context != 0 {
+                    mem.write_u64(context, value & !INIT_ONCE_CTX_RESERVED_MASK)
+                        .map_err(fault)?;
+                }
+                return Ok(CallbackStart::Return(1));
+            }
+            if value != 0 {
+                // Another thread's pending initialization would block.
+                return unsupported();
+            }
+            let mut synch = s.synch.lock().expect("guest synchronization state");
+            mem.write_u64(scratch, 0).map_err(fault)?;
+            mem.write_u64(once, INIT_ONCE_PENDING).map_err(fault)?;
+            synch.init_once_pending.insert(once, teb);
+            Ok(CallbackStart::Call {
+                task: Box::new(InitOnceExecution {
+                    state: Arc::clone(&s),
+                    once,
+                    context,
+                    scratch,
+                }),
+                entry: initializer,
+                args: [once, parameter, scratch, 0],
+            })
+        },
+    );
+
     for symbol in [
         "InitOnceInitialize",
         "InitOnceBeginInitialize",
         "InitOnceComplete",
+        "InitOnceExecuteOnce",
     ] {
         registry.alias(SYNCH_API_2, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
@@ -804,22 +900,41 @@ fn register_tls(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     });
 
     let s = Arc::clone(state);
-    registry.register(KERNEL32, "FlsFree", move |args, cpu, _| {
-        let index = args.rcx as u32;
-        let mut synch = s.synch.lock().expect("guest synchronization state");
-        let Some(slot) = synch.fls_slots.get(&index) else {
-            drop(synch);
-            return s.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
-        };
-        let has_values = synch.fls_values.keys().any(|&(_, i)| i == index);
-        if slot.callback != 0 && has_values {
-            // FlsFree must run the guest callback for each nonnull value.
-            return unsupported();
-        }
-        synch.fls_slots.remove(&index);
-        synch.fls_values.retain(|&(_, slot), _| slot != index);
-        Ok(1)
-    });
+    registry.register_callback_task(
+        KERNEL32,
+        "FlsFree",
+        ServiceStatus::Partial,
+        move |args, teb, _, _| {
+            let index = args.rcx as u32;
+            let mut synch = s.synch.lock().expect("guest synchronization state");
+            let Some(slot) = synch.fls_slots.remove(&index) else {
+                drop(synch);
+                s.fail(teb, ERROR_INVALID_PARAMETER, 0)?;
+                return Ok(CallbackStart::Return(0));
+            };
+            // The slot is released first; its callback then receives each
+            // thread's nonnull value, in TEB order, on the calling thread.
+            let mut values = Vec::new();
+            synch.fls_values.retain(|&(_, slot), value| {
+                if slot == index {
+                    values.push(*value);
+                }
+                slot != index
+            });
+            if slot.callback == 0 || values.is_empty() {
+                return Ok(CallbackStart::Return(1));
+            }
+            let first = values.remove(0);
+            Ok(CallbackStart::Call {
+                task: Box::new(FlsCleanup {
+                    callback: slot.callback,
+                    values: values.into_iter(),
+                }),
+                entry: slot.callback,
+                args: [first, 0, 0, 0],
+            })
+        },
+    );
 
     let s = Arc::clone(state);
     registry.register(KERNEL32, "FlsGetValue", move |args, cpu, _| {

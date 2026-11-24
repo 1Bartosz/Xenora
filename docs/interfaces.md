@@ -290,7 +290,9 @@ one-time initialization that another thread has pending.
   mode, `INIT_ONCE_CHECK_ONLY` and `INIT_ONCE_INIT_FAILED`. The completed
   context is stored in the `INIT_ONCE` word, so later calls read it back.
   Asynchronous mode returns `ERROR_NOT_SUPPORTED`. `InitOnceExecuteOnce`
-  needs a three-argument guest callback and is not registered.
+  calls the guest initializer once with the object, the parameter and a
+  context pointer. A FALSE result, or a context that uses the two reserved
+  low bits, leaves the object uninitialized so a later call can retry.
 - Interlocked SLists use the x64 `SLIST_HEADER` layout. The low 16 bits hold
   the depth, and bits 4 to 63 of the second quadword hold the first entry.
   Headers and entries must be 16-byte aligned. Updates are atomic with
@@ -301,7 +303,39 @@ one-time initialization that another thread has pending.
   per guest thread, new indexes read as zero everywhere, and successful get
   calls clear the last error. Values live in the runtime, not in the TEB
   `TlsSlots` array, so guest code that reads the TEB directly does not see
-  them. `FlsFree` stops the guest if it would have to run a cleanup callback.
+  them. `FlsFree` releases the slot, then calls its cleanup callback on the
+  calling thread for each thread's nonnull value, in TEB order.
+
+### Services that call guest code
+
+A service registered as a callback task can call guest functions before it
+returns. The dispatcher reserves 72 bytes of guest stack below the caller's
+return address. That space holds the callback's return address, its 32-byte
+home area and 16 bytes of scratch owned by the service, and it keeps RSP at 8
+modulo 16 on entry, as after a CALL. Each callback receives up to four
+integer register arguments and must preserve the Win64 nonvolatile
+registers, or the guest stops with `ServiceAbiViolation`. The callback's RAX
+is passed to the task, which either calls guest code again or returns a value
+to the original caller with its RSP restored. Up to 32 callback frames may be
+active. Callback entry points must be executable. The earlier one-shot
+dispatch used by the GDK task queue is unchanged.
+
+The CRT uses this for:
+
+- `qsort` and `qsort_s`, which sort up to 1 MiB in place with a guest
+  comparator. Elements stay in place while the comparator runs and are
+  permuted once at the end. `qsort_s` passes its context as the first
+  comparator argument.
+- `bsearch` and `bsearch_s`, which return a pointer to a matching element
+  or null.
+- `_initterm` and `_initterm_e`, which call each nonnull entry of an
+  initializer table in order. `_initterm_e` stops at the first nonzero
+  result and returns it. Tables hold at most 65,536 entries.
+
+Null comparators, null arrays with a nonzero count, and reversed or
+misaligned tables would reach the CRT invalid-parameter handler. That
+handler is not modeled, so these inputs stop the guest with the
+runtime-limit fault.
 
 API-set aliases follow Microsoft's
 [Win32 APIs for UWP apps](https://learn.microsoft.com/uwp/win32-and-com/win32-apis)

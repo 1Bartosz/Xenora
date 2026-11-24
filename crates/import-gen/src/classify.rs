@@ -425,18 +425,11 @@ impl SymbolDb {
             "CRT invalid param abort",
         );
         self.win32_stub(m, "_purecall", false, "pure virtual call trap");
-        self.win32_stub(
-            m,
-            "_initterm",
-            false,
-            "CRT ctor table init — no-op for guest image",
-        );
-        self.win32_stub(
-            m,
-            "_initterm_e",
-            false,
-            "CRT ctor table init with error — no-op",
-        );
+        for module in [m, "ucrtbase.dll"] {
+            for symbol in ["_initterm", "_initterm_e"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         self.win32_stub(
             m,
             "_initialize_onexit_table",
@@ -582,8 +575,12 @@ impl SymbolDb {
         self.crt_native(m, "div", "div", "ISO C div");
         self.crt_native(m, "ldiv", "ldiv", "ISO C ldiv");
         self.crt_native(m, "lldiv", "lldiv", "ISO C lldiv");
-        self.crt_native(m, "bsearch", "bsearch", "ISO C bsearch");
-        self.crt_native(m, "qsort", "qsort", "ISO C qsort");
+        // The comparators are guest code, so these cannot use host libc.
+        for module in [m, "ucrtbase.dll"] {
+            for symbol in ["qsort", "qsort_s", "bsearch", "bsearch_s"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         self.crt_native(m, "rand", "rand", "ISO C rand");
         self.crt_native(m, "srand", "srand", "ISO C srand");
     }
@@ -829,6 +826,7 @@ impl SymbolDb {
                 "InitOnceInitialize",
                 "InitOnceBeginInitialize",
                 "InitOnceComplete",
+                "InitOnceExecuteOnce",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
@@ -885,12 +883,6 @@ impl SymbolDb {
             m2,
             "WaitForMultipleObjects",
             Classification::StandardService,
-        );
-        self.win32_stub(
-            "api-ms-win-core-synch-l1-2-0.dll",
-            "InitOnceExecuteOnce",
-            false,
-            "needs a guest callback with three arguments and its result",
         );
     }
 

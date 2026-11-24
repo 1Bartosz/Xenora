@@ -10,6 +10,7 @@
 //! - Xbox physical memory: `XMemAlloc`, `XMemFree`
 
 mod crt;
+mod crt_callbacks;
 mod events;
 mod files;
 mod gdk_queue;
@@ -342,6 +343,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_heap(registry);
     crt::register_errno(registry);
     crt::register_conversions(registry);
+    crt_callbacks::register(registry);
     heap::register(registry, &state);
 
     let s = state.clone();

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Mutexes, critical sections, SRW locks, condition variables, one-time
-//! initialization, SLists and thread-local storage, called by translated guest
-//! code through a bound import table.
+//! initialization, SLists, thread-local storage and the CRT services that call
+//! guest functions, called by translated guest code through a bound import
+//! table.
 //!
 //! Two guest threads are modelled by switching the TEB address in GS between
-//! calls. Expected values come from the public Win32 synchprocess and
-//! processthreadsapi documentation and the x64 layouts in winnt.h, not from
-//! the handlers.
+//! calls. Guest comparators and initializers are original x86-64 routines in
+//! the image's text section. Expected values come from the public Win32
+//! synchapi and processthreadsapi documentation, the C standard, the Microsoft
+//! CRT reference and the x64 layouts in winnt.h, not from the handlers.
 
 use std::sync::Arc;
 use xenora_loader::cpu::{CpuState, ExitReason, Register};
@@ -84,7 +86,123 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "FlsGetValue"),
     (FIBERS, "FlsSetValue"),
     (FIBERS, "FlsFree"),
+    (SYNCH_2, "InitOnceExecuteOnce"),
+    (UCRT, "qsort"),
+    (CRT_UTILITY, "qsort_s"),
+    (CRT_UTILITY, "bsearch"),
+    (UCRT, "bsearch_s"),
+    (CRT_RUNTIME, "_initterm"),
+    (UCRT, "_initterm_e"),
 ];
+
+const UCRT: &str = "ucrtbase.dll";
+const CRT_UTILITY: &str = "api-ms-win-crt-utility-l1-1-0.dll";
+const CRT_RUNTIME: &str = "api-ms-win-crt-runtime-l1-1-0.dll";
+
+/// Guest routines, placed at RVA 0x1800 in the text section.
+const ROUTINES_RVA: u32 = 0x1800;
+/// Written by the initializer and cleanup routines.
+const LOG: u64 = SCRATCH + 0xF00;
+const COUNTER: u64 = SCRATCH + 0xF08;
+
+#[derive(Clone, Copy)]
+enum Routine {
+    /// `int compare(const int *a, const int *b)`: `*a - *b`.
+    Compare,
+    /// `int compare_s(int64_t *calls, const int *a, const int *b)`: counts calls.
+    CompareCounting,
+    /// `void init(void)` appending `n` as a decimal digit of LOG.
+    Append(u8),
+    /// `int init(void)` returning 7 without touching LOG.
+    Fail,
+    /// Clobbers nonvolatile RBX.
+    ClobberRbx,
+    /// `BOOL init(INIT_ONCE *, void *parameter, void **context)`: stores the
+    /// parameter as the context, increments COUNTER and returns TRUE.
+    InitOnceStore,
+    /// `BOOL init(...)` returning FALSE.
+    InitOnceFail,
+    /// `void cleanup(void *value)` adding the value to LOG.
+    FlsAdd,
+}
+
+const ROUTINES: [Routine; 10] = [
+    Routine::Compare,
+    Routine::CompareCounting,
+    Routine::Append(1),
+    Routine::Append(2),
+    Routine::Append(3),
+    Routine::Fail,
+    Routine::ClobberRbx,
+    Routine::InitOnceStore,
+    Routine::InitOnceFail,
+    Routine::FlsAdd,
+];
+
+impl Routine {
+    fn code(self) -> Vec<u8> {
+        let mov_rax = |address: u64| {
+            let mut code = vec![0x48, 0xB8]; // mov rax, imm64
+            code.extend_from_slice(&address.to_le_bytes());
+            code
+        };
+        match self {
+            // mov eax, [rcx]; sub eax, [rdx]; ret
+            Self::Compare => vec![0x8B, 0x01, 0x2B, 0x02, 0xC3],
+            // inc qword [rcx]; mov eax, [rdx]; sub eax, [r8]; ret
+            Self::CompareCounting => vec![0x48, 0xFF, 0x01, 0x8B, 0x02, 0x41, 0x2B, 0x00, 0xC3],
+            Self::Append(digit) => {
+                let mut code = mov_rax(LOG);
+                code.extend_from_slice(&[
+                    0x48, 0x8B, 0x08, // mov rcx, [rax]
+                    0x48, 0x6B, 0xC9, 0x0A, // imul rcx, rcx, 10
+                    0x48, 0x83, 0xC1, digit, // add rcx, digit
+                    0x48, 0x89, 0x08, // mov [rax], rcx
+                    0x31, 0xC0, // xor eax, eax
+                    0xC3,
+                ]);
+                code
+            }
+            // mov eax, 7; ret
+            Self::Fail => vec![0xB8, 7, 0, 0, 0, 0xC3],
+            // mov rbx, 1; ret
+            Self::ClobberRbx => vec![0x48, 0xC7, 0xC3, 1, 0, 0, 0, 0xC3],
+            Self::InitOnceStore => {
+                let mut code = mov_rax(COUNTER);
+                code.extend_from_slice(&[
+                    0x48, 0xFF, 0x00, // inc qword [rax]
+                    0x49, 0x89, 0x10, // mov [r8], rdx
+                    0xB8, 1, 0, 0, 0, // mov eax, 1
+                    0xC3,
+                ]);
+                code
+            }
+            // xor eax, eax; ret
+            Self::InitOnceFail => vec![0x31, 0xC0, 0xC3],
+            Self::FlsAdd => {
+                let mut code = mov_rax(LOG);
+                code.extend_from_slice(&[0x48, 0x01, 0x08, 0xC3]); // add [rax], rcx; ret
+                code
+            }
+        }
+    }
+}
+
+/// Guest address of a routine. Each routine occupies a 32-byte slot.
+fn routine(which: usize) -> u64 {
+    BASE + u64::from(ROUTINES_RVA) + 32 * which as u64
+}
+
+const COMPARE: usize = 0;
+const COMPARE_COUNTING: usize = 1;
+const APPEND_1: usize = 2;
+const APPEND_2: usize = 3;
+const APPEND_3: usize = 4;
+const FAIL: usize = 5;
+const CLOBBER_RBX: usize = 6;
+const INIT_ONCE_STORE: usize = 7;
+const INIT_ONCE_FAIL: usize = 8;
+const FLS_ADD: usize = 9;
 
 const WAIT_TIMEOUT: u64 = 258;
 const ERROR_INVALID_HANDLE: u64 = 6;
@@ -163,6 +281,12 @@ fn build() -> Vec<u8> {
         put(&mut pe, at + 2, &displacement.to_le_bytes());
         put(&mut pe, at + 6, &[0xF4]); // hlt
     }
+    for (index, routine) in ROUTINES.iter().enumerate() {
+        let code = routine.code();
+        assert!(code.len() <= 32);
+        let at = 0x200 + (ROUTINES_RVA - CODE_RVA) as usize + 32 * index;
+        put(&mut pe, at, &code);
+    }
     pe
 }
 
@@ -222,7 +346,19 @@ impl Guest {
             let address = STACK_TOP - 8 + 8 + 32 + 8 * slot as u64;
             self.memory.write_u64(address, *value).unwrap();
         }
-        let result = self.engine.run(&mut cpu, &mut self.memory, 8);
+        use Register::{R12, R13, R14, R15, Rbp, Rbx, Rdi, Rsi};
+        let nonvolatile = [Rbx, Rbp, Rdi, Rsi, R12, R13, R14, R15];
+        for (index, register) in nonvolatile.into_iter().enumerate() {
+            cpu.set(register, 0x5EED_0000 + index as u64);
+        }
+        let result = self.engine.run(&mut cpu, &mut self.memory, 100_000);
+        if result.exit_reason == ExitReason::Halt {
+            // The service returned to the instruction after its CALL.
+            assert_eq!(cpu.get(Register::Rsp), STACK_TOP, "{symbol}");
+            for (index, register) in nonvolatile.into_iter().enumerate() {
+                assert_eq!(cpu.get(register), 0x5EED_0000 + index as u64, "{symbol}");
+            }
+        }
         (cpu.get(Register::Rax), result.exit_reason)
     }
 
@@ -733,12 +869,228 @@ fn tls_and_fls_values_are_per_thread_and_cleared_on_reallocation() {
     assert_eq!(guest.call("FlsGetValue", &[plain]), 0);
     assert_eq!(guest.error(), ERROR_INVALID_PARAMETER);
 
-    // FlsFree must run the callback for each nonnull value, which needs guest
-    // callback execution; a slot without values can be released.
-    let callback = BASE + u64::from(CODE_RVA);
-    let with_callback = guest.call("FlsAlloc", &[callback]);
-    assert_eq!(guest.call("FlsSetValue", &[with_callback, 9]), 1);
-    assert_eq!(guest.fails("FlsFree", &[with_callback]), RUNTIME_LIMIT);
-    assert_eq!(guest.call("FlsSetValue", &[with_callback, 0]), 1);
+    // FlsFree runs the slot's callback once for each nonnull value.
+    let with_callback = guest.call("FlsAlloc", &[routine(FLS_ADD)]);
+    assert_eq!(
+        guest.on(THREAD_A).call("FlsSetValue", &[with_callback, 5]),
+        1
+    );
+    assert_eq!(
+        guest.on(THREAD_B).call("FlsSetValue", &[with_callback, 30]),
+        1
+    );
+    let unset = guest.call("FlsAlloc", &[routine(FLS_ADD)]);
+    guest.memory.write_u64(LOG, 0).unwrap();
     assert_eq!(guest.call("FlsFree", &[with_callback]), 1);
+    assert_eq!(guest.u64_at(LOG), 35);
+    assert_eq!(guest.call("FlsGetValue", &[with_callback]), 0);
+    assert_eq!(guest.error(), ERROR_INVALID_PARAMETER);
+    assert_eq!(guest.call("FlsFree", &[unset]), 1);
+    assert_eq!(guest.u64_at(LOG), 35);
+}
+
+fn write_i32s(guest: &mut Guest, address: u64, values: &[i32]) {
+    for (index, value) in values.iter().enumerate() {
+        guest
+            .memory
+            .write_u32(address + 4 * index as u64, *value as u32)
+            .unwrap();
+    }
+}
+
+fn read_i32s(guest: &Guest, address: u64, count: usize) -> Vec<i32> {
+    (0..count)
+        .map(|index| guest.u32_at(address + 4 * index as u64) as i32)
+        .collect()
+}
+
+#[test]
+fn qsort_orders_elements_with_a_guest_comparator() {
+    let mut guest = Guest::new();
+    let array = SCRATCH + 0x100;
+    let input = [5, -3, 9, 0, 5, 2, -8, 7, 1, 4, -1];
+    write_i32s(&mut guest, array, &input);
+    let mut expected = input;
+    expected.sort();
+    let count = input.len() as u64;
+    assert_eq!(guest.call("qsort", &[array, count, 4, routine(COMPARE)]), 0);
+    assert_eq!(read_i32s(&guest, array, input.len()), expected);
+
+    // Eight-byte records keyed by their first int: the records move intact.
+    let records = SCRATCH + 0x200;
+    let keyed = [(3, 30), (1, 10), (2, 20), (0, 0)];
+    for (index, (key, tag)) in keyed.iter().enumerate() {
+        write_i32s(&mut guest, records + 8 * index as u64, &[*key, *tag]);
+    }
+    assert_eq!(guest.call("qsort", &[records, 4, 8, routine(COMPARE)]), 0);
+    assert_eq!(read_i32s(&guest, records, 8), [0, 0, 1, 10, 2, 20, 3, 30]);
+
+    // qsort_s passes its context as the comparator's first argument.
+    write_i32s(&mut guest, array, &input);
+    guest.memory.write_u64(COUNTER, 0).unwrap();
+    assert_eq!(
+        guest.call(
+            "qsort_s",
+            &[array, count, 4, routine(COMPARE_COUNTING), COUNTER]
+        ),
+        0
+    );
+    assert_eq!(read_i32s(&guest, array, input.len()), expected);
+    // Any comparison sort of n distinct-enough keys needs at least n - 1 calls.
+    let calls = guest.u64_at(COUNTER);
+    assert!(calls >= count - 1 && calls <= count * count, "{calls}");
+
+    // Fewer than two elements need no comparison.
+    guest.memory.write_u64(COUNTER, 0).unwrap();
+    assert_eq!(
+        guest.call(
+            "qsort_s",
+            &[array, 1, 4, routine(COMPARE_COUNTING), COUNTER]
+        ),
+        0
+    );
+    assert_eq!(guest.u64_at(COUNTER), 0);
+    // A read-only array cannot be sorted in place.
+    let text = BASE + u64::from(CODE_RVA);
+    assert!(matches!(
+        guest.fails("qsort", &[text, 4, 4, routine(COMPARE)]),
+        ExitReason::MemoryFault(_)
+    ));
+    assert_eq!(guest.fails("qsort", &[array, 4, 4, 0]), RUNTIME_LIMIT);
+}
+
+#[test]
+fn bsearch_returns_the_matching_element_or_null() {
+    let mut guest = Guest::new();
+    let array = SCRATCH + 0x100;
+    let key = SCRATCH + 0x80;
+    let sorted = [-8, -3, 0, 2, 5, 9, 14];
+    write_i32s(&mut guest, array, &sorted);
+    let count = sorted.len() as u64;
+    for (index, value) in sorted.iter().enumerate() {
+        write_i32s(&mut guest, key, &[*value]);
+        assert_eq!(
+            guest.call("bsearch", &[key, array, count, 4, routine(COMPARE)]),
+            array + 4 * index as u64
+        );
+    }
+    for missing in [-9, 1, 15] {
+        write_i32s(&mut guest, key, &[missing]);
+        assert_eq!(
+            guest.call("bsearch", &[key, array, count, 4, routine(COMPARE)]),
+            0
+        );
+    }
+    assert_eq!(
+        guest.call("bsearch", &[key, array, 0, 4, routine(COMPARE)]),
+        0
+    );
+
+    write_i32s(&mut guest, key, &[14]);
+    guest.memory.write_u64(COUNTER, 0).unwrap();
+    assert_eq!(
+        guest.call(
+            "bsearch_s",
+            &[key, array, count, 4, routine(COMPARE_COUNTING), COUNTER]
+        ),
+        array + 24
+    );
+    // A binary search of seven elements needs at most three comparisons.
+    let calls = guest.u64_at(COUNTER);
+    assert!((1..=3).contains(&calls), "{calls}");
+}
+
+#[test]
+fn initializer_tables_run_in_order_and_stop_on_failure() {
+    let mut guest = Guest::new();
+    let table = SCRATCH + 0x300;
+    let write_table = |guest: &mut Guest, entries: &[u64]| {
+        for (index, entry) in entries.iter().enumerate() {
+            guest
+                .memory
+                .write_u64(table + 8 * index as u64, *entry)
+                .unwrap();
+        }
+        table + 8 * entries.len() as u64
+    };
+
+    // Null entries are skipped.
+    let end = write_table(
+        &mut guest,
+        &[routine(APPEND_1), 0, routine(APPEND_2), routine(APPEND_3)],
+    );
+    guest.memory.write_u64(LOG, 0).unwrap();
+    assert_eq!(guest.call("_initterm", &[table, end]), 0);
+    assert_eq!(guest.u64_at(LOG), 123);
+    assert_eq!(guest.call("_initterm", &[table, table]), 0);
+    assert_eq!(guest.u64_at(LOG), 123);
+
+    // _initterm_e returns the first nonzero result and runs nothing after it.
+    let end = write_table(
+        &mut guest,
+        &[routine(APPEND_2), routine(FAIL), routine(APPEND_3)],
+    );
+    guest.memory.write_u64(LOG, 0).unwrap();
+    assert_eq!(guest.call("_initterm_e", &[table, end]), 7);
+    assert_eq!(guest.u64_at(LOG), 2);
+    let end = write_table(&mut guest, &[routine(APPEND_3), routine(APPEND_1)]);
+    guest.memory.write_u64(LOG, 0).unwrap();
+    assert_eq!(guest.call("_initterm_e", &[table, end]), 0);
+    assert_eq!(guest.u64_at(LOG), 31);
+
+    // An initializer that does not preserve RBX breaks the Win64 contract.
+    let end = write_table(&mut guest, &[routine(CLOBBER_RBX)]);
+    assert_eq!(
+        guest.fails("_initterm", &[table, end]),
+        ExitReason::ServiceAbiViolation
+    );
+    // Reversed and misaligned tables are rejected.
+    assert_eq!(guest.fails("_initterm", &[end, table]), RUNTIME_LIMIT);
+    assert_eq!(guest.fails("_initterm", &[table, table + 4]), RUNTIME_LIMIT);
+}
+
+#[test]
+fn init_once_execute_once_runs_the_initializer_exactly_once() {
+    let mut guest = Guest::new();
+    let once = SCRATCH;
+    let context = SCRATCH + 0x10;
+    guest.memory.write_u64(COUNTER, 0).unwrap();
+    let execute = |guest: &mut Guest, once: u64, initializer: usize, parameter: u64| {
+        guest.call(
+            "InitOnceExecuteOnce",
+            &[once, routine(initializer), parameter, context],
+        )
+    };
+    assert_eq!(execute(&mut guest, once, INIT_ONCE_STORE, 0x5000), 1);
+    assert_eq!(guest.u64_at(context), 0x5000);
+    assert_eq!(guest.u64_at(COUNTER), 1);
+    guest.memory.write_u64(context, 0).unwrap();
+    assert_eq!(
+        execute(guest.on(THREAD_B), once, INIT_ONCE_STORE, 0x6000),
+        1
+    );
+    assert_eq!(guest.u64_at(context), 0x5000);
+    assert_eq!(guest.u64_at(COUNTER), 1);
+
+    // The completed context is visible through InitOnceBeginInitialize.
+    let pending = SCRATCH + 0x18;
+    assert_eq!(
+        guest.call("InitOnceBeginInitialize", &[once, 1, pending, context]),
+        1
+    );
+    assert_eq!(guest.u32_at(pending), 0);
+
+    // A failed initializer leaves the object uninitialized for a retry.
+    let retry = SCRATCH + 0x40;
+    assert_eq!(execute(&mut guest, retry, INIT_ONCE_FAIL, 0), 0);
+    assert_eq!(guest.u64_at(retry), 0);
+    assert_eq!(execute(&mut guest, retry, INIT_ONCE_STORE, 0x7000), 1);
+    assert_eq!(guest.u64_at(context), 0x7000);
+    assert_eq!(guest.u64_at(COUNTER), 2);
+
+    // A context using the reserved low bits cannot be stored.
+    let reserved = SCRATCH + 0x60;
+    assert_eq!(execute(&mut guest, reserved, INIT_ONCE_STORE, 0x7001), 0);
+    assert_eq!(guest.error(), ERROR_INVALID_PARAMETER);
+    assert_eq!(guest.u64_at(reserved), 0);
 }

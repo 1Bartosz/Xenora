@@ -12,7 +12,7 @@ use crate::memory::{GuestMemory, MemoryError};
 use crate::pe::ParsedPe;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Base virtual address range reserved for synthetic guest import dispatch trampolines.
 pub const IMPORT_TRAMPOLINE_BASE_VA: u64 = 0x0000_0007_F000_0000;
@@ -208,10 +208,58 @@ type CallbackDispatch = Box<
     dyn Fn(&Win64Args, &GuestMemory) -> Result<Option<GuestCallback>, ExitReason> + Send + Sync,
 >;
 
+/// What a callback-driven service does next.
+pub(crate) enum CallbackStep {
+    /// Call guest code at `entry` with the four Win64 integer register arguments.
+    Call { entry: u64, args: [u64; 4] },
+    /// Return `value` in RAX to the service's caller.
+    Return(u64),
+}
+
+/// A service that calls guest code one or more times before it returns.
+pub(crate) trait CallbackTask: Send {
+    /// Continue after the previous guest callback returned `result` in RAX.
+    fn resume(
+        &mut self,
+        result: u64,
+        teb: u64,
+        memory: &mut GuestMemory,
+    ) -> Result<CallbackStep, ExitReason>;
+}
+
+/// How a callback-driven service begins: return at once, or call guest code
+/// and continue in a task.
+pub(crate) enum CallbackStart {
+    Return(u64),
+    Call {
+        task: Box<dyn CallbackTask>,
+        entry: u64,
+        args: [u64; 4],
+    },
+}
+
+/// Starts a callback service. The last argument is the address of 16 bytes of
+/// guest stack the service owns until it returns.
+type TaskStart = Box<
+    dyn Fn(&Win64Args, u64, &mut GuestMemory, u64) -> Result<CallbackStart, ExitReason>
+        + Send
+        + Sync,
+>;
+
+/// Stack the dispatcher reserves below the caller's return address for a
+/// callback frame: the callback's return address, its 32-byte home area,
+/// 16 bytes of service scratch and alignment padding. 72 keeps the callback
+/// entry RSP at 8 modulo 16, as after a CALL.
+const TASK_FRAME: u64 = 72;
+const TASK_SCRATCH: u64 = 40;
+
 #[derive(Clone)]
 pub(crate) struct CallbackFrame {
     resume: u64,
     preserved: Nonvolatile,
+    task: Option<Arc<Mutex<Box<dyn CallbackTask>>>>,
+    /// RSP to restore when a task returns to its caller.
+    after: u64,
 }
 
 /// Registry for resolving and binding import symbols to guest trampoline VAs.
@@ -220,6 +268,7 @@ pub struct ImportRegistry {
     services: HashMap<(String, ImportName), usize>,
     handlers: Vec<ServiceDescriptor>,
     callback_dispatchers: HashMap<usize, CallbackDispatch>,
+    callback_tasks: HashMap<usize, TaskStart>,
     dynamic_trampolines: DynamicTrampolines,
     trampoline_to_service: HashMap<u64, usize>, // Trampoline VA -> service_index
 }
@@ -236,6 +285,7 @@ impl ImportRegistry {
             services: HashMap::new(),
             handlers: Vec::new(),
             callback_dispatchers: HashMap::new(),
+            callback_tasks: HashMap::new(),
             trampoline_to_service: HashMap::new(),
             dynamic_trampolines: DynamicTrampolines::default(),
         }
@@ -527,6 +577,61 @@ impl ImportRegistry {
         self.callback_dispatchers.insert(index, Box::new(handler));
     }
 
+    /// Register a service that may call guest code before returning. `start`
+    /// receives the arguments, the caller's TEB, guest memory and the address
+    /// of the service's 16-byte stack scratch area.
+    pub(crate) fn register_callback_task(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        status: ServiceStatus,
+        start: impl Fn(&Win64Args, u64, &mut GuestMemory, u64) -> Result<CallbackStart, ExitReason>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        self.register_with_status(module, symbol, status, |_, _, _| {
+            Err(ExitReason::IllegalInstruction(0xff))
+        });
+        let index = self
+            .service_index(module, symbol)
+            .expect("registered callback task");
+        self.callback_tasks.insert(index, Box::new(start));
+    }
+
+    /// Enter a guest callback from the task frame whose return slot is `slot`.
+    fn enter_task_callback(
+        cpu: &mut CpuState,
+        memory: &mut GuestMemory,
+        frame: CallbackFrame,
+        slot: u64,
+        entry: u64,
+        args: [u64; 4],
+    ) -> Result<(), ExitReason> {
+        let key = (cpu.gs_base, slot + 8);
+        if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
+            || memory.callback_frames.contains_key(&key)
+        {
+            return Err(ExitReason::ServiceAbiViolation);
+        }
+        memory
+            .fetch_instruction_byte(entry)
+            .map_err(ExitReason::MemoryFault)?;
+        memory
+            .write_u64(slot, CALLBACK_RETURN)
+            .map_err(ExitReason::MemoryFault)?;
+        memory.callback_frames.insert(key, frame);
+        for (register, value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(register, value);
+        }
+        cpu.set(Register::Rsp, slot);
+        cpu.rip = entry;
+        Ok(())
+    }
+
     /// Check if target RIP matches a synthetic service trampoline.
     pub fn is_service_trampoline(&self, rip: u64) -> bool {
         rip == CALLBACK_RETURN
@@ -550,9 +655,28 @@ impl ImportRegistry {
             if Nonvolatile::of(cpu) != frame.preserved {
                 return Err(ExitReason::ServiceAbiViolation);
             }
-            cpu.set(Register::Rax, 1);
-            cpu.rip = frame.resume;
-            return Ok(());
+            let Some(task) = frame.task.clone() else {
+                cpu.set(Register::Rax, 1);
+                cpu.rip = frame.resume;
+                return Ok(());
+            };
+            let result = cpu.get(Register::Rax);
+            let step =
+                task.lock()
+                    .expect("guest callback task")
+                    .resume(result, cpu.gs_base, memory)?;
+            return match step {
+                CallbackStep::Call { entry, args } => {
+                    let slot = key.1 - 8;
+                    Self::enter_task_callback(cpu, memory, frame, slot, entry, args)
+                }
+                CallbackStep::Return(value) => {
+                    cpu.set(Register::Rax, value);
+                    cpu.set(Register::Rsp, frame.after);
+                    cpu.rip = frame.resume;
+                    Ok(())
+                }
+            };
         }
         let service_idx = self
             .trampoline_to_service
@@ -572,6 +696,33 @@ impl ImportRegistry {
 
         let args = Win64Args::new(cpu);
         let preserved = Nonvolatile::of(cpu);
+        if let Some(start) = self.callback_tasks.get(&service_idx) {
+            let slot = after
+                .checked_sub(TASK_FRAME)
+                .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
+            memory
+                .check_write(slot, (TASK_FRAME - 8) as usize)
+                .map_err(ExitReason::MemoryFault)?;
+            match start(&args, cpu.gs_base, memory, slot + TASK_SCRATCH)? {
+                CallbackStart::Return(value) => {
+                    cpu.set(Register::Rax, value);
+                    cpu.set(Register::Rsp, after);
+                    cpu.rip = ret_addr;
+                }
+                CallbackStart::Call { task, entry, args } => {
+                    let mut preserved = preserved;
+                    preserved.gpr[4] = slot + 8;
+                    let frame = CallbackFrame {
+                        resume: ret_addr,
+                        preserved,
+                        task: Some(Arc::new(Mutex::new(task))),
+                        after,
+                    };
+                    Self::enter_task_callback(cpu, memory, frame, slot, entry, args)?;
+                }
+            }
+            return Ok(());
+        }
         if let Some(dispatcher) = self.callback_dispatchers.get(&service_idx) {
             let key = (cpu.gs_base, after);
             if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
@@ -593,6 +744,8 @@ impl ImportRegistry {
                     CallbackFrame {
                         resume: ret_addr,
                         preserved,
+                        task: None,
+                        after,
                     },
                 );
                 cpu.set(Register::Rcx, callback.context);
