@@ -178,14 +178,16 @@ mod tests {
     #[test]
     fn guest_module_references_control_dynamic_export_lifetime() {
         let mut registry = ImportRegistry::new();
+        registry.register(UCRT, "SyntheticOrdinalExport", |_, _, _| Ok(42));
         registry
-            .try_register(
-                UCRT,
-                ImportName::Ordinal(42),
-                ServiceStatus::Implemented,
-                Box::new(|_, _, _| Ok(42)),
-            )
+            .try_ordinal_alias(UCRT, "SyntheticOrdinalExport", 42)
             .unwrap();
+        registry.register(UCRT, "OtherSyntheticExport", |_, _, _| Ok(43));
+        assert!(
+            registry
+                .try_ordinal_alias(UCRT, "OtherSyntheticExport", 42)
+                .is_err()
+        );
         register_standard_services(
             &mut registry,
             Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),

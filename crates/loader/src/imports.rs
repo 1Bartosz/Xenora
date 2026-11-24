@@ -406,24 +406,43 @@ impl ImportRegistry {
         target: &str,
         symbol: &str,
     ) -> Result<(), RegistryError> {
-        let name = ImportName::Name(symbol.to_owned());
-        Self::check_key(module, &name)?;
-        let index = self
-            .index(target, &name)
-            .ok_or_else(|| RegistryError::UnknownTarget {
-                module: target.to_owned(),
-                symbol: symbol.to_owned(),
-            })?;
+        self.alias_key(module, target, symbol, ImportName::Name(symbol.to_owned()))
+    }
+
+    /// Publish a documented ordinal for a named export in its canonical module.
+    pub fn try_ordinal_alias(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        ordinal: u16,
+    ) -> Result<(), RegistryError> {
+        self.alias_key(module, module, symbol, ImportName::Ordinal(ordinal))
+    }
+
+    fn alias_key(
+        &mut self,
+        module: &str,
+        target: &str,
+        symbol: &str,
+        key: ImportName,
+    ) -> Result<(), RegistryError> {
+        Self::check_key(module, &key)?;
+        let index =
+            self.service_index(target, symbol)
+                .ok_or_else(|| RegistryError::UnknownTarget {
+                    module: target.to_owned(),
+                    symbol: symbol.to_owned(),
+                })?;
         let previous = *self
             .services
-            .entry((module.to_ascii_lowercase(), name))
+            .entry((module.to_ascii_lowercase(), key.clone()))
             .or_insert(index);
         if previous == index {
             Ok(())
         } else {
             Err(RegistryError::Duplicate {
                 module: module.to_owned(),
-                symbol: symbol.to_owned(),
+                symbol: key.to_string(),
             })
         }
     }
