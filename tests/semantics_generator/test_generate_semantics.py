@@ -144,9 +144,31 @@ def snapshot():
             "instruction": name, "encoding": "ENC_VOP2", "opcode": opcode,
             "operands": vector(data_format),
         }
+    vopc = {
+        "name": "ENC_VOPC",
+        "bits": 32,
+        "fields": [
+            ["SRC0", [[0, 9]]], ["VSRC1", [[9, 8]]], ["OP", [[17, 8]]], ["ENCODING", [[25, 7]]],
+        ],
+        "identifier_mask": 0xFFFE0000,
+        "identifiers": [0x7C000000 | (op << 17) for op in (129, 197)],
+    }
+    for name, opcode, data_format in (("V_CMP_LT_I32", 129, I32), ("V_CMP_NE_U32", 197, U32)):
+        variants[(name, "ENC_VOPC")] = {
+            "instruction": name, "encoding": "ENC_VOPC", "opcode": opcode,
+            # Values copied from the AMD XML snapshot: an implicit 64-bit VCC output.
+            "operands": [
+                ["", "FMT_NUM_M64", "OPR_VCC", 64, False, True, False, False],
+                ["SRC0", data_format, "OPR_SRC", 32, True, False, False, True],
+                ["VSRC1", data_format, "OPR_VGPR", 32, True, False, False, True],
+            ],
+        }
     return {
         "source": {"sha256": SHA},
-        "encodings": {"ENC_SOP2": encoding, "ENC_SOPC": sopc, "ENC_SOP1": sop1, "ENC_VOP2": vop2},
+        "encodings": {
+            "ENC_SOP2": encoding, "ENC_SOPC": sopc, "ENC_SOP1": sop1, "ENC_VOP2": vop2,
+            "ENC_VOPC": vopc,
+        },
         "variants": variants,
     }
 
@@ -213,6 +235,27 @@ def vectors():
         # The same variant name as a scalar form: variants are per enum.
         vector("V_MIN_I32", 17, "AddU32", "min", "signed"),
         vector("V_SUBREV_NC_U32", 39, "SubrevNcU32", "sub", "unsigned", source_order="reversed"),
+    ]
+    return reg
+
+
+def vector_compares():
+    reg = registry()
+    rule = copy.deepcopy(gen.OPERAND_RULES["vopc_vcc"]["shape"])
+    rule["unsupported"] = sorted(gen.OPERAND_RULES["vopc_vcc"]["unsupported"])
+    reg["operand_rules"]["vopc_vcc"] = rule
+
+    def compare(name, opcode, variant, relation, signedness):
+        form = _form(name, opcode, variant, "compare", signedness, "unchanged")
+        form.update(
+            family="VOPC", relation=relation, operands="vopc_vcc", vcc="lane_mask", wave="wave32"
+        )
+        return form
+
+    reg["form"] += [
+        # The same variant name as a SOPC form: variants are per enum.
+        compare("V_CMP_LT_I32", 129, "CmpLtI32", "lt", "signed"),
+        compare("V_CMP_NE_U32", 197, "CmpNeU32", "lg", "unsigned"),
     ]
     return reg
 
@@ -738,7 +781,65 @@ class Validate(unittest.TestCase):
     def test_rejects_an_unenforced_wave_restriction(self):
         reg = registry()
         reg["form"][0]["wave"] = "wave32"
-        self.rejects(reg, "S_ADD_U32: wave wave32 has no decoder enforcement yet")
+        self.rejects(reg, "S_ADD_U32: wave wave32 is not enforced for this rule (requires any)")
+
+    # ---- VOPC lane-mask compares ----
+
+    def test_accepts_vector_compares(self):
+        self.assertEqual(self.errors(vector_compares()), [])
+
+    def test_rejects_a_vector_compare_declared_for_any_wave(self):
+        reg = vector_compares()
+        form(reg, "V_CMP_LT_I32")["wave"] = "any"
+        self.rejects(reg, "V_CMP_LT_I32: wave any is not enforced for this rule (requires wave32)")
+
+    def test_rejects_a_vector_compare_without_its_vcc_write(self):
+        reg = vector_compares()
+        form(reg, "V_CMP_LT_I32")["vcc"] = "unchanged"
+        self.rejects(reg, "V_CMP_LT_I32: vcc unchanged contradicts rule vopc_vcc (requires lane_mask)")
+        # The XML VCC output is then undeclared as well.
+        self.rejects(reg, "V_CMP_LT_I32: XML implicit operands ['OPR_VCC'] are not declared")
+
+    def test_rejects_a_lane_mask_outside_vopc(self):
+        reg = registry()
+        reg["form"][0]["vcc"] = "lane_mask"
+        self.rejects(reg, "S_ADD_U32: vcc lane_mask contradicts rule sop2_sgpr (requires unchanged)")
+        self.rejects(reg, "S_ADD_U32: vcc lane_mask but the XML has no implicit VCC output")
+
+    def test_rejects_an_exec_write(self):
+        reg = vector_compares()
+        form(reg, "V_CMP_LT_I32")["exec"] = "lane_mask"
+        self.rejects(reg, "V_CMP_LT_I32: exec lane_mask has no contract (requires unchanged)")
+
+    def test_rejects_a_vector_compare_that_writes_scc(self):
+        reg = vector_compares()
+        form(reg, "V_CMP_LT_I32")["scc"] = "relation"
+        self.rejects(reg, "V_CMP_LT_I32: scc relation contradicts compare (requires unchanged)")
+
+    def test_rejects_a_vector_compare_without_a_relation(self):
+        reg = vector_compares()
+        del form(reg, "V_CMP_NE_U32")["relation"]
+        self.rejects(reg, "V_CMP_NE_U32: unknown or missing relation None")
+
+    def test_rejects_a_vector_compare_under_a_scalar_rule(self):
+        reg = vector_compares()
+        form(reg, "V_CMP_LT_I32")["operands"] = "sopc_scalar"
+        self.rejects(reg, "V_CMP_LT_I32: operand rule sopc_scalar is for SOPC")
+
+    def test_rejects_a_vector_compare_signedness_against_the_xml(self):
+        reg = vector_compares()
+        form(reg, "V_CMP_LT_I32")["signedness"] = "unsigned"
+        self.rejects(reg, "V_CMP_LT_I32: signedness unsigned contradicts XML format FMT_NUM_I32")
+
+    def test_renders_vector_compare_dispatch(self):
+        text = gen.render(vector_compares(), snapshot())
+        self.assertIn("pub enum VectorCompareOp {", text)
+        self.assertIn("if word & 0xfe00_0000 != 0x7c00_0000 {", text)
+        self.assertIn('Self::CmpNeU32 => "v_cmp_ne_u32_e32",', text)
+        self.assertIn("Self::CmpLtI32 => true,", text.split("fn signed", 1)[1])
+        self.assertIn("Self::CmpNeU32 => primitive::ne_b32(src0, src1),", text)
+        self.assertIn("vcc: MaskEffect::LaneMask,", text)
+        self.assertIn("wave: Wave::Wave32,", text)
 
     def test_rejects_a_reserved_variant(self):
         reg = registry()

@@ -55,6 +55,9 @@ The 32-bit VOPC encoding (bits 31:25 = 0b0111110), no SDWA or DPP:
 | v_cmp_ge_i32 / v_cmp_ge_u32 | S0 >= S1 |
 
 `_i32` compares the 32-bit two's-complement values, `_u32` the unsigned values.
+The forms are declared in the semantic registry
+(`crates/isa/semantics/rdna2.toml`, operand rule `vopc_vcc`); the decoder
+dispatches them from the generated `VectorCompareOp`.
 Operand order matters (S0 is SRC0): lt with swapped operands is gt.
 
 SRC0 selectors, exhaustively: 0-105 (normal SGPR), 106 (VCC_LO, see 5),

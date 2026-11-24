@@ -195,7 +195,7 @@ impl Op {
 
 fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
     use xenora_decoder::CompareRelation;
-    let symbol = match op.relation {
+    let symbol = match op.relation() {
         CompareRelation::Less => "<",
         CompareRelation::Equal => "==",
         CompareRelation::LessOrEqual => "<=",
@@ -203,7 +203,7 @@ fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
         CompareRelation::NotEqual => "!=",
         CompareRelation::GreaterOrEqual => ">=",
     };
-    if op.signed {
+    if op.signed() {
         format!("as_type<int>({left}) {symbol} as_type<int>({right})")
     } else {
         format!("{left} {symbol} {right}")
@@ -485,7 +485,7 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
                 let _ = writeln!(
                     ir,
                     "{offset:04x}: {dest} = wave.mask {} {src0}, {src1} exec=0x{exec:08x}",
-                    op.mnemonic()
+                    op.assembly_name()
                 );
                 emit_lane_mask(&mut msl, &operations, &uniform, index, op, src0, src1, exec);
                 continue;

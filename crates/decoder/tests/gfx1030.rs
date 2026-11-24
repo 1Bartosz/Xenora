@@ -454,7 +454,7 @@ fn reference_op(instruction: Instruction) -> Op {
 
         Instruction::VectorCompare { op, src0, src1 } => Op::Compare(
             Comparison {
-                offset: match op.relation {
+                offset: match op.relation() {
                     CompareRelation::Less => 1,
                     CompareRelation::Equal => 2,
                     CompareRelation::LessOrEqual => 3,
@@ -462,7 +462,7 @@ fn reference_op(instruction: Instruction) -> Op {
                     CompareRelation::NotEqual => 5,
                     CompareRelation::GreaterOrEqual => 6,
                 },
-                signed: op.signed,
+                signed: op.signed(),
             },
             match src0 {
                 VectorSource::Register(reg) => CompareSource::Vector(reg),
