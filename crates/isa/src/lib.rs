@@ -18,7 +18,9 @@ pub use rdna2::{
     V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32, V_LSHRREV_B32,
     V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
-pub use semantics_gen::{ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp};
+pub use semantics_gen::{
+    ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp,
+};
 
 /// SGPR index of `vcc_lo`, the Wave32 vector condition code.
 pub const VCC_LO: u8 = 106;
@@ -93,7 +95,8 @@ impl fmt::Display for ScalarSource {
     }
 }
 
-/// Relation tested by a VOPC integer compare; S0 is SRC0 and S1 is VSRC1.
+/// Relation tested by a SOPC or VOPC integer compare; S0 (SSRC0 or SRC0) is on
+/// the left.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompareRelation {
     /// S0 < S1 (opcode offset 1).
@@ -108,64 +111,10 @@ pub enum CompareRelation {
     NotEqual,
     /// S0 >= S1 (offset 6).
     GreaterOrEqual,
-}
-
-/// A 32-bit VOPC integer compare: one relation over signed or unsigned operands.
-///
-/// The per-lane test follows the RDNA 2 ISA guide, section 12.9 (Table 59) and
-/// the pinned XML descriptions. VCC and EXEC rules are in
-/// docs/shaders/vector-compare.md.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct VectorCompareOp {
-    /// The tested relation.
-    pub relation: CompareRelation,
-    /// `_i32` (two's complement) when true, `_u32` when false.
-    pub signed: bool,
-}
-
-impl VectorCompareOp {
-    /// Lower-case mnemonic of the 32-bit VOPC encoding.
-    pub fn mnemonic(self) -> &'static str {
-        const SIGNED: [&str; 6] = [
-            "v_cmp_lt_i32_e32",
-            "v_cmp_eq_i32_e32",
-            "v_cmp_le_i32_e32",
-            "v_cmp_gt_i32_e32",
-            "v_cmp_ne_i32_e32",
-            "v_cmp_ge_i32_e32",
-        ];
-        const UNSIGNED: [&str; 6] = [
-            "v_cmp_lt_u32_e32",
-            "v_cmp_eq_u32_e32",
-            "v_cmp_le_u32_e32",
-            "v_cmp_gt_u32_e32",
-            "v_cmp_ne_u32_e32",
-            "v_cmp_ge_u32_e32",
-        ];
-        let index = self.relation as usize;
-        if self.signed {
-            SIGNED[index]
-        } else {
-            UNSIGNED[index]
-        }
-    }
-
-    /// The per-lane test result for operand bits S0 and S1.
-    pub fn test(self, src0: u32, src1: u32) -> bool {
-        let ordering = if self.signed {
-            (src0 as i32).cmp(&(src1 as i32))
-        } else {
-            src0.cmp(&src1)
-        };
-        match self.relation {
-            CompareRelation::Less => ordering.is_lt(),
-            CompareRelation::Equal => ordering.is_eq(),
-            CompareRelation::LessOrEqual => ordering.is_le(),
-            CompareRelation::Greater => ordering.is_gt(),
-            CompareRelation::NotEqual => ordering.is_ne(),
-            CompareRelation::GreaterOrEqual => ordering.is_ge(),
-        }
-    }
+    /// Never holds (VOPC F, offset 0).
+    False,
+    /// Always holds (VOPC T, offset 7).
+    True,
 }
 
 /// Output targeted by a supported uncompressed four-component export.
@@ -205,8 +154,14 @@ pub enum Instruction {
     WaitStore,
     /// VOP1 unmodified 32-bit vector move.
     MoveB32 { dst: u8, src: VectorSource },
-    /// VOP3 unsigned 32-bit addition with no carry or input/output modifiers.
-    AddNoCarryU32 { dst: u8, src0: u8, src1: u8 },
+    /// VOP3 encoding of a registry VOP2 integer operation (operand rule
+    /// `vop3_vgpr2`): two VGPR sources and no input or output modifiers.
+    VectorAluVop3 {
+        op: VectorAluVop3Op,
+        dst: u8,
+        src0: u8,
+        src1: u8,
+    },
     /// SOP1 32-bit move to a normal SGPR or an EXEC/VCC half.
     ScalarMoveB32 { dst: u8, src: ScalarSource },
     /// SOP1 32-bit unary integer operation writing a normal SGPR (s0-s105) and,
@@ -254,18 +209,6 @@ pub enum Instruction {
     BranchVccZero { target: usize },
     /// SOPP unconditional jump to a stream byte offset.
     Branch { target: usize },
-    /// VOP2 logical left shift with the count in src0.
-    VectorLshlrevB32 { dst: u8, src0: u8, src1: u8 },
-    /// VOP2 logical right shift with the count in src0.
-    VectorLshrrevB32 { dst: u8, src0: u8, src1: u8 },
-    /// VOP2 arithmetic right shift with the count in src0.
-    VectorAshrrevI32 { dst: u8, src0: u8, src1: u8 },
-    /// VOP2 bitwise AND.
-    VectorAndB32 { dst: u8, src0: u8, src1: u8 },
-    /// VOP2 bitwise OR.
-    VectorOrB32 { dst: u8, src0: u8, src1: u8 },
-    /// VOP2 bitwise XOR.
-    VectorXorB32 { dst: u8, src0: u8, src1: u8 },
     /// VOP2 single-precision addition. Execution requires an explicit FP mode.
     VectorAddF32 { dst: u8, src0: u8, src1: u8 },
     /// VOP2 single-precision multiplication. Execution requires an explicit FP mode.
@@ -322,23 +265,17 @@ impl Instruction {
             Self::WaitLoad => "s_waitcnt",
             Self::WaitStore => "s_waitcnt_vscnt",
             Self::MoveB32 { .. } => "v_mov_b32_e32",
-            Self::AddNoCarryU32 { .. } => "v_add_nc_u32_e64",
+            Self::VectorAluVop3 { op, .. } => op.assembly_name(),
             Self::ScalarMoveB32 { .. } => "s_mov_b32",
             Self::ScalarUnary { op, .. } => op.mnemonic(),
             Self::ScalarAlu { op, .. } => op.mnemonic(),
             Self::ScalarCompare { op, .. } => op.mnemonic(),
-            Self::VectorCompare { op, .. } => op.mnemonic(),
+            Self::VectorCompare { op, .. } => op.assembly_name(),
             Self::VectorAlu { op, .. } => op.assembly_name(),
             Self::BranchSccZero { .. } => "s_cbranch_scc0",
             Self::BranchExecZero { .. } => "s_cbranch_execz",
             Self::BranchVccZero { .. } => "s_cbranch_vccz",
             Self::Branch { .. } => "s_branch",
-            Self::VectorLshlrevB32 { .. } => "v_lshlrev_b32_e32",
-            Self::VectorLshrrevB32 { .. } => "v_lshrrev_b32_e32",
-            Self::VectorAshrrevI32 { .. } => "v_ashrrev_i32_e32",
-            Self::VectorAndB32 { .. } => "v_and_b32_e32",
-            Self::VectorOrB32 { .. } => "v_or_b32_e32",
-            Self::VectorXorB32 { .. } => "v_xor_b32_e32",
             Self::VectorAddF32 { .. } => "v_add_f32_e32",
             Self::VectorMulF32 { .. } => "v_mul_f32_e32",
             Self::Export { .. } => "exp",
@@ -379,13 +316,9 @@ impl fmt::Display for Instruction {
             Self::WaitLoad => formatter.write_str(" vmcnt(0)"),
             Self::WaitStore => formatter.write_str(" null, 0"),
             Self::MoveB32 { dst, src } => write!(formatter, " v{dst}, {src}"),
-            Self::AddNoCarryU32 { dst, src0, src1 }
-            | Self::VectorLshlrevB32 { dst, src0, src1 }
-            | Self::VectorLshrrevB32 { dst, src0, src1 }
-            | Self::VectorAshrrevI32 { dst, src0, src1 }
-            | Self::VectorAndB32 { dst, src0, src1 }
-            | Self::VectorOrB32 { dst, src0, src1 }
-            | Self::VectorXorB32 { dst, src0, src1 }
+            Self::VectorAluVop3 {
+                dst, src0, src1, ..
+            }
             | Self::VectorAddF32 { dst, src0, src1 }
             | Self::VectorMulF32 { dst, src0, src1 } => {
                 write!(formatter, " v{dst}, v{src0}, v{src1}")

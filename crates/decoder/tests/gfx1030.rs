@@ -4,7 +4,8 @@ use std::process::{Command, Stdio};
 
 use xenora_decoder::{
     Architecture, CompareRelation, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction,
-    ScalarAluOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorSource, decode, decode_at,
+    ScalarAluOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorSource, decode,
+    decode_at,
 };
 use xenora_isa::semantics::Signedness;
 use xenora_ref::{
@@ -43,7 +44,8 @@ fn decodes_each_fixture_instruction_with_offset_and_length() {
         (
             20,
             8,
-            Instruction::AddNoCarryU32 {
+            Instruction::VectorAluVop3 {
+                op: VectorAluVop3Op::AddNcU32,
                 dst: 1,
                 src0: 1,
                 src1: 2,
@@ -373,7 +375,13 @@ fn reference_op(instruction: Instruction) -> Op {
             reference_scalar(src0),
             reference_scalar(src1),
         ),
-        Instruction::AddNoCarryU32 { dst, src0, src1 } => Op::Add(dst, src0, src1),
+        // The reference's VOP3 add; it is the only VOP3 variant so far.
+        Instruction::VectorAluVop3 {
+            op: VectorAluVop3Op::AddNcU32,
+            dst,
+            src0,
+            src1,
+        } => Op::Add(dst, src0, src1),
         Instruction::ScalarMoveB32 { dst, src } => Op::ScalarMove(dst, reference_scalar(src)),
         Instruction::ScalarUnary { op, dst, src } => Op::ScalarUnary(
             match op {
@@ -424,22 +432,32 @@ fn reference_op(instruction: Instruction) -> Op {
             target,
             condition: BranchCondition::Always,
         },
-        Instruction::VectorAndB32 { dst, src0, src1 } => {
-            Op::Vector(VectorAlu::And, dst, src0, src1)
-        }
-        Instruction::VectorLshlrevB32 { dst, src0, src1 } => {
-            Op::Vector(VectorAlu::ShiftLeft, dst, src0, src1)
-        }
-        Instruction::VectorAshrrevI32 { dst, src0, src1 } => {
-            Op::Vector(VectorAlu::ArithmeticShiftRight, dst, src0, src1)
-        }
-        Instruction::VectorLshrrevB32 { dst, src0, src1 } => {
-            Op::Vector(VectorAlu::ShiftRight, dst, src0, src1)
-        }
-        Instruction::VectorOrB32 { dst, src0, src1 } => Op::Vector(VectorAlu::Or, dst, src0, src1),
-        Instruction::VectorXorB32 { dst, src0, src1 } => {
-            Op::Vector(VectorAlu::Xor, dst, src0, src1)
-        }
+        // The six logical and shift forms migrated from hand-written code
+        // (#215 M27) keep the reference's VGPR-only VectorAlu ops.
+        Instruction::VectorAlu {
+            op:
+                op @ (VectorAluOp::AndB32
+                | VectorAluOp::OrB32
+                | VectorAluOp::XorB32
+                | VectorAluOp::LshlrevB32
+                | VectorAluOp::LshrrevB32
+                | VectorAluOp::AshrrevI32),
+            dst,
+            src0: VectorSource::Register(src0),
+            src1,
+        } => Op::Vector(
+            match op {
+                VectorAluOp::AndB32 => VectorAlu::And,
+                VectorAluOp::OrB32 => VectorAlu::Or,
+                VectorAluOp::XorB32 => VectorAlu::Xor,
+                VectorAluOp::LshlrevB32 => VectorAlu::ShiftLeft,
+                VectorAluOp::LshrrevB32 => VectorAlu::ShiftRight,
+                _ => VectorAlu::ArithmeticShiftRight,
+            },
+            dst,
+            src0,
+            src1,
+        ),
         Instruction::VectorAddF32 { dst, src0, src1 } => {
             Op::Vector(VectorAlu::FloatAdd, dst, src0, src1)
         }
@@ -454,15 +472,17 @@ fn reference_op(instruction: Instruction) -> Op {
 
         Instruction::VectorCompare { op, src0, src1 } => Op::Compare(
             Comparison {
-                offset: match op.relation {
+                offset: match op.relation() {
                     CompareRelation::Less => 1,
                     CompareRelation::Equal => 2,
                     CompareRelation::LessOrEqual => 3,
                     CompareRelation::Greater => 4,
                     CompareRelation::NotEqual => 5,
                     CompareRelation::GreaterOrEqual => 6,
+                    CompareRelation::False => 0,
+                    CompareRelation::True => 7,
                 },
-                signed: op.signed,
+                signed: op.signed(),
             },
             match src0 {
                 VectorSource::Register(reg) => CompareSource::Vector(reg),
@@ -490,6 +510,7 @@ fn reference_op(instruction: Instruction) -> Op {
                 VectorAluOp::AddNcU32 => VectorInteger::Add,
                 VectorAluOp::SubNcU32 => VectorInteger::Subtract,
                 VectorAluOp::SubrevNcU32 => VectorInteger::SubtractReverse,
+                _ => panic!("{op:?} decodes only with a VGPR SRC0 (operand rule vop2_vgpr2)"),
             },
             dst,
             match src0 {
@@ -526,12 +547,13 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/scalar-arith.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-integer.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-compare-ft.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 100, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 104, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -596,7 +618,7 @@ fn assemble_matrix() -> Vec<u8> {
     );
     // Every supported VOPC form with each source class: VGPR, SGPR, vcc_lo,
     // inline integers at both ends, inline zero and a literal.
-    for relation in ["lt", "eq", "le", "gt", "ne", "ge"] {
+    for relation in ["f", "lt", "eq", "le", "gt", "ne", "ge", "t"] {
         for kind in ["i32", "u32"] {
             for src0 in [
                 "v255",
@@ -744,8 +766,6 @@ fn distinguishes_llvm_invalid_encodings_from_xenora_subset_rejections() {
     let outside_subset: &[&[u32]] = &[
         &[0x7e04_026b],                                        // VOP1 VCC_HI source
         &[0x7da2_0501],                                        // v_cmpx_eq_u32_e32
-        &[0x7d00_0501],                                        // v_cmp_f_i32_e32
-        &[0x7d0e_0501],                                        // v_cmp_t_i32_e32
         &[0xd482_006a, 0x0002_0501],                           // v_cmp_lt_i32_e64
         &[0x8788_0908],                                        // s_and_b64
         &[0x8008_ffff, 0x1234_5678],                           // SOP2 with two literal sources
@@ -997,7 +1017,8 @@ fn accepts_scalar_destination_105_and_vgpr_zero_add_sources() {
     let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     assert_eq!(
         decode(Architecture::Gfx1030, &bytes).unwrap()[0].instruction,
-        Instruction::AddNoCarryU32 {
+        Instruction::VectorAluVop3 {
+            op: VectorAluVop3Op::AddNcU32,
             dst: 1,
             src0: 0,
             src1: 0

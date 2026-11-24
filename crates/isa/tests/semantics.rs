@@ -1,8 +1,13 @@
 //! Ties the generated semantic registry tables to the independent XML metadata table.
 
 use xenora_isa::meta::{EncodingFamily, FORMS as META_FORMS};
-use xenora_isa::semantics::{CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, SCHEMA, SccEffect};
-use xenora_isa::{ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp};
+use xenora_isa::semantics::{
+    CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, MaskEffect, SCHEMA, SccEffect, Signedness, Wave,
+};
+use xenora_isa::{
+    CompareRelation, ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op,
+    VectorCompareOp,
+};
 
 #[test]
 fn generated_tables_match_the_schema_and_the_metadata_forms() {
@@ -97,9 +102,100 @@ fn vector_alu_dispatch_selects_exactly_the_registry_vop2_forms() {
         assert_eq!(op.swaps_sources(), row.swap_sources);
         assert_eq!(row.scc, SccEffect::Unchanged);
     }
-    // The hand-written VOP2 forms (v_and_b32, v_add_f32, ...) must not be
-    // dispatched here.
+    // Exactly the registry VOP2 forms are dispatched here; the hand-written
+    // ones (v_add_f32, v_mul_f32) must not be.
     dispatch_selects_exactly(EncodingFamily::Vop2, |word| {
         VectorAluOp::from_word(word).map(|op| op.semantics().name)
     });
+}
+
+#[test]
+fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
+    const OPERANDS: [u32; 6] = [0, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_fffe, 0xffff_ffff];
+    for op in VectorCompareOp::ALL {
+        let row = op.semantics();
+        assert_eq!(row.family, EncodingFamily::Vopc);
+        assert_eq!(row.name.to_ascii_lowercase(), op.mnemonic());
+        assert_eq!(op.assembly_name(), format!("{}_e32", op.mnemonic()));
+        assert_eq!(row.relation, Some(op.relation()));
+        assert_eq!(op.signed(), row.signedness == Signedness::Signed);
+        assert_eq!(
+            (row.scc, row.vcc, row.exec, row.wave),
+            (
+                SccEffect::Unchanged,
+                MaskEffect::LaneMask,
+                MaskEffect::Unchanged,
+                Wave::Wave32
+            )
+        );
+        // The per-lane test is the declared relation over the declared
+        // signedness, with SRC0 on the left.
+        for src0 in OPERANDS {
+            for src1 in OPERANDS {
+                let ordering = if op.signed() {
+                    (src0 as i32).cmp(&(src1 as i32))
+                } else {
+                    src0.cmp(&src1)
+                };
+                let expected = match op.relation() {
+                    CompareRelation::Less => ordering.is_lt(),
+                    CompareRelation::Equal => ordering.is_eq(),
+                    CompareRelation::LessOrEqual => ordering.is_le(),
+                    CompareRelation::Greater => ordering.is_gt(),
+                    CompareRelation::NotEqual => ordering.is_ne(),
+                    CompareRelation::GreaterOrEqual => ordering.is_ge(),
+                    CompareRelation::False => false,
+                    CompareRelation::True => true,
+                };
+                assert_eq!(
+                    op.test(src0, src1),
+                    expected,
+                    "{} {src0:#x} {src1:#x}",
+                    row.name
+                );
+            }
+        }
+    }
+    // v_cmpx and the 16-, 64-bit and float compares must not be dispatched.
+    dispatch_selects_exactly(EncodingFamily::Vopc, |word| {
+        VectorCompareOp::from_word(word).map(|op| op.semantics().name)
+    });
+}
+
+#[test]
+fn vop3_variant_dispatch_selects_exactly_the_registry_vop3_rows() {
+    for op in VectorAluVop3Op::ALL {
+        let (row, base) = (op.semantics(), op.base().semantics());
+        assert_eq!((row.name, row.family), (base.name, EncodingFamily::Vop3));
+        // The variant inherits the base declaration; only identity and the
+        // operand rule differ.
+        assert_eq!(
+            (
+                base.operation,
+                base.signedness,
+                base.scc,
+                base.vcc,
+                base.exec
+            ),
+            (row.operation, row.signedness, row.scc, row.vcc, row.exec)
+        );
+        assert_eq!(row.swap_sources, base.swap_sources);
+        assert_eq!(op.assembly_name(), format!("{}_e64", op.base().mnemonic()));
+    }
+    dispatch_selects_exactly(EncodingFamily::Vop3, |word| {
+        VectorAluVop3Op::from_word(word).map(|op| op.semantics().name)
+    });
+    // No first word of the other 64-bit families (VOP3B shares VOP3's
+    // encoding bits) selects a variant.
+    for meta in META_FORMS
+        .iter()
+        .filter(|form| form.family != EncodingFamily::Vop3 && form.bytes == 8)
+    {
+        assert_eq!(
+            VectorAluVop3Op::from_word(meta.bits as u32),
+            None,
+            "{}",
+            meta.name
+        );
+    }
 }
