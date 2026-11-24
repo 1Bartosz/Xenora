@@ -328,6 +328,8 @@ fn reference_op(instruction: Instruction) -> Op {
             match op {
                 ScalarAluOp::AddU32 => ScalarAlu::Add,
                 ScalarAluOp::SubU32 => ScalarAlu::Subtract,
+                ScalarAluOp::AddI32 => ScalarAlu::AddSigned,
+                ScalarAluOp::SubI32 => ScalarAlu::SubtractSigned,
                 ScalarAluOp::AddcU32 => ScalarAlu::AddWithCarry,
                 ScalarAluOp::SubbU32 => ScalarAlu::SubtractWithBorrow,
                 ScalarAluOp::AndB32 => ScalarAlu::And,
@@ -413,7 +415,7 @@ fn compares_fixture_instructions_against_llvm() {
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 28, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 30, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -464,6 +466,8 @@ fn assemble_matrix() -> Vec<u8> {
         s_sub_u32 s9, 0xdeadbeef, -16
         s_addc_u32 s104, 0xdeadbeef, s105
         s_subb_u32 s0, s0, s0
+        s_add_i32 s101, 0x7fffffff, s100
+        s_sub_i32 s100, -16, 0x80000000
         s_and_b32 s1, -1, s2
         s_or_b32 s103, s3, 0x80000000
         s_xor_b32 s102, s104, -16
@@ -602,8 +606,6 @@ fn distinguishes_llvm_invalid_encodings_from_xenora_subset_rejections() {
     ];
     let outside_subset: &[&[u32]] = &[
         &[0x7e04_026a],                                        // VOP1 VCC_LO source
-        &[0x8108_0908],                                        // s_add_i32: SCC rule not pinned
-        &[0x8188_0908],                                        // s_sub_i32: SCC rule not pinned
         &[0x8788_0908],                                        // s_and_b64
         &[0x8008_ffff, 0x1234_5678],                           // SOP2 with two literal sources
         &[0x806c_0908],                                        // SOP2 TTMP destination
@@ -697,8 +699,8 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
             };
             format!("{mnemonic} {}, {}", scalar(left), scalar(right))
         }
-        "s_add_u32" | "s_sub_u32" | "s_addc_u32" | "s_subb_u32" | "s_and_b32" | "s_or_b32"
-        | "s_xor_b32" => {
+        "s_add_u32" | "s_sub_u32" | "s_add_i32" | "s_sub_i32" | "s_addc_u32" | "s_subb_u32"
+        | "s_and_b32" | "s_or_b32" | "s_xor_b32" => {
             let scalar = |operand: &str| match literal_bits(operand) {
                 Some(bits) => match bits as i32 {
                     inline @ -16..=64 => inline.to_string(),

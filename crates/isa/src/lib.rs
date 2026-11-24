@@ -7,11 +7,11 @@ mod rdna2;
 #[rustfmt::skip]
 mod rdna2_meta;
 pub use rdna2::{
-    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_U32, S_ADDC_U32, S_AND_B32,
-    S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32,
-    S_OR_B32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32, V_ADD_F32,
-    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
-    V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_I32, S_ADD_U32, S_ADDC_U32,
+    S_AND_B32, S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM,
+    S_MOV_B32, S_OR_B32, S_SUB_I32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32,
+    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32,
+    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 
 /// Selects the instruction encoding independently of the container and execution ABI.
@@ -87,14 +87,19 @@ impl fmt::Display for ScalarSource {
 ///
 /// SCC behaviour follows the pinned AMD RDNA 2 XML descriptions: additions
 /// store the carry-out, subtractions the borrow, ADDC and SUBB also consume
-/// SCC as carry-in or borrow-in, and bitwise operations set SCC iff the result
-/// is nonzero. See docs/shaders/scalar-alu.md for the sources.
+/// SCC as carry-in or borrow-in, signed forms store signed overflow (RDNA 2 ISA
+/// guide 12.1), and bitwise operations set SCC iff the result is nonzero. See
+/// docs/shaders/scalar-alu.md for the sources.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScalarAluOp {
     /// `s_add_u32`: D = S0 + S1, SCC = carry-out.
     AddU32,
     /// `s_sub_u32`: D = S0 - S1, SCC = borrow (S1 > S0).
     SubU32,
+    /// `s_add_i32`: D = S0 + S1, SCC = signed overflow.
+    AddI32,
+    /// `s_sub_i32`: D = S0 - S1, SCC = signed overflow.
+    SubI32,
     /// `s_addc_u32`: D = S0 + S1 + SCC, SCC = carry-out.
     AddcU32,
     /// `s_subb_u32`: D = S0 - S1 - SCC, SCC = borrow.
@@ -113,6 +118,8 @@ impl ScalarAluOp {
         match self {
             Self::AddU32 => "s_add_u32",
             Self::SubU32 => "s_sub_u32",
+            Self::AddI32 => "s_add_i32",
+            Self::SubI32 => "s_sub_i32",
             Self::AddcU32 => "s_addc_u32",
             Self::SubbU32 => "s_subb_u32",
             Self::AndB32 => "s_and_b32",
@@ -135,6 +142,14 @@ impl ScalarAluOp {
                 let (partial, first) = src0.overflowing_sub(src1);
                 let (value, second) = partial.overflowing_sub(carry);
                 (value, first || second)
+            }
+            Self::AddI32 => {
+                let (value, overflow) = (src0 as i32).overflowing_add(src1 as i32);
+                (value as u32, overflow)
+            }
+            Self::SubI32 => {
+                let (value, overflow) = (src0 as i32).overflowing_sub(src1 as i32);
+                (value as u32, overflow)
             }
             Self::AndB32 => (src0 & src1, src0 & src1 != 0),
             Self::OrB32 => (src0 | src1, src0 | src1 != 0),

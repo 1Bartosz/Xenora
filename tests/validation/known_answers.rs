@@ -769,7 +769,7 @@ mod review {
 
     const SCALAR_ALU_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-alu.bin");
     // SOP2 opcodes of the supported subset (RDNA 2 XML opcode table).
-    const SOP2_OPCODES: [u32; 7] = [0, 1, 4, 5, 14, 16, 18];
+    const SOP2_OPCODES: [u32; 9] = [0, 1, 2, 3, 4, 5, 14, 16, 18];
     const SCALAR_VALUES: [u32; 10] = [
         0,
         1,
@@ -796,6 +796,18 @@ mod review {
         let (exact, scc) = match opcode {
             0 | 4 => (a + b + c, a + b + c >= 1 << 32),
             1 | 5 => (((1 << 32) + a - b - c) % (1 << 32), b + c > a),
+            // Signed: the exact result of the sign-extended operands must fit in
+            // [-2^31, 2^31), else SCC = overflow (RDNA 2 ISA guide 5.3 and 12.1).
+            2 | 3 => {
+                let signed = |value: u64| i64::from(value as u32 as i32);
+                let exact = if opcode == 2 {
+                    signed(a) + signed(b)
+                } else {
+                    signed(a) - signed(b)
+                };
+                let overflow = !(-(1_i64 << 31)..(1_i64 << 31)).contains(&exact);
+                (exact.rem_euclid(1 << 32) as u64, overflow)
+            }
             14 => (a & b, a & b != 0),
             16 => (a | b, a | b != 0),
             _ => (a ^ b, a ^ b != 0),
@@ -842,8 +854,8 @@ mod review {
 
     #[test]
     fn scalar_alu_fixture_chains_carry_borrow_and_bitwise_scc() {
-        let input = [0, 1, u32::MAX, 0x8000_000e, 0x1234_5678];
-        let expected: Vec<_> = input.iter().map(|word| word ^ 0x8000_000e).collect();
+        let input = [0, 1, u32::MAX, 0x0000_000e, 0x1234_5678];
+        let expected: Vec<_> = input.iter().map(|word| word ^ 0x0000_000e).collect();
         verify(SCALAR_ALU_FIXTURE, &input, Some(&expected));
         let compiled = compile(Architecture::Gfx1030, SCALAR_ALU_FIXTURE).unwrap();
         // The scalar results reach the kernel as constants; the branch is resolved.
@@ -852,8 +864,8 @@ mod review {
         // Clearing the final AND's SCC-zero edge (s15 = s14 & 15 = 0) is observable:
         // with 31 instead of 15 the result is 0x10, SCC = 1, and v2 = 0.
         let mut nonzero = SCALAR_ALU_FIXTURE.to_vec();
-        assert_eq!(nonzero[0x31], 0x8f);
-        nonzero[0x31] = 0x9f;
+        assert_eq!(nonzero[0x39], 0x8f);
+        nonzero[0x39] = 0x9f;
         verify(&nonzero, &input, Some(&[0; 5]));
     }
 
@@ -904,7 +916,7 @@ mod review {
     #[test]
     fn scalar_alu_matches_definitions_on_boundary_operands() {
         let vectors = sop2_vectors();
-        assert_eq!(vectors.len(), 7 * 10 * 10 * 2);
+        assert_eq!(vectors.len(), 9 * 10 * 10 * 2);
         for (code, expected) in &vectors {
             verify(code, &[0, u32::MAX], Some(expected));
             assert_translated(code, expected);
@@ -912,9 +924,72 @@ mod review {
     }
 
     #[test]
+    fn signed_add_and_subtract_set_scc_on_overflow_not_carry() {
+        // (opcode, S0, S1, D, SCC), worked by hand from RDNA 2 ISA guide 12.1.
+        for (opcode, a, b, value, scc) in [
+            (2, 0x7fff_ffff, 1, 0x8000_0000, true), // MAX + 1: overflow, no carry
+            (2, u32::MAX, 1, 0, false),             // -1 + 1: carry, no overflow
+            (2, 0x8000_0000, u32::MAX, 0x7fff_ffff, true), // MIN + -1: overflow
+            (2, 0x8000_0000, 0x7fff_ffff, u32::MAX, false), // MIN + MAX = -1
+            (3, 0x8000_0000, 1, 0x7fff_ffff, true), // MIN - 1: overflow
+            (3, 0, 1, u32::MAX, false),             // 0 - 1: borrow, no overflow
+            (3, 0x7fff_ffff, u32::MAX, 0x8000_0000, true), // MAX - -1: overflow
+            (3, 0x8000_0000, 0x8000_0000, 0, false), // MIN - MIN = 0
+        ] {
+            let code = sop2_program(&[sop2(opcode, 10, 8, 9)], 10, a, b, Some(false));
+            let expected = lanes(value, scc);
+            assert_eq!(sop2_expected(opcode, a, b, false), (value, scc));
+            verify(&code, &[0, u32::MAX], Some(&expected));
+            assert_translated(&code, &expected);
+        }
+        for (code, expected) in signed_immediate_overflows() {
+            verify(&code, &[0, u32::MAX], Some(&expected));
+            assert_translated(&code, &expected);
+        }
+    }
+
+    /// Overflow through an inline and a literal source, observed by the branch.
+    fn signed_immediate_overflows() -> Vec<(Vec<u8>, [u32; 2])> {
+        vec![
+            // s_add_i32 s10, s8, 1 with s8 = MAX: 0x80000000, overflow.
+            (
+                sop2_program(&[sop2(2, 10, 8, 0x81)], 10, 0x7fff_ffff, 0, Some(false)),
+                lanes(0x8000_0000, true),
+            ),
+            // s_sub_i32 s10, s8, 0x12345678 with s8 = MIN: 0x6dcba988, overflow.
+            (
+                sop2_program(
+                    &[sop2(3, 10, 8, 255), 0x1234_5678],
+                    10,
+                    0x8000_0000,
+                    0,
+                    Some(false),
+                ),
+                lanes(0x6dcb_a988, true),
+            ),
+            // s_add_i32 s10, 0x40000000, s8 with s8 = 0x40000000: 0x80000000, overflow.
+            (
+                sop2_program(
+                    &[sop2(2, 10, 255, 8), 0x4000_0000],
+                    10,
+                    0x4000_0000,
+                    0,
+                    Some(false),
+                ),
+                lanes(0x8000_0000, true),
+            ),
+            // s_sub_i32 s10, -16, s8 with s8 = MAX: 0x7ffffff1, overflow.
+            (
+                sop2_program(&[sop2(3, 10, 0xd0, 8)], 10, 0x7fff_ffff, 0, Some(false)),
+                lanes(0x7fff_fff1, true),
+            ),
+        ]
+    }
+
+    #[test]
     fn scalar_alu_aliasing_inline_and_literal_operands() {
         let cases = sop2_operand_cases();
-        assert_eq!(cases.len(), 7 * 10);
+        assert_eq!(cases.len(), 9 * 10);
         for (code, expected) in &cases {
             verify(code, &[0, u32::MAX], Some(expected));
             assert_translated(code, expected);
@@ -945,8 +1020,8 @@ mod review {
     #[test]
     fn scalar_alu_rejects_forms_outside_the_subset() {
         // load 8, wait 4, two literal moves 8 each, s_cmp 4: the SOP2 word is at 0x20.
-        for opcode in [2, 3, 15, 17, 19] {
-            // s_add_i32 and s_sub_i32 (SCC rule not confirmed), 64-bit bitwise forms.
+        for opcode in [6, 15, 17, 19] {
+            // s_min_i32 and the 64-bit bitwise forms.
             rejected_at(
                 &sop2_program(&[sop2(opcode, 10, 8, 9)], 10, 1, 2, Some(false)),
                 0x20,
@@ -1012,10 +1087,11 @@ mod review {
                 .unwrap()
         };
         let input: Vec<u32> = (0..64).map(|lane| lane * 0x0101_0101).collect();
-        let expected: Vec<_> = input.iter().map(|word| word ^ 0x8000_000e).collect();
+        let expected: Vec<_> = input.iter().map(|word| word ^ 0x0000_000e).collect();
         assert_eq!(run(SCALAR_ALU_FIXTURE, &input), expected);
         let mut vectors = sop2_vectors();
         vectors.extend(sop2_operand_cases());
+        vectors.extend(signed_immediate_overflows());
         for (code, expected) in &vectors {
             assert_eq!(&run(code, &[0, u32::MAX]), expected);
         }
