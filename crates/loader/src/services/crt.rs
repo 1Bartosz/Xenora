@@ -192,12 +192,13 @@ fn allocation_result(
 
 const ERANGE: u32 = 34;
 
-fn parse_long(
+fn parse_integer(
     memory: &mut GuestMemory,
     address: u64,
     end: u64,
     mut radix: u32,
     signed: bool,
+    wide_result: bool,
     unit: StringUnit,
 ) -> Result<u64, ExitReason> {
     if address == 0 || (radix != 0 && !(2..=36).contains(&radix)) {
@@ -241,16 +242,20 @@ fn parse_long(
         radix = if next == '0' { 8 } else { 10 };
     }
 
-    let limit = if signed {
-        i32::MAX as u32 + u32::from(negative)
-    } else {
-        u32::MAX
+    let limit = match (wide_result, signed) {
+        (false, false) => u64::from(u32::MAX),
+        (false, true) => i32::MAX as u64 + u64::from(negative),
+        (true, false) => u64::MAX,
+        (true, true) => i64::MAX as u64 + u64::from(negative),
     };
     let start = index;
-    let mut value = 0u32;
+    let mut value = 0u64;
     let mut overflow = false;
     while let Some(digit) = next.to_digit(radix) {
-        match value.checked_mul(radix).and_then(|v| v.checked_add(digit)) {
+        match value
+            .checked_mul(u64::from(radix))
+            .and_then(|v| v.checked_add(u64::from(digit)))
+        {
             Some(v) if v <= limit => value = v,
             _ => overflow = true,
         }
@@ -273,18 +278,38 @@ fn parse_long(
     if negative && (!overflow || signed) {
         value = value.wrapping_neg();
     }
-    Ok(u64::from(value))
+    Ok(if wide_result {
+        value
+    } else {
+        u64::from(value as u32)
+    })
 }
 
 pub(super) fn register_conversions(registry: &mut ImportRegistry) {
-    for (symbol, signed, unit) in [
-        ("strtol", true, StringUnit::Byte),
-        ("strtoul", false, StringUnit::Byte),
-        ("wcstol", true, StringUnit::Wide),
-        ("wcstoul", false, StringUnit::Wide),
+    for (symbol, signed, wide_result, unit) in [
+        ("strtol", true, false, StringUnit::Byte),
+        ("strtoul", false, false, StringUnit::Byte),
+        ("wcstol", true, false, StringUnit::Wide),
+        ("wcstoul", false, false, StringUnit::Wide),
+        ("strtoll", true, true, StringUnit::Byte),
+        ("strtoull", false, true, StringUnit::Byte),
+        ("wcstoll", true, true, StringUnit::Wide),
+        ("wcstoull", false, true, StringUnit::Wide),
+        ("_strtoi64", true, true, StringUnit::Byte),
+        ("_strtoui64", false, true, StringUnit::Byte),
+        ("_wcstoi64", true, true, StringUnit::Wide),
+        ("_wcstoui64", false, true, StringUnit::Wide),
     ] {
         registry.register(UCRT, symbol, move |args, _, memory| {
-            parse_long(memory, args.rcx, args.rdx, args.r8 as u32, signed, unit)
+            parse_integer(
+                memory,
+                args.rcx,
+                args.rdx,
+                args.r8 as u32,
+                signed,
+                wide_result,
+                unit,
+            )
         });
         registry.alias("api-ms-win-crt-convert-l1-1-0.dll", UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);

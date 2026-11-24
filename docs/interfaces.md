@@ -188,7 +188,9 @@ UCRT and the CRT conversion API set expose strtol, strtoul, wcstol, and
 wcstoul with 32-bit Windows long results. The parser supports C-locale
 whitespace, explicit bases 2–36 and automatic base selection, and writes
 the first unparsed guest address to a supplied end pointer. Overflow
-clamps the result and sets ERANGE. Scans have a 1 MiB input budget.
+clamps the result and sets ERANGE. Scans have a 1 MiB input budget. The long-long variants and
+Microsoft's _strtoi64, _strtoui64, _wcstoi64, and _wcstoui64 apply the
+same rules with 64-bit results.
 
 ### Event signaling
 

@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added guest CRT signed and unsigned 64-bit conversions for narrow and wide strings.
+
 - Added bounded guest CRT long-integer parsing for byte and wide strings.
 
 - Added guest CRT errno accessors and allocation failure reporting for the synthetic main thread.

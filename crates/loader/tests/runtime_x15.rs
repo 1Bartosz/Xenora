@@ -1235,7 +1235,7 @@ fn test_guest_crt_long_conversions_through_iat() {
         assert_eq!(result.bound_imports, 2);
         assert_eq!(result.execution.exit_reason, ExitReason::Halt);
         (
-            result.execution.final_state.get(Register::Rbx) as u32,
+            result.execution.final_state.get(Register::Rbx),
             result
                 .image
                 .memory
@@ -1249,19 +1249,25 @@ fn test_guest_crt_long_conversions_through_iat() {
                 .unwrap(),
         )
     };
-    assert_eq!(run("strtol", b" -0x10!\0", 0), ((-16i32) as u32, 6, 0));
+    assert_eq!(
+        run("strtol", b" -0x10!\0", 0),
+        (u64::from((-16i32) as u32), 6, 0)
+    );
     assert_eq!(
         run("strtol", b"21474836480!\0", 10),
-        (i32::MAX as u32, 11, 34)
+        (i32::MAX as u64, 11, 34)
     );
     assert_eq!(
         run("strtol", b"-2147483649\0", 10),
-        (i32::MIN as u32, 11, 34)
+        (u64::from(i32::MIN as u32), 11, 34)
     );
     assert_eq!(run("strtol", b"  +!\0", 10), (0, 0, 0));
     assert_eq!(run("strtol", b"17\0", 37), (0, 0, 22));
-    assert_eq!(run("strtoul", b"-1\0", 10), (u32::MAX, 2, 0));
-    assert_eq!(run("strtoul", b"4294967296\0", 10), (u32::MAX, 10, 34));
+    assert_eq!(run("strtoul", b"-1\0", 10), (u64::from(u32::MAX), 2, 0));
+    assert_eq!(
+        run("strtoul", b"4294967296\0", 10),
+        (u64::from(u32::MAX), 10, 34)
+    );
     assert_eq!(run("strtoul", b"078\0", 0), (7, 2, 0));
     let wide = "42!"
         .encode_utf16()
@@ -1270,6 +1276,27 @@ fn test_guest_crt_long_conversions_through_iat() {
         .collect::<Vec<_>>();
     assert_eq!(run("wcstol", &wide, 10), (42, 4, 0));
     assert_eq!(run("wcstoul", &wide, 10), (42, 4, 0));
+    assert_eq!(
+        run("strtoll", b"9223372036854775808\0", 10),
+        (i64::MAX as u64, 19, 34)
+    );
+    assert_eq!(
+        run("_strtoi64", b"-9223372036854775808\0", 10),
+        (i64::MIN as u64, 20, 0)
+    );
+    assert_eq!(
+        run("_strtoui64", b"18446744073709551616\0", 10),
+        (u64::MAX, 20, 34)
+    );
+    assert_eq!(run("strtoull", b"-1\0", 10), (u64::MAX, 2, 0));
+    let wide = "4294967296"
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    for symbol in ["wcstoll", "wcstoull", "_wcstoi64", "_wcstoui64"] {
+        assert_eq!(run(symbol, &wide, 10), (4_294_967_296, 20, 0));
+    }
 }
 
 #[test]

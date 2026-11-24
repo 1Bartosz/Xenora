@@ -523,15 +523,26 @@ impl SymbolDb {
     fn populate_crt_convert(&mut self) {
         let m = "api-ms-win-crt-convert-l1-1-0.dll";
         for module in [m, "ucrtbase.dll"] {
-            for symbol in ["strtol", "strtoul", "wcstol", "wcstoul"] {
+            for symbol in [
+                "strtol",
+                "strtoul",
+                "wcstol",
+                "wcstoul",
+                "strtoll",
+                "strtoull",
+                "wcstoll",
+                "wcstoull",
+                "_strtoi64",
+                "_strtoui64",
+                "_wcstoi64",
+                "_wcstoui64",
+            ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
         }
         for (sym, libc) in &[
             ("strtod", "strtod"),
             ("strtof", "strtof"),
-            ("strtoll", "strtoll"),
-            ("strtoull", "strtoull"),
             ("mbstowcs", "mbstowcs"),
             ("wcstombs", "wcstombs"),
             ("wcstod", "wcstod"),
@@ -540,18 +551,6 @@ impl SymbolDb {
         ] {
             self.crt_native(m, sym, libc, "ISO C conversion — identical ABI on macOS");
         }
-        self.win32_stub(
-            m,
-            "_strtoi64",
-            false,
-            "Windows 64-bit strtoi64 — same as strtoll",
-        );
-        self.win32_stub(
-            m,
-            "_strtoui64",
-            false,
-            "Windows 64-bit strtoui64 — same as strtoull",
-        );
         self.win32_stub(m, "_itoa", false, "Windows itoa — integer to ASCII");
         self.win32_stub(m, "_itoa_s", false, "Windows itoa_s — safe variant");
         self.win32_stub(m, "_wtoi", false, "Wide char to int");
