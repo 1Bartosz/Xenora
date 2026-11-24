@@ -19,6 +19,10 @@ remains unsupported.
   orders, padded row and slice pitches, two layers and two mips against the CPU decoders and
   hand-derived anchors. On an Apple M5 Pro the native decoder's interpolated values were within
   1.14 codes of the exact values, so up to two codes from the truncating CPU reference.
+  Edge levels of 5×3 (one block row) and 1×1 are covered, invalid payloads (zero extents,
+  short, oversized or block-count-mismatched buffers, bad pitches) are rejected before upload,
+  and `MetalError::is_capability_unavailable` separates a device without BC support from an
+  implementation failure.
 - Added CPU block decoders for BC2, BC3, BC4 and BC5 (UNORM and SNORM) in `xenora-texture`, with tests whose expected texels were derived by hand from the Microsoft and Khronos block-compression specifications. Interpolated values truncate toward zero, as the existing BC1 decoder does; GPU upload and sampling of these formats are not implemented yet.
 - Added `dbt::tests::sib_store_executes_through_the_native_dbt`, an independent DBT execution
   test that runs the SIB store form `mov [rsp + 0x20], rbx` through the native ARM64 DBT and
