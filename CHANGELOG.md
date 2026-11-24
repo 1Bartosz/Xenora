@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added nested guest directories and checked file deletion on the synthetic drive.
+
 - Added file seeking and end-of-file resizing on the synthetic guest drive.
 
 - Added a bounded synthetic guest drive with synchronous file open, read, write, and size queries.

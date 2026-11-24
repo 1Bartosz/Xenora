@@ -978,6 +978,9 @@ impl SymbolDb {
                 "GetFileSizeEx",
                 "SetFilePointerEx",
                 "SetEndOfFile",
+                "CreateDirectoryW",
+                "RemoveDirectoryW",
+                "DeleteFileW",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
@@ -992,12 +995,6 @@ impl SymbolDb {
         );
         self.win32_stub(m, "GetFileAttributesW", false, "GetFileAttributesW — stub");
         self.win32_stub(m, "DeleteFileA", false, "DeleteFile — stub returning FALSE");
-        self.win32_stub(
-            m,
-            "DeleteFileW",
-            false,
-            "DeleteFileW — stub returning FALSE",
-        );
         self.win32_stub(
             m,
             "FlushFileBuffers",

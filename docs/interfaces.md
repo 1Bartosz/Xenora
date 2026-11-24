@@ -195,15 +195,18 @@ same rules with 64-bit results.
 ### Synthetic guest files
 
 The runtime exposes an in-memory C: drive through CreateFileW, ReadFile,
-WriteFile, GetFileSizeEx, and CloseHandle. It supports root-level UTF-16
-names, ASCII case folding, synchronous I/O, per-handle positions, and
+WriteFile, GetFileSizeEx, and CloseHandle. It supports UTF-16 file and
+directory names, ASCII case folding, synchronous I/O, per-handle positions, and
 read/write sharing. SetFilePointerEx supports seeking from the beginning,
 current position, and end. SetEndOfFile truncates or zero-extends writable
 files at the current position. Seeks alone do not change file length.
 Paths cannot access host files. The drive supports
 256 files and 16 MiB of data, with a 1 MiB limit per transfer.
-Directories, persistence, asynchronous I/O, and file handle duplication
-remain outside this subset.
+CreateDirectoryW and RemoveDirectoryW manage up to 256 directories. Parents
+must exist, and directories must be empty before removal. DeleteFileW
+deletes closed files. Traversal components and device names are rejected.
+Persistence, directory enumeration, asynchronous I/O, and file handle
+duplication remain outside this subset.
 
 ### Event and semaphore signaling
 

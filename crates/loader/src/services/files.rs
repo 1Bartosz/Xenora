@@ -16,6 +16,8 @@ const INVALID_HANDLE: u64 = u64::MAX;
 const READ: u32 = 0x8000_0000;
 const WRITE: u32 = 0x4000_0000;
 const FILE_NOT_FOUND: u32 = 2;
+const PATH_NOT_FOUND: u32 = 3;
+const DIRECTORY_NOT_EMPTY: u32 = 145;
 const FILE_EXISTS: u32 = 80;
 const ALREADY_EXISTS: u32 = 183;
 const INVALID_NAME: u32 = 123;
@@ -23,6 +25,7 @@ const NEGATIVE_SEEK: u32 = 131;
 const SHARING_VIOLATION: u32 = 32;
 const DISK_FULL: u32 = 112;
 const MAX_FILES: usize = 256;
+const MAX_DIRECTORIES: usize = 256;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TRANSFER: usize = 1024 * 1024;
 
@@ -33,7 +36,7 @@ pub(super) struct OpenFile {
     share: u32,
 }
 
-fn flat_guest_name(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
+fn guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
     if address == 0 {
         return Ok(None);
     }
@@ -49,24 +52,31 @@ fn flat_guest_name(memory: &GuestMemory, address: u64) -> Result<Option<String>,
             };
             let path = path.replace('/', "\\").to_ascii_lowercase();
             let name = path.strip_prefix("c:\\").unwrap_or(&path);
-            let device = name.split('.').next().unwrap_or_default();
-            if name.is_empty()
-                || name.ends_with([' ', '.'])
-                || name
-                    .chars()
-                    .any(|c| c.is_control() || "\\/:*?\"<>|".contains(c))
-                || matches!(device, "con" | "prn" | "aux" | "nul")
-                || (device.len() == 4
-                    && (device.starts_with("com") || device.starts_with("lpt"))
-                    && device.as_bytes()[3].is_ascii_digit())
-            {
-                return Ok(None);
-            }
-            return Ok(Some(name.to_owned()));
+            return Ok(name
+                .split('\\')
+                .all(valid_component)
+                .then(|| name.to_owned()));
         }
         units.push(unit);
     }
     Ok(None)
+}
+
+fn valid_component(name: &str) -> bool {
+    let device = name.split('.').next().unwrap_or_default();
+    !name.is_empty()
+        && !name.ends_with([' ', '.'])
+        && !name
+            .chars()
+            .any(|c| c.is_control() || "\\/:*?\"<>|".contains(c))
+        && !matches!(device, "con" | "prn" | "aux" | "nul")
+        && !(device.len() == 4
+            && (device.starts_with("com") || device.starts_with("lpt"))
+            && device.as_bytes()[3].is_ascii_digit())
+}
+
+fn parent(path: &str) -> &str {
+    path.rsplit_once('\\').map_or("", |(parent, _)| parent)
 }
 
 fn share_mask(access: u32) -> u32 {
@@ -95,10 +105,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         if matches!(disposition, 2 | 5) && access & WRITE == 0 {
             return open.fail(ERROR_ACCESS_DENIED, INVALID_HANDLE);
         }
-        let Some(path) = flat_guest_name(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+        let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
             return open.fail(INVALID_NAME, INVALID_HANDLE);
         };
         let mut objects = open.objects.lock().expect("guest object state");
+        let parent = parent(&path);
+        if !parent.is_empty() && !objects.directories.contains(parent) {
+            return open.fail(PATH_NOT_FOUND, INVALID_HANDLE);
+        }
+        if objects.directories.contains(&path) {
+            return open.fail(ERROR_ACCESS_DENIED, INVALID_HANDLE);
+        }
         let exists = objects.files.contains_key(&path);
         if exists && disposition == 1 {
             return open.fail(FILE_EXISTS, INVALID_HANDLE);
@@ -138,6 +155,73 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             }),
         );
         Ok(handle)
+    });
+
+    let create = Arc::clone(state);
+    registry.register(KERNEL32, "CreateDirectoryW", move |args, _, memory| {
+        if args.rdx != 0 {
+            return create.fail(ERROR_NOT_SUPPORTED, 0);
+        }
+        let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return create.fail(INVALID_NAME, 0);
+        };
+        let mut objects = create.objects.lock().expect("guest object state");
+        let parent = parent(&path);
+        if !parent.is_empty() && !objects.directories.contains(parent) {
+            return create.fail(PATH_NOT_FOUND, 0);
+        }
+        if objects.directories.contains(&path) || objects.files.contains_key(&path) {
+            return create.fail(ALREADY_EXISTS, 0);
+        }
+        if objects.directories.len() >= MAX_DIRECTORIES {
+            return create.fail(DISK_FULL, 0);
+        }
+        objects.directories.insert(path);
+        Ok(1)
+    });
+
+    let remove = Arc::clone(state);
+    registry.register(KERNEL32, "RemoveDirectoryW", move |args, _, memory| {
+        let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return remove.fail(INVALID_NAME, 0);
+        };
+        let mut objects = remove.objects.lock().expect("guest object state");
+        if !objects.directories.contains(&path) {
+            return remove.fail(PATH_NOT_FOUND, 0);
+        }
+        if objects.directories.iter().any(|key| parent(key) == path)
+            || objects.files.keys().any(|key| parent(key) == path)
+        {
+            return remove.fail(DIRECTORY_NOT_EMPTY, 0);
+        }
+        objects.directories.remove(&path);
+        Ok(1)
+    });
+
+    let delete = Arc::clone(state);
+    registry.register(KERNEL32, "DeleteFileW", move |args, _, memory| {
+        let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return delete.fail(INVALID_NAME, 0);
+        };
+        let mut objects = delete.objects.lock().expect("guest object state");
+        if objects.directories.contains(&path) {
+            return delete.fail(ERROR_ACCESS_DENIED, 0);
+        }
+        let parent = parent(&path);
+        if !parent.is_empty() && !objects.directories.contains(parent) {
+            return delete.fail(PATH_NOT_FOUND, 0);
+        }
+        if objects
+            .handles
+            .values()
+            .any(|object| matches!(object, GuestObject::File(file) if file.path == path))
+        {
+            return delete.fail(SHARING_VIOLATION, 0);
+        }
+        if objects.files.remove(&path).is_none() {
+            return delete.fail(FILE_NOT_FOUND, 0);
+        }
+        Ok(1)
     });
 
     let size = Arc::clone(state);
@@ -309,6 +393,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "WriteFile",
         "SetFilePointerEx",
         "SetEndOfFile",
+        "CreateDirectoryW",
+        "RemoveDirectoryW",
+        "DeleteFileW",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
