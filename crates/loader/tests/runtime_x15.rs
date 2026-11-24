@@ -1193,6 +1193,61 @@ fn test_guest_event_signaling_through_iat() {
 }
 
 #[test]
+fn test_guest_creates_and_allocates_private_heap_through_iat() {
+    const IMAGE: u64 = 0x140000000;
+    const MODULE: &str = "api-ms-win-core-heap-l1-1-0.dll";
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let mut code = vec![0x48, 0x83, 0xec, 0x28];
+    for register in [[0x48, 0xb9], [0x48, 0xba], [0x49, 0xb8]] {
+        code.extend_from_slice(&register);
+        code.extend_from_slice(&0u64.to_le_bytes());
+    }
+    append_import_call(&mut code, 0x2060);
+    // Preserve the new heap handle in RBX and pass it in RCX.
+    code.extend_from_slice(&[0x48, 0x89, 0xc3, 0x48, 0x89, 0xc1]);
+    code.extend_from_slice(&[0x48, 0xba]);
+    code.extend_from_slice(&8u64.to_le_bytes());
+    code.extend_from_slice(&[0x49, 0xb8]);
+    code.extend_from_slice(&16u64.to_le_bytes());
+    append_import_call(&mut code, 0x21a0);
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
+
+    let bytes = TestPeBuilder::new(IMAGE, 0x1000)
+        .add_import(MODULE, "HeapCreate")
+        .add_import(MODULE, "HeapAlloc")
+        .code(&code)
+        .build();
+    let mut imports = ImportRegistry::new();
+    register_standard_services(&mut imports, state.clone());
+    let result = run_synthetic_startup(
+        &bytes,
+        StartupLayout {
+            image_base: IMAGE,
+            stack_top: PROCESS_FIXTURE_STACK_TOP,
+            tls_base: 0x300000000,
+        },
+        imports,
+        100,
+    )
+    .unwrap();
+    assert_eq!(result.bound_imports, 2);
+    assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+    let heap = result.execution.final_state.get(Register::Rbx);
+    let address = result.execution.final_state.get(Register::Rax);
+    assert_ne!(heap, 0);
+    assert_ne!(address, 0);
+    assert_eq!(result.image.memory.read_u64(address).unwrap(), 0);
+    assert_eq!(
+        call_service_fixture(&state, MODULE, "HeapDestroy", &[heap])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0,
+        "a different address space cannot destroy the private heap"
+    );
+}
+
+#[test]
 fn test_guest_process_heap_through_iat() {
     const IMAGE: u64 = 0x140000000;
     const MODULE: &str = "api-ms-win-core-heap-l1-1-0.dll";

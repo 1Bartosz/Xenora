@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added private guest heap creation and destruction with per-heap allocation ownership.
+
 - Added default guest heap reallocation with data preservation and an in-place-only option.
 
 - Added the synthetic default process heap with allocation, size queries, and release.

@@ -684,6 +684,8 @@ impl SymbolDb {
                 "HeapReAlloc",
                 "HeapSize",
                 "HeapFree",
+                "HeapCreate",
+                "HeapDestroy",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }

@@ -85,13 +85,14 @@ impl fmt::Display for MemoryError {
 
 impl std::error::Error for MemoryError {}
 
+pub(crate) const PROCESS_HEAP: u64 = u64::MAX - 2;
 const MAX_DYNAMIC_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AllocationKind {
     ImageOrStatic,
     Virtual,
-    Heap,
+    Heap(u64),
 }
 
 #[derive(Clone)]
@@ -117,14 +118,14 @@ impl MappedRegion {
 #[derive(Default, Clone)]
 pub struct GuestMemory {
     regions: Vec<MappedRegion>,
+    private_heaps: std::collections::BTreeSet<u64>,
+    private_heap_serial: u64,
 }
 
 impl GuestMemory {
     /// Create a new empty guest address space.
     pub fn new() -> Self {
-        Self {
-            regions: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Map a new region into guest virtual memory.
@@ -200,8 +201,46 @@ impl GuestMemory {
         self.map_dynamic_allocation(requested_base, size, permissions, AllocationKind::Virtual)
     }
 
-    pub(crate) fn map_heap_allocation(&mut self, size: usize) -> Result<u64, MemoryError> {
-        self.map_dynamic_allocation(0, size, MemoryPermissions::READ_WRITE, AllocationKind::Heap)
+    pub(crate) fn create_private_heap(&mut self, initial: u64) -> Option<u64> {
+        if initial > MAX_DYNAMIC_BYTES as u64
+            || self.private_heaps.len() >= 256
+            || self.private_heap_serial >= i64::MAX as u64 - 3
+        {
+            return None;
+        }
+        self.private_heap_serial += 1;
+        let heap = PROCESS_HEAP - self.private_heap_serial;
+        self.private_heaps.insert(heap);
+        Some(heap)
+    }
+
+    pub(crate) fn has_heap(&self, heap: u64) -> bool {
+        heap == PROCESS_HEAP || self.private_heaps.contains(&heap)
+    }
+
+    pub(crate) fn destroy_private_heap(&mut self, heap: u64) -> bool {
+        if !self.private_heaps.remove(&heap) {
+            return false;
+        }
+        self.regions
+            .retain(|region| region.allocation != AllocationKind::Heap(heap));
+        true
+    }
+
+    pub(crate) fn map_heap_allocation(
+        &mut self,
+        heap: u64,
+        size: usize,
+    ) -> Result<u64, MemoryError> {
+        if !self.has_heap(heap) {
+            return Err(MemoryError::AllocationFailed);
+        }
+        self.map_dynamic_allocation(
+            0,
+            size,
+            MemoryPermissions::READ_WRITE,
+            AllocationKind::Heap(heap),
+        )
     }
 
     fn map_dynamic_allocation(
@@ -214,11 +253,11 @@ impl GuestMemory {
         // Bound retained host storage independently for each allocation kind.
         let allocated = self.dynamic_bytes(allocation);
         if size > MAX_DYNAMIC_BYTES - allocated
-            || (allocation == AllocationKind::Heap
+            || (matches!(allocation, AllocationKind::Heap(_))
                 && self
                     .regions
                     .iter()
-                    .filter(|r| r.allocation == allocation)
+                    .filter(|r| matches!(r.allocation, AllocationKind::Heap(_)))
                     .count()
                     >= 4096)
         {
@@ -237,7 +276,10 @@ impl GuestMemory {
     fn dynamic_bytes(&self, allocation: AllocationKind) -> usize {
         self.regions
             .iter()
-            .filter(|region| region.allocation == allocation)
+            .filter(|region| match allocation {
+                AllocationKind::Heap(_) => matches!(region.allocation, AllocationKind::Heap(_)),
+                _ => region.allocation == allocation,
+            })
             .map(|region| region.data.len())
             .sum()
     }
@@ -262,6 +304,7 @@ impl GuestMemory {
 
     pub(crate) fn resize_heap_allocation(
         &mut self,
+        heap: u64,
         base: u64,
         size: usize,
         in_place_only: bool,
@@ -269,10 +312,12 @@ impl GuestMemory {
         let index = self
             .regions
             .iter()
-            .position(|region| region.base == base && region.allocation == AllocationKind::Heap)
+            .position(|region| {
+                region.base == base && region.allocation == AllocationKind::Heap(heap)
+            })
             .ok_or(MemoryError::UnmappedAddress(base))?;
         let previous = self.regions[index].data.len();
-        let other_bytes = self.dynamic_bytes(AllocationKind::Heap) - previous;
+        let other_bytes = self.dynamic_bytes(AllocationKind::Heap(heap)) - previous;
         if size > MAX_DYNAMIC_BYTES - other_bytes {
             return Err(MemoryError::AllocationFailed);
         }
@@ -309,14 +354,14 @@ impl GuestMemory {
         self.release_dynamic_allocation(base, AllocationKind::Virtual)
     }
 
-    pub(crate) fn release_heap_allocation(&mut self, base: u64) -> bool {
-        self.release_dynamic_allocation(base, AllocationKind::Heap)
+    pub(crate) fn release_heap_allocation(&mut self, heap: u64, base: u64) -> bool {
+        self.release_dynamic_allocation(base, AllocationKind::Heap(heap))
     }
 
-    pub(crate) fn heap_allocation_size(&self, base: u64) -> Option<usize> {
+    pub(crate) fn heap_allocation_size(&self, heap: u64, base: u64) -> Option<usize> {
         self.regions
             .iter()
-            .find(|region| region.base == base && region.allocation == AllocationKind::Heap)
+            .find(|region| region.base == base && region.allocation == AllocationKind::Heap(heap))
             .map(|region| region.data.len())
     }
 
@@ -477,25 +522,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn private_heap_destruction_reclaims_only_owned_regions() {
+        let mut memory = GuestMemory::new();
+        let private = memory.create_private_heap(0).unwrap();
+        let peer = memory.create_private_heap(0).unwrap();
+        let address = memory.map_heap_allocation(private, 16).unwrap();
+        let retained = memory.map_heap_allocation(peer, 16).unwrap();
+        assert!(!memory.release_heap_allocation(peer, address));
+        assert_eq!(memory.heap_allocation_size(PROCESS_HEAP, address), None);
+        assert!(!memory.destroy_private_heap(PROCESS_HEAP));
+        assert!(memory.destroy_private_heap(private));
+        assert!(!memory.destroy_private_heap(private));
+        assert!(memory.map_heap_allocation(private, 16).is_err());
+        assert!(memory.read_u8(address).is_err());
+        assert_eq!(memory.read_u8(retained), Ok(0));
+        assert_ne!(memory.create_private_heap(0).unwrap(), private);
+    }
+
+    #[test]
     fn heap_resize_moves_only_when_allowed_and_preserves_bytes() {
         let mut memory = GuestMemory::new();
-        let base = memory.map_heap_allocation(19).unwrap();
-        let neighbor = memory.map_heap_allocation(1).unwrap();
+        let base = memory.map_heap_allocation(PROCESS_HEAP, 19).unwrap();
+        let neighbor = memory.map_heap_allocation(PROCESS_HEAP, 1).unwrap();
         memory.write_u8(base, 0xab).unwrap();
         memory.write_u8(neighbor, 0xcd).unwrap();
         let growth = (neighbor - base) as usize + 1;
         assert_eq!(
-            memory.resize_heap_allocation(base, growth, true),
+            memory.resize_heap_allocation(PROCESS_HEAP, base, growth, true),
             Err(MemoryError::AllocationFailed)
         );
-        assert_eq!(memory.heap_allocation_size(base), Some(19));
-        let moved = memory.resize_heap_allocation(base, growth, false).unwrap();
+        assert_eq!(memory.heap_allocation_size(PROCESS_HEAP, base), Some(19));
+        let moved = memory
+            .resize_heap_allocation(PROCESS_HEAP, base, growth, false)
+            .unwrap();
         assert_ne!(moved, base);
         assert_eq!(memory.read_u8(moved), Ok(0xab));
         assert_eq!(memory.read_u8(neighbor), Ok(0xcd));
         assert_eq!(memory.read_u8(moved + growth as u64 - 1), Ok(0));
-        assert_eq!(memory.heap_allocation_size(base), None);
-        assert_eq!(memory.resize_heap_allocation(moved, 1, true), Ok(moved));
-        assert_eq!(memory.heap_allocation_size(moved), Some(1));
+        assert_eq!(memory.heap_allocation_size(PROCESS_HEAP, base), None);
+        assert_eq!(
+            memory.resize_heap_allocation(PROCESS_HEAP, moved, 1, true),
+            Ok(moved)
+        );
+        assert_eq!(memory.heap_allocation_size(PROCESS_HEAP, moved), Some(1));
     }
 }
