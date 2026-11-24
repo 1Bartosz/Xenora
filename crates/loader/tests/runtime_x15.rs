@@ -1122,6 +1122,41 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn guest_gdk_manual_queue_handles_have_independent_lifetimes() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call = |symbol, args: &[u64]| {
+        let result = call_service_fixture(&state, "xgameruntime.dll", symbol, args);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result
+    };
+    let output = PROCESS_FIXTURE_STACK_TOP - 0x400;
+    let rejected = call("XTaskQueueCreate", &[1, 0, output]);
+    assert_eq!(
+        rejected.execution.final_state.get(Register::Rax),
+        0x8007_0032
+    );
+    assert_eq!(rejected.image.memory.read_u64(output).unwrap(), 0);
+    let open = |symbol, args: &[u64]| {
+        let result = call(symbol, args);
+        assert_eq!(result.execution.final_state.get(Register::Rax), 0);
+        result.image.memory.read_u64(output).unwrap()
+    };
+    let first = open("XTaskQueueCreate", &[0, 0, output]);
+    let second = open("XTaskQueueDuplicateHandle", &[first, output]);
+    assert_ne!(first, second);
+    call("XTaskQueueCloseHandle", &[first]);
+    let stale = call("XTaskQueueDuplicateHandle", &[first, output]);
+    assert_eq!(stale.execution.final_state.get(Register::Rax), 0x8007_0006);
+    assert_eq!(stale.image.memory.read_u64(output).unwrap(), 0);
+    let third = open("XTaskQueueDuplicateHandle", &[second, output]);
+    assert!(third > second);
+    call("XTaskQueueCloseHandle", &[second]);
+    call("XTaskQueueCloseHandle", &[third]);
+    let next = open("XTaskQueueCreate", &[0, 0, output]);
+    assert!(next > third);
+}
+
+#[test]
 fn guest_manual_tasks_deliver_results_once_through_imports() {
     let clock = Arc::new(MockClock::new(0));
     let state = Arc::new(ServicesState::new(clock.clone()));

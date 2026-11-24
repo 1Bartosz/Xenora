@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Handle ownership for the documented manual GDK task queue subset.
+
+use super::ServicesState;
+use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED};
+use crate::imports::{ImportRegistry, ServiceStatus};
+use crate::memory::GuestMemory;
+use crate::runtime::HResult;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+const MODULE: &str = "xgameruntime.dll";
+const MAX_HANDLES: usize = 64;
+const ERROR_OUTOFMEMORY: u32 = 14;
+const MANUAL: u32 = 0;
+
+#[derive(Default)]
+pub(super) struct QueueHandles {
+    last_id: u64,
+    queues: BTreeMap<u64, u64>,
+}
+
+impl QueueHandles {
+    fn open(
+        &mut self,
+        object: Option<u64>,
+        output: u64,
+        memory: &mut GuestMemory,
+    ) -> Result<(), u32> {
+        if output == 0 {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        if self.queues.len() == MAX_HANDLES {
+            return Err(ERROR_OUTOFMEMORY);
+        }
+        let next = self
+            .last_id
+            .checked_add(1)
+            .filter(|id| *id < (1 << 48))
+            .ok_or(ERROR_OUTOFMEMORY)?;
+        let handle = 0x5144_0000_0000_0000 | next;
+        memory
+            .write_u64(output, handle)
+            .map_err(|_| ERROR_INVALID_PARAMETER)?;
+        self.last_id = next;
+        self.queues.insert(handle, object.unwrap_or(handle));
+        Ok(())
+    }
+}
+
+fn guest_hresult(result: Result<(), u32>) -> u64 {
+    match result {
+        Ok(()) => HResult::OK.guest_return(),
+        Err(error) => HResult::from_win32(error).guest_return(),
+    }
+}
+
+pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    let create = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "XTaskQueueCreate",
+        ServiceStatus::Partial,
+        move |args, _, memory| {
+            if args.rcx as u32 != MANUAL || args.rdx as u32 != MANUAL {
+                return Ok(guest_hresult(Err(ERROR_NOT_SUPPORTED)));
+            }
+            let mut queues = create.gdk_queues.lock().expect("GDK queue handle table");
+            Ok(guest_hresult(queues.open(None, args.r8, memory)))
+        },
+    );
+
+    let duplicate = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "XTaskQueueDuplicateHandle",
+        ServiceStatus::Partial,
+        move |args, _, memory| {
+            let mut queues = duplicate.gdk_queues.lock().expect("GDK queue handle table");
+            let Some(&object) = queues.queues.get(&args.rcx) else {
+                return Ok(guest_hresult(Err(ERROR_INVALID_HANDLE)));
+            };
+            Ok(guest_hresult(queues.open(Some(object), args.rdx, memory)))
+        },
+    );
+
+    let close = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "XTaskQueueCloseHandle",
+        ServiceStatus::Partial,
+        move |args, _, _| {
+            close
+                .gdk_queues
+                .lock()
+                .expect("GDK queue handle table")
+                .queues
+                .remove(&args.rcx);
+            Ok(0)
+        },
+    );
+}

@@ -12,6 +12,7 @@
 mod crt;
 mod events;
 mod files;
+mod gdk_queue;
 mod heap;
 mod modules;
 mod task_fixture;
@@ -174,6 +175,7 @@ pub struct ServicesState {
     last_errors: Mutex<BTreeMap<u64, u32>>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
+    gdk_queues: Mutex<gdk_queue::QueueHandles>,
     winsock_changed: Condvar,
     pub next_alloc_addr: AtomicU64,
     pub graphics: Arc<Mutex<crate::graphics::GraphicsContext>>,
@@ -191,6 +193,7 @@ impl ServicesState {
             last_errors: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
+            gdk_queues: Mutex::default(),
             winsock_changed: Condvar::new(),
             next_alloc_addr: AtomicU64::new(0x0000_0002_0000_0000), // 8GB guest heap
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),
@@ -549,6 +552,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     );
     winsock::register(registry, &state);
     task_fixture::register(registry, &state);
+    gdk_queue::register(registry, &state);
     modules::register(registry, &state);
 }
 
