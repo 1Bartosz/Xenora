@@ -530,6 +530,7 @@ impl<'a> Interpreter<'a> {
         Ok((Register::from_index(reg_idx), Register::from_index(rm_idx)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_mov_rm(
         &mut self,
         modrm: u8,
