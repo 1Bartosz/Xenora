@@ -40,6 +40,11 @@ fn test_manifest_and_codegen_pipeline() {
 "api-ms-win-crt-string-l1-1-0.dll","strlen",0x1008
 "api-ms-win-core-processthreads-l1-1-0.dll","CreateThread",0x1010
 "custom.dll","UnknownCustomFunc",0x1018
+"kernel32.dll","QueryPerformanceCounter",0x1020
+"api-ms-win-core-profile-l1-1-0.dll","QueryPerformanceFrequency",0x1028
+"api-ms-win-core-processthreads-l1-1-0.dll","GetThreadId",0x1030
+"api-ms-win-core-handle-l1-1-0.dll","DuplicateHandle",0x1038
+"api-ms-win-core-sysinfo-l1-1-0.dll","GetTickCount64",0x1040
 "#;
 
     let tmp_dir = std::env::temp_dir().join("xenora_test_pipeline");
@@ -48,7 +53,7 @@ fn test_manifest_and_codegen_pipeline() {
     std::fs::write(&csv_file, csv_content).unwrap();
 
     let records = parse_csv(csv_file.to_str().unwrap()).unwrap();
-    assert_eq!(records.len(), 4);
+    assert_eq!(records.len(), 9);
 
     let db = SymbolDb::builtin();
     let manifest = Manifest::build(&records, &db);
@@ -58,10 +63,17 @@ fn test_manifest_and_codegen_pipeline() {
     assert_eq!(*summary.get("win32-stub").unwrap_or(&0), 1);
     assert_eq!(*summary.get("manual").unwrap_or(&0), 1);
 
+    assert_eq!(summary.get("standard-service"), Some(&5));
+    assert_eq!(manifest.generatable().count(), 3);
+
     let files = generate(&manifest, &db);
     assert!(files.crt_rs.contains("register_generated_crt_services"));
     assert!(files.crt_rs.contains("strlen"));
     assert!(files.stubs_rs.contains("CreateThread"));
+    assert!(!files.stubs_rs.contains("QueryPerformance"));
+    assert!(!files.stubs_rs.contains("GetThreadId"));
+    assert!(!files.stubs_rs.contains("DuplicateHandle"));
+    assert!(!files.stubs_rs.contains("GetTickCount64"));
     assert!(files.tests_rs.contains("generated_test_strlen"));
 
     let out_dir = tmp_dir.join("out");

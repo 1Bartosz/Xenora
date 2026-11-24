@@ -93,14 +93,37 @@ Win32 references include Microsoft's documentation for
 [SetProcessPriorityBoost](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocesspriorityboost),
 and [GetProcessPriorityBoost](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesspriorityboost).
 
+### Performance timing
+
+The guest can import `QueryPerformanceCounter` and `QueryPerformanceFrequency`
+from Kernel32 or the profile API set. The counter measures monotonic elapsed
+time at a fixed 10 MHz, independently of wall-clock time. Synthetic fixtures
+can advance it deterministically. A failed guest output write returns false
+and records `ERROR_NOACCESS`. `GetTickCount` and `GetTickCount64` return
+whole milliseconds since the synthetic runtime was created. The 32-bit value
+wraps at 2³² milliseconds. Both use the monotonic clock and are available
+through Kernel32 and the system-information API set.
+
+See Microsoft's documentation for
+[QueryPerformanceCounter](https://learn.microsoft.com/windows/win32/api/profileapi/nf-profileapi-queryperformancecounter)
+[QueryPerformanceFrequency](https://learn.microsoft.com/windows/win32/api/profileapi/nf-profileapi-queryperformancefrequency),
+[GetTickCount](https://learn.microsoft.com/windows/win32/api/sysinfoapi/nf-sysinfoapi-gettickcount),
+and [GetTickCount64](https://learn.microsoft.com/windows/win32/api/sysinfoapi/nf-sysinfoapi-gettickcount64).
+
 ### Thread handles and virtual memory
 
 The thread object model exposes one guest thread with a stable synthetic ID.
 `OpenThread` issues rights-checked handles to that thread, and `CloseHandle`
 invalidates real handles. A thread pseudo handle refers to the current synthetic
-thread. The priority APIs store and query the thread's base-priority setting.
+thread. `GetThreadId` accepts the pseudo handle and live thread handles with
+query rights. The priority APIs store and query the thread's base-priority setting.
 Thread creation, inheritance, debugger exceptions, and scheduling remain outside
-this model.
+this model. Within the synthetic process, `DuplicateHandle` can convert the
+thread pseudo handle to a real handle or copy a live thread handle. The new
+handle can keep or reduce the source's rights. The original and duplicate can
+be closed independently. Cross-process duplication, inheritable handles,
+process-handle duplication, and closing the source during duplication are
+outside this subset. A failed output write leaves the handle table unchanged.
 
 `VirtualAlloc` supports combined reserve and commit for data-only pages.
 `VirtualFree` supports `MEM_RELEASE` with the exact allocation base and a
@@ -110,7 +133,9 @@ allocation lifecycle remain unsupported.
 
 References include Microsoft's
 [thread handle](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthread),
+[thread ID](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadid),
 [thread priority](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadpriority),
+[handle duplication](https://learn.microsoft.com/windows/win32/api/handleapi/nf-handleapi-duplicatehandle),
 [handle close](https://learn.microsoft.com/windows/win32/api/handleapi/nf-handleapi-closehandle),
 [virtual allocation](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc),
 and [virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree) contracts.

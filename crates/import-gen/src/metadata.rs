@@ -30,6 +30,8 @@ pub enum AbiType {
     U64,
     F32,
     F64,
+    /// Opaque Win64 object handle.
+    Handle,
     /// Raw guest pointer (virtual address).
     Pointer {
         is_const: bool,
@@ -319,6 +321,49 @@ impl MetadataCatalog {
             "<errhandlingapi.h>",
             "Sets the last-error code for the calling thread",
         );
+        self.add(
+            "kernel32.dll",
+            "GetThreadId",
+            AbiType::U32,
+            vec![("Thread", AbiType::Handle)],
+            "<processthreadsapi.h>",
+            "Retrieves the identifier of the specified thread",
+        );
+        self.add(
+            "kernel32.dll",
+            "DuplicateHandle",
+            AbiType::Bool,
+            vec![
+                ("hSourceProcessHandle", AbiType::Handle),
+                ("hSourceHandle", AbiType::Handle),
+                ("hTargetProcessHandle", AbiType::Handle),
+                (
+                    "lpTargetHandle",
+                    AbiType::Pointer {
+                        is_const: false,
+                        pointee: "HANDLE".into(),
+                    },
+                ),
+                ("dwDesiredAccess", AbiType::U32),
+                ("bInheritHandle", AbiType::Bool),
+                ("dwOptions", AbiType::U32),
+            ],
+            "<handleapi.h>",
+            "Creates another handle to the same object",
+        );
+        for (name, return_type) in [
+            ("GetTickCount", AbiType::U32),
+            ("GetTickCount64", AbiType::U64),
+        ] {
+            self.add(
+                "kernel32.dll",
+                name,
+                return_type,
+                vec![],
+                "<sysinfoapi.h>",
+                "Returns elapsed system uptime in milliseconds",
+            );
+        }
         self.add(
             "kernel32.dll",
             "QueryPerformanceCounter",

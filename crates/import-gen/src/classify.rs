@@ -33,6 +33,8 @@ pub enum Classification {
         /// Brief description for the stub comment.
         note: &'static str,
     },
+    /// Service supplied by the loader standard registry.
+    StandardService,
     /// Compiler intrinsic or SEH helper; stub that traps gracefully.
     RuntimeHelper { note: &'static str },
     /// Proprietary, platform-only, or requires significant manual engineering.
@@ -47,6 +49,7 @@ impl Classification {
             Self::CrtNative { .. } => "crt-native",
             Self::CrtWrapper { .. } => "crt-wrapper",
             Self::Win32Stub { .. } => "win32-stub",
+            Self::StandardService => "standard-service",
             Self::RuntimeHelper { .. } => "runtime-helper",
             Self::Manual { .. } => "manual",
             Self::Unsupported { .. } => "unsupported",
@@ -54,7 +57,10 @@ impl Classification {
     }
 
     pub fn is_generatable(&self) -> bool {
-        !matches!(self, Self::Manual { .. } | Self::Unsupported { .. })
+        !matches!(
+            self,
+            Self::StandardService | Self::Manual { .. } | Self::Unsupported { .. }
+        )
     }
 }
 
@@ -675,6 +681,12 @@ impl SymbolDb {
     fn populate_win32_kernel(&mut self) {
         let p1 = "api-ms-win-core-processthreads-l1-1-0.dll";
         let p2 = "api-ms-win-core-processthreads-l1-1-2.dll";
+        for module in [p1, "kernel32.dll"] {
+            self.ins(module, "GetThreadId", Classification::StandardService);
+        }
+        for module in ["kernel32.dll", "api-ms-win-core-handle-l1-1-0.dll"] {
+            self.ins(module, "DuplicateHandle", Classification::StandardService);
+        }
         for m in &[p1, p2, "kernel32.dll"] {
             self.win32_stub(
                 m,
@@ -916,19 +928,11 @@ impl SymbolDb {
     // ---- Win32 performance -------------------------------------------------
 
     fn populate_win32_profile(&mut self) {
-        let m = "api-ms-win-core-profile-l1-1-0.dll";
-        self.win32_stub(
-            m,
-            "QueryPerformanceCounter",
-            false,
-            "QPC — returns host mach_absolute_time",
-        );
-        self.win32_stub(
-            m,
-            "QueryPerformanceFrequency",
-            false,
-            "QPF — returns 10 MHz",
-        );
+        for module in ["kernel32.dll", "api-ms-win-core-profile-l1-1-0.dll"] {
+            for symbol in ["QueryPerformanceCounter", "QueryPerformanceFrequency"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
     }
 
     // ---- Win32 system info -------------------------------------------------
@@ -941,8 +945,11 @@ impl SymbolDb {
             false,
             "returns current UTC as FILETIME",
         );
-        self.win32_stub(m, "GetTickCount64", false, "returns uptime in ms as u64");
-        self.win32_stub(m, "GetTickCount", false, "returns uptime in ms as u32");
+        for module in [m, "kernel32.dll"] {
+            for symbol in ["GetTickCount", "GetTickCount64"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         self.win32_stub(
             m,
             "GetSystemInfo",

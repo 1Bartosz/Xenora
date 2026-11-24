@@ -11,6 +11,11 @@ remains unsupported.
 
 ### Added
 
+- Added same-process duplication of synthetic thread handles with independent closure.
+- Added a rights-checked `GetThreadId` query for handles to the synthetic guest thread.
+- Added 32-bit and 64-bit millisecond uptime queries for synthetic Windows guests.
+- Added high-resolution elapsed-time queries for synthetic Windows guests through `QueryPerformanceCounter` and `QueryPerformanceFrequency`.
+
 - Added `dbt::tests::sib_store_executes_through_the_native_dbt`, an independent DBT execution
   test that runs the SIB store form `mov [rsp + 0x20], rbx` through the native ARM64 DBT and
   verifies the value lands in guest memory.

@@ -629,21 +629,35 @@ fn call_identity_fixture(
     symbol: &str,
     args: [u64; 3],
 ) -> xenora_loader::startup::StartupResult {
+    call_service_fixture(state, module, symbol, &args)
+}
+
+fn call_service_fixture(
+    state: &Arc<ServicesState>,
+    module: &str,
+    symbol: &str,
+    args: &[u64],
+) -> xenora_loader::startup::StartupResult {
     let image_base = 0x140000000;
-    let mut code = vec![0x48, 0x83, 0xec, 0x28]; // Win64 home space and alignment
-    for (register, value) in [[0x48, 0xb9], [0x48, 0xba], [0x49, 0xb8]]
-        .into_iter()
-        .zip(args)
-    {
-        code.extend_from_slice(&register); // mov rcx/rdx/r8, imm64
+    assert!(args.len() <= 7);
+    let mut code = vec![0x48, 0x83, 0xec, 0x48]; // home space, stack arguments and alignment
+    let registers = [[0x48, 0xb9], [0x48, 0xba], [0x49, 0xb8], [0x49, 0xb9]];
+    for (register, value) in registers.into_iter().zip(args) {
+        code.extend_from_slice(&register);
         code.extend_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in args.iter().skip(registers.len()).enumerate() {
+        code.extend_from_slice(&[0x48, 0xb8]); // mov rax, imm64
+        code.extend_from_slice(&value.to_le_bytes());
+        // mov [rsp + 32 + index * 8], rax (before the call pushes its return address)
+        code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x20 + index as u8 * 8]);
     }
     code.extend_from_slice(&[0x48, 0xb8]); // mov rax, address of output slot
     code.extend_from_slice(&PROCESS_FIXTURE_OUTPUT.to_le_bytes());
     // mov qword ptr [rax], -1, seeding the BOOL and adjacent bytes
     code.extend_from_slice(&[0x48, 0xc7, 0x00, 0xff, 0xff, 0xff, 0xff]);
     append_import_call(&mut code, 0x2060);
-    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]); // release frame and halt
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x48, 0xf4]); // release frame and halt
 
     let bytes = TestPeBuilder::new(image_base, 0x1000)
         .code(&code)
@@ -768,6 +782,104 @@ fn test_process_priority_boost_query_through_iat() {
     }
 }
 
+#[test]
+fn test_guest_performance_counter_through_iat() {
+    let clock = Arc::new(MockClock::new(133_000_000_000_000_000));
+    let state = Arc::new(ServicesState::new(clock.clone()));
+    let query = |module, symbol| {
+        let result = call_process_fixture(&state, module, symbol, PROCESS_FIXTURE_OUTPUT, 0);
+        assert_eq!(result.execution.final_state.get(Register::Rax), 1);
+        result
+            .image
+            .memory
+            .read_u64(PROCESS_FIXTURE_OUTPUT)
+            .unwrap()
+    };
+    let kernel = "kernel32.dll";
+    let profile = "api-ms-win-core-profile-l1-1-0.dll";
+    assert_eq!(query(kernel, "QueryPerformanceCounter"), 0);
+    assert_eq!(query(profile, "QueryPerformanceFrequency"), 10_000_000);
+    clock.advance(2_500_000);
+    assert_eq!(query(profile, "QueryPerformanceCounter"), 2_500_000);
+    assert_eq!(query(kernel, "QueryPerformanceFrequency"), 10_000_000);
+
+    for symbol in ["QueryPerformanceCounter", "QueryPerformanceFrequency"] {
+        for ptr in [0, 0x140001000, PROCESS_FIXTURE_STACK_TOP - 2] {
+            let result = call_process_fixture(&state, profile, symbol, ptr, 0);
+            assert_eq!(result.execution.final_state.get(Register::Rax), 0);
+            assert_eq!(
+                result
+                    .image
+                    .memory
+                    .read_u64(PROCESS_FIXTURE_OUTPUT)
+                    .unwrap(),
+                u64::MAX
+            );
+            let error = call_process_fixture(&state, kernel, "GetLastError", 0, 0);
+            assert_eq!(error.execution.final_state.get(Register::Rax), 998);
+        }
+    }
+    clock.advance(u64::MAX);
+    assert_eq!(query(kernel, "QueryPerformanceCounter"), i64::MAX as u64);
+    let error = call_process_fixture(&state, kernel, "GetLastError", 0, 0);
+    assert_eq!(error.execution.final_state.get(Register::Rax), 998);
+}
+
+#[test]
+fn test_guest_performance_counter_with_host_clock() {
+    let state = Arc::new(ServicesState::new(Arc::new(
+        xenora_loader::services::SystemClock,
+    )));
+    let read_counter = || {
+        let result = call_process_fixture(
+            &state,
+            "kernel32.dll",
+            "QueryPerformanceCounter",
+            PROCESS_FIXTURE_OUTPUT,
+            0,
+        );
+        assert_eq!(result.execution.final_state.get(Register::Rax), 1);
+        result
+            .image
+            .memory
+            .read_u64(PROCESS_FIXTURE_OUTPUT)
+            .unwrap()
+    };
+
+    let first = read_counter();
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    assert!(read_counter() > first);
+}
+
+#[test]
+fn test_guest_uptime_wraps_only_at_32_bits() {
+    let clock = Arc::new(MockClock::new(133_000_000_000_000_000));
+    clock.advance(5_000_000);
+    let state = Arc::new(ServicesState::new(clock.clone()));
+    let query = |module, symbol| {
+        call_service_fixture(&state, module, symbol, &[])
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let kernel = "kernel32.dll";
+    let sysinfo = "api-ms-win-core-sysinfo-l1-1-0.dll";
+    assert_eq!(query(kernel, "GetTickCount"), 0);
+    assert_eq!(query(sysinfo, "GetTickCount64"), 0);
+    clock.advance(9_999);
+    assert_eq!(query(kernel, "GetTickCount"), 0);
+    clock.advance(1);
+    assert_eq!(query(sysinfo, "GetTickCount64"), 1);
+
+    let max = u64::from(u32::MAX);
+    clock.advance((max - 1) * 10_000);
+    assert_eq!(query(sysinfo, "GetTickCount"), max);
+    assert_eq!(query(kernel, "GetTickCount64"), max);
+    clock.advance(10_000);
+    assert_eq!(query(sysinfo, "GetTickCount"), 0);
+    assert_eq!(query(kernel, "GetTickCount64"), max + 1);
+}
+
 fn append_import_call(code: &mut Vec<u8>, slot_rva: i32) {
     // call qword ptr [rip + disp32], through the fixture's import slot.
     let next_rva = 0x1000 + code.len() as i32 + 6;
@@ -789,6 +901,7 @@ fn test_guest_thread_handle_lifecycle_through_iat() {
     let last_error = || call("kernel32.dll", "GetLastError", [0; 3]);
     let id = call(api, "GetCurrentThreadId", [0; 3]);
     let pseudo = call(api, "GetCurrentThread", [0; 3]);
+    let thread_id = |handle| call(api, "GetThreadId", [handle, 0, 0]);
     assert_eq!(pseudo, u64::MAX - 1);
 
     const QUERY_LIMITED: u64 = 0x0800;
@@ -809,6 +922,12 @@ fn test_guest_thread_handle_lifecycle_through_iat() {
     assert_ne!(query_only, 0);
     assert_ne!(set_only, 0);
     assert_ne!(query_only, set_only);
+    assert_eq!(thread_id(pseudo), id);
+    assert_eq!(thread_id(query_only), id);
+    assert_eq!(thread_id(set_only), 0);
+    assert_eq!(last_error(), 5);
+    assert_eq!(thread_id(u64::MAX), 0);
+    assert_eq!(last_error(), 6);
     assert_eq!(query(query_only), 0);
     assert_eq!(set(query_only, 1), 0);
     assert_eq!(last_error(), 5);
@@ -824,14 +943,83 @@ fn test_guest_thread_handle_lifecycle_through_iat() {
     assert_eq!(query(pseudo), u64::from(u32::MAX));
     assert_eq!(close(pseudo), 1);
     assert_eq!(close(query_only), 1);
+    assert_eq!(thread_id(query_only), 0);
+    assert_eq!(last_error(), 6);
     assert_eq!(query(query_only), 0x7fff_ffff);
     assert_eq!(last_error(), 6);
     assert_eq!(close(query_only), 0);
     assert_eq!(last_error(), 6);
     let reopened = open(QUERY_LIMITED, 0, id);
     assert_ne!(reopened, query_only);
+    assert_eq!(thread_id(reopened), id);
+    assert_eq!(thread_id(query_only), 0);
     assert_eq!(query(reopened), u64::from(u32::MAX));
     assert_eq!(last_error(), 6);
+}
+
+#[test]
+fn test_guest_duplicates_thread_handle_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call = |symbol, arg| {
+        call_process_fixture(&state, "kernel32.dll", symbol, arg, 0)
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let duplicate = |source, output, rights, inherit, options| {
+        let result = call_service_fixture(
+            &state,
+            "api-ms-win-core-handle-l1-1-0.dll",
+            "DuplicateHandle",
+            &[u64::MAX, source, u64::MAX, output, rights, inherit, options],
+        );
+        let success = result.execution.final_state.get(Register::Rax);
+        let handle = result
+            .image
+            .memory
+            .read_u64(PROCESS_FIXTURE_OUTPUT)
+            .unwrap();
+        (success, handle)
+    };
+
+    let id = call("GetCurrentThreadId", 0);
+    let pseudo = call("GetCurrentThread", 0);
+    let (success, source) = duplicate(pseudo, PROCESS_FIXTURE_OUTPUT, 0x0800, 0, 0);
+    assert_eq!(success, 1);
+    assert_ne!(source, pseudo);
+    assert_eq!(call("GetThreadId", source), id);
+
+    assert_eq!(
+        duplicate(source, PROCESS_FIXTURE_OUTPUT, 0x0400, 0, 0),
+        (0, u64::MAX)
+    );
+    assert_eq!(call("GetLastError", 0), 5);
+    assert_eq!(duplicate(source, 0, 0, 0, 2), (0, u64::MAX));
+    assert_eq!(call("GetLastError", 0), 998);
+    assert_eq!(
+        duplicate(source, PROCESS_FIXTURE_OUTPUT, 0, 1, 2),
+        (0, u64::MAX)
+    );
+    assert_eq!(call("GetLastError", 0), 50);
+    assert_eq!(
+        duplicate(source, PROCESS_FIXTURE_OUTPUT, 0, 0, 1),
+        (0, u64::MAX)
+    );
+    assert_eq!(call("GetLastError", 0), 50);
+    assert_eq!(call("GetThreadId", source), id);
+
+    let (success, copy) = duplicate(source, PROCESS_FIXTURE_OUTPUT, u64::MAX, 0, 2);
+    assert_eq!(success, 1);
+    assert_ne!(source, copy);
+    assert_eq!(call("CloseHandle", source), 1);
+    assert_eq!(call("GetThreadId", copy), id);
+    assert_eq!(
+        duplicate(source, PROCESS_FIXTURE_OUTPUT, 0, 0, 2),
+        (0, u64::MAX)
+    );
+    assert_eq!(call("GetLastError", 0), 6);
+    assert_eq!(call("CloseHandle", copy), 1);
+    assert_eq!(call("GetThreadId", copy), 0);
 }
 
 #[test]
