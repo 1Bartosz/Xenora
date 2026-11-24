@@ -178,6 +178,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 
     register_address_conversion(registry, state);
     register_loopback(registry, state);
+    register_socket_names(registry, state);
     register_poll(registry, state);
 
     let get = Arc::clone(state);
@@ -384,6 +385,51 @@ fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
             socket_result(&recv, cpu.gs_base, result)
         },
     );
+}
+
+fn register_socket_names(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    for (symbol, peer) in [("getsockname", false), ("getpeername", true)] {
+        let state = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, memory| {
+                let result = (|| {
+                    let net = state.winsock.lock().expect("guest Winsock state");
+                    let socket = net.socket(args.rcx)?;
+                    let port = if peer {
+                        socket.peer.ok_or(WSAENOTCONN)?
+                    } else {
+                        socket.port.ok_or(WSAEINVAL)?
+                    };
+                    if args.rdx == 0 || args.r8 == 0 {
+                        return Err(WSAEFAULT);
+                    }
+                    let length = memory.read_u32(args.r8).map_err(|_| WSAEFAULT)? as i32;
+                    let mut address = [0; 16];
+                    if length < address.len() as i32 {
+                        return Err(WSAEFAULT);
+                    }
+                    memory
+                        .check_write(args.rdx, address.len())
+                        .map_err(|_| WSAEFAULT)?;
+                    memory.check_write(args.r8, 4).map_err(|_| WSAEFAULT)?;
+                    address[..2].copy_from_slice(&2_u16.to_le_bytes());
+                    address[2..4].copy_from_slice(&port.to_be_bytes());
+                    address[4..8].copy_from_slice(&[127, 0, 0, 1]);
+                    memory
+                        .write_bytes(args.rdx, &address)
+                        .map_err(|_| WSAEFAULT)?;
+                    memory
+                        .write_u32(args.r8, address.len() as u32)
+                        .map_err(|_| WSAEFAULT)?;
+                    Ok(0)
+                })();
+                socket_result(&state, cpu.gs_base, result)
+            },
+        );
+    }
 }
 
 fn register_poll(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {

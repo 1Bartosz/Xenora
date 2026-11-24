@@ -338,6 +338,8 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
         "WSAGetLastError",
         "WSACleanup",
         "WSAPoll",
+        "getsockname",
+        "getpeername",
         "inet_pton",
         "inet_ntop",
         "htons",
@@ -380,9 +382,11 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
     let text = SCRATCH + 0x260;
     let poll = SCRATCH + 0x280;
     let formatted = SCRATCH + 0x2a0;
+    let address_length = SCRATCH + 0x2b0;
+    let peer_address = SCRATCH + 0x2c0;
     memory.write_u16(address, 2).unwrap();
     let port = call(&mut memory, "htons", &[5000]);
-    memory.write_u16(address + 2, port as u16).unwrap();
+    assert_eq!(port, 0x8813);
     memory.write_bytes(text, b"127.0.0.1\0").unwrap();
     assert_eq!(call(&mut memory, "inet_pton", &[2, text, address + 4]), 1);
     assert_eq!(
@@ -423,7 +427,41 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
     assert_ne!(sender, u64::MAX);
     assert_ne!(sender, receiver);
     assert_eq!(call(&mut memory, "bind", &[receiver, address, 16]), 0);
+    memory.write_u32(address_length, 15).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "getsockname",
+            &[receiver, address, address_length]
+        ),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10014);
+    assert_eq!(memory.read_u16(address + 2).unwrap(), 0);
+    memory.write_u32(address_length, 32).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "getsockname",
+            &[receiver, address, address_length]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(address_length).unwrap(), 16);
+    assert_eq!(memory.read_u16(address + 2).unwrap().swap_bytes(), 49152);
     assert_eq!(call(&mut memory, "connect", &[sender, address, 16]), 0);
+    assert_eq!(
+        call(
+            &mut memory,
+            "getpeername",
+            &[sender, peer_address, address_length]
+        ),
+        0
+    );
+    assert_eq!(
+        memory.read_u64(peer_address).unwrap(),
+        memory.read_u64(address).unwrap()
+    );
     memory.write_u64(poll, receiver).unwrap();
     memory.write_u16(poll + 8, 0x0100).unwrap();
     memory.write_u64(poll + 16, sender).unwrap();
