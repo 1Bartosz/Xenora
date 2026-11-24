@@ -119,8 +119,8 @@ error.
 | `shift_amount` | `lshl_add` only: the fixed left shift of S0 before the add | `1` to `4`; required for `lshl_add`, rejected elsewhere |
 | `shift_count_bits` | Shifts only: the low bits of the count source used as the count: S1, or S0 for a vector form with `source_order = "reversed"`. Scalar forms mask it in the generated evaluation, vector forms in their MSL template; the XML must list the count source as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
 | `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `relation` (SOPC and SOPK compares only), `selected_src0` (min and max: S0 won the strict compare, so a tie gives 0), `unchanged` |
-| `vcc`, `exec` | Implicit effect on VCC and EXEC | `unchanged`; `vcc` is `lane_mask` exactly for the VOPC compares and the three VOP2 carry forms (fully written VCC_LO, with inactive bits zero and VCC_HI unknown afterwards); `exec` must be `unchanged` (explicit destinations are covered by the operand rule) |
-| `wave` | Wave sizes the form is valid in | `wave32` for the VOPC compares and the VCC-reading VOP2 forms in the Wave32 compute fixture ABI, `any` for other forms |
+| `vcc`, `exec` | Implicit effect on VCC and EXEC | `vcc` is `lane_mask` for [VOPC compares](vector-compare.md) and the three [VOP2 carry forms](vector-vcc.md). These write all of VCC_LO, zero inactive lane bits and leave VCC_HI unknown. Other forms declare `vcc` as `unchanged`. All forms declare `exec` as `unchanged`. Operand rules cover explicit destinations. |
+| `wave` | Wave sizes the form is valid in | `wave32` for VOPC compares, VOP1 integer forms and VCC-reading VOP2 forms in the Wave32 compute fixture ABI, `any` for other registry forms |
 | `operands` | Name of an `[operand_rules]` entry for the same family | e.g. `sop2_sgpr` |
 | `spec` | References `{ document, section, page }` | at least one `guide` reference with a page above 0 |
 | `verify` | Evidence the form needs before it counts as verified | `reference`, `independent`, `metal`, `llvm_encoding` |
