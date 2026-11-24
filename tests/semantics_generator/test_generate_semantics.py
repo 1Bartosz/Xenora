@@ -1471,6 +1471,13 @@ class SopkForms(unittest.TestCase):
         form(reg, "S_CMOVK_I32")["carry_in"] = "none"
         self.rejects(reg, "S_CMOVK_I32: carry_in none contradicts the XML SCC input")
 
+    def test_rejects_a_conditional_move_that_does_not_read_scc(self):
+        # S_MOVK_I32 has no SCC input, so as a cmov it would see SCC = 0 and
+        # never write D.
+        reg = self.registry()
+        form(reg, "S_MOVK_I32")["operation"] = "cmov"
+        self.rejects(reg, "S_MOVK_I32: operation cmov reads SCC (requires carry_in scc)")
+
     def test_rejects_a_two_source_operation_on_a_sopk_rule(self):
         reg = self.registry()
         form(reg, "S_MULK_I32")["operation"] = "and"

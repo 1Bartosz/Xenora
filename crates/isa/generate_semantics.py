@@ -107,7 +107,7 @@ SHIFTS = {"lshl", "lshr", "ashr"}
 # descriptor), so the XML gives it FMT_NUM_U32 whatever the form's signedness.
 CONTROL_S1 = SHIFTS | {"bfe"}
 # Operations that always read SCC: the select condition. They need carry_in scc.
-SCC_READERS = {"cselect"}
+SCC_READERS = {"cselect", "cmov"}
 # XML number formats a source may have for each declared signedness.
 SOURCE_FORMATS = {
     "signed": {"FMT_NUM_I32"},
