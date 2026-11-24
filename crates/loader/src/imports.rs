@@ -83,7 +83,10 @@ impl Win64Args {
             2 => Ok(self.r8),
             3 => Ok(self.r9),
             n => {
-                let stack_offset = 40 + ((n - 4) as u64) * 8;
+                let stack_offset = ((n - 4) as u64)
+                    .checked_mul(8)
+                    .and_then(|offset| offset.checked_add(40))
+                    .ok_or(MemoryError::Overflow)?;
                 let addr = self
                     .rsp
                     .checked_add(stack_offset)
@@ -428,5 +431,54 @@ fn find_import_directory(bytes: &[u8]) -> Result<Option<(u32, u32)>, ImportError
         Ok(None)
     } else {
         Ok(Some((import_rva, import_size)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::MemoryPermissions;
+
+    #[test]
+    fn win64_arguments_follow_register_and_stack_layout() {
+        let args = Win64Args {
+            rcx: 11,
+            rdx: 12,
+            r8: 13,
+            r9: 14,
+            rsp: 0x1000,
+        };
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region(0x1000, 56, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory.write_u64(0x1028, 15).unwrap();
+        memory.write_u64(0x1030, 16).unwrap();
+        for (index, expected) in (11..=16).enumerate() {
+            assert_eq!(args.get(index, &memory), Ok(expected));
+        }
+        assert_eq!(
+            args.get(6, &memory),
+            Err(MemoryError::UnmappedAddress(0x1038))
+        );
+    }
+
+    #[test]
+    fn win64_stack_arguments_reject_overflow_in_offsets_and_addresses() {
+        let mut args = Win64Args {
+            rcx: 0,
+            rdx: 0,
+            r8: 0,
+            r9: 0,
+            rsp: 0x1000,
+        };
+        let memory = GuestMemory::new();
+        assert_eq!(args.get(usize::MAX, &memory), Err(MemoryError::Overflow));
+        assert_eq!(
+            args.get(usize::MAX / 8 + 4, &memory),
+            Err(MemoryError::Overflow)
+        );
+        args.rsp = u64::MAX - 39;
+        assert_eq!(args.get(4, &memory), Err(MemoryError::Overflow));
     }
 }
