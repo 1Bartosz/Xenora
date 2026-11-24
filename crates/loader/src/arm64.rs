@@ -72,6 +72,10 @@ impl Arm64Assembler {
         &self.code
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.code.clear();
+    }
+
     pub fn current_offset(&self) -> usize {
         self.code.len()
     }
@@ -116,6 +120,31 @@ impl Arm64Assembler {
     pub fn patch_b_cond(&mut self, index: usize, cond: Condition, offset_insns: i32) {
         let imm19 = ((offset_insns as u32) & 0x0007_ffff) << 5;
         self.code[index] = 0x5400_0000 | imm19 | (cond as u32 & 0xf);
+    }
+
+    /// Patch a previously emitted unconditional `B` at `index`.
+    pub fn patch_b(&mut self, index: usize, offset_insns: i32) {
+        let imm26 = (offset_insns as u32) & 0x03ff_ffff;
+        self.code[index] = 0x1400_0000 | imm26;
+    }
+
+    /// CBZ Xt, imm19 (compare and branch on zero, 64-bit).
+    pub fn cbz_64(&mut self, xt: u8, offset_insns: i32) {
+        let imm19 = ((offset_insns as u32) & 0x0007_ffff) << 5;
+        self.emit(0xb4000000 | imm19 | (xt as u32 & 0x1f));
+    }
+
+    /// CBNZ Xt, imm19 (compare and branch on nonzero, 64-bit).
+    pub fn cbnz_64(&mut self, xt: u8, offset_insns: i32) {
+        let imm19 = ((offset_insns as u32) & 0x0007_ffff) << 5;
+        self.emit(0xb5000000 | imm19 | (xt as u32 & 0x1f));
+    }
+
+    /// Patch a previously emitted `CBZ`/`CBNZ` at `index`.
+    pub fn patch_cbz_64(&mut self, index: usize, xt: u8, offset_insns: i32) {
+        let imm19 = ((offset_insns as u32) & 0x0007_ffff) << 5;
+        let template = self.code[index] & 0xff00_0000;
+        self.code[index] = template | imm19 | (xt as u32 & 0x1f);
     }
 
     /// ADD (extended/shifted register, 64-bit): ADD Xd, Xn, Xm
@@ -355,10 +384,18 @@ impl Arm64Assembler {
 
     /// STP (64-bit pre-index): STP Xt1, Xt2, [Xn, #imm7]!
     pub fn stp_pre_64(&mut self, xt1: u8, xt2: u8, xn: u8, offset_bytes: i32) {
+        debug_assert_eq!(
+            offset_bytes % 8,
+            0,
+            "STP pre-index offset must be 8-byte aligned"
+        );
+        debug_assert!(
+            (-512..=504).contains(&offset_bytes),
+            "STP pre-index offset out of imm7 range"
+        );
         let imm7 = ((offset_bytes / 8) as u32) & 0x7f;
         self.emit(
-            0xa9a00000
-                | 0x001e0000
+            0xa9800000
                 | (imm7 << 15)
                 | ((xt2 as u32 & 0x1f) << 10)
                 | ((xn as u32 & 0x1f) << 5)
@@ -368,6 +405,15 @@ impl Arm64Assembler {
 
     /// LDP (64-bit post-index): LDP Xt1, Xt2, [Xn], #imm7
     pub fn ldp_post_64(&mut self, xt1: u8, xt2: u8, xn: u8, offset_bytes: i32) {
+        debug_assert_eq!(
+            offset_bytes % 8,
+            0,
+            "LDP post-index offset must be 8-byte aligned"
+        );
+        debug_assert!(
+            (-512..=504).contains(&offset_bytes),
+            "LDP post-index offset out of imm7 range"
+        );
         let imm7 = ((offset_bytes / 8) as u32) & 0x7f;
         self.emit(
             0xa8c00000
@@ -386,5 +432,95 @@ impl Arm64Assembler {
     /// MSR NZCV, Xt (Write flags from register)
     pub fn msr_nzcv(&mut self, xt: u8) {
         self.emit(0xd51b4200 | (xt as u32 & 0x1f));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_pair_encodings_cover_every_used_offset() {
+        // Cross-checked against the architectural encodings:
+        //   stp x29, x30, [sp, #-16]! == 0xa9bf7bfd
+        //   ldp x29, x30, [sp], #16  == 0xa8c17bfd
+        let mut asm = Arm64Assembler::new();
+        asm.stp_pre_64(X29, X30, SP, -16);
+        asm.ldp_post_64(X29, X30, SP, 16);
+        asm.stp_pre_64(X29, X30, SP, -32);
+        asm.ldp_post_64(X29, X30, SP, 32);
+        asm.stp_pre_64(X29, X30, SP, -48);
+        asm.ldp_post_64(X29, X30, SP, 48);
+        assert_eq!(
+            asm.instructions(),
+            &[
+                0xa9bf7bfd, 0xa8c17bfd, 0xa9be7bfd, 0xa8c27bfd, 0xa9bd7bfd, 0xa8c37bfd,
+            ]
+        );
+    }
+
+    #[test]
+    fn stp_pre_64_respects_the_requested_frame_size() {
+        let mut asm = Arm64Assembler::new();
+        asm.stp_pre_64(X19, X20, SP, -64);
+        assert_eq!(asm.instructions()[0], 0xa9bc53f3);
+        asm.stp_pre_64(X19, X20, SP, 496);
+        assert_eq!(asm.instructions()[1], 0xa99f53f3);
+    }
+
+    #[test]
+    fn alu_and_memory_encodings_match_llvm_mc() {
+        // Golden words produced by llvm-mc 23.1.6 for the same instructions.
+        let mut asm = Arm64Assembler::new();
+        asm.add_reg_64(X9, X9, X10);
+        asm.sub_reg_64(X9, X9, X10);
+        asm.and_reg_64(X9, X9, X10);
+        asm.orr_reg_64(X19, XZR, X0);
+        asm.eor_reg_64(X9, X9, X10);
+        asm.add_imm_64(X1, X1, 8);
+        asm.sub_imm_64(X1, X1, 8);
+        asm.movz_64(X9, 0x1234, 0);
+        asm.movk_64(X9, 0xabcd, 2);
+        asm.ldr_uoff_64(X9, X19, 128);
+        asm.str_uoff_64(X21, SP, 32);
+        asm.ldr_uoff_32(X0, X19, 136);
+        asm.str_uoff_32(X0, X19, 136);
+        asm.ldr_reg_64(X9, X19, X10);
+        asm.str_reg_64(X9, X19, X10);
+        asm.mrs_nzcv(X9);
+        asm.msr_nzcv(X9);
+        assert_eq!(
+            asm.instructions(),
+            &[
+                0x8b0a0129, 0xcb0a0129, 0x8a0a0129, 0xaa0003f3, 0xca0a0129, 0x91002021, 0xd1002021,
+                0xd2824689, 0xf2d579a9, 0xf9404269, 0xf90013f5, 0xb9408a60, 0xb9008a60, 0xf86a6a69,
+                0xf82a6a69, 0xd53b4209, 0xd51b4209,
+            ]
+        );
+    }
+
+    #[test]
+    fn compare_and_branch_encodings_match_the_assembler() {
+        // llvm-mc -triple=aarch64: cbz x5, #28 -> b40000e5;
+        // cbnz x9, #-8 -> b5ffffc9; b #20 -> 14000005.
+        let mut asm = Arm64Assembler::new();
+        asm.cbz_64(X5, 7);
+        asm.cbnz_64(X9, -2);
+        assert_eq!(asm.instructions(), &[0xb40000e5, 0xb5ffffc9]);
+        asm.patch_cbz_64(0, X5, 1);
+        assert_eq!(asm.instructions()[0], 0xb4000025);
+        let mut branch = Arm64Assembler::new();
+        branch.b(0);
+        branch.patch_b(0, 5);
+        assert_eq!(branch.instructions()[0], 0x14000005);
+    }
+
+    #[test]
+    fn unsigned_offset_stores_scale_by_access_size() {
+        let mut asm = Arm64Assembler::new();
+        asm.str_uoff_64(X21, SP, 32);
+        asm.ldr_uoff_64(X9, X19, 128);
+        asm.str_uoff_32(X0, X19, 136);
+        assert_eq!(asm.instructions(), &[0xf90013f5, 0xf9404269, 0xb9008a60]);
     }
 }

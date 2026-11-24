@@ -84,7 +84,10 @@ impl Win64Args {
             3 => Ok(self.r9),
             n => {
                 let stack_offset = 40 + ((n - 4) as u64) * 8;
-                let addr = self.rsp.checked_add(stack_offset).ok_or(MemoryError::Overflow)?;
+                let addr = self
+                    .rsp
+                    .checked_add(stack_offset)
+                    .ok_or(MemoryError::Overflow)?;
                 memory.read_u64(addr)
             }
         }
@@ -93,14 +96,34 @@ impl Win64Args {
 
 /// Handler for a typed guest service.
 /// Returns Ok(ret_val) to be placed into RAX, or Err(reason) to halt/fault execution.
-pub type ServiceHandler =
-    Box<dyn Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason> + Send + Sync>;
+pub type ServiceHandler = Box<
+    dyn Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason> + Send + Sync,
+>;
+
+/// Scope of a registered handler's implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceStatus {
+    Implemented,
+    Partial,
+    Stub,
+}
+
+impl ServiceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Implemented => "implemented",
+            Self::Partial => "partial",
+            Self::Stub => "stub",
+        }
+    }
+}
 
 /// Registration entry for an imported symbol.
 pub struct ServiceDescriptor {
     pub module: String,
     pub symbol: String,
     pub handler: ServiceHandler,
+    pub status: ServiceStatus,
 }
 
 /// Registry for resolving and binding import symbols to guest trampoline VAs.
@@ -125,6 +148,17 @@ impl ImportRegistry {
         }
     }
 
+    fn service_index(&self, module: &str, symbol: &str) -> Option<usize> {
+        self.services
+            .get(&(module.to_ascii_lowercase(), symbol.to_owned()))
+            .copied()
+    }
+
+    /// Check whether the exact import key has a binding, including stub handlers.
+    pub fn has_binding(&self, module: &str, symbol: &str) -> bool {
+        self.service_index(module, symbol).is_some()
+    }
+
     /// Register a host-provided guest service.
     pub fn register<F>(&mut self, module: &str, symbol: &str, handler: F)
     where
@@ -140,8 +174,60 @@ impl ImportRegistry {
             module: mod_key.clone(),
             symbol: sym_key.clone(),
             handler: Box::new(handler),
+            status: ServiceStatus::Implemented,
         });
         self.services.insert((mod_key, sym_key), index);
+    }
+
+    /// Describe the canonical binding behind an import without calling it.
+    pub fn binding(&self, module: &str, symbol: &str) -> Option<&ServiceDescriptor> {
+        self.service_index(module, symbol)
+            .map(|index| &self.handlers[index])
+    }
+
+    /// Iterate all canonical registered (module, symbol, status) tuples.
+    ///
+    /// Each entry is returned exactly once regardless of how many API-set alias
+    /// keys point at the same underlying handler.
+    pub fn iter_registered(&self) -> impl Iterator<Item = (&str, &str, ServiceStatus)> {
+        self.handlers
+            .iter()
+            .map(|d| (d.module.as_str(), d.symbol.as_str(), d.status))
+    }
+
+    /// Return (alias_module_lowercase, symbol) pairs that resolve to a canonical handler
+    /// in a different module.
+    pub fn iter_aliases(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        // `services` maps (module_lc, symbol) -> handler_index.
+        // An alias exists when module_lc != handlers[index].module.to_lowercase().
+        self.services.iter().filter_map(|((mod_lc, sym), &idx)| {
+            let canonical_mod = self.handlers[idx].module.to_ascii_lowercase();
+            if *mod_lc != canonical_mod {
+                Some((
+                    mod_lc.as_str(),
+                    sym.as_str(),
+                    self.handlers[idx].module.as_str(),
+                ))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn set_status(&mut self, module: &str, symbol: &str, status: ServiceStatus) {
+        let index = self
+            .service_index(module, symbol)
+            .expect("registered service");
+        self.handlers[index].status = status;
+    }
+
+    /// Point an API-set import at an existing handler and its trampoline.
+    pub(crate) fn alias(&mut self, module: &str, target: &str, symbol: &str) {
+        let index = self
+            .service_index(target, symbol)
+            .expect("registered alias target");
+        self.services
+            .insert((module.to_ascii_lowercase(), symbol.to_owned()), index);
     }
 
     /// Bind the PE's Import Address Table (IAT) in guest memory to synthetic trampoline VAs.
@@ -167,11 +253,18 @@ impl ImportRegistry {
         let mut bound_count = 0;
 
         while desc_file_off + 20 <= bytes.len() {
-            let oft = u32::from_le_bytes(bytes[desc_file_off..desc_file_off + 4].try_into().unwrap());
-            let name_rva =
-                u32::from_le_bytes(bytes[desc_file_off + 12..desc_file_off + 16].try_into().unwrap());
-            let ft =
-                u32::from_le_bytes(bytes[desc_file_off + 16..desc_file_off + 20].try_into().unwrap());
+            let oft =
+                u32::from_le_bytes(bytes[desc_file_off..desc_file_off + 4].try_into().unwrap());
+            let name_rva = u32::from_le_bytes(
+                bytes[desc_file_off + 12..desc_file_off + 16]
+                    .try_into()
+                    .unwrap(),
+            );
+            let ft = u32::from_le_bytes(
+                bytes[desc_file_off + 16..desc_file_off + 20]
+                    .try_into()
+                    .unwrap(),
+            );
 
             if oft == 0 && name_rva == 0 && ft == 0 {
                 break;
@@ -221,9 +314,7 @@ impl ImportRegistry {
                     }
                 };
 
-                let mod_key = mod_name.to_ascii_lowercase();
-                let Some(&service_idx) = self.services.get(&(mod_key.clone(), sym_name.clone()))
-                else {
+                let Some(service_idx) = self.service_index(&mod_name, &sym_name) else {
                     return Err(ImportError::UnresolvedImport {
                         module: mod_name,
                         symbol: sym_name,
@@ -233,7 +324,8 @@ impl ImportRegistry {
                 // Assign a deterministic synthetic trampoline VA
                 let trampoline_va =
                     IMPORT_TRAMPOLINE_BASE_VA + (service_idx as u64) * IMPORT_TRAMPOLINE_STRIDE;
-                self.trampoline_to_service.insert(trampoline_va, service_idx);
+                self.trampoline_to_service
+                    .insert(trampoline_va, service_idx);
 
                 // Write trampoline_va into guest IAT entry at (loaded_base + iat_rva)
                 let iat_va = loaded_base + iat_rva as u64;
@@ -293,16 +385,27 @@ fn find_import_directory(bytes: &[u8]) -> Result<Option<(u32, u32)>, ImportError
     if bytes.len() < coff_offset + 18 {
         return Ok(None);
     }
-    let size_of_opt =
-        u16::from_le_bytes(bytes[coff_offset + 16..coff_offset + 18].try_into().unwrap()) as usize;
+    let size_of_opt = u16::from_le_bytes(
+        bytes[coff_offset + 16..coff_offset + 18]
+            .try_into()
+            .unwrap(),
+    ) as usize;
 
     // Import directory is directory index 1 (offset 112 + 1 * 8 = 120 in Optional Header)
     if size_of_opt < 128 || bytes.len() < opt_offset + 128 {
         return Ok(None);
     }
 
-    let import_rva = u32::from_le_bytes(bytes[opt_offset + 120..opt_offset + 124].try_into().unwrap());
-    let import_size = u32::from_le_bytes(bytes[opt_offset + 124..opt_offset + 128].try_into().unwrap());
+    let import_rva = u32::from_le_bytes(
+        bytes[opt_offset + 120..opt_offset + 124]
+            .try_into()
+            .unwrap(),
+    );
+    let import_size = u32::from_le_bytes(
+        bytes[opt_offset + 124..opt_offset + 128]
+            .try_into()
+            .unwrap(),
+    );
 
     if import_rva == 0 || import_size == 0 {
         Ok(None)

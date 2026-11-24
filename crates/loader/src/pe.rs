@@ -228,10 +228,16 @@ impl ParsedPe {
 
     /// Load this parsed PE into a fresh `GuestMemory` instance, mapping all sections.
     pub fn load_into_memory(&self, bytes: &[u8]) -> Result<LoadedImage, PeError> {
+        self.load_at_base(bytes, self.image_base)
+    }
+
+    pub(crate) fn load_at_base(&self, bytes: &[u8], base: u64) -> Result<LoadedImage, PeError> {
         let mut memory = GuestMemory::new();
 
         for sec in &self.sections {
-            let base_addr = self.image_base + sec.virtual_address as u64;
+            let base_addr = base
+                .checked_add(u64::from(sec.virtual_address))
+                .ok_or(PeError::InvalidSectionHeaders)?;
             let map_size = std::cmp::max(sec.virtual_size, sec.raw_data_size) as usize;
             if map_size == 0 {
                 continue;
@@ -240,11 +246,9 @@ impl ParsedPe {
             let initial_data = if sec.raw_data_size > 0 && sec.raw_data_ptr > 0 {
                 let start = sec.raw_data_ptr as usize;
                 let end = start + sec.raw_data_size as usize;
-                if end <= bytes.len() {
-                    &bytes[start..end]
-                } else {
-                    &[]
-                }
+                bytes
+                    .get(start..end)
+                    .ok_or(PeError::InvalidSectionHeaders)?
             } else {
                 &[]
             };
@@ -254,7 +258,9 @@ impl ParsedPe {
                 .map_err(PeError::SectionMappingError)?;
         }
 
-        let entry_point = self.image_base + self.entry_point_rva as u64;
+        let entry_point = base
+            .checked_add(u64::from(self.entry_point_rva))
+            .ok_or(PeError::InvalidEntryPoint)?;
 
         Ok(LoadedImage {
             pe: self.clone(),

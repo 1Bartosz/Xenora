@@ -7,6 +7,8 @@
 
 use std::fmt;
 
+pub(crate) const ALLOCATION_GRANULARITY: u64 = 65_536;
+
 /// Permission flags for a mapped memory region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryPermissions {
@@ -16,6 +18,11 @@ pub struct MemoryPermissions {
 }
 
 impl MemoryPermissions {
+    pub const NO_ACCESS: Self = Self {
+        read: false,
+        write: false,
+        execute: false,
+    };
     pub const READ_ONLY: Self = Self {
         read: true,
         write: false,
@@ -83,6 +90,7 @@ struct MappedRegion {
     base: u64,
     data: Vec<u8>,
     permissions: MemoryPermissions,
+    virtual_allocation: bool,
 }
 
 impl MappedRegion {
@@ -117,29 +125,7 @@ impl GuestMemory {
         size: usize,
         permissions: MemoryPermissions,
     ) -> Result<(), MemoryError> {
-        let size_u64 = size as u64;
-        let end = base.checked_add(size_u64).ok_or(MemoryError::Overflow)?;
-
-        // Ensure no overlap with existing regions
-        for r in &self.regions {
-            let r_end = r.base + r.data.len() as u64;
-            if (base < r_end) && (r.base < end) {
-                return Err(MemoryError::OverlappingRegion {
-                    base,
-                    size: size_u64,
-                });
-            }
-        }
-
-        self.regions.push(MappedRegion {
-            base,
-            data: vec![0u8; size],
-            permissions,
-        });
-
-        // Keep sorted by base address
-        self.regions.sort_by_key(|r| r.base);
-        Ok(())
+        self.map_region_with_data(base, size, permissions, &[])
     }
 
     /// Map a new region and initialize it with initial data, bypassing runtime write permission checks.
@@ -150,12 +136,22 @@ impl GuestMemory {
         permissions: MemoryPermissions,
         initial_data: &[u8],
     ) -> Result<(), MemoryError> {
+        self.insert_region(base, size, permissions, initial_data, false)
+    }
+
+    fn insert_region(
+        &mut self,
+        base: u64,
+        size: usize,
+        permissions: MemoryPermissions,
+        initial_data: &[u8],
+        virtual_allocation: bool,
+    ) -> Result<(), MemoryError> {
         let size_u64 = size as u64;
         let end = base.checked_add(size_u64).ok_or(MemoryError::Overflow)?;
-
         for r in &self.regions {
             let r_end = r.base + r.data.len() as u64;
-            if (base < r_end) && (r.base < end) {
+            if base < r_end && r.base < end {
                 return Err(MemoryError::OverlappingRegion {
                     base,
                     size: size_u64,
@@ -163,18 +159,71 @@ impl GuestMemory {
             }
         }
 
-        let mut data = vec![0u8; size];
-        let copy_len = std::cmp::min(size, initial_data.len());
+        let mut data = Vec::new();
+        data.try_reserve_exact(size)
+            .map_err(|_| MemoryError::AllocationFailed)?;
+        data.resize(size, 0);
+        let copy_len = size.min(initial_data.len());
         data[..copy_len].copy_from_slice(&initial_data[..copy_len]);
 
         self.regions.push(MappedRegion {
             base,
             data,
             permissions,
+            virtual_allocation,
         });
-
         self.regions.sort_by_key(|r| r.base);
         Ok(())
+    }
+
+    pub(crate) fn map_virtual_allocation(
+        &mut self,
+        requested_base: u64,
+        size: usize,
+        permissions: MemoryPermissions,
+    ) -> Result<u64, MemoryError> {
+        // Bound the host storage retained by the synthetic VirtualAlloc service.
+        const MAX_VIRTUAL_BYTES: usize = 64 * 1024 * 1024;
+        let allocated: usize = self
+            .regions
+            .iter()
+            .filter(|region| region.virtual_allocation)
+            .map(|region| region.data.len())
+            .sum();
+        if size > MAX_VIRTUAL_BYTES - allocated {
+            return Err(MemoryError::AllocationFailed);
+        }
+
+        let mut base = requested_base;
+        if base == 0 {
+            base = 0x0000_0003_0000_0000;
+            for region in &self.regions {
+                let end = base.checked_add(size as u64).ok_or(MemoryError::Overflow)?;
+                if end <= region.base {
+                    break;
+                }
+                let region_end = region.base + region.data.len() as u64;
+                if base < region_end {
+                    base = region_end
+                        .checked_next_multiple_of(ALLOCATION_GRANULARITY)
+                        .ok_or(MemoryError::Overflow)?;
+                }
+            }
+        }
+        self.insert_region(base, size, permissions, &[], true)?;
+        Ok(base)
+    }
+
+    pub(crate) fn release_virtual_allocation(&mut self, base: u64) -> bool {
+        let Some(index) = self
+            .regions
+            .iter()
+            .position(|region| region.base == base && region.virtual_allocation)
+        else {
+            return false;
+        };
+        self.regions.remove(index);
+        true
     }
 
     /// Write raw bytes into guest memory at the specified address, checking permissions.

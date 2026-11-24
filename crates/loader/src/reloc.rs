@@ -30,19 +30,31 @@ impl fmt::Display for RelocationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DirectoryOutOfBounds { rva, size } => {
-                write!(f, "relocation directory (RVA 0x{rva:08x}, size 0x{size:x}) is out of bounds")
+                write!(
+                    f,
+                    "relocation directory (RVA 0x{rva:08x}, size 0x{size:x}) is out of bounds"
+                )
             }
             Self::MalformedBlockHeader { offset } => {
                 write!(f, "malformed relocation block header at offset {offset}")
             }
-            Self::BlockSizeOutOfBounds { block_size, max_size } => {
-                write!(f, "relocation block size 0x{block_size:x} exceeds boundary {max_size}")
+            Self::BlockSizeOutOfBounds {
+                block_size,
+                max_size,
+            } => {
+                write!(
+                    f,
+                    "relocation block size 0x{block_size:x} exceeds boundary {max_size}"
+                )
             }
             Self::UnsupportedRelocationType(t) => {
                 write!(f, "unsupported base relocation type: {t}")
             }
             Self::TargetOutOfBounds { target_va } => {
-                write!(f, "relocation target VA 0x{target_va:016x} is outside mapped memory")
+                write!(
+                    f,
+                    "relocation target VA 0x{target_va:016x} is outside mapped memory"
+                )
             }
             Self::Memory(e) => write!(f, "guest memory fault during relocation: {e}"),
             Self::ArithmeticOverflow => write!(f, "arithmetic overflow in relocation computation"),
@@ -98,12 +110,12 @@ pub fn apply_relocations(
         return Ok(report);
     }
 
-    let reloc_file_offset = pe
-        .rva_to_file_offset(reloc_rva)
-        .ok_or(RelocationError::DirectoryOutOfBounds {
-            rva: reloc_rva,
-            size: reloc_size,
-        })?;
+    let reloc_file_offset =
+        pe.rva_to_file_offset(reloc_rva)
+            .ok_or(RelocationError::DirectoryOutOfBounds {
+                rva: reloc_rva,
+                size: reloc_size,
+            })?;
 
     if reloc_file_offset + (reloc_size as usize) > bytes.len() {
         return Err(RelocationError::DirectoryOutOfBounds {
@@ -193,7 +205,10 @@ pub fn apply_relocations(
     Ok(report)
 }
 
-fn find_reloc_directory(bytes: &[u8], _pe: &ParsedPe) -> Result<Option<(u32, u32)>, RelocationError> {
+fn find_reloc_directory(
+    bytes: &[u8],
+    _pe: &ParsedPe,
+) -> Result<Option<(u32, u32)>, RelocationError> {
     if bytes.len() < 0x40 {
         return Ok(None);
     }
@@ -203,16 +218,27 @@ fn find_reloc_directory(bytes: &[u8], _pe: &ParsedPe) -> Result<Option<(u32, u32
     if bytes.len() < coff_offset + 18 {
         return Ok(None);
     }
-    let size_of_opt =
-        u16::from_le_bytes(bytes[coff_offset + 16..coff_offset + 18].try_into().unwrap()) as usize;
+    let size_of_opt = u16::from_le_bytes(
+        bytes[coff_offset + 16..coff_offset + 18]
+            .try_into()
+            .unwrap(),
+    ) as usize;
 
     // Relocation directory is directory index 5 (offset 112 + 5 * 8 = 152 in Optional Header)
     if size_of_opt < 160 || bytes.len() < opt_offset + 160 {
         return Ok(None);
     }
 
-    let reloc_rva = u32::from_le_bytes(bytes[opt_offset + 152..opt_offset + 156].try_into().unwrap());
-    let reloc_size = u32::from_le_bytes(bytes[opt_offset + 156..opt_offset + 160].try_into().unwrap());
+    let reloc_rva = u32::from_le_bytes(
+        bytes[opt_offset + 152..opt_offset + 156]
+            .try_into()
+            .unwrap(),
+    );
+    let reloc_size = u32::from_le_bytes(
+        bytes[opt_offset + 156..opt_offset + 160]
+            .try_into()
+            .unwrap(),
+    );
 
     if reloc_rva == 0 || reloc_size == 0 {
         Ok(None)

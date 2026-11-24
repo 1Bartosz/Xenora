@@ -16,3 +16,11 @@ timeout 30s cargo test --locked -p xenora-metal --features gpu-tests --test nati
 cargo test --locked -p xenora-loader --features gpu-tests --test dbt_render --no-run
 timeout 30s cargo test --locked -p xenora-loader --features gpu-tests --test dbt_render -- \
     --nocapture --test-threads=1
+
+cargo test --locked -p xenora-loader --features gpu-tests --test runtime_x15 --no-run
+timeout 30s cargo test --locked -p xenora-loader --features gpu-tests --test runtime_x15 -- \
+    test_fixture_c_service_to_metal_framebuffer --exact --nocapture --test-threads=1
+
+cargo test --locked -p xenora-loader --features gpu-tests --test graphics_d3d12 --no-run
+timeout 30s cargo test --locked -p xenora-loader --features gpu-tests --test graphics_d3d12 -- \
+    --nocapture --test-threads=1
