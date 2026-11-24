@@ -89,6 +89,14 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
         pc += 1;
     }
 
+    // Recognize the operand-size override for C7 without changing how the
+    // probe classifies prefixes on unrelated opcodes.
+    let operand_override =
+        b0 == 0x66 && matches!(slice.get(pc..), Some([0xc7, ..] | [0x40..=0x4f, 0xc7, ..]));
+    if operand_override {
+        b0 = slice[pc];
+        pc += 1;
+    }
     let mut rex_w = false;
     let mut op = b0;
 
@@ -141,6 +149,51 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
             is_dbt = true;
             is_interp = true;
             fall_through = false;
+        }
+        0xC7 => {
+            if let Some(&modrm) = slice.get(pc) {
+                pc += 1;
+                let mode = modrm >> 6;
+                let rm = modrm & 7;
+                if modrm & 0x38 != 0 {
+                    mnemonic = format!("unsupported c7 extension (modrm 0x{modrm:02x})");
+                    notes = "unknown instruction boundary".into();
+                    fall_through = false;
+                } else {
+                    pc += modrm_extra_len(modrm, slice, pc);
+                    let imm16 = operand_override && !rex_w;
+                    let imm_len = if imm16 { 2 } else { 4 };
+                    if let Some(imm) = slice.get(pc..pc + imm_len) {
+                        pc += imm_len;
+                        let (width, value) = if imm16 {
+                            (16, i32::from(i16::from_le_bytes(imm.try_into().unwrap())))
+                        } else {
+                            (
+                                if rex_w { 64 } else { 32 },
+                                i32::from_le_bytes(imm.try_into().unwrap()),
+                            )
+                        };
+                        mnemonic = format!("mov r/m{width}, {value} (modrm 0x{modrm:02x})");
+                        // The native C7 memory path always writes eight bytes and
+                        // does not apply segment bases or decode a SIB byte.
+                        is_dbt = mode == 3
+                            || (mode == 0 && rm != 4 && rex_w && !matches!(slice[0], 0x64 | 0x65));
+                        is_dbt &= !operand_override;
+                        if !is_dbt {
+                            notes = "MOV immediate operand form lacks native semantics".into();
+                        }
+                    } else {
+                        pc = slice.len();
+                        fall_through = false;
+                    }
+                }
+            } else {
+                fall_through = false;
+            }
+            if mnemonic.is_empty() {
+                mnemonic = "truncated c7".into();
+                notes = "incomplete MOV immediate encoding".into();
+            }
         }
         0xC2 => {
             // RETN imm16
@@ -443,8 +496,10 @@ fn modrm_extra_len(modrm: u8, slice: &[u8], after_modrm: usize) -> usize {
         extra += 1; // disp8
     } else if mode == 2 {
         extra += 4; // disp32
-    } else if mode == 0 && rm == 5 {
-        extra += 4; // RIP-relative disp32
+    } else if mode == 0
+        && (rm == 5 || (rm == 4 && slice.get(after_modrm).is_some_and(|sib| sib & 7 == 5)))
+    {
+        extra += 4; // RIP-relative or SIB with no base
     }
     // Clamp to what's actually available
     extra.min(slice.len().saturating_sub(after_modrm))
@@ -1048,7 +1103,7 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
 
     // 1. imports.csv
     let mut imports_csv = String::from(
-        "module,symbol_or_ordinal,iat_rva,category,registered_binding,implementation_status,is_alias,canonical_module,startup_priority,startup_cluster\n",
+        "module,symbol_or_ordinal,iat_rva,category,registered_binding,implementation_status,is_alias,canonical_module,startup_priority,startup_cluster,trusted_runner_binding\n",
     );
     let mut missing_csv = String::from("module,symbol_or_ordinal,iat_rva\n");
     let mut modules = BTreeSet::new();
@@ -1058,6 +1113,9 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
     let mut counts = BTreeMap::<&str, usize>::new();
     let mut clusters = BTreeMap::<(u8, &str), (usize, usize)>::new();
     let mut aliases = 0;
+    // The runner admits exactly these bytes and installs a private draw handler.
+    let trusted_fixture = bytes == include_bytes!("../../../fixtures/pe/trusted-runner.exe");
+    let mut trusted_runner_slots = 0;
     let mut missing = 0;
     for imp in &report.imports {
         let module_key = imp.dll.to_ascii_lowercase();
@@ -1071,6 +1129,10 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
         let module = imp.dll.replace('"', "\"\"");
         let symbol = imp.symbol.replace('"', "\"\"");
         let key = format!("\"{module}\",\"{symbol}\",0x{:08x}", imp.iat_rva);
+        let trusted_binding = trusted_fixture
+            && imp.dll.eq_ignore_ascii_case("xenora.dll")
+            && imp.symbol == "fixture_draw";
+        trusted_runner_slots += usize::from(trusted_binding);
         let status = imp.coverage_label();
         let canonical = imp.canonical_module.as_deref().unwrap_or("");
         let is_alias = imp.canonical_module.is_some() && !imp.dll.eq_ignore_ascii_case(canonical);
@@ -1086,7 +1148,7 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
         let canonical = canonical.replace('"', "\"\"");
         let _ = writeln!(
             imports_csv,
-            "{key},{},{},{status},{is_alias},\"{canonical}\",{priority},{cluster}",
+            "{key},{},{},{status},{is_alias},\"{canonical}\",{priority},{cluster},{trusted_binding}",
             imp.category, imp.is_supported
         );
         if !imp.is_supported {
@@ -1140,6 +1202,7 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
   "total_imports": {},
   "imported_dlls_count": {},
   "unresolved_imports": {},
+  "trusted_runner_binding_slots": {trusted_runner_slots},
   "distinct_import_keys": {},
   "distinct_symbol_names_and_scoped_ordinals": {},
   "canonical_registered_services": {},
@@ -1207,7 +1270,7 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
     let _ = writeln!(md, "- **Section Alignment**: `4096` bytes");
     let _ = writeln!(md, "- **File Alignment**: `512` bytes\n");
 
-    let _ = writeln!(md, "## Sections Census (10)");
+    let _ = writeln!(md, "## Sections Census ({})", report.parsed.sections.len());
     for s in &report.parsed.sections {
         let _ = writeln!(
             md,
@@ -1273,6 +1336,13 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
         md,
         "- **Unresolved standard import thunks**: `{missing}`. See `missing_imports.csv`. A registered handler may be a stub.\n"
     );
+
+    if trusted_runner_slots > 0 {
+        let _ = writeln!(
+            md,
+            "The trusted runner supplies `xenora.dll!fixture_draw` for this fixture. The standard registry counts above exclude that private handler.\n"
+        );
+    }
 
     let _ = writeln!(md, "## First Static DBT Blocker");
     if let Some(insn) = &report.first_unsupported_dbt_insn {
