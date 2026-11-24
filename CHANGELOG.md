@@ -12,6 +12,7 @@ remains unsupported.
 ### Added
 
 - Added an agent task queue for the cpu, gpu, runtime, shared and qa areas: an *Agent task* issue form with priority and interface fields, a workflow that decides `/claim`, `/release`, `/reassign`, `/progress`, `/blocked`, `/unblock` and `/approve-acceptance` comments one at a time (dependency, cycle and file-overlap checks, 24-hour leases renewed by progress), a pull request check (linked claimed task, file ownership, overlap with other pull requests, independent `/verified <head sha>`), `scripts/agent-queue.sh` and `scripts/agent-sync.sh` (upstream fetch every 12 minutes, task branches in separate worktrees) and a machine-readable queue summary. The rules are standard-library Python in `scripts/agent_queue/` with unit tests in `tests/agent_queue/`; issue text is never executed and acceptance commands need maintainer approval. See `docs/coordination/agent-tasks.md`. Unit tests pass locally; the workflows have not run on GitHub yet.
+- Added CPU block decoders for BC2, BC3, BC4 and BC5 (UNORM and SNORM) in `xenora-texture`, with tests whose expected texels were derived by hand from the Microsoft and Khronos block-compression specifications. Interpolated values truncate toward zero, as the existing BC1 decoder does; GPU upload and sampling of these formats are not implemented yet.
 - Added `dbt::tests::sib_store_executes_through_the_native_dbt`, an independent DBT execution
   test that runs the SIB store form `mov [rsp + 0x20], rbx` through the native ARM64 DBT and
   verifies the value lands in guest memory.
