@@ -88,3 +88,36 @@ fn test_manifest_and_codegen_pipeline() {
     assert!(out_dir.join("generated_tests.rs").exists());
     assert!(out_dir.join("generated_manifest.md").exists());
 }
+
+#[test]
+fn test_catalog_describes_windows_wide_string_signatures() {
+    use xenora_import_gen::{AbiType, MetadataCatalog};
+
+    let catalog = MetadataCatalog::builtin();
+    let wide = AbiType::StringWide;
+    for (symbol, return_type, parameters) in [
+        ("wcslen", AbiType::U64, vec![wide.clone()]),
+        ("wcsnlen", AbiType::U64, vec![wide.clone(), AbiType::U64]),
+        ("wcscmp", AbiType::I32, vec![wide.clone(), wide.clone()]),
+        (
+            "wcsncmp",
+            AbiType::I32,
+            vec![wide.clone(), wide, AbiType::U64],
+        ),
+    ] {
+        let signature = catalog.lookup("ucrtbase.dll", symbol).unwrap();
+        assert_eq!(signature.return_type, return_type);
+        assert_eq!(
+            signature
+                .params
+                .iter()
+                .map(|p| p.abi_type.clone())
+                .collect::<Vec<_>>(),
+            parameters
+        );
+    }
+    let copy = catalog.lookup("ucrtbase.dll", "memcpy").unwrap();
+    let move_ = catalog.lookup("ucrtbase.dll", "memmove").unwrap();
+    assert_eq!(move_.params, copy.params);
+    assert_eq!(move_.return_type, copy.return_type);
+}

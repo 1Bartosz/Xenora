@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added Win64 signatures for wide-string length and comparison and overlapping byte moves to the import catalog.
+
 - Added guest CRT wide-string length and comparison using Windows 16-bit code units.
 
 - Added checked guest CRT byte string comparison with `strcmp` and `strncmp`.
