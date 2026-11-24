@@ -8,7 +8,7 @@
 //! the value under test, so expected and actual values come from different
 //! decoders.
 
-use super::context;
+use super::{context, native};
 use xenora_texture::{
     BcChannelFormat, BcChannelUpload, BcChannelUploadDesc, decode_bc4_snorm, decode_bc4_unorm,
     decode_bc5_snorm, decode_bc5_unorm,
@@ -168,9 +168,7 @@ fn read_and_compare(case: &Case) -> (Reads, u8) {
             crop(&decoded[4..], 1, 2, 2),
         ];
         std::array::from_fn(|mip| {
-            let actual = gpu
-                .read_bc_channel_upload(&upload, layer, mip as u32)
-                .unwrap();
+            let actual = native(gpu.read_bc_channel_upload(&upload, layer, mip as u32));
             let expected = &levels[mip];
             assert_eq!(actual.len(), expected.len());
             for (texel, (&got, &want)) in actual.iter().zip(expected).enumerate() {
@@ -380,4 +378,104 @@ fn reads_pitched_bc5_snorm_in_red_green_order() {
     assert_eq!([sbyte(base[0], 1), sbyte(base[1], 1)], [-127, 127]);
     assert!(base.iter().all(|&word| word & 0xffff_0000 == 0x7f00_0000));
     println!("checked 58 BC5 SNORM texels, worst channel difference {worst}");
+}
+
+/// Reads a one-mip, one-layer upload of `width`×`height` from `blocks` with
+/// one padding block per row, comparing with the CPU decoder.
+fn read_edge(
+    format: BcChannelFormat,
+    reference: fn(&[u8]) -> [u32; 16],
+    blocks: &[Vec<u8>],
+    (width, height): (usize, usize),
+) -> Vec<u32> {
+    let block = format.block_bytes();
+    let pad = PAD.repeat(block / PAD.len());
+    let blocks_x = width.div_ceil(4);
+    let mut bytes = Vec::new();
+    for row in blocks.chunks(blocks_x) {
+        for slot in row {
+            bytes.extend_from_slice(slot);
+        }
+        bytes.extend_from_slice(&pad);
+    }
+    let upload = BcChannelUpload::new(
+        &bytes,
+        BcChannelUploadDesc {
+            width,
+            height,
+            mips: 1,
+            layers: 1,
+            format,
+            row_pitch: (blocks_x + 1) * block,
+            slice_pitch: bytes.len(),
+        },
+    )
+    .unwrap();
+    let actual = native(context().read_bc_channel_upload(&upload, 0, 0));
+    let decoded: Vec<_> = blocks.iter().map(|b| reference(b)).collect();
+    let expected = crop(&decoded, blocks_x, width, height);
+    assert_eq!(actual.len(), expected.len());
+    for (texel, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+        assert!(
+            distance(format, got, want) <= TOLERANCE,
+            "{format:?} {width}x{height}: texel {texel} got {got:#010x}, want {want:#010x}"
+        );
+    }
+    actual
+}
+
+#[test]
+fn reads_bc4_and_bc5_edge_blocks() {
+    let [eight, six, ..] = unsigned_blocks();
+    let [s_eight, s_six, _, _, s_low] = signed_blocks();
+    // 5×3 is one row of two blocks (Metal's zero row stride), both cut at
+    // row 3 and the second at column 1; 1×1 is one block cut to texel 0.
+    // Row 0 of every block holds indices 6, 7, 0, 1; column 0 holds 6, 2, 6.
+    let wide = read_edge(
+        BcChannelFormat::Bc4Unorm,
+        bc4_unorm,
+        &[eight.to_vec(), six.to_vec()],
+        (5, 3),
+    );
+    let red: Vec<_> = wide.iter().map(|&w| byte(w, 0)).collect();
+    assert_eq!([red[2], red[3], red[4], red[14]], [200, 20, 0, 0]);
+    assert_near("six-value index 2", red[9].into(), 56.0);
+    let wide = read_edge(
+        BcChannelFormat::Bc5Snorm,
+        bc5_snorm,
+        &[dual(s_eight, s_six), dual(s_six, s_eight)],
+        (5, 3),
+    );
+    // Block 0: red eight-value endpoints 100, -100; green six-value 0 and 1
+    // indices -100, 100. Block 1: red six-value fixed -1.0 at index 6, green
+    // eight-value index 6 (2 * 100 + 5 * -100) / 7 = -42.9.
+    let texel = |i: usize| [sbyte(wide[i], 0), sbyte(wide[i], 1)];
+    assert_eq!([texel(2), texel(3)], [[100, -100], [-100, 100]]);
+    assert_eq!(texel(4)[0], -127);
+    assert_near(
+        "green eight-value index 6",
+        texel(4)[1].into(),
+        -300.0 / 7.0,
+    );
+    // Index 6 of -128 < 127 is the six-value fixed -1.0.
+    let one = read_edge(
+        BcChannelFormat::Bc4Snorm,
+        bc4_snorm,
+        &[s_low.to_vec()],
+        (1, 1),
+    );
+    assert_eq!(one, [0x7f00_0081]);
+    let one = read_edge(
+        BcChannelFormat::Bc5Unorm,
+        bc5_unorm,
+        &[dual(six, eight)],
+        (1, 1),
+    );
+    assert_eq!(byte(one[0], 0), 0);
+    assert_near(
+        "green eight-value index 6",
+        byte(one[0], 1).into(),
+        500.0 / 7.0,
+    );
+    println!("checked 32 BC4 and BC5 texels from 5x3 and 1x1 edge levels");
 }

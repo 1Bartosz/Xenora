@@ -490,9 +490,24 @@ mod tests {
                 .len(),
             48
         );
-        assert_eq!(
-            BcChannelUpload::new(&bytes[..447], bc5).unwrap_err(),
-            TextureError::InvalidByteLength
-        );
+        // Short, oversized, and one block too few or too many for the layout.
+        for len in [447, 449, 432, 464] {
+            assert_eq!(
+                BcChannelUpload::new(&vec![0; len], bc5).unwrap_err(),
+                TextureError::InvalidByteLength
+            );
+        }
+        for desc in [
+            BcChannelUploadDesc { width: 0, ..bc5 },
+            BcChannelUploadDesc { height: 0, ..bc5 },
+            BcChannelUploadDesc { layers: 0, ..bc5 },
+            BcChannelUploadDesc { mips: 0, ..bc5 },
+            BcChannelUploadDesc { mips: 4, ..bc5 },
+        ] {
+            assert_eq!(
+                BcChannelUpload::new(&bytes, desc).unwrap_err(),
+                TextureError::InvalidLayout
+            );
+        }
     }
 }
