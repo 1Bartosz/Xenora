@@ -3,7 +3,7 @@
 from . import config as cfgmod
 from . import lease as L
 from .patterns import path_matches, patterns_overlap
-from .decide import task_index
+from .decide import task_index, verified_sha
 
 
 def verified_by(pr, comments, tasks, cfg):
@@ -11,11 +11,8 @@ def verified_by(pr, comments, tasks, cfg):
     head, out = pr.get("head_sha", ""), []
     holders = {tasks[i]["holder"] for i in L.linked_issues(pr.get("body")) if i in tasks}
     for c in comments:
-        parts = c["body"].strip().split("\n", 1)[0].split()
-        if len(parts) < 2 or parts[0] != "/verified" or len(parts[1]) < 7:
-            continue
-        who = c["user"]
-        if (head.startswith(parts[1]) and who != pr.get("author") and who not in holders
+        sha, who = verified_sha(c["body"]), c["user"]
+        if (sha and sha == head and who != pr.get("author") and who not in holders
                 and cfgmod.is_verifier(cfg, who) and who not in out):
             out.append(who)
     return out
@@ -48,5 +45,5 @@ def check_pr(state, cfg, now):
             problems.append("overlaps open PR #%d on: %s" % (other["number"], ", ".join(shared[:10])))
     ok_by = verified_by(pr, comments, tasks, cfg)
     if not ok_by:
-        problems.append("independent verification missing: an eligible verifier must comment `/verified %s`" % pr.get("head_sha", "")[:12])
+        problems.append("independent verification missing: an eligible verifier must comment `/verified %s`" % pr.get("head_sha", ""))
     return {"pr": pr["number"], "ok": not problems, "problems": problems, "verified_by": ok_by}
