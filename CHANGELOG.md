@@ -35,6 +35,8 @@ remains unsupported.
 
 ### Fixed
 
+- Generated CRT adapters now report unsupported calls when the required guest ABI or runtime behavior is missing.
+
 - Win64 service argument decoding reports a guest memory error when a stack argument offset overflows.
 
 - Updated `test_probe_static_analysis_does_not_execute_code`: the SIB store `mov [rsp + 0x20],

@@ -119,9 +119,15 @@ pub fn register_generated_crt_services(registry: &mut ImportRegistry) {
 
 /// Generate a registration block for a CrtNative symbol.
 /// These use a simple `Win64Args` → libc dispatch pattern.
-fn gen_crt_native_registration(module: &str, symbol: &str, libc_sym: &str, note: &str) -> String {
+fn gen_crt_native_registration(module: &str, symbol: &str, _libc_sym: &str, note: &str) -> String {
     // Determine the calling pattern based on symbol name
-    let dispatch = crt_dispatch_expr(symbol, libc_sym);
+    let (status, dispatch) = match crt_dispatch_expr(symbol) {
+        Some(dispatch) => ("Partial", dispatch),
+        None => (
+            "Stub",
+            "Err(ExitReason::IllegalInstruction(0xFE))".to_owned(),
+        ),
+    };
 
     format!(
         r#"
@@ -129,7 +135,7 @@ fn gen_crt_native_registration(module: &str, symbol: &str, libc_sym: &str, note:
     // Source: ISO C / POSIX public specification.
     registry.register_with_status(
         "{module}", "{symbol}",
-        ServiceStatus::Partial,  // upgraded to Implemented when conformance test passes
+        ServiceStatus::{status},
         |args: &Win64Args, _cpu: &mut CpuState, mem: &mut GuestMemory| -> Result<u64, ExitReason> {{
             {dispatch}
         }},
@@ -151,9 +157,7 @@ fn gen_crt_wrapper_registration(module: &str, symbol: &str, _libc_sym: &str, not
         "{module}", "{symbol}",
         ServiceStatus::Stub,
         |args: &Win64Args, _cpu: &mut CpuState, mem: &mut GuestMemory| -> Result<u64, ExitReason> {{
-            // Safe-CRT wrapper: delegates to underlying function, ignores size argument.
-            // Guest memory is already bounds-checked by the caller's service dispatch.
-            Ok(0) // success
+            Err(ExitReason::IllegalInstruction(0xFE))
         }},
     );
 "#,
@@ -162,14 +166,14 @@ fn gen_crt_wrapper_registration(module: &str, symbol: &str, _libc_sym: &str, not
 
 /// Generate a registration for a runtime helper (EH frame handlers, etc.).
 fn gen_runtime_helper_registration(module: &str, symbol: &str, note: &str) -> String {
-    // Most runtime helpers either call abort or return 0
+    // Termination helpers halt. Other unimplemented helpers fail explicitly.
     let body = if symbol.contains("Throw")
         || symbol.contains("terminate")
         || symbol.contains("purecall")
     {
         "// C++ exception/terminate: halt guest execution.\n            Err(ExitReason::Halted)"
     } else {
-        "Ok(0)"
+        "Err(ExitReason::IllegalInstruction(0xFE))"
     };
     format!(
         r#"
@@ -276,6 +280,7 @@ fn fresh_state() -> (CpuState, GuestMemory) {
     // Generate a test per CrtNative entry that has a testable canonical case
     for entry in manifest.entries.iter() {
         if let Classification::CrtNative { libc_sym, .. } = &entry.classification
+            && crt_dispatch_expr(&entry.symbol).is_some()
             && let Some(test) = canonical_test(&entry.symbol, libc_sym)
         {
             out.push_str(&format!(
@@ -339,74 +344,9 @@ fn symbol_to_ident_lower(sym: &str) -> String {
     symbol_to_ident(sym).to_ascii_lowercase()
 }
 
-/// Returns the Rust dispatch expression body for a CRT native call.
-/// We call libc via `unsafe` FFI.  Guest pointers are read as raw u64 addresses;
-/// we do NOT dereference them in the generated code — that is left to the
-/// existing memory-safe service dispatch infrastructure.
-fn crt_dispatch_expr(symbol: &str, libc_sym: &str) -> String {
-    // Categorise by calling pattern
-    match symbol {
-        // Math f64 → f64, single arg
-        "acos" | "asin" | "atan" | "cos" | "sin" | "tan" | "exp" | "log" | "log10" | "log2"
-        | "sqrt" | "fabs" | "floor" | "ceil" | "round" | "trunc" | "exp2" => {
-            format!(
-                r#"let x = f64::from_bits(args.rcx);
-            extern "C" {{ fn {libc_sym}(x: f64) -> f64; }}
-            let r = unsafe {{ {libc_sym}(x) }};
-            Ok(r.to_bits())"#,
-                libc_sym = libc_sym,
-            )
-        }
-        // Math f32 → f32, single arg
-        "acosf" | "asinf" | "atanf" | "cosf" | "sinf" | "tanf" | "expf" | "logf" | "log10f"
-        | "log2f" | "sqrtf" | "fabsf" | "floorf" | "ceilf" | "roundf" | "truncf" | "cbrtf"
-        | "erff" | "exp2f" => {
-            format!(
-                r#"let x = f32::from_bits(args.rcx as u32);
-            extern "C" {{ fn {libc_sym}(x: f32) -> f32; }}
-            let r = unsafe {{ {libc_sym}(x) }};
-            Ok(r.to_bits() as u64)"#,
-                libc_sym = libc_sym,
-            )
-        }
-        // Math f64 × f64 → f64, two args
-        "atan2" | "pow" | "fmod" | "hypot" | "fmax" | "fmin" | "copysign" => {
-            format!(
-                r#"let x = f64::from_bits(args.rcx);
-            let y = f64::from_bits(args.rdx);
-            extern "C" {{ fn {libc_sym}(x: f64, y: f64) -> f64; }}
-            let r = unsafe {{ {libc_sym}(x, y) }};
-            Ok(r.to_bits())"#,
-                libc_sym = libc_sym,
-            )
-        }
-        // Math f32 × f32 → f32
-        "atan2f" | "powf" | "fmodf" | "hypotf" | "fmaxf" | "fminf" | "copysignf" => {
-            format!(
-                r#"let x = f32::from_bits(args.rcx as u32);
-            let y = f32::from_bits(args.rdx as u32);
-            extern "C" {{ fn {libc_sym}(x: f32, y: f32) -> f32; }}
-            let r = unsafe {{ {libc_sym}(x, y) }};
-            Ok(r.to_bits() as u64)"#,
-                libc_sym = libc_sym,
-            )
-        }
-        // Math f64 × f64 × f64 → f64 (fma)
-        "fma" => r#"let x = f64::from_bits(args.rcx);
-            let y = f64::from_bits(args.rdx);
-            let z = f64::from_bits(args.r8);
-            extern "C" { fn fma(x: f64, y: f64, z: f64) -> f64; }
-            let r = unsafe { fma(x, y, z) };
-            Ok(r.to_bits())"#
-            .to_string(),
-        "fmaf" => r#"let x = f32::from_bits(args.rcx as u32);
-            let y = f32::from_bits(args.rdx as u32);
-            let z = f32::from_bits(args.r8 as u32);
-            extern "C" { fn fmaf(x: f32, y: f32, z: f32) -> f32; }
-            let r = unsafe { fmaf(x, y, z) };
-            Ok(r.to_bits() as u64)"#
-            .to_string(),
-        // strlen(ptr) -> size_t
+/// Returns a dispatch body for CRT calls with a compatible guest ABI adapter.
+fn crt_dispatch_expr(symbol: &str) -> Option<String> {
+    Some(match symbol {
         "strlen" => r#"// strlen: RCX = guest pointer to null-terminated string
             let ptr = args.rcx;
             if ptr == 0 { return Ok(0); }
@@ -513,16 +453,9 @@ fn crt_dispatch_expr(symbol: &str, libc_sym: &str) -> String {
         "toupper" => r#"let c = (args.rcx & 0xFF) as u8;
             Ok(c.to_ascii_uppercase() as u64)"#
             .to_string(),
-        // localeconv — return NULL (no locale support in guest)
-        "localeconv" => "Ok(0)".to_string(),
-        // strftime — stub returning 0
-        "strftime" => "Ok(0)".to_string(),
-        // Generic: return 0 as a safe default
-        _ => format!(
-            "// No specific dispatch for '{symbol}' — safe default\n            Ok(0)",
-            symbol = symbol,
-        ),
-    }
+        // Floating-point CRT calls also land here until XMM state is available.
+        _ => return None,
+    })
 }
 
 /// Returns a Rust test body for symbols where we can derive a known-good expected value.

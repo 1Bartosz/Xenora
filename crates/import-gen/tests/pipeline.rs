@@ -69,6 +69,11 @@ fn test_manifest_and_codegen_pipeline() {
     let files = generate(&manifest, &db);
     assert!(files.crt_rs.contains("register_generated_crt_services"));
     assert!(files.crt_rs.contains("strlen"));
+    let acos = files.crt_rs.split_once("\"acos\"").unwrap().1;
+    let (acos, _) = acos.split_once("registry.register_with_status").unwrap();
+    assert!(acos.contains("ServiceStatus::Stub"));
+    assert!(acos.contains("Err(ExitReason::IllegalInstruction(0xFE))"));
+    assert!(!files.tests_rs.contains("generated_test_acos"));
     assert!(files.stubs_rs.contains("CreateThread"));
     assert!(!files.stubs_rs.contains("QueryPerformance"));
     assert!(!files.stubs_rs.contains("GetThreadId"));
