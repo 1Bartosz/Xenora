@@ -3,7 +3,7 @@
 //! End-to-end integration tests for Xenora X12: PE32+ loading & x86-64 execution bootstrap.
 
 use xenora_loader::cpu::{CpuState, ExitReason, Interpreter, Register};
-use xenora_loader::memory::{MemoryError, MemoryPermissions};
+use xenora_loader::memory::{GuestMemory, MemoryError, MemoryPermissions};
 use xenora_loader::pe::{
     IMAGE_FILE_MACHINE_AMD64, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, PE32_PLUS_MAGIC, ParsedPe,
 };
@@ -288,4 +288,177 @@ fn test_sib_addressing_mode() {
 
     assert_eq!(result.exit_reason, ExitReason::Halt);
     assert_eq!(result.final_state.get(Register::Rdx), 0x12345678_9abcdef0);
+}
+
+/// Base address of the read-write data region used by the SIB tests.
+const DATA_BASE: u64 = 0x6000_0000;
+/// Base address of the read-write stack region used by the SIB tests.
+const STACK_BASE: u64 = 0x5000_0000;
+
+/// Run `code` on the interpreter with a writable stack and a writable data
+/// region, and return the final state, the exit reason and the guest memory.
+///
+/// `DATA_BASE` is mapped read-write so a test can observe where a store
+/// landed. `STACK_BASE` holds the stack pointer.
+fn run_with_regions(code: &[u8]) -> (CpuState, ExitReason, GuestMemory) {
+    let pe_bytes = build_synthetic_pe32_plus(code);
+    let parsed = ParsedPe::parse(&pe_bytes).expect("parse");
+    let mut loaded = parsed.load_into_memory(&pe_bytes).expect("load");
+
+    loaded
+        .memory
+        .map_region(STACK_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("stack mapping should succeed");
+    loaded
+        .memory
+        .map_region(DATA_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("data mapping should succeed");
+
+    let cpu = CpuState::new(loaded.entry_point, STACK_BASE + 0x8000);
+    let mut interp = Interpreter::new(cpu, &mut loaded.memory, 100);
+    let result = interp.run();
+    (result.final_state, result.exit_reason, loaded.memory)
+}
+
+/// `mov rax, DATA_BASE` (48 B8 <imm64>).
+fn mov_rax_data_base() -> Vec<u8> {
+    let mut code = vec![0x48, 0xB8];
+    code.extend_from_slice(&DATA_BASE.to_le_bytes());
+    code
+}
+
+/// `mov rbx, 0x12345678_9abcdef0` (48 BB <imm64>).
+fn mov_rbx_value() -> Vec<u8> {
+    let mut code = vec![0x48, 0xBB];
+    code.extend_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+    code
+}
+
+/// A SIB index register is extended by REX.X, not by REX.R.
+///
+/// The encoding 4A 89 1C E0 is `mov [rax + r12*8], rbx`. Its REX prefix sets
+/// REX.X, so the SIB index field 100b selects r12 and the store lands at
+/// `rax + r12*8`. REX.R is clear in this prefix, so the ModRM `reg` field is
+/// rbx.
+#[test]
+fn test_rex_x_extends_the_sib_index_register() {
+    // mov rax, DATA_BASE           (48 b8 <imm64>)
+    // mov r12, 4                   (41 bc 04 00 00 00)
+    // mov rbx, 0x12345678_9abcdef0 (48 bb <imm64>)
+    // mov [rax + r12*8], rbx       (4a 89 1c e0)
+    // hlt                          (f4)
+    let mut code = mov_rax_data_base();
+    code.extend_from_slice(&[0x41, 0xBC, 0x04, 0x00, 0x00, 0x00]); // mov r12d, 4
+    code.extend_from_slice(&mov_rbx_value());
+    code.extend_from_slice(&[0x4A, 0x89, 0x1C, 0xE0]); // mov [rax + r12*8], rbx
+    code.push(0xF4); // hlt
+
+    let (_state, reason, memory) = run_with_regions(&code);
+    assert_eq!(reason, ExitReason::Halt);
+    // r12 holds 4, so the store lands at DATA_BASE + 4*8.
+    assert_eq!(
+        memory.read_u64(DATA_BASE + 32).expect("indexed slot"),
+        0x1234_5678_9abc_def0
+    );
+    // The unindexed slot at DATA_BASE must be untouched.
+    assert_eq!(memory.read_u64(DATA_BASE).expect("base slot"), 0);
+}
+
+/// REX.R and REX.X extend independent fields in the same instruction.
+///
+/// The encoding 4C 89 1C C8 is `mov [rax + rcx*8], r11`. Its REX prefix sets
+/// REX.R, so the ModRM `reg` field 011 selects r11. It does not set REX.X, so
+/// the SIB index field 001 selects rcx and must not be extended to r9.
+#[test]
+fn test_rex_r_does_not_extend_the_sib_index_register() {
+    // mov rax, DATA_BASE           (48 b8 <imm64>)
+    // mov r11, 0x11223344_55667788 (49 bb <imm64>)
+    // mov ecx, 4                   (b9 04 00 00 00)
+    // mov r9, 8                    (41 b9 08 00 00 00)
+    // mov [rax + rcx*8], r11       (4c 89 1c c8)
+    // hlt                          (f4)
+    let mut code = mov_rax_data_base();
+    let mut r11 = vec![0x49, 0xBB];
+    r11.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    code.extend_from_slice(&r11);
+    code.extend_from_slice(&[0xB9, 0x04, 0x00, 0x00, 0x00]); // mov ecx, 4
+    code.extend_from_slice(&[0x41, 0xB9, 0x08, 0x00, 0x00, 0x00]); // mov r9d, 8
+    code.extend_from_slice(&[0x4C, 0x89, 0x1C, 0xC8]); // mov [rax + rcx*8], r11
+    code.push(0xF4); // hlt
+
+    let (_state, reason, memory) = run_with_regions(&code);
+    assert_eq!(reason, ExitReason::Halt);
+    // rcx holds 4, so the store lands at DATA_BASE + 4*8. A wrongly extended
+    // index would have selected r9 and landed at DATA_BASE + 8*8.
+    assert_eq!(
+        memory.read_u64(DATA_BASE + 32).expect("indexed slot"),
+        0x1122_3344_5566_7788
+    );
+    assert_eq!(memory.read_u64(DATA_BASE + 64).expect("r9 slot"), 0);
+}
+
+/// REX.R and REX.X set together extend their own fields independently.
+///
+/// The encoding 4E 89 1C E0 is `mov [rax + r12*8], r11`. Its REX prefix sets
+/// both REX.R and REX.X: the ModRM `reg` field 011 becomes r11 and the SIB
+/// index field 100b becomes r12.
+#[test]
+fn test_rex_r_and_rex_x_set_together_extend_independent_fields() {
+    // mov rax, DATA_BASE           (48 b8 <imm64>)
+    // mov r11, 0x11223344_55667788 (49 bb <imm64>)
+    // mov r12, 4                   (41 bc 04 00 00 00)
+    // mov [rax + r12*8], r11       (4e 89 1c e0)
+    // hlt                          (f4)
+    let mut code = mov_rax_data_base();
+    let mut r11 = vec![0x49, 0xBB];
+    r11.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    code.extend_from_slice(&r11);
+    code.extend_from_slice(&[0x41, 0xBC, 0x04, 0x00, 0x00, 0x00]); // mov r12d, 4
+    code.extend_from_slice(&[0x4E, 0x89, 0x1C, 0xE0]); // mov [rax + r12*8], r11
+    code.push(0xF4); // hlt
+
+    let (_state, reason, memory) = run_with_regions(&code);
+    assert_eq!(reason, ExitReason::Halt);
+    assert_eq!(
+        memory.read_u64(DATA_BASE + 32).expect("indexed slot"),
+        0x1122_3344_5566_7788
+    );
+    assert_eq!(memory.read_u64(DATA_BASE).expect("base slot"), 0);
+}
+
+/// Without REX.X, a SIB index field of 100b means "no index register" and the
+/// address is the base alone.
+///
+/// The encoding 48 89 1C 24 is `mov [rsp], rbx`: the SIB index field is 100b
+/// and REX.X is clear, so no index register contributes to the address.
+#[test]
+fn test_sib_index_field_100b_without_rex_x_means_no_index() {
+    // mov rbx, 0x12345678_9abcdef0 (48 bb <imm64>)
+    // mov r12, 0x1000              (41 bc 00 10 00 00)
+    // mov [rsp], rbx              (48 89 1c 24)
+    // hlt                          (f4)
+    let mut code = mov_rbx_value();
+    code.extend_from_slice(&[0x41, 0xBC, 0x00, 0x10, 0x00, 0x00]); // mov r12d, 0x1000
+    code.extend_from_slice(&[0x48, 0x89, 0x1C, 0x24]); // mov [rsp], rbx
+    code.push(0xF4); // hlt
+
+    let pe_bytes = build_synthetic_pe32_plus(&code);
+    let parsed = ParsedPe::parse(&pe_bytes).expect("parse");
+    let mut loaded = parsed.load_into_memory(&pe_bytes).expect("load");
+    loaded
+        .memory
+        .map_region(STACK_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("stack mapping should succeed");
+
+    let cpu = CpuState::new(loaded.entry_point, STACK_BASE + 0x8000);
+    let mut interp = Interpreter::new(cpu, &mut loaded.memory, 100);
+    let result = interp.run();
+    assert_eq!(result.exit_reason, ExitReason::Halt);
+
+    // The index is absent, so the address is the base (rsp) alone.
+    let stack_top = STACK_BASE + 0x8000;
+    assert_eq!(
+        loaded.memory.read_u64(stack_top).expect("base slot"),
+        0x1234_5678_9abc_def0
+    );
 }
