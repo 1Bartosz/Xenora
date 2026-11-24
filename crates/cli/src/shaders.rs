@@ -101,7 +101,7 @@ fn inspect(path: &str) -> ExitCode {
         return ExitCode::FAILURE;
     }
     println!(
-        "{} instructions inspected against {} gfx1030 forms; {} not executable",
+        "{} instructions inspected against {} gfx1030 forms; {} without semantic decoding",
         listing.rows.len(),
         FORMS.len(),
         listing.unsupported
@@ -141,6 +141,10 @@ fn listing(bytes: &[u8]) -> Listing {
         }
     }
     let boundary = |target: usize| forms.binary_search_by_key(&target, |form| form.0).is_ok();
+    // Past the last identified instruction the boundaries are unknown.
+    let identified = forms
+        .last()
+        .map_or(0, |&(offset, found)| offset + found.len);
     for &(offset, found) in &forms {
         let instruction = &bytes[offset..offset + found.len];
         let words: Vec<String> = instruction
@@ -149,6 +153,9 @@ fn listing(bytes: &[u8]) -> Listing {
             .collect();
         let status = match decode_at(Architecture::Gfx1030, &bytes[..offset + found.len], offset) {
             Ok(decoded) => match decoded.branch_target() {
+                Some(target) if listing.failure.is_some() && target >= identified => {
+                    format!("branch target {target:#04x} unverified: stream not identified there")
+                }
                 Some(target) if !boundary(target) => {
                     format!("invalid branch target {target:#04x}")
                 }
@@ -181,6 +188,9 @@ mod tests {
     #[test]
     fn coverage_totals_match_the_generated_table() {
         let json = coverage_report(true);
+        assert!(json.starts_with("{\"architecture\":\"gfx1030\""), "{json}");
+        assert!(json.ends_with("}]}\n"), "{json}");
+        assert_eq!(json.matches('{').count(), json.matches('}').count());
         let totals = format!(
             "\"discovered\":{},\"semantic\":{},\"families\":[",
             FORMS.len(),
@@ -227,6 +237,20 @@ mod tests {
             assert!(row.ends_with(" semantic"), "{row}");
         }
         assert_eq!(listing.unsupported, 0);
+    }
+
+    #[test]
+    fn targets_past_an_identification_failure_are_unverified() {
+        // s_branch 1 targets 0x08; 0xbfff0000 is not a gfx1030 form, so
+        // nothing past 0x04 is identified; s_endpgm.
+        let listing = listing(&program(&[0xbf82_0001, 0xbfff_0000, 0xbf81_0000]));
+        assert!(listing.failure.as_deref().unwrap().starts_with("0x0004"));
+        assert_eq!(listing.rows.len(), 1);
+        assert!(
+            listing.rows[0].ends_with("branch target 0x08 unverified: stream not identified there"),
+            "{}",
+            listing.rows[0]
+        );
     }
 
     #[test]

@@ -60,6 +60,16 @@ fn identification_matches_llvm_names_and_lengths() {
         .filter(|line| !line.is_empty() && !line.starts_with("//"))
         .count();
     assert_eq!(encodings.len(), expected_lines);
+    // The VOP3 and VOP3P literal probes must really carry a literal trailer:
+    // 1.0 in either width would be an inline constant and only eight bytes.
+    for (probe, literal) in [("V_FMA_F32", 0x3f80_0001_u32), ("V_PK_FMA_F16", 0x3c01)] {
+        let (_, bytes) = encodings
+            .iter()
+            .find(|(mnemonic, _)| mnemonic == probe)
+            .unwrap_or_else(|| panic!("{probe} probe missing"));
+        assert_eq!(bytes.len(), 12, "{probe}");
+        assert_eq!(bytes[8..], literal.to_le_bytes(), "{probe}");
+    }
     let mut stream = Vec::new();
     for (mnemonic, bytes) in &encodings {
         let found = identify(bytes).unwrap_or_else(|error| panic!("{mnemonic}: {error}"));

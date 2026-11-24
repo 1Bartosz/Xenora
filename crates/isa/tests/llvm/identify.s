@@ -19,11 +19,11 @@ v_cmp_eq_u32_e32 vcc_lo, 0x1234, v1
 v_cmp_eq_u32_sdwa s0, v1, v2 src0_sel:DWORD src1_sel:DWORD
 v_fmamk_f32 v0, v1, 0x40000000, v2
 v_fmaak_f32 v0, v1, v2, 0x40000000
-v_fma_f32 v0, v1, v2, 0x3f800000
+v_fma_f32 v0, v1, v2, 0x3f800001
 v_add_co_u32 v0, s0, v1, v2
 v_readlane_b32 s0, v1, 0
 v_pk_add_f16 v0, v1, v2
-v_pk_fma_f16 v0, v1, v2, 0x3c00
+v_pk_fma_f16 v0, v1, v2, 0x3c01
 v_interp_p1_f32 v0, v1, attr0.x
 ds_write_b32 v0, v1
 ds_read_b32 v0, v1 offset:16
