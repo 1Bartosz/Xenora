@@ -65,4 +65,25 @@ xenora_status xenora_session_run_trusted_fixture(
     uint32_t *out_width,
     uint32_t *out_height);
 
+/* Largest file xenora_inspect_executable accepts, in bytes. */
+#define XENORA_MAX_INSPECT_BYTES 268435456u
+
+/*
+ * Read-only compatibility inspection of a caller-supplied PE file. Nothing in
+ * `bytes` is executed: it is parsed and statically disassembled (bounded) only.
+ * On XENORA_OK, XENORA_PE_ERROR or XENORA_INTERNAL_ERROR, `out_report` holds a
+ * NUL-terminated UTF-8 report of `*out_required` bytes including the NUL.
+ * XENORA_PE_ERROR means the file is not an acceptable PE32+ image;
+ * XENORA_INTERNAL_ERROR means Xenora's own probe failed on it. The report says which. If `capacity`
+ * is too small the call returns XENORA_BUFFER_TOO_SMALL with `*out_required`
+ * set and nothing else written. Files over XENORA_MAX_INSPECT_BYTES return
+ * XENORA_LIMIT_EXCEEDED.
+ */
+xenora_status xenora_inspect_executable(
+    const uint8_t *bytes,
+    uint64_t length,
+    char *out_report,
+    uint64_t capacity,
+    uint64_t *out_required);
+
 #endif
