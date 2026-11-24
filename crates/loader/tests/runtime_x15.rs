@@ -1193,6 +1193,86 @@ fn test_guest_event_signaling_through_iat() {
 }
 
 #[test]
+fn test_guest_crt_long_conversions_through_iat() {
+    const IMAGE: u64 = 0x140000000;
+    const INPUT: u64 = IMAGE + 0x1080;
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let run = |symbol, input: &[u8], radix: u64| {
+        let mut code = vec![0x48, 0x83, 0xec, 0x28];
+        for (register, value) in [
+            ([0x48, 0xb9], INPUT),
+            ([0x48, 0xba], PROCESS_FIXTURE_OUTPUT),
+            ([0x49, 0xb8], radix),
+        ] {
+            code.extend_from_slice(&register);
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        append_import_call(&mut code, 0x2060);
+        code.extend_from_slice(&[0x48, 0x89, 0xc3, 0x48, 0xb9]);
+        code.extend_from_slice(&(PROCESS_FIXTURE_OUTPUT + 8).to_le_bytes());
+        append_import_call(&mut code, 0x21a0);
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
+        code.resize(0x80, 0);
+        code.extend_from_slice(input);
+        let bytes = TestPeBuilder::new(IMAGE, 0x1000)
+            .add_import("api-ms-win-crt-convert-l1-1-0.dll", symbol)
+            .add_import("ucrtbase.dll", "_get_errno")
+            .code(&code)
+            .build();
+        let mut imports = ImportRegistry::new();
+        register_standard_services(&mut imports, state.clone());
+        let result = run_synthetic_startup(
+            &bytes,
+            StartupLayout {
+                image_base: IMAGE,
+                stack_top: PROCESS_FIXTURE_STACK_TOP,
+                tls_base: 0x300000000,
+            },
+            imports,
+            100,
+        )
+        .unwrap();
+        assert_eq!(result.bound_imports, 2);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        (
+            result.execution.final_state.get(Register::Rbx) as u32,
+            result
+                .image
+                .memory
+                .read_u64(PROCESS_FIXTURE_OUTPUT)
+                .unwrap()
+                - INPUT,
+            result
+                .image
+                .memory
+                .read_u32(PROCESS_FIXTURE_OUTPUT + 8)
+                .unwrap(),
+        )
+    };
+    assert_eq!(run("strtol", b" -0x10!\0", 0), ((-16i32) as u32, 6, 0));
+    assert_eq!(
+        run("strtol", b"21474836480!\0", 10),
+        (i32::MAX as u32, 11, 34)
+    );
+    assert_eq!(
+        run("strtol", b"-2147483649\0", 10),
+        (i32::MIN as u32, 11, 34)
+    );
+    assert_eq!(run("strtol", b"  +!\0", 10), (0, 0, 0));
+    assert_eq!(run("strtol", b"17\0", 37), (0, 0, 22));
+    assert_eq!(run("strtoul", b"-1\0", 10), (u32::MAX, 2, 0));
+    assert_eq!(run("strtoul", b"4294967296\0", 10), (u32::MAX, 10, 34));
+    assert_eq!(run("strtoul", b"078\0", 0), (7, 2, 0));
+    let wide = "42!"
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(run("wcstol", &wide, 10), (42, 4, 0));
+    assert_eq!(run("wcstoul", &wide, 10), (42, 4, 0));
+}
+
+#[test]
 fn test_guest_crt_errno_through_iat() {
     const MODULE: &str = "api-ms-win-crt-runtime-l1-1-0.dll";
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));

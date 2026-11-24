@@ -190,6 +190,107 @@ fn allocation_result(
     }
 }
 
+const ERANGE: u32 = 34;
+
+fn parse_long(
+    memory: &mut GuestMemory,
+    address: u64,
+    end: u64,
+    mut radix: u32,
+    signed: bool,
+    unit: StringUnit,
+) -> Result<u64, ExitReason> {
+    if address == 0 || (radix != 0 && !(2..=36).contains(&radix)) {
+        if end != 0 {
+            memory
+                .write_u64(end, address)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        set_errno(memory, EINVAL)?;
+        return Ok(0);
+    }
+
+    let read = |index| {
+        if index >= SCAN_BUDGET / unit.width() {
+            return Err(ExitReason::IllegalInstruction(0xFE));
+        }
+        unit.read(memory, address, index)
+            .map(|value| char::from_u32(u32::from(value)).unwrap_or(char::REPLACEMENT_CHARACTER))
+    };
+    let mut index = 0;
+    let mut next = read(index)?;
+    while matches!(next, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c') {
+        index += 1;
+        next = read(index)?;
+    }
+    let negative = next == '-';
+    if matches!(next, '+' | '-') {
+        index += 1;
+        next = read(index)?;
+    }
+    if next == '0'
+        && matches!(radix, 0 | 16)
+        && matches!(read(index + 1)?, 'x' | 'X')
+        && read(index + 2)?.is_ascii_hexdigit()
+    {
+        radix = 16;
+        index += 2;
+        next = read(index)?;
+    }
+    if radix == 0 {
+        radix = if next == '0' { 8 } else { 10 };
+    }
+
+    let limit = if signed {
+        i32::MAX as u32 + u32::from(negative)
+    } else {
+        u32::MAX
+    };
+    let start = index;
+    let mut value = 0u32;
+    let mut overflow = false;
+    while let Some(digit) = next.to_digit(radix) {
+        match value.checked_mul(radix).and_then(|v| v.checked_add(digit)) {
+            Some(v) if v <= limit => value = v,
+            _ => overflow = true,
+        }
+        index += 1;
+        next = read(index)?;
+    }
+    let consumed = if start == index { 0 } else { index };
+    if end != 0 {
+        let pointer = address
+            .checked_add(consumed * unit.width())
+            .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
+        memory
+            .write_u64(end, pointer)
+            .map_err(ExitReason::MemoryFault)?;
+    }
+    if overflow {
+        set_errno(memory, ERANGE)?;
+        value = limit;
+    }
+    if negative && (!overflow || signed) {
+        value = value.wrapping_neg();
+    }
+    Ok(u64::from(value))
+}
+
+pub(super) fn register_conversions(registry: &mut ImportRegistry) {
+    for (symbol, signed, unit) in [
+        ("strtol", true, StringUnit::Byte),
+        ("strtoul", false, StringUnit::Byte),
+        ("wcstol", true, StringUnit::Wide),
+        ("wcstoul", false, StringUnit::Wide),
+    ] {
+        registry.register(UCRT, symbol, move |args, _, memory| {
+            parse_long(memory, args.rcx, args.rdx, args.r8 as u32, signed, unit)
+        });
+        registry.alias("api-ms-win-crt-convert-l1-1-0.dll", UCRT, symbol);
+        registry.set_status(UCRT, symbol, ServiceStatus::Partial);
+    }
+}
+
 pub(super) fn register_errno(registry: &mut ImportRegistry) {
     registry.register(UCRT, "_errno", |_, _, memory| {
         memory.crt_errno_address().map_err(ExitReason::MemoryFault)

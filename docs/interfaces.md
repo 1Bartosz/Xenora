@@ -182,6 +182,14 @@ Allocation failures also set the synthetic main thread's CRT `errno` to
 and CRT parameter or new-handler callbacks remain unsupported. See
 [Microsoft CRT allocation documentation](https://learn.microsoft.com/cpp/c-runtime-library/memory-allocation).
 
+### CRT integer conversion
+
+UCRT and the CRT conversion API set expose strtol, strtoul, wcstol, and
+wcstoul with 32-bit Windows long results. The parser supports C-locale
+whitespace, explicit bases 2–36 and automatic base selection, and writes
+the first unparsed guest address to a supplied end pointer. Overflow
+clamps the result and sets ERANGE. Scans have a 1 MiB input budget.
+
 ### Event signaling
 
 The synthetic runtime supports unnamed manual-reset and auto-reset events

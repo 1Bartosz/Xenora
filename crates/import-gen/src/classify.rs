@@ -522,18 +522,19 @@ impl SymbolDb {
 
     fn populate_crt_convert(&mut self) {
         let m = "api-ms-win-crt-convert-l1-1-0.dll";
+        for module in [m, "ucrtbase.dll"] {
+            for symbol in ["strtol", "strtoul", "wcstol", "wcstoul"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         for (sym, libc) in &[
             ("strtod", "strtod"),
             ("strtof", "strtof"),
-            ("strtol", "strtol"),
-            ("strtoul", "strtoul"),
             ("strtoll", "strtoll"),
             ("strtoull", "strtoull"),
             ("mbstowcs", "mbstowcs"),
             ("wcstombs", "wcstombs"),
             ("wcstod", "wcstod"),
-            ("wcstol", "wcstol"),
-            ("wcstoul", "wcstoul"),
             ("wctob", "wctob"),
             ("btowc", "btowc"),
         ] {

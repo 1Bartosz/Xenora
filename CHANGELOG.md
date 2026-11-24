@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added bounded guest CRT long-integer parsing for byte and wide strings.
+
 - Added guest CRT errno accessors and allocation failure reporting for the synthetic main thread.
 
 - Added guest CRT allocation, zeroed array allocation, resizing, and release.
