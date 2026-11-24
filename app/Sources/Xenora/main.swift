@@ -4,9 +4,11 @@
 // bundled trusted PE fixture (x86-64 translated to ARM64; its draw request is rendered
 // by native Metal) and shows the verified read-back frame. No other executable can run.
 
+import AppKit
 import CXenora
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RuntimeProbe {
     var abiVersion: UInt32 = 0
@@ -84,14 +86,97 @@ final class FrameModel: ObservableObject {
     }
 }
 
+/// Read-only compatibility inspection of a user-chosen file. Nothing in it is executed.
+@MainActor
+final class InspectionModel: ObservableObject {
+    static let shared = InspectionModel()
+    @Published var fileName: String?
+    @Published var report = ""
+    @Published var status: Int32 = Int32(XENORA_OK)
+    @Published var busy = false
+    @Published var importing = false
+
+    func inspect(_ url: URL) {
+        fileName = url.lastPathComponent
+        busy = true
+        Task {
+            let (newStatus, newReport) = await Task.detached { InspectionModel.run(url) }.value
+            status = newStatus
+            report = newReport
+            busy = false
+        }
+    }
+
+    nonisolated static func run(_ url: URL) -> (Int32, String) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        // Check the size before reading so an oversized file is never loaded into memory.
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else {
+            return (Int32(XENORA_INVALID_ARGUMENT), "Could not read the file's size.")
+        }
+        guard UInt64(size) <= UInt64(XENORA_MAX_INSPECT_BYTES) else {
+            return (Int32(XENORA_LIMIT_EXCEEDED), "The file is \(size) bytes; inspection accepts at most \(XENORA_MAX_INSPECT_BYTES).")
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            return (Int32(XENORA_INVALID_ARGUMENT), "Could not read the file.")
+        }
+        return data.withUnsafeBytes { raw in
+            let bytes = raw.bindMemory(to: UInt8.self).baseAddress
+            var required: UInt64 = 0
+            var probe: CChar = 0
+            var status = xenora_inspect_executable(bytes, UInt64(data.count), &probe, 1, &required)
+            guard status == Int32(XENORA_BUFFER_TOO_SMALL) else { return (status, "Inspection failed (status \(status)).") }
+            var text = [CChar](repeating: 0, count: Int(required))
+            status = xenora_inspect_executable(bytes, UInt64(data.count), &text, required, &required)
+            return (status, String(cString: text))
+        }
+    }
+}
+
+/// Receives files opened from Finder (double-click or Open With).
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let url = urls.first else { return }
+        MainActor.assumeIsolated { InspectionModel.shared.inspect(url) }
+    }
+}
+
+struct InspectorView: View {
+    @ObservedObject var model: InspectionModel
+
+    var body: some View {
+        Section("Executable inspection (read-only)") {
+            HStack {
+                Button("Open Executable…") { model.importing = true }
+                Text("or drop a file on this window").foregroundStyle(.secondary)
+            }
+            if let name = model.fileName {
+                LabeledContent("File", value: model.busy ? "\(name) (inspecting…)" : name)
+                ScrollView {
+                    Text(model.report)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(minHeight: 160, maxHeight: 320)
+            }
+            Text("Opened files are inspected only. Running them is not available.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 struct ContentView: View {
     let probe = RuntimeProbe.run()
     @ObservedObject var model: FrameModel
+    @ObservedObject var inspection = InspectionModel.shared
     private var frame: GuestFrame? { model.frame }
     private var running: Bool { model.running }
 
     var body: some View {
         Form {
+            InspectorView(model: inspection)
             Section("Guest display") {
                 if let image = frame?.image {
                     Image(decorative: image, scale: 1)
@@ -118,16 +203,33 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
-        .frame(minWidth: 460, minHeight: 420)
+        .fileImporter(isPresented: $inspection.importing, allowedContentTypes: [.item]) { result in
+            if case .success(let url) = result { inspection.inspect(url) }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first, url.isFileURL else { return false }
+            inspection.inspect(url)
+            return true
+        }
+        .frame(minWidth: 520, minHeight: 560)
     }
 }
 
 struct XenoraApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     let model = FrameModel()
 
     var body: some Scene {
         WindowGroup("Xenora") { ContentView(model: model) }
     }
+}
+
+// `--inspect <path>` prints the read-only report for a file and exits with its status.
+if let flag = CommandLine.arguments.firstIndex(of: "--inspect"), flag + 1 < CommandLine.arguments.count {
+    let (status, report) = InspectionModel.run(URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
+    print(report.hasSuffix("\n") ? report : report + "\n", terminator: "")
+    print("status=\(status)")
+    exit(status == Int32(XENORA_OK) ? 0 : 1)
 }
 
 // `--smoke-frame` runs the trusted fixture on the Metal device and exits; it needs a GPU.
