@@ -121,6 +121,7 @@ enum Op {
         op: VectorCompareOp,
         src0: Value,
         src1: Value,
+        high: Option<(Value, Value)>,
         exec: u32,
     },
     /// `s_cbranch_vccz` on a lane-derived VCC_LO (IR annotation only).
@@ -147,7 +148,15 @@ impl Op {
                 active, inactive, ..
             } => vec![active, inactive],
             Self::Store(value) => vec![value],
-            Self::LaneMask { src0, src1, .. } => vec![src0, src1],
+            Self::LaneMask {
+                src0, src1, high, ..
+            } => {
+                let mut operands = vec![src0, src1];
+                if let Some((left, right)) = high {
+                    operands.extend([left, right]);
+                }
+                operands
+            }
             Self::RuntimeBranch { mask, .. } => vec![mask],
             Self::VccArithmetic {
                 left, right, mask, ..
@@ -256,7 +265,9 @@ fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
         CompareRelation::False => return "false".to_owned(),
         CompareRelation::True => return "true".to_owned(),
     };
-    if op.signed() {
+    if op.signed() && op.semantics().width == 64 {
+        format!("as_type<long>({left}) {symbol} as_type<long>({right})")
+    } else if op.signed() {
         format!("as_type<int>({left}) {symbol} as_type<int>({right})")
     } else {
         format!("{left} {symbol} {right}")
@@ -580,11 +591,17 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
                 op,
                 src0,
                 src1,
+                high,
                 exec,
             } => {
+                let (left, right) = if let Some((hi0, hi1)) = high {
+                    (format!("{src0}:{hi0}"), format!("{src1}:{hi1}"))
+                } else {
+                    (src0.to_string(), src1.to_string())
+                };
                 let _ = writeln!(
                     ir,
-                    "{offset:04x}: {dest} = wave.mask {} {src0}, {src1} exec=0x{exec:08x}",
+                    "{offset:04x}: {dest} = wave.mask {} {left}, {right} exec=0x{exec:08x}",
                     op.assembly_name()
                 );
                 let inputs = if matches!(
@@ -593,7 +610,7 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
                 ) {
                     Vec::new()
                 } else {
-                    vec![src0, src1]
+                    operation.operands()
                 };
                 emit_lane_mask(
                     &mut msl,
@@ -603,10 +620,15 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
                     exec,
                     inputs,
                     |name| {
-                        format!(
-                            "({}) ? 1u : 0u",
-                            compare_expression(op, &name(src0), &name(src1))
-                        )
+                        let (left, right) = if let Some((hi0, hi1)) = high {
+                            let pair = |lo, hi| {
+                                format!("((ulong({}) << 32u) | ulong({}))", name(hi), name(lo))
+                            };
+                            (pair(src0, hi0), pair(src1, hi1))
+                        } else {
+                            (name(src0), name(src1))
+                        };
+                        format!("({}) ? 1u : 0u", compare_expression(op, &left, &right))
                     },
                 );
                 continue;
@@ -628,11 +650,10 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
     })
 }
 
-/// Emit a Wave32 compare mask without any cross-thread operation: the thread
+/// Emit a Wave32 predicate mask without any cross-thread operation: the thread
 /// recomputes the lane-dependent operands of each lane of its own RDNA wave
 /// (dispatch indices `(index & ~31) + n`) from those lanes' input words.
 /// Absent lanes of a final partial wave contribute 0.
-#[allow(clippy::too_many_arguments)]
 fn emit_lane_mask(
     msl: &mut String,
     operations: &[(usize, Op)],
@@ -1100,6 +1121,23 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         facts.push(KnownBits::constant(bits));
                         value
                     };
+                let high = if op.semantics().width == 64 {
+                    // Guide §3.6.3 and contract §2a put the high word at base + 1.
+                    let left = match src0 {
+                        VectorSource::Register(base) => read(base + 1)?,
+                        VectorSource::Scalar(base) => {
+                            let bits = read_scalar(ScalarSource::Register(base + 1))?;
+                            constant(&mut operations, &mut facts, bits)
+                        }
+                        VectorSource::Immediate(bits) => {
+                            let high = ((bits as i32) >> 31) as u32;
+                            constant(&mut operations, &mut facts, high)
+                        }
+                    };
+                    Some((left, read(src1 + 1)?))
+                } else {
+                    None
+                };
                 let src0 = match src0 {
                     VectorSource::Register(register) => read(register)?,
                     VectorSource::Scalar(register) if usize::from(register) == VCC_LO => {
@@ -1125,6 +1163,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         op,
                         src0,
                         src1,
+                        high,
                         exec,
                     },
                 ));
