@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Unnamed event objects and waits that can resolve without a guest scheduler.
+//! Unnamed event and semaphore objects and waits that can resolve without a guest scheduler.
 
 use super::{
-    ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY,
-    ERROR_NOT_SUPPORTED, GuestObject, KERNEL32, ServicesState,
+    ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS,
+    ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, GuestObject, KERNEL32, ServicesState,
 };
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -19,9 +19,51 @@ const WAIT_OBJECT_0: u64 = 0;
 const WAIT_TIMEOUT: u64 = 258;
 const WAIT_FAILED: u64 = u32::MAX as u64;
 
-pub(super) struct Event {
-    manual_reset: bool,
-    signaled: bool,
+const SEMAPHORE_ALL_ACCESS: u32 = 0x001f_0003;
+const SEMAPHORE_MODIFY_STATE: u32 = 2;
+const ERROR_TOO_MANY_POSTS: u32 = 298;
+
+pub(super) enum Waitable {
+    Event { manual_reset: bool, signaled: bool },
+    Semaphore { count: i32, maximum: i32 },
+}
+
+impl Waitable {
+    fn is_ready(&self) -> bool {
+        match self {
+            Self::Event { signaled, .. } => *signaled,
+            Self::Semaphore { count, .. } => *count > 0,
+        }
+    }
+
+    fn consume(&mut self) {
+        match self {
+            Self::Event {
+                manual_reset,
+                signaled,
+            } => *signaled = *manual_reset,
+            Self::Semaphore { count, .. } => *count -= 1,
+        }
+    }
+}
+
+fn insert_waitable(
+    state: &ServicesState,
+    object: Waitable,
+    access: u32,
+) -> Result<u64, ExitReason> {
+    let mut objects = state.objects.lock().expect("guest object state");
+    let Some(handle) = objects.next_handle() else {
+        return state.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+    };
+    objects.insert_handle(
+        handle,
+        GuestObject::Waitable {
+            state: Arc::new(Mutex::new(object)),
+            access,
+        },
+    );
+    Ok(handle)
 }
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
@@ -35,21 +77,14 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             if attributes != 0 || name != 0 {
                 return state.fail(ERROR_NOT_SUPPORTED, 0);
             }
-            let mut objects = state.objects.lock().expect("guest object state");
-            let Some(handle) = objects.next_handle() else {
-                return state.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
-            };
-            objects.insert_handle(
-                handle,
-                GuestObject::Event {
-                    state: Arc::new(Mutex::new(Event {
-                        manual_reset,
-                        signaled,
-                    })),
-                    access: EVENT_ALL_ACCESS,
+            insert_waitable(
+                &state,
+                Waitable::Event {
+                    manual_reset,
+                    signaled,
                 },
-            );
-            Ok(handle)
+                EVENT_ALL_ACCESS,
+            )
         });
     }
 
@@ -58,20 +93,77 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.register(KERNEL32, symbol, move |args, _, mem| {
             let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
             let objects = state.objects.lock().expect("guest object state");
-            let Some(GuestObject::Event {
+            let Some(GuestObject::Waitable {
                 state: event,
                 access,
             }) = objects.handles.get(&handle)
             else {
                 return state.fail(ERROR_INVALID_HANDLE, 0);
             };
+            let mut event = event.lock().expect("guest waitable state");
+            let Waitable::Event {
+                signaled: current, ..
+            } = &mut *event
+            else {
+                return state.fail(ERROR_INVALID_HANDLE, 0);
+            };
             if access & EVENT_MODIFY_STATE == 0 {
                 return state.fail(ERROR_ACCESS_DENIED, 0);
             }
-            event.lock().expect("guest event state").signaled = signaled;
+            *current = signaled;
             Ok(1)
         });
     }
+
+    for symbol in ["CreateSemaphoreA", "CreateSemaphoreW"] {
+        let state = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, _, mem| {
+            let attributes = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+            let count = args.get(1, mem).map_err(ExitReason::MemoryFault)? as i32;
+            let maximum = args.get(2, mem).map_err(ExitReason::MemoryFault)? as i32;
+            let name = args.get(3, mem).map_err(ExitReason::MemoryFault)?;
+            if attributes != 0 || name != 0 {
+                return state.fail(ERROR_NOT_SUPPORTED, 0);
+            }
+            if maximum <= 0 || count < 0 || count > maximum {
+                return state.fail(ERROR_INVALID_PARAMETER, 0);
+            }
+            insert_waitable(
+                &state,
+                Waitable::Semaphore { count, maximum },
+                SEMAPHORE_ALL_ACCESS,
+            )
+        });
+    }
+
+    let release = Arc::clone(state);
+    registry.register(KERNEL32, "ReleaseSemaphore", move |args, _, mem| {
+        let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        let amount = args.get(1, mem).map_err(ExitReason::MemoryFault)? as i32;
+        let output = args.get(2, mem).map_err(ExitReason::MemoryFault)?;
+        if amount <= 0 {
+            return release.fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        let objects = release.objects.lock().expect("guest object state");
+        let Some(GuestObject::Waitable { state, access }) = objects.handles.get(&handle) else {
+            return release.fail(ERROR_INVALID_HANDLE, 0);
+        };
+        let mut state = state.lock().expect("guest waitable state");
+        let Waitable::Semaphore { count, maximum } = &mut *state else {
+            return release.fail(ERROR_INVALID_HANDLE, 0);
+        };
+        if access & SEMAPHORE_MODIFY_STATE == 0 {
+            return release.fail(ERROR_ACCESS_DENIED, 0);
+        }
+        if amount > *maximum - *count {
+            return release.fail(ERROR_TOO_MANY_POSTS, 0);
+        }
+        if output != 0 && mem.write_u32(output, *count as u32).is_err() {
+            return release.fail(ERROR_NOACCESS, 0);
+        }
+        *count += amount;
+        Ok(1)
+    });
 
     for (symbol, extended) in [
         ("WaitForSingleObject", false),
@@ -84,7 +176,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             if extended && args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32 != 0 {
                 return single.fail(ERROR_NOT_SUPPORTED, WAIT_FAILED);
             }
-            wait_for_events(&single, &[handle], false, timeout)
+            wait_for_objects(&single, &[handle], false, timeout)
         });
     }
     for (symbol, extended) in [
@@ -111,7 +203,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
                 *handle = mem.read_u64(slot).map_err(ExitReason::MemoryFault)?;
             }
-            wait_for_events(&multiple, handles, all, timeout)
+            wait_for_objects(&multiple, handles, all, timeout)
         });
     }
 
@@ -120,6 +212,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "CreateEventW",
         "SetEvent",
         "ResetEvent",
+        "CreateSemaphoreA",
+        "CreateSemaphoreW",
+        "ReleaseSemaphore",
         "WaitForSingleObject",
         "WaitForSingleObjectEx",
         "WaitForMultipleObjects",
@@ -133,7 +228,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     }
 }
 
-fn wait_for_events(
+fn wait_for_objects(
     state: &ServicesState,
     handles: &[u64],
     all: bool,
@@ -141,23 +236,27 @@ fn wait_for_events(
 ) -> Result<u64, ExitReason> {
     // The object table remains locked through validation and consumption.
     let objects = state.objects.lock().expect("guest object state");
-    let mut events: Vec<&Arc<Mutex<Event>>> = Vec::with_capacity(handles.len());
+    let mut waitables: Vec<&Arc<Mutex<Waitable>>> = Vec::with_capacity(handles.len());
     for (index, handle) in handles.iter().enumerate() {
         if handles[..index].contains(handle) {
             return state.fail(ERROR_INVALID_PARAMETER, WAIT_FAILED);
         }
         match objects.handles.get(handle) {
-            Some(GuestObject::Event {
+            Some(GuestObject::Waitable {
                 state: event,
                 access,
             }) => {
                 if access & SYNCHRONIZE == 0 {
                     return state.fail(ERROR_ACCESS_DENIED, WAIT_FAILED);
                 }
-                if all && events.iter().any(|existing| Arc::ptr_eq(existing, event)) {
+                if all
+                    && waitables
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, event))
+                {
                     return state.fail(ERROR_INVALID_PARAMETER, WAIT_FAILED);
                 }
-                events.push(event);
+                waitables.push(event);
             }
             Some(_) => return state.fail(ERROR_NOT_SUPPORTED, WAIT_FAILED),
             None if matches!(*handle, super::CURRENT_THREAD | super::CURRENT_PROCESS) => {
@@ -167,8 +266,8 @@ fn wait_for_events(
         }
     }
     let mut ready = Vec::with_capacity(handles.len());
-    for (index, event) in events.into_iter().enumerate() {
-        if event.lock().expect("guest event state").signaled {
+    for (index, event) in waitables.into_iter().enumerate() {
+        if event.lock().expect("guest waitable state").is_ready() {
             ready.push((index, event));
             if !all {
                 break;
@@ -184,8 +283,7 @@ fn wait_for_events(
     }
     let first = ready[0].0;
     for (_, event) in ready {
-        let mut event = event.lock().expect("guest event state");
-        event.signaled = event.manual_reset;
+        event.lock().expect("guest waitable state").consume();
     }
     Ok(WAIT_OBJECT_0 + first as u64)
 }

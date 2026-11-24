@@ -192,7 +192,7 @@ clamps the result and sets ERANGE. Scans have a 1 MiB input budget. The long-lon
 Microsoft's _strtoi64, _strtoui64, _wcstoi64, and _wcstoui64 apply the
 same rules with 64-bit results.
 
-### Event signaling
+### Event and semaphore signaling
 
 The synthetic runtime supports unnamed manual-reset and auto-reset events
 created with default security attributes. `SetEvent` signals an event,
@@ -205,13 +205,19 @@ Event duplicates share signal state and keep the event alive independently.
 A duplicate can retain or reduce its rights. Waiting requires synchronize
 access, and setting or resetting requires modify-state access.
 
-`WaitForMultipleObjects` supports immediate waits on up to 64 events.
+`WaitForMultipleObjects` supports immediate waits on up to 64 events or semaphores.
 Wait-any selects the first signaled handle. Wait-all consumes auto-reset
-signals only when every event is ready. Repeated handles and wait-all
+signals only when every object is ready. Repeated handles and wait-all
 aliases to the same event are rejected. The extended single- and multiple-
 object wait APIs support the same immediate behavior when alerting is
 disabled. Alertable calls and waits that would block return an unsupported
 error.
+
+`CreateSemaphoreA` and `CreateSemaphoreW` create unnamed semaphores
+with default security attributes. A successful wait consumes one permit.
+`ReleaseSemaphore` can return the previous count and rejects a release
+that exceeds the maximum without changing the count. Duplicates share
+the same permit count.
 
 See Microsoft's [event object documentation](https://learn.microsoft.com/windows/win32/sync/event-objects).
 

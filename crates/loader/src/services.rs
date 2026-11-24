@@ -117,8 +117,8 @@ impl Clock for SystemClock {
 
 enum GuestObject {
     Thread(u32),
-    Event {
-        state: Arc<Mutex<events::Event>>,
+    Waitable {
+        state: Arc<Mutex<events::Waitable>>,
         access: u32,
     },
 }
@@ -366,7 +366,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         } else {
             match thread.handles.get(&source) {
                 Some(GuestObject::Thread(rights)) => (*rights, None),
-                Some(GuestObject::Event { state, access }) => (*access, Some(Arc::clone(state))),
+                Some(GuestObject::Waitable { state, access }) => (*access, Some(Arc::clone(state))),
                 None => return s.fail(ERROR_INVALID_HANDLE, 0),
             }
         };
@@ -384,7 +384,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             return s.fail(ERROR_NOACCESS, 0);
         }
         let object = match event {
-            Some(state) => GuestObject::Event { state, access },
+            Some(state) => GuestObject::Waitable { state, access },
             None => GuestObject::Thread(access),
         };
         thread.insert_handle(handle, object);

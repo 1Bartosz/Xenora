@@ -1122,6 +1122,37 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn test_guest_semaphore_counts_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call = |symbol, args: &[u64]| call_service_fixture(&state, "kernel32.dll", symbol, args);
+    let value = |symbol, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    assert_eq!(value("CreateSemaphoreW", &[0, 3, 2, 0]), 0);
+    let handle = value("CreateSemaphoreW", &[0, 1, 2, 0]);
+    assert_ne!(handle, 0);
+    assert_eq!(value("SetEvent", &[handle]), 0);
+    assert_eq!(value("ReleaseSemaphore", &[handle, 2, 0]), 0);
+    assert_eq!(value("GetLastError", &[]), 298);
+    assert_eq!(value("ReleaseSemaphore", &[handle, 1, u64::MAX]), 0);
+    assert_eq!(value("GetLastError", &[]), 998);
+
+    let released = call("ReleaseSemaphore", &[handle, 1, PROCESS_FIXTURE_OUTPUT]);
+    assert_eq!(released.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(
+        released
+            .image
+            .memory
+            .read_u64(PROCESS_FIXTURE_OUTPUT)
+            .unwrap(),
+        0xffff_ffff_0000_0001
+    );
+    for expected in [0, 0, 258] {
+        assert_eq!(value("WaitForSingleObject", &[handle, 0]), expected);
+    }
+    assert_eq!(value("CloseHandle", &[handle]), 1);
+    assert_eq!(value("ReleaseSemaphore", &[handle, 1, 0]), 0);
+}
+
+#[test]
 fn test_guest_waits_for_multiple_events_through_iat() {
     const IMAGE: u64 = 0x140000000;
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
@@ -1216,6 +1247,12 @@ fn test_guest_waits_for_multiple_events_through_iat() {
         u64::from(u32::MAX)
     );
     assert_eq!(call("WaitForSingleObjectEx", &[second, 0, 0]), 0);
+    let semaphore = call("CreateSemaphoreW", &[0, 1, 2, 0]);
+    assert_ne!(semaphore, 0);
+    assert_eq!(wait([semaphore, first], true, None), 258);
+    assert_eq!(call("SetEvent", &[first]), 1);
+    assert_eq!(wait([semaphore, first], true, None), 0);
+    assert_eq!(wait([semaphore, first], false, None), 258);
 }
 
 #[test]

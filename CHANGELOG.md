@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added unnamed guest semaphores with checked release and immediate mixed-object waits.
+
 - Added non-alertable extended event waits through both Win64 wait APIs.
 
 - Added immediate wait-any and wait-all for guest event handles.
