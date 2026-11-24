@@ -42,6 +42,8 @@ pub(super) struct Winsock {
     refs: u32,
     serial: u32,
     sockets: BTreeMap<u64, Socket>,
+    #[cfg(test)]
+    poll_waiters: usize,
 }
 
 #[derive(Default)]
@@ -551,10 +553,18 @@ fn register_poll(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
                     if ready != 0 || remaining.is_zero() {
                         break ready;
                     }
+                    #[cfg(test)]
+                    {
+                        net.poll_waiters += 1;
+                    }
                     (net, _) = state
                         .winsock_changed
                         .wait_timeout(net, remaining)
                         .expect("guest Winsock state");
+                    #[cfg(test)]
+                    {
+                        net.poll_waiters -= 1;
+                    }
                 };
                 memory
                     .write_bytes(args.rcx, descriptors)
@@ -576,10 +586,8 @@ fn loopback_datagrams_preserve_boundaries_and_reject_external_addresses() {
     use crate::services::MockClock;
 
     let mut registry = ImportRegistry::new();
-    register(
-        &mut registry,
-        &Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),
-    );
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
     let mut memory = GuestMemory::new();
     memory
         .map_region(0x1000, 4096, MemoryPermissions::READ_WRITE)
@@ -654,4 +662,27 @@ fn loopback_datagrams_preserve_boundaries_and_reject_external_addresses() {
         call(&mut memory, "WSAGetLastError", &[]),
         u64::from(WSAEWOULDBLOCK)
     );
+
+    let mut polling_memory = memory.clone();
+    polling_memory.write_u64(0x1500, server).unwrap();
+    polling_memory.write_u16(0x1508, 0x0100).unwrap();
+    std::thread::scope(|scope| {
+        let (finished, completion) = std::sync::mpsc::channel();
+        let polling_memory = &mut polling_memory;
+        scope.spawn(move || {
+            let ready = call(polling_memory, "WSAPoll", &[0x1500, 1, 1000]);
+            finished.send(ready).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while state.winsock.lock().unwrap().poll_waiters == 0 {
+            assert!(Instant::now() < deadline, "poll did not enter its wait");
+            std::thread::yield_now();
+        }
+        assert_eq!(call(&mut memory, "send", &[client, 0x1300, 5, 0]), 5);
+        assert_eq!(
+            completion.recv_timeout(Duration::from_millis(400)).unwrap(),
+            1
+        );
+    });
+    assert_eq!(polling_memory.read_u16(0x150a).unwrap(), 0x0100);
 }
