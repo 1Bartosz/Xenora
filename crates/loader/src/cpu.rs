@@ -64,6 +64,8 @@ struct Prefixes {
     rex_w: bool,
     /// REX.R: extends the ModRM `reg` field to R8-R15.
     rex_r: bool,
+    /// REX.X: extends the SIB `index` field to R8-R15.
+    rex_x: bool,
     /// REX.B: extends the ModRM `rm` field to R8-R15.
     rex_b: bool,
     /// The GS segment override prefix (0x65) is present.
@@ -453,6 +455,7 @@ impl<'a> Interpreter<'a> {
         if (byte & 0xF0) == 0x40 {
             prefixes.rex_w = (byte & 0x08) != 0;
             prefixes.rex_r = (byte & 0x04) != 0;
+            prefixes.rex_x = (byte & 0x02) != 0;
             prefixes.rex_b = (byte & 0x01) != 0;
             byte = self.fetch_u8()?;
         }
@@ -762,7 +765,11 @@ impl<'a> Interpreter<'a> {
             // SIB byte follows ModR/M
             let sib = self.fetch_u8()?;
             let scale_shift = (sib >> 6) & 3;
-            let index_raw = ((sib >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 }; // SIB.index can use REX.X; here index_raw
+            // REX.X extends the SIB index field; REX.R extends the ModRM reg
+            // field and must not affect the index. An index field of 100b
+            // selects r12 when REX.X is set, and means "no index" otherwise.
+            let index_field = (sib >> 3) & 7;
+            let index_raw = index_field + if prefixes.rex_x { 8 } else { 0 };
             let base_raw = (sib & 7) + if prefixes.rex_b { 8 } else { 0 };
 
             let base_v = if mode == 0 && (sib & 7) == 5 {
@@ -772,7 +779,7 @@ impl<'a> Interpreter<'a> {
                 self.cpu.get(Register::from_index(base_raw))
             };
 
-            let index_v = if (sib >> 3) & 7 == 4 {
+            let index_v = if index_field == 4 && !prefixes.rex_x {
                 // index == 4 means no index register (ESP/RSP)
                 0u64
             } else {
