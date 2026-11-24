@@ -82,6 +82,25 @@ fn wait_until(session: u64, what: &str, done: impl Fn(&Status) -> bool) -> Statu
     }
 }
 
+/// Footprint once it has stopped changing. After a session is destroyed, Metal gives
+/// back its memory asynchronously: measured on an Apple M5, a reading taken right after
+/// destroy was up to about 45 MiB above the floor it returned to within one second,
+/// every time. A single immediate reading therefore mixes in memory that is already on
+/// its way out. Read every 50 ms until two consecutive readings agree within 1 MiB
+/// (at most 5 s). A genuine leak still settles high, so it is still caught.
+fn settled_footprint() -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut previous = footprint();
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let current = footprint();
+        if current.abs_diff(previous) < 1 << 20 || Instant::now() >= deadline {
+            return current;
+        }
+        previous = current;
+    }
+}
+
 /// Physical memory footprint of this process (macOS `proc_pid_rusage`, RUSAGE_INFO_V2).
 fn footprint() -> u64 {
     unsafe extern "C" {
@@ -245,11 +264,11 @@ fn repeated_sessions_do_not_grow_the_memory_footprint() {
     // Warm up so one-time allocations (Metal device, shader compiler) are excluded.
     run();
     run();
-    let baseline = footprint();
+    let baseline = settled_footprint();
     for _ in 0..5 {
         run();
     }
-    let after = footprint();
+    let after = settled_footprint();
     let growth = after.saturating_sub(baseline);
     println!("footprint baseline={baseline} after_5_sessions={after} growth={growth}");
     assert!(
