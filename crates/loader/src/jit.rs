@@ -47,8 +47,8 @@ unsafe impl Sync for JitMemory {}
 impl JitMemory {
     /// Allocate a new JIT memory region using `MAP_JIT`.
     pub fn new(capacity: usize) -> Result<Self, JitError> {
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-        let aligned_capacity = (capacity + page_size - 1) & !(page_size - 1);
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let aligned_capacity = aligned_capacity(capacity, page_size)?;
 
         let ptr = unsafe {
             libc::mmap(
@@ -98,10 +98,7 @@ impl JitMemory {
     /// Automatically manages `pthread_jit_write_protect_np`, copies bytes,
     /// flushes data cache and invalidates instruction cache.
     pub fn emit_block(&mut self, instructions: &[u32]) -> Result<*const u8, JitError> {
-        let bytes_len = instructions.len() * 4;
-        if self.used + bytes_len > self.capacity {
-            return Err(JitError::CapacityExceeded);
-        }
+        let bytes_len = emit_len(self.used, instructions.len(), self.capacity)?;
 
         let emit_offset = self.used;
         let dst_ptr = unsafe { self.ptr.as_ptr().add(emit_offset) };
@@ -131,10 +128,96 @@ impl JitMemory {
     }
 }
 
+/// Round `capacity` up to a whole number of pages, rejecting an invalid page size
+/// (`sysconf` failure, zero or not a power of two) and arithmetic overflow.
+fn aligned_capacity(capacity: usize, page_size: libc::c_long) -> Result<usize, JitError> {
+    let page_size = usize::try_from(page_size)
+        .ok()
+        .filter(|p| p.is_power_of_two())
+        .ok_or(JitError::AllocationFailed(libc::EINVAL))?;
+    capacity
+        .checked_add(page_size - 1)
+        .map(|c| c & !(page_size - 1))
+        .ok_or(JitError::CapacityExceeded)
+}
+
+/// Byte length of `count` 4-byte instructions, if they fit after `used` bytes.
+fn emit_len(used: usize, count: usize, capacity: usize) -> Result<usize, JitError> {
+    count
+        .checked_mul(4)
+        .filter(|len| used.checked_add(*len).is_some_and(|end| end <= capacity))
+        .ok_or(JitError::CapacityExceeded)
+}
+
 impl Drop for JitMemory {
     fn drop(&mut self) {
         unsafe {
             libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.capacity);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacity_rounds_up_to_whole_pages() {
+        assert_eq!(aligned_capacity(1, 16384), Ok(16384));
+        assert_eq!(aligned_capacity(16384, 16384), Ok(16384));
+        assert_eq!(aligned_capacity(16385, 16384), Ok(32768));
+        assert_eq!(aligned_capacity(0, 4096), Ok(0));
+    }
+
+    #[test]
+    fn invalid_page_size_is_rejected() {
+        for page in [-1, 0, 3, 12288] {
+            assert_eq!(
+                aligned_capacity(4096, page),
+                Err(JitError::AllocationFailed(libc::EINVAL)),
+                "page size {page}"
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_rounding_overflow_is_rejected() {
+        assert_eq!(
+            aligned_capacity(usize::MAX, 16384),
+            Err(JitError::CapacityExceeded)
+        );
+        assert_eq!(
+            aligned_capacity(usize::MAX - 16382, 16384),
+            Err(JitError::CapacityExceeded)
+        );
+    }
+
+    #[test]
+    fn emit_length_is_checked() {
+        assert_eq!(emit_len(0, 4, 16), Ok(16));
+        assert_eq!(emit_len(4, 3, 16), Ok(12));
+        assert_eq!(emit_len(4, 4, 16), Err(JitError::CapacityExceeded));
+        // count * 4 overflows usize.
+        assert_eq!(
+            emit_len(0, usize::MAX / 2, usize::MAX),
+            Err(JitError::CapacityExceeded)
+        );
+        // used + len overflows usize.
+        assert_eq!(
+            emit_len(usize::MAX - 3, 2, usize::MAX),
+            Err(JitError::CapacityExceeded)
+        );
+    }
+
+    #[test]
+    fn emit_past_capacity_fails_and_leaves_usage_unchanged() {
+        let mut jit = JitMemory::new(1).expect("MAP_JIT allocation");
+        let words = jit.capacity() / 4;
+        assert!(jit.emit_block(&vec![0xD503_201F; words]).is_ok()); // NOP fills the page
+        assert_eq!(
+            jit.emit_block(&[0xD503_201F]),
+            Err(JitError::CapacityExceeded)
+        );
+        assert_eq!(jit.used(), jit.capacity());
     }
 }
