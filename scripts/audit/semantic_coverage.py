@@ -142,6 +142,23 @@ def parse_generated(source):
     raise ValueError(f"{GENERATED}: unterminated FORM_IDS")
 
 
+def load_registry(path):
+    """The root registry with its `include`d family files merged in order.
+
+    Only the merge is done here; crates/isa/generate_semantics.py validates
+    which family each file may hold.
+    """
+    registry = tomllib.loads(path.read_text(encoding="utf-8"))
+    for include in registry.pop("include", []):
+        part = tomllib.loads((path.parent / include).read_text(encoding="utf-8"))
+        for name, rule in part.get("operand_rules", {}).items():
+            if name in registry.setdefault("operand_rules", {}):
+                raise ValueError(f"{REGISTRY}: operand rule {name} is declared twice")
+            registry["operand_rules"][name] = rule
+        registry.setdefault("form", []).extend(part.get("form", []))
+    return registry
+
+
 def read_declarations(registry, identified):
     if type(registry.get("schema")) is not int or registry["schema"] != 1:
         raise ValueError(f"{REGISTRY}: expected schema 1")
@@ -294,7 +311,7 @@ def main():
     args = parser.parse_args()
     try:
         identified = load_snapshot(ROOT)
-        registry = tomllib.loads((ROOT / REGISTRY).read_text(encoding="utf-8"))
+        registry = load_registry(ROOT / REGISTRY)
         decoder = parse_decoder((ROOT / DECODER).read_text(encoding="utf-8")) | parse_generated(
             (ROOT / GENERATED).read_text(encoding="utf-8"))
         status = tomllib.loads((ROOT / STATUS).read_text(encoding="utf-8"))

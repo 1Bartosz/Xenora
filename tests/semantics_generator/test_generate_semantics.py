@@ -10,6 +10,7 @@ snapshot are only read, never edited. Run from the repository root:
 
 import copy
 import importlib.util
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1037,6 +1038,79 @@ class Render(unittest.TestCase):
         self.assertEqual(text, gen.RUST.read_text(encoding="utf-8"))
 
 
+class LoadRegistry(unittest.TestCase):
+    """The root file plus its per-family files merge into one registry."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        (self.dir / "rdna2").mkdir()
+
+    def write(self, root_extra, files):
+        (self.dir / "rdna2.toml").write_text(
+            "schema = 1\n" + root_extra, encoding="utf-8"
+        )
+        for name, text in files.items():
+            (self.dir / "rdna2" / name).write_text(text, encoding="utf-8")
+        return self.dir / "rdna2.toml"
+
+    RULE = '[operand_rules.{name}]\nfamily = "{family}"\n'
+    FORM = '[[form]]\nname = "{name}"\nfamily = "{family}"\n'
+
+    def fails(self, root, fragment):
+        with self.assertRaises(gen.RegistryError) as raised:
+            gen.load_registry(root)
+        self.assertIn(fragment, str(raised.exception))
+
+    def test_the_real_split_registry_equals_one_concatenated_file(self):
+        registry = gen.load_registry()
+        self.assertNotIn("include", registry)
+        families = [form["family"] for form in registry["form"]]
+        # Each family is one contiguous run, in include order.
+        runs = [family for index, family in enumerate(families) if index == 0 or families[index - 1] != family]
+        self.assertEqual(len(runs), len(set(runs)))
+        for name, rule in registry["operand_rules"].items():
+            self.assertIn(rule["family"], runs, name)
+
+    def test_merges_family_files_in_include_order(self):
+        root = self.write('include = ["rdna2/vop2.toml", "rdna2/sop2.toml"]\n', {
+            "vop2.toml": self.RULE.format(name="v", family="VOP2") + self.FORM.format(name="B", family="VOP2"),
+            "sop2.toml": self.FORM.format(name="A", family="SOP2") + self.FORM.format(name="C", family="SOP2"),
+        })
+        registry = gen.load_registry(root)
+        self.assertEqual([form["name"] for form in registry["form"]], ["B", "A", "C"])
+        self.assertEqual(list(registry["operand_rules"]), ["v"])
+
+    def test_rejects_a_form_of_another_family(self):
+        root = self.write('include = ["rdna2/sop2.toml"]\n', {
+            "sop2.toml": self.FORM.format(name="V_X", family="VOP2"),
+        })
+        self.fails(root, "rdna2/sop2.toml: form V_X is not a SOP2 form")
+
+    def test_rejects_a_rule_of_another_family(self):
+        root = self.write('include = ["rdna2/sop2.toml"]\n', {
+            "sop2.toml": self.RULE.format(name="r", family="SOPC"),
+        })
+        self.fails(root, "rdna2/sop2.toml: operand rule r is not a SOP2 rule")
+
+    def test_rejects_a_rule_declared_in_two_files(self):
+        root = self.write('include = ["rdna2/sop2.toml", "rdna2/sop1.toml"]\n', {
+            "sop2.toml": self.RULE.format(name="r", family="SOP2"),
+            "sop1.toml": self.RULE.format(name="r", family="SOP1"),
+        })
+        self.fails(root, "rdna2/sop1.toml: operand rule r is declared twice")
+
+    def test_rejects_root_keys_in_a_family_file(self):
+        root = self.write('include = ["rdna2/sop2.toml"]\n', {"sop2.toml": "schema = 1\n"})
+        self.fails(root, "rdna2/sop2.toml: keys ['schema'] belong in the root file")
+
+    def test_rejects_a_missing_or_repeated_include(self):
+        self.fails(self.write('include = ["rdna2/sop2.toml"]\n', {}), "included family file rdna2/sop2.toml does not exist")
+        root = self.write('include = ["rdna2/sop2.toml", "rdna2/sop2.toml"]\n', {"sop2.toml": ""})
+        self.fails(root, "a family file is included twice")
+
+
 class CommandLine(unittest.TestCase):
     def run_cli(self, *arguments):
         return subprocess.run(
@@ -1072,6 +1146,7 @@ class CommandLine(unittest.TestCase):
 
     def test_invalid_registry_fails_every_mode_without_writing(self):
         bad = self.dir / "rdna2.toml"
+        shutil.copytree(gen.REGISTRY.parent / "rdna2", self.dir / "rdna2")
         text = gen.REGISTRY.read_text(encoding="utf-8")
         bad.write_text(text.replace("\nschema = 1\n", "\nschema = 2\n", 1), encoding="utf-8")
         output = self.dir / "out.rs"

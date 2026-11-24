@@ -12,7 +12,8 @@ The registry covers the nine SOP2 forms listed in [SOP2 scalar ALU](scalar-alu.m
 
 | File | Role |
 | --- | --- |
-| `crates/isa/semantics/rdna2.toml` | The registry. Data only: every value comes from a closed vocabulary. |
+| `crates/isa/semantics/rdna2.toml` | The registry root: schema, architecture, the snapshot hash, the cited documents and the ordered `include` list of family files. |
+| `crates/isa/semantics/rdna2/<family>.toml` | One file per encoding family (`sop2.toml`, `sopc.toml`, `sop1.toml`, `vop2.toml`, `vopc.toml`): that family's operand rules and forms only. Data only: every value comes from a closed vocabulary. |
 | `crates/isa/generate_semantics.py` | Validates the registry and writes the Rust tables. Python 3.11 or newer, standard library only. |
 | `crates/isa/data/rdna2.jsonl` | Pinned snapshot of the AMD machine-readable ISA XML, used to cross-check identity and operands. |
 | `crates/isa/src/semantics_gen.rs` | Generated output. Never edit it by hand. |
@@ -20,9 +21,23 @@ The registry covers the nine SOP2 forms listed in [SOP2 scalar ALU](scalar-alu.m
 | `crates/isa/src/primitive.rs` | The shared integer primitives that the generated `evaluate` calls. |
 | `tests/semantics_generator/` | Unit tests for the generator. |
 
+## Family files
+
+The root lists its family files under `include`. The generator merges them in
+that order, and forms keep their order within each file, so the merged registry
+equals one file with the parts concatenated (splitting the original single file
+left `semantics_gen.rs` byte-identical). A family file may hold only
+`[operand_rules.*]` and `[[form]]` entries of the family it is named after:
+`rdna2/vop2.toml` holds VOP2 rules and forms and nothing else. The loader
+rejects a form or rule of another family, a rule declared in two files, root
+keys in a family file, and a missing or repeated include. Work on different
+families therefore never edits the same registry file. To add a family, create
+`rdna2/<family>.toml` and append it to `include`; the generated order (and so
+the generated file) changes only where the new file is placed.
+
 ## Fields
 
-The top of the file holds:
+The root file holds:
 
 - `schema`: must be `1`.
 - `architecture`: must be `"gfx1030"`.

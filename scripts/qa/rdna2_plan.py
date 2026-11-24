@@ -67,6 +67,7 @@ class Inventory:
 # Planning does not claim or edit these paths.
 DEFAULT_PERMITTED_FILES = (
     "crates/isa/semantics/rdna2.toml",
+    "crates/isa/semantics/rdna2/",
     "crates/isa/src/semantics_gen.rs",
     "crates/decoder/src/lib.rs",
     "crates/shader/",
@@ -87,7 +88,8 @@ DEFAULT_ACCEPTANCE = (
 def load_inventories(root: Path) -> dict[str, Any]:
     sc = _load_coverage_module(root)
     identified = sc["load_snapshot"](root)
-    registry = tomllib.loads((root / sc["REGISTRY"]).read_text(encoding="utf-8"))
+    # The root registry includes per-family files; merge them as the coverage report does.
+    registry = sc["load_registry"](root / sc["REGISTRY"])
     decoder = sc["parse_decoder"]((root / sc["DECODER"]).read_text(encoding="utf-8"))
     generated = sc["parse_generated"]((root / sc["GENERATED"]).read_text(encoding="utf-8"))
     decoder_forms = set(decoder) | set(generated)

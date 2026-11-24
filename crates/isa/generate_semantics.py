@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Validate the declarative gfx1030 semantic registry and generate its Rust tables.
 
-  validate   check crates/isa/semantics/rdna2.toml against its closed vocabulary
+  validate   check crates/isa/semantics/rdna2.toml (and the family files it
+             includes) against its closed vocabulary
              and the pinned AMD XML snapshot (crates/isa/data/rdna2.jsonl)
   generate   validate, then write crates/isa/src/semantics_gen.rs
   --check    validate and regenerate in memory; exit 1 if the committed file
@@ -315,10 +316,55 @@ NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 SECTION = re.compile(r"^[0-9]+(\.[0-9]+)*$")
 
 
+class RegistryError(ValueError):
+    """A registry file set that cannot be merged into one registry."""
+
+
+# Keys a family file may hold; everything else lives in the root file.
+FAMILY_FILE_KEYS = {"operand_rules", "form"}
+
+
 def load_registry(path=REGISTRY):
-    """Parse the TOML registry into a dict."""
+    """Parse the root registry file and merge its family files into one dict.
+
+    The root lists its family files under `include`, in order. Each family file
+    holds only operand rules and forms of the one encoding family it is named
+    after (`rdna2/vop2.toml` holds VOP2), so parallel work on different
+    families never edits the same file. Forms keep the include order, so the
+    merged registry is the same as one file with the parts concatenated.
+    """
+    path = Path(path)
     with open(path, "rb") as handle:
-        return tomllib.load(handle)
+        registry = tomllib.load(handle)
+    includes = registry.pop("include", [])
+    if not isinstance(includes, list) or not all(isinstance(item, str) for item in includes):
+        raise RegistryError(f"{path.name}: include must be a list of file names")
+    if len(set(includes)) != len(includes):
+        raise RegistryError(f"{path.name}: a family file is included twice")
+    rules = registry.setdefault("operand_rules", {})
+    forms = registry.setdefault("form", [])
+    for include in includes:
+        part_path = path.parent / include
+        family = Path(include).stem.upper()
+        if not part_path.is_file():
+            raise RegistryError(f"{path.name}: included family file {include} does not exist")
+        with open(part_path, "rb") as handle:
+            part = tomllib.load(handle)
+        unknown = sorted(set(part) - FAMILY_FILE_KEYS)
+        if unknown:
+            raise RegistryError(f"{include}: keys {unknown} belong in the root file")
+        for name, rule in part.get("operand_rules", {}).items():
+            if name in rules:
+                raise RegistryError(f"{include}: operand rule {name} is declared twice")
+            if not isinstance(rule, dict) or rule.get("family") != family:
+                raise RegistryError(f"{include}: operand rule {name} is not a {family} rule")
+            rules[name] = rule
+        for index, form in enumerate(part.get("form", [])):
+            if not isinstance(form, dict) or form.get("family") != family:
+                label = form.get("name", f"form #{index}") if isinstance(form, dict) else index
+                raise RegistryError(f"{include}: form {label} is not a {family} form")
+            forms.append(form)
+    return registry
 
 
 def load_snapshot(path=SNAPSHOT):
@@ -1018,7 +1064,11 @@ def main():
     arguments = parser.parse_args()
     if bool(arguments.mode) == arguments.check:
         parser.error("choose exactly one of generate, validate or --check")
-    registry = load_registry(arguments.registry)
+    try:
+        registry = load_registry(arguments.registry)
+    except RegistryError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     snapshot = load_snapshot(arguments.snapshot)
     errors = validate(registry, snapshot)
     if errors:
