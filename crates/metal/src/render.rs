@@ -14,7 +14,7 @@ use objc2_metal::{
     MTLTextureUsage, MTLViewport,
 };
 
-use xenora_texture::Bc1Subresource;
+use xenora_texture::{Bc1Subresource, Bc1Upload};
 
 use super::{
     ComputeInput, MetalError, NativeCompute, compile_options, complete_command, find_function,
@@ -396,8 +396,9 @@ pub struct DepthPass<'a> {
     pub clear_color: [u8; 4],
     pub clear_depth: Option<f32>,
     pub draws: &'a [DepthDraw],
-    /// A validated BC1 level placed unchanged in a native `BC1_RGBA` texture.
-    pub texture: Option<&'a Bc1Subresource<'a>>,
+    /// A validated BC1 upload whose base level of layer 0 is uploaded to a
+    /// native `BC1_RGBA` texture as the original blocks, without CPU decoding.
+    pub texture: Option<&'a Bc1Upload<'a>>,
 }
 
 /// Colour bytes, tightly packed top-to-bottom, and the stored depth values
@@ -413,7 +414,8 @@ impl NativeCompute {
     ///
     /// Each draw sets its own depth state before drawing, so depth compare,
     /// clear and write enable act exactly as the pass describes. The stored
-    /// depth is read back bit-exactly by a compute kernel.
+    /// depth is read back by a compute kernel that returns each value as
+    /// the texture read gives it, without numeric conversion.
     ///
     /// # Errors
     ///
@@ -431,9 +433,12 @@ impl NativeCompute {
         validate_depth_pass(pass)?;
         let bc1 = pass
             .texture
-            .map(|level| {
+            .map(|upload| {
+                let level = upload.subresource(0, 0).map_err(|error| {
+                    MetalError::new("texture subresource", format!("{error:?}"))
+                })?;
                 self.validate_bc_extent(level.width, level.height, "BC1")?;
-                self.new_bc1_texture(level)
+                self.new_bc1_texture(&level)
             })
             .transpose()?;
 
@@ -696,8 +701,10 @@ impl NativeCompute {
         } else {
             level.row_pitch
         };
-        // SAFETY: The region spans the whole level. `Bc1Upload::subresource`
-        // validated that the bytes hold every block row at this stride.
+        // SAFETY: The region spans the whole level. The level comes only from
+        // `Bc1Upload::subresource`, whose layout validation guarantees that the
+        // bytes hold every block row, including partial edge blocks, at this
+        // block-aligned stride.
         unsafe {
             texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
                 whole(level.width, level.height),

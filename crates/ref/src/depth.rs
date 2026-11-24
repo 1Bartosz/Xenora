@@ -77,6 +77,8 @@ pub struct RefTexture<'a> {
 pub enum DepthRefError {
     Extent,
     NonUnitW,
+    /// A position is non-finite or its depth lies outside 0..=1: (draw).
+    Unclipped(usize),
     /// A pixel centre lies on a triangle edge: (draw, x, y).
     EdgeTie(usize, usize, usize),
     MissingTexture,
@@ -99,8 +101,8 @@ pub type DepthRefOutput = (Vec<[u8; 4]>, Option<Vec<f32>>);
 ///
 /// # Errors
 ///
-/// Returns an error for an empty extent, non-unit `w`, a pixel centre on an
-/// edge, a textured draw without texture, or a depth state without attachment.
+/// Returns an error for an empty extent, non-unit `w`, a non-finite position
+/// or depth outside 0..=1, a pixel centre on an edge, a textured draw without texture, or a depth state without attachment.
 pub fn render_depth(
     [width, height]: [usize; 2],
     clear_color: [u8; 4],
@@ -111,9 +113,8 @@ pub fn render_depth(
     let pixels = width.checked_mul(height).filter(|&n| n > 0);
     let pixels = pixels.ok_or(DepthRefError::Extent)?;
     if let Some(texture) = texture
-        && (texture.width == 0
-            || texture.height == 0
-            || texture.texels.len() != texture.width * texture.height)
+        && texture.width.checked_mul(texture.height).filter(|&n| n > 0)
+            != Some(texture.texels.len())
     {
         return Err(DepthRefError::Extent);
     }
@@ -128,6 +129,15 @@ pub fn render_depth(
         }
         if draw.positions.iter().any(|p| p[3] != 1.0) {
             return Err(DepthRefError::NonUnitW);
+        }
+        // The reference does not clip, so depth must already lie in the
+        // viewport range 0..=1 (this also rejects non-finite depth).
+        if draw
+            .positions
+            .iter()
+            .any(|p| !p.iter().all(|v| v.is_finite()) || !(0.0..=1.0).contains(&p[2]))
+        {
+            return Err(DepthRefError::Unclipped(index));
         }
         // Viewport transform: NDC x, y in -1..1 map to pixels, y down.
         let screen = draw.positions.map(|[x, y, z, _]| {
@@ -269,6 +279,18 @@ mod tests {
             ),
             Err(DepthRefError::EdgeTie(0, _, _))
         ));
+        let mut far = LOWER_LEFT;
+        far[0][2] = 1.25;
+        assert_eq!(
+            render_depth(
+                [2, 2],
+                [0; 4],
+                Some(1.0),
+                &[draw(far, CompareFunction::Always, true)],
+                None
+            ),
+            Err(DepthRefError::Unclipped(0))
+        );
         assert_eq!(
             render_depth(
                 [2, 2],

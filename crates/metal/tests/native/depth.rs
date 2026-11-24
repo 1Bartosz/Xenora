@@ -59,7 +59,6 @@ fn bc1_upload() -> Bc1Upload<'static> {
 fn depth_attachment_known_answers() {
     let gpu = context();
     let upload = bc1_upload();
-    let level = upload.subresource(0, 0).expect("BC1 level 0");
     let expected = expected();
     let cases = cases();
     assert_eq!(cases.len(), expected.len());
@@ -67,13 +66,21 @@ fn depth_attachment_known_answers() {
     for (case, want) in cases.iter().zip(&expected) {
         assert_eq!(case.name, want.name);
         let draws = metal_draws(case);
-        let output = native(gpu.render_depth(&DepthPass {
-            extent: [SIZE, SIZE],
-            clear_color: case.clear_color,
-            clear_depth: case.clear_depth,
-            draws: &draws,
-            texture: Some(&level),
-        }));
+        let output = native(
+            gpu.render_depth(&DepthPass {
+                extent: [SIZE, SIZE],
+                clear_color: case.clear_color,
+                clear_depth: case.clear_depth,
+                draws: &draws,
+                // Only the textured case needs BC support, so a device without it
+                // fails that case alone, as a capability error.
+                texture: case
+                    .draws
+                    .iter()
+                    .any(|draw| matches!(draw.fill, Fill::Texture))
+                    .then_some(&upload),
+            }),
+        );
         for (index, (pixel, wanted)) in output
             .color
             .as_chunks::<4>()
