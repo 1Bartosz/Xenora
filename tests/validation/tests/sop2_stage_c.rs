@@ -105,7 +105,7 @@ const COUNTS: [(&str, usize); 5] = [
     ("stage c domain", 8 * 8 * 8 * 2),
     ("stage c shift count", 3 * 8 * 7 * 2),
     ("stage c aliasing", 8 * 2 * 5 * 2),
-    ("stage c inline integer", 8 * 81 * 2 * 2),
+    ("stage c inline integer", 8 * 81 * 2 * 2 * 2),
     ("stage c literal", 8 * 6 * 2 * 2),
 ];
 
@@ -177,23 +177,28 @@ fn cases() -> Vec<Case> {
                     cases.push(case(name, "stage c aliasing", label, code, out));
                 }
             }
-            // Every integer inline constant (-16..64) in each source slot; the
-            // register operand is s8 = 0x8000_0f0f (or 0x40 as a shift count).
+            // Every integer inline constant (-16..64) in each source slot. The
+            // register operand s8 takes a word and its complement, so a wrong
+            // inline value changes D for at least one of them (as a shift
+            // count it is 0x40 and 0x21, i.e. counts 0 and 1).
             for selector in 128..=208 {
                 let value = inline_integer(selector);
-                for slot in 0..2 {
-                    let other = if slot == 0 && shift {
-                        0x40
+                for (slot, other) in [0, 1].into_iter().flat_map(|slot| {
+                    let others = if slot == 0 && shift {
+                        [0x40, 0x21]
                     } else {
-                        0x8000_0f0f
+                        [0x8000_0f0f, 0x7fff_f0f0]
                     };
+                    others.map(|other| (slot, other))
+                }) {
                     let (alu, out) = if slot == 0 {
                         (sop2(form, 10, selector, 8), expect(form, value, other))
                     } else {
                         (sop2(form, 10, 8, selector), expect(form, other, value))
                     };
                     let code = program(&[(8, other)], scc, &[alu], 10);
-                    let label = format!("inline {value:#x} in src{slot}, scc before {scc}");
+                    let label =
+                        format!("inline {value:#x} in src{slot}, s8 {other:#x}, scc before {scc}");
                     cases.push(case(name, "stage c inline integer", label, code, out));
                 }
             }
@@ -290,11 +295,13 @@ fn stage_c_forms_match_the_guide_on_the_independent_interpreter() {
 
 #[test]
 fn odd_opcodes_beside_the_stage_c_forms_stay_unsupported() {
-    // The 64-bit neighbours (opcodes 21-35 odd) read SGPR pairs; neither
-    // interpreter supports them, so each must refuse the SOP2 word.
+    // The 64-bit neighbours (opcodes 21-35 odd) read aligned SGPR pairs
+    // (s[10:11] = s[8:9] op s[12:13], all initialized); neither interpreter
+    // supports them, so each must refuse the SOP2 word.
     for op in (21..=35).step_by(2) {
-        let alu = [0x8000_0000 | op << 23 | 10 << 16 | 9 << 8 | 8];
-        let code = program(&[(8, 1), (9, 2)], false, &alu, 10);
+        let alu = [0x8000_0000 | op << 23 | 10 << 16 | 12 << 8 | 8];
+        let init = [(8, 1), (9, 2), (12, 3), (13, 4)];
+        let code = program(&init, false, &alu, 10);
         assert!(
             xenora_ref::execute(&code, &INPUT).is_err(),
             "reference accepted opcode {op}"
