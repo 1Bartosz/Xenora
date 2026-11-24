@@ -363,9 +363,24 @@ pub fn decode<E>(
             GROUPS[usize::from(index)][usize::from((modrm >> 3) & 7)]
         }
     };
-    let form = FORMS
+    let mut form = FORMS
         .get(usize::from(form_index))
         .ok_or(DecodeError::Unsupported(opcode))?;
+    let mut form_index = form_index;
+    if form.no_rex_b && rex_b != 0 {
+        // 90 is NOP only without REX.B. With it the byte exchanges r8 with the
+        // accumulator, as the first register of the 91..97 row would (Intel
+        // SDM Vol. 2B, "NOP" and "XCHG").
+        match ONE_BYTE[slot + 1] {
+            Entry::Form(index)
+                if !two_byte && !rep && FORMS[usize::from(index)].encoding == Encoding::OpReg =>
+            {
+                form_index = index;
+                form = &FORMS[usize::from(index)];
+            }
+            _ => return Err(DecodeError::Unsupported(opcode)),
+        }
+    }
     if form.has_modrm && matches!(entry, Entry::Form(_)) {
         modrm = cursor.u8()?;
     }
@@ -386,10 +401,6 @@ pub fn decode<E>(
     if operand_size && !takes_operand_size && !overridden {
         return Err(DecodeError::Unsupported(0x66));
     }
-    if form.no_rex_b && rex_b != 0 {
-        return Err(DecodeError::Unsupported(opcode));
-    }
-
     let rm_size = if form.source != 0 { form.source } else { size };
     let register = |field: u8, extension: u8, width: u8| {
         if width == 1 && rex == 0 && field >= 4 {

@@ -40,8 +40,9 @@ XMM registers live in `CpuState::xmm`, lane 0 in the low bits, and MXCSR in `Cpu
 
 - a denormal dividend over zero raises divide-by-zero only, not also denormal-operand;
 - flush-to-zero also flushes a tiny result that is exact, raising underflow and precision;
-- DAZ applies before conversion to an integer;
-- an unmasked overflow also records precision.
+- DAZ applies before conversion to an integer.
+
+An unmasked overflow records precision only when rounding with an unbounded exponent is inexact (Intel SDM Vol. 1, D.4.2.3, Table D-16). The known-answer cases in `tests/cpu_known_answers.rs` assert this.
 
 None of it has been compared with x86 hardware.
 

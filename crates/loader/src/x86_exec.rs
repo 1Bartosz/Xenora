@@ -386,6 +386,14 @@ pub fn execute(
                 write_reg(cpu, insn.reg, size, offset(cpu, &operand));
             }
         }
+        Op::Xchg if insn.encoding == Encoding::OpReg => {
+            // The accumulator with the register in the opcode, never itself:
+            // 90 without REX.B is NOP.
+            let rax = accumulator(RAX);
+            let (a, b) = (read_reg(cpu, rax, size), read_reg(cpu, insn.reg, size));
+            write_reg(cpu, rax, size, b);
+            write_reg(cpu, insn.reg, size, a);
+        }
         Op::Xchg => {
             let (a, b) = operands(cpu, memory, insn)?;
             write_rm(cpu, memory, insn, b)?;
