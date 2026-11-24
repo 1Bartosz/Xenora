@@ -39,8 +39,8 @@ The latest verified milestone includes **translated gfx1030 vertex and pixel sha
 | X13 — Advanced shaders | Mesh, geometry and additional compute shader capabilities with verified Metal execution | Planned |
 | X14 — CPU recompilation | Native ARM64 dynamic recompilation of supported x86-64 instructions in synthetic fixtures | Implemented subset |
 | X15 — Executable compatibility | Static PE inspection reports sections, relocations, thread-local storage (TLS) callbacks, imports and entry-point instructions | Static probe implemented |
-| X16 — Guest memory and threading | Virtual memory mapping, thread scheduling, synchronization primitives and atomic operations | Planned |
-| X17 — System services | Implement a tested subset of Xbox-compatible runtime APIs, memory services, filesystem access and application lifecycle | Planned |
+| X16 — Guest memory and threading | Virtual memory mapping, thread scheduling, synchronization primitives and atomic operations | Implemented subset |
+| X17 — System services | Implement a tested subset of Xbox-compatible runtime APIs, memory services, filesystem access and application lifecycle | Implemented subet |
 | X18 — Graphics API translation | Translate supported Xbox graphics commands, resource descriptors, command queues, barriers and fences into Metal operations | Planned |
 | X19 — Advanced GPU features | Indirect rendering, asynchronous compute, additional texture formats and ray-tracing compatibility research | Planned |
 | X20 — Integrated guest runtime | Connect CPU recompilation, executable loading, system services and graphics translation into one persistent runtime | Planned |
@@ -297,8 +297,6 @@ Run the original guest resource integration tests:
 tests/compat_fixtures/verify-resources.sh
 ```
 
-The X9 verification script builds synthetic PE fixtures, executes guest resource and rendering workloads, compares reported output and exercises negative cases.
-
 Additional checks:
 
 ```sh
@@ -322,60 +320,8 @@ Testing distinguishes between:
 
 Compiling a shader is not equivalent to proving its GPU output is correct.
 
-The [X9 acceptance report](docs/testing/x9-acceptance.md) documents verified outcomes and unresolved work.
 
 ---
-
-## Roadmap
-
-Future development will focus on expanding the complete execution path instead of treating synthetic demonstration milestones as evidence of commercial-game compatibility.
-
-### Near-term priorities
-
-1. **Graphics compatibility:** Extend shader translation, texture sampling, resource bindings, multi-draw rendering and synchronization.
-2. **Guest execution:** Improve the PE loader, CPU instruction coverage, runtime services and execution correctness.
-3. **Performance:** Investigate efficient ARM64 guest execution, graphics pipeline caching, profiling and GPU resource lifetime management.
-
-Longer-term research includes authentic Xbox application interfaces and significantly broader GPU behavior.
-
-MetalFX upscaling and other presentation optimizations may become useful once substantial workloads render correctly. They are not substitutes for correct guest execution or shader translation.
-
-There is no announced commercial-game support date.
-
----
-
-## Contributors wanted
-
-**Xenora is looking for developers interested in native Apple Silicon systems programming, graphics translation and emulation research.**
-
-This is an ambitious project, and there's a great deal of work that would benefit from experienced contributors and independent reviewers.
-
-Particularly useful areas include:
-
-| Area | Potential contributions |
-| --- | --- |
-| Apple Metal | Rendering, resource management, synchronization, GPU debugging and profiling |
-| AMD RDNA2 | ISA decoding, wave semantics, shader execution and correctness tests |
-| Compiler engineering | Shader intermediate representations, lowering, optimization and code generation |
-| ARM64 / x86-64 | Guest CPU execution, instruction semantics, memory models and future JIT research |
-| Rust | Runtime architecture, concurrency, safety, tests and tooling |
-| macOS | Apple Silicon compatibility, native debugging and hardware validation |
-| Testing | Independent reference implementations, fuzzing, regression tests and reproducible GPU fixtures |
-
-You don't need to be an expert in every subsystem.
-
-Code review, small targeted fixes, independent test cases and technical criticism are all valuable contributions.
-
-### Getting involved
-
-1. Read [CONTRIBUTING.md](CONTRIBUTING.md) and the relevant architecture documentation.
-2. Review the [current acceptance results](docs/testing/x9-acceptance.md).
-3. Open a [GitHub issue](https://github.com/ranveersoni98/Xenora/issues) to discuss a feature, bug, or research question.
-4. Submit focused pull requests with reproducible tests and documented limitations.
-
-Contributions must follow the project's original-implementation and clean-room research policies. Do not submit proprietary game files, leaked SDK materials, console keys or unauthorized shader dumps.
-
-AI-assisted development has been used in Xenora. All contributions, including AI-assisted code, are expected to undergo human review and independent verification.
 
 **The goal is to build a trustworthy native Apple Silicon compatibility framework, one verifiable subsystem at a time.**
 
@@ -390,5 +336,3 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party attribution
 Xenora is an independent open-source project and is not affiliated with Microsoft, Xbox, Rockstar Games or Apple.
 
 ---
-
-**Built for Apple Silicon. Powered by Rust and Metal. Open to contributors.**

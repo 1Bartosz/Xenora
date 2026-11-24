@@ -62,7 +62,8 @@ pub struct RFlags {
     pub of: bool, // Overflow flag
 }
 
-/// x86-64 CPU state.
+/// x86-64 CPU state. Native DBT accesses the general registers and RIP by offset.
+#[repr(C)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CpuState {
     pub gpr: [u64; 16],
@@ -96,6 +97,7 @@ pub enum ExitReason {
     Halt,
     Syscall(u64),
     StepLimitExceeded,
+    JitCacheExhausted,
     MemoryFault(MemoryError),
     IllegalInstruction(u8),
     StackUnderflow,
@@ -107,6 +109,7 @@ impl fmt::Display for ExitReason {
             Self::Halt => write!(f, "guest executed HLT"),
             Self::Syscall(nr) => write!(f, "guest executed SYSCALL ({nr})"),
             Self::StepLimitExceeded => write!(f, "execution step budget exhausted"),
+            Self::JitCacheExhausted => write!(f, "native JIT code cache exhausted"),
             Self::MemoryFault(e) => write!(f, "memory fault: {e}"),
             Self::IllegalInstruction(op) => write!(f, "illegal or unsupported opcode: 0x{op:02x}"),
             Self::StackUnderflow => write!(f, "stack underflow"),
@@ -115,6 +118,34 @@ impl fmt::Display for ExitReason {
 }
 
 impl std::error::Error for ExitReason {}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{CpuState, RFlags, Register};
+
+    /// The native translator addresses guest registers and RIP by raw byte
+    /// offset. Keep these assertions next to the struct so a layout change
+    /// cannot silently corrupt translated blocks.
+    #[test]
+    fn native_translator_offsets_match_repr_c_layout() {
+        assert_eq!(std::mem::offset_of!(CpuState, gpr), 0);
+        assert_eq!(std::mem::offset_of!(CpuState, rip), 16 * 8);
+        assert_eq!(std::mem::offset_of!(CpuState, flags), 16 * 8 + 8);
+        assert_eq!(std::mem::size_of::<RFlags>(), 4);
+        assert_eq!(std::mem::size_of::<CpuState>(), 16 * 8 + 8 + 8);
+
+        let cpu = CpuState::default();
+        let base = std::ptr::addr_of!(cpu) as usize;
+        for reg in [Register::Rax, Register::Rsp, Register::R15] {
+            assert_eq!(
+                base + (reg as usize) * 8,
+                std::ptr::addr_of!(cpu.gpr[reg as usize]) as usize
+            );
+        }
+        assert_eq!(base + 16 * 8, std::ptr::addr_of!(cpu.rip) as usize);
+        assert_eq!(base + 16 * 8 + 8, std::ptr::addr_of!(cpu.flags) as usize);
+    }
+}
 
 /// Result returned after running guest execution.
 #[derive(Debug)]

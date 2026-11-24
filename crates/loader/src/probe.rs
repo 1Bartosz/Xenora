@@ -1,23 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Non-executing PE compatibility probe diagnostic generator for Xenora X14.5.
+//! Non-executing PE compatibility probe diagnostic generator for Xenora X14.5+X16.
 //!
 //! Parses candidate PE32+ binaries in strictly read-only mode, inventories
 //! sections, relocations, TLS structures, import dependencies, and performs bounded
-//! static instruction disassembly without executing any guest code.
+//! control-flow-aware static instruction disassembly without executing any guest code.
+//!
+//! The disassembly phase uses a worklist-based CFG traversal so that unreachable
+//! padding bytes (e.g. INT3 after an unconditional JMP) are never classified as
+//! startup blockers.
 
+use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::MemoryPermissions;
 use crate::pe::{IMAGE_FILE_MACHINE_AMD64, PE32_PLUS_MAGIC, ParsedPe, PeError, PeSection};
-use std::collections::BTreeMap;
+use crate::services::{MockClock, ServicesState, register_standard_services};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Bounded probe configuration.
 #[derive(Clone, Debug)]
 pub struct ProbeConfig {
     pub max_disasm_bytes: usize,
     pub max_instructions: usize,
+    /// Maximum number of CFG worklist entries to visit (guards against exponential blowup).
+    pub max_worklist_entries: usize,
 }
 
 impl Default for ProbeConfig {
@@ -25,8 +35,410 @@ impl Default for ProbeConfig {
         Self {
             max_disasm_bytes: 65536,
             max_instructions: 10000,
+            max_worklist_entries: 4096,
         }
     }
+}
+
+/// Reachability classification for a decoded instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reachability {
+    /// Reached via at least one CFG edge from the entry point or a TLS callback.
+    Reachable,
+    /// Not reached by the bounded CFG traversal; may be dead code or padding.
+    Unreachable,
+    /// Reachability could not be determined (e.g. behind an indirect branch target).
+    Uncertain,
+}
+
+/// Internal CFG traversal result for a single decoded instruction.
+#[derive(Clone, Debug)]
+struct CfgDecoded {
+    #[allow(dead_code)]
+    rva: u32,
+    insn_len: usize,
+    mnemonic: String,
+    is_dbt: bool,
+    is_interp: bool,
+    notes: String,
+    /// Statically known successor RVAs to push onto the worklist.
+    successors: Vec<u32>,
+    /// True if fall-through to the next sequential byte is reachable.
+    fall_through: bool,
+}
+
+/// Decode a single x86-64 instruction from a file-mapped byte slice.
+///
+/// `slice`  — file bytes beginning at the instruction's raw file offset.
+/// `rva`    — the instruction's RVA (used to compute branch targets).
+/// `va`     — the instruction's virtual address (same).
+///
+/// Returns `None` if the slice is empty.
+fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
+    if slice.is_empty() {
+        return None;
+    }
+
+    let mut pc = 0usize;
+    let b0 = slice[pc];
+    pc += 1;
+
+    let mut rex_w = false;
+    let mut op = b0;
+
+    // REX prefix
+    if (op & 0xF0) == 0x40 {
+        rex_w = (op & 0x08) != 0;
+        if pc >= slice.len() {
+            return Some(CfgDecoded {
+                rva,
+                insn_len: pc,
+                mnemonic: "truncated".into(),
+                is_dbt: false,
+                is_interp: false,
+                notes: "truncated at REX prefix".into(),
+                successors: vec![],
+                fall_through: false,
+            });
+        }
+        op = slice[pc];
+        pc += 1;
+    }
+
+    let mut is_dbt = false;
+    let mut is_interp = false;
+    let mut mnemonic = String::new();
+    let mut notes = String::new();
+    let mut successors: Vec<u32> = Vec::new();
+    let mut fall_through = true;
+
+    match op {
+        0xF4 => {
+            mnemonic = "hlt".to_string();
+            is_dbt = true;
+            is_interp = true;
+            fall_through = false; // HLT terminates
+        }
+        0x90 => {
+            mnemonic = "nop".to_string();
+            is_dbt = true;
+            is_interp = true;
+        }
+        0xCC => {
+            mnemonic = "int3".to_string();
+            notes = "debugger breakpoint trap".to_string();
+            // INT3 terminates a linear sequence (trap), no fall-through for CFG purposes
+            fall_through = false;
+        }
+        0xC3 => {
+            mnemonic = "ret".to_string();
+            is_dbt = true;
+            is_interp = true;
+            fall_through = false;
+        }
+        0xC2 => {
+            // RETN imm16
+            if pc + 2 <= slice.len() {
+                pc += 2;
+            }
+            mnemonic = "retn imm16".to_string();
+            is_dbt = false;
+            is_interp = false;
+            notes = "near return with stack pop".to_string();
+            fall_through = false;
+        }
+        0x50..=0x57 => {
+            let r = op - 0x50;
+            mnemonic = format!("push r{r}");
+            is_dbt = true;
+            is_interp = true;
+        }
+        0x58..=0x5F => {
+            let r = op - 0x58;
+            mnemonic = format!("pop r{r}");
+            is_dbt = true;
+            is_interp = true;
+        }
+        0x01 | 0x03 => {
+            if pc < slice.len() {
+                let modrm = slice[pc];
+                pc += 1;
+                pc += modrm_extra_len(modrm, slice, pc);
+                mnemonic = format!("add (modrm 0x{modrm:02x})");
+                if (modrm >> 6) == 3 {
+                    is_dbt = true;
+                    is_interp = true;
+                }
+            }
+        }
+        0x29 | 0x2B => {
+            if pc < slice.len() {
+                let modrm = slice[pc];
+                pc += 1;
+                pc += modrm_extra_len(modrm, slice, pc);
+                mnemonic = format!("sub (modrm 0x{modrm:02x})");
+                if (modrm >> 6) == 3 {
+                    is_dbt = true;
+                    is_interp = true;
+                }
+            }
+        }
+        0x31 | 0x33 => {
+            if pc < slice.len() {
+                let modrm = slice[pc];
+                pc += 1;
+                pc += modrm_extra_len(modrm, slice, pc);
+                mnemonic = format!("xor (modrm 0x{modrm:02x})");
+                if (modrm >> 6) == 3 {
+                    is_dbt = true;
+                    is_interp = true;
+                }
+            }
+        }
+        0x83 => {
+            if pc + 1 < slice.len() {
+                let modrm = slice[pc];
+                let imm = slice[pc + 1];
+                pc += 2;
+                let sub_op = (modrm >> 3) & 7;
+                mnemonic = format!("imm8_group modrm=0x{modrm:02x} imm=0x{imm:02x}");
+                if (modrm >> 6) == 3 && (sub_op == 0 || sub_op == 5 || sub_op == 7) {
+                    is_dbt = true;
+                    is_interp = true;
+                }
+            }
+        }
+        0x85 => {
+            // TEST r/m, r
+            if pc < slice.len() {
+                let modrm = slice[pc];
+                pc += 1;
+                pc += modrm_extra_len(modrm, slice, pc);
+                mnemonic = format!("test (modrm 0x{modrm:02x})");
+                is_interp = true;
+            }
+        }
+        0x89 | 0x8B => {
+            if pc < slice.len() {
+                let modrm = slice[pc];
+                pc += 1;
+                let mode = (modrm >> 6) & 3;
+                let rm = modrm & 7;
+                mnemonic = format!("mov (modrm 0x{modrm:02x})");
+                if mode == 3 {
+                    is_dbt = true;
+                    is_interp = true;
+                } else if rm == 4 {
+                    // SIB
+                    if pc < slice.len() {
+                        let sib = slice[pc];
+                        pc += 1;
+                        if mode == 1 && pc < slice.len() {
+                            pc += 1; // disp8
+                        } else if mode == 2 && pc + 4 <= slice.len() {
+                            pc += 4; // disp32
+                        }
+                        mnemonic = format!("mov [SIB=0x{sib:02x}]");
+                        is_interp = true; // SIB implemented in interpreter
+                        notes = "SIB memory addressing form (interpreter only)".to_string();
+                    }
+                } else {
+                    if mode == 1 && pc < slice.len() {
+                        pc += 1;
+                    } else if (mode == 2 || (mode == 0 && rm == 5)) && pc + 4 <= slice.len() {
+                        pc += 4;
+                    }
+                    is_interp = true;
+                }
+            }
+        }
+        0xB8..=0xBF => {
+            let imm_len = if rex_w { 8 } else { 4 };
+            if pc + imm_len <= slice.len() {
+                pc += imm_len;
+                mnemonic = format!("mov reg, imm{imm_len}");
+                is_dbt = true;
+                is_interp = true;
+            }
+        }
+        // CALL rel32 — both call target and fall-through continuation are successors
+        0xE8 => {
+            if pc + 4 <= slice.len() {
+                let rel32 = i32::from_le_bytes(slice[pc..pc + 4].try_into().unwrap());
+                pc += 4;
+                let insn_len = pc as i64;
+                let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
+                mnemonic = format!("call rel32 -> 0x{target_va:016x}");
+                is_dbt = true;
+                is_interp = true;
+                // Push call target as a CFG successor; fall-through (return site) continues.
+                let call_rva = rva.wrapping_add(pc as u32).wrapping_add(rel32 as u32);
+                successors.push(call_rva);
+                // fall_through = true (the return site is the sequential instruction)
+            }
+        }
+        // JMP rel32 — unconditional; only the target is a successor, no fall-through
+        0xE9 => {
+            if pc + 4 <= slice.len() {
+                let rel32 = i32::from_le_bytes(slice[pc..pc + 4].try_into().unwrap());
+                pc += 4;
+                let insn_len = pc as i64;
+                let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
+                mnemonic = format!("jmp rel32 -> 0x{target_va:016x}");
+                is_dbt = true;
+                is_interp = true;
+                let jmp_rva = rva.wrapping_add(pc as u32).wrapping_add(rel32 as u32);
+                successors.push(jmp_rva);
+                fall_through = false;
+            }
+        }
+        // JMP rel8 — unconditional short jump
+        0xEB => {
+            if pc < slice.len() {
+                let rel8 = slice[pc] as i8;
+                pc += 1;
+                let insn_len = pc as i64;
+                let target_va = (va as i64 + insn_len + rel8 as i64) as u64;
+                mnemonic = format!("jmp rel8 -> 0x{target_va:016x}");
+                is_dbt = true;
+                is_interp = true;
+                let jmp_rva = (rva as i64 + insn_len + rel8 as i64) as u32;
+                successors.push(jmp_rva);
+                fall_through = false;
+            }
+        }
+        // Jcc rel8 (0x70..=0x7F) — conditional; both target and fall-through are successors
+        0x70..=0x7F => {
+            if pc < slice.len() {
+                let rel8 = slice[pc] as i8;
+                pc += 1;
+                let insn_len = pc as i64;
+                let target_va = (va as i64 + insn_len + rel8 as i64) as u64;
+                mnemonic = format!("j{:x} rel8 -> 0x{target_va:016x}", op & 0xF);
+                is_dbt = true;
+                is_interp = true;
+                let jcc_rva = (rva as i64 + insn_len + rel8 as i64) as u32;
+                successors.push(jcc_rva);
+                // fall_through = true (not-taken path)
+            }
+        }
+        // 0F-prefixed two-byte opcodes (Jcc rel32, etc.)
+        0x0F => {
+            if pc < slice.len() {
+                let op2 = slice[pc];
+                pc += 1;
+                match op2 {
+                    // Jcc rel32 (0F 80..=0F 8F)
+                    0x80..=0x8F => {
+                        if pc + 4 <= slice.len() {
+                            let rel32 = i32::from_le_bytes(slice[pc..pc + 4].try_into().unwrap());
+                            pc += 4;
+                            let insn_len = pc as i64;
+                            let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
+                            mnemonic = format!("j{:x} rel32 -> 0x{target_va:016x}", op2 & 0xF);
+                            is_dbt = true;
+                            is_interp = true;
+                            let jcc_rva = (rva as i64 + insn_len + rel32 as i64) as u32;
+                            successors.push(jcc_rva);
+                            // fall_through = true
+                        }
+                    }
+                    _ => {
+                        mnemonic = format!("0f_{op2:02x}");
+                        notes = "unsupported two-byte opcode".to_string();
+                    }
+                }
+            }
+        }
+        // FF /2 (CALL r/m) and FF /4 (JMP r/m) — indirect, target unknown
+        0xFF => {
+            if pc < slice.len() {
+                let modrm = slice[pc];
+                pc += 1;
+                let reg_field = (modrm >> 3) & 7;
+                if reg_field == 2 || reg_field == 4 {
+                    // indirect call/jmp
+                    if (modrm & 7) == 5 && pc + 4 <= slice.len() {
+                        let disp32 = i32::from_le_bytes(slice[pc..pc + 4].try_into().unwrap());
+                        pc += 4;
+                        let iat_target = (va as i64 + pc as i64 + disp32 as i64) as u64;
+                        if reg_field == 2 {
+                            mnemonic = format!("call *[RIP + 0x{iat_target:016x}]");
+                            notes = "indirect IAT symbol call - requires dynamic import linking"
+                                .to_string();
+                            is_dbt = true;
+                            is_interp = true;
+                            // fall_through = true (return will come back here)
+                        } else {
+                            mnemonic = format!("jmp *[RIP + 0x{iat_target:016x}]");
+                            notes = "indirect jmp - target unknown statically".to_string();
+                            fall_through = false; // unconditional, target uncertain
+                        }
+                    } else {
+                        pc += modrm_extra_len(modrm, slice, pc);
+                        if reg_field == 2 {
+                            mnemonic = format!("call *r/m (modrm 0x{modrm:02x})");
+                            notes = "indirect call - target unknown".to_string();
+                            is_dbt = true;
+                            is_interp = true;
+                        } else {
+                            mnemonic = format!("jmp *r/m (modrm 0x{modrm:02x})");
+                            notes = "indirect jmp - target unknown statically".to_string();
+                            fall_through = false;
+                        }
+                    }
+                } else if reg_field == 6 {
+                    // PUSH r/m
+                    pc += modrm_extra_len(modrm, slice, pc);
+                    mnemonic = format!("push r/m (modrm 0x{modrm:02x})");
+                    is_dbt = true;
+                    is_interp = true;
+                } else {
+                    pc += modrm_extra_len(modrm, slice, pc);
+                    mnemonic = format!("ff_group_r{reg_field} (modrm 0x{modrm:02x})");
+                    notes = "unsupported FF-group opcode".to_string();
+                }
+            }
+        }
+        _ => {
+            mnemonic = format!("opcode_0x{op:02x}");
+            notes = "unsupported opcode".to_string();
+        }
+    }
+
+    Some(CfgDecoded {
+        rva,
+        insn_len: pc,
+        mnemonic,
+        is_dbt,
+        is_interp,
+        notes,
+        successors,
+        fall_through,
+    })
+}
+
+/// Compute the number of additional bytes after ModRM that the addressing mode requires.
+/// Does NOT include the ModRM byte itself.
+fn modrm_extra_len(modrm: u8, slice: &[u8], after_modrm: usize) -> usize {
+    let mode = (modrm >> 6) & 3;
+    let rm = modrm & 7;
+    if mode == 3 {
+        return 0; // register operand, no memory bytes
+    }
+    let mut extra = 0;
+    if rm == 4 {
+        extra += 1; // SIB byte
+    }
+    if mode == 1 {
+        extra += 1; // disp8
+    } else if mode == 2 {
+        extra += 4; // disp32
+    } else if mode == 0 && rm == 5 {
+        extra += 4; // RIP-relative disp32
+    }
+    // Clamp to what's actually available
+    extra.min(slice.len().saturating_sub(after_modrm))
 }
 
 /// An entry in the detailed relocation census.
@@ -57,7 +469,58 @@ pub struct ImportedSymbol {
     pub symbol: String,
     pub iat_rva: u32,
     pub category: &'static str,
+    /// The standard synthetic registry has a handler for this exact key.
     pub is_supported: bool,
+    pub service_status: Option<ServiceStatus>,
+    pub canonical_module: Option<String>,
+}
+
+impl ImportedSymbol {
+    fn coverage_label(&self) -> &'static str {
+        if let Some(status) = self.service_status {
+            return status.as_str();
+        }
+        // Explicitly tracked public APIs whose prerequisites are still missing.
+        match (self.dll.to_ascii_lowercase().as_str(), self.symbol.as_str()) {
+            (
+                "api-ms-win-core-processthreads-l1-1-0.dll",
+                "CreateThread" | "ResumeThread" | "SuspendThread" | "TerminateProcess",
+            )
+            | (
+                "api-ms-win-core-synch-l1-1-0.dll",
+                "WaitForSingleObject" | "WaitForSingleObjectEx",
+            )
+            | ("api-ms-win-core-synch-l1-2-1.dll", "WaitForMultipleObjects")
+            | ("api-ms-win-core-rtlsupport-l1-1-0.dll", "RtlVirtualUnwind") => "unsupported",
+            _ => "missing",
+        }
+    }
+
+    fn startup_priority(&self) -> (u8, &'static str) {
+        let dll = self.dll.to_ascii_lowercase();
+        if dll.contains("processthreads") || dll.contains("core-handle") {
+            (1, "process and thread identity and handles")
+        } else if dll.contains("fibers") || matches!(self.symbol.get(..3), Some("Tls" | "Fls")) {
+            (2, "thread and fiber local storage")
+        } else if dll.contains("core-synch") {
+            (3, "synchronization")
+        } else if dll.contains("core-profile") || dll.contains("core-sysinfo") {
+            (4, "clocks and system information")
+        } else if dll.contains("core-memory") || dll.contains("core-heap") || dll == "xmem.dll" {
+            (5, "virtual memory and allocation lifecycle")
+        } else if dll.contains("rtlsupport")
+            || dll.contains("errorhandling")
+            || self.symbol.starts_with("__CxxFrameHandler")
+        {
+            (7, "exceptions and unwind")
+        } else if self.category == "C/C++ CRT Runtime" || dll.contains("libraryloader") {
+            (6, "C/C++ runtime and module initialization")
+        } else if dll.contains("core-file") || dll == "xcrdapi.dll" {
+            (8, "file and package I/O")
+        } else {
+            (9, "platform services and graphics")
+        }
+    }
 }
 
 /// Decoded instruction coverage record.
@@ -349,6 +812,11 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
     }
 
     // 3. Import Census
+    let mut registry = ImportRegistry::new();
+    register_standard_services(
+        &mut registry,
+        Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),
+    );
     let mut imports = Vec::new();
     if import_dir_rva != 0
         && let Some(mut desc_off) = rva_to_offset(import_dir_rva)
@@ -405,255 +873,130 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
                         }
                     };
 
+                    let binding = registry.binding(&dll_name, &sym_name);
                     imports.push(ImportedSymbol {
                         dll: dll_name.clone(),
                         symbol: sym_name,
                         iat_rva,
                         category,
-                        is_supported: false, // None of the candidate's 587 external functions are linked
+                        is_supported: binding.is_some(),
+                        service_status: binding.map(|service| service.status),
+                        canonical_module: binding.map(|service| service.module.clone()),
                     });
                 }
             }
         }
     }
 
-    // 4. Bounded Static Disassembly at Entry Point
-    let mut instruction_records = Vec::new();
-    let mut first_unsupported_dbt_insn = None;
+    // 4. Control-Flow-Aware Static Disassembly
+    //
+    // Use a worklist (priority queue ordered by ascending RVA) rather than a
+    // linear sweep.  Seeds:
+    //   - Entry point RVA
+    //   - Every TLS callback RVA (converted from VA)
+    //
+    // For each decoded instruction:
+    //   - If unconditional JMP/RET/HLT/INT3: do not add sequential fall-through.
+    //   - If conditional branch / CALL: add both the branch target and the
+    //     fall-through continuation.
+    //   - If indirect branch (target unknown): record as "uncertain" and stop
+    //     that path.
+    //
+    // Track visited RVAs so each instruction is decoded at most once.
+    let mut instruction_records: Vec<InstructionRecord> = Vec::new();
+    let mut first_unsupported_dbt_insn: Option<InstructionRecord> = None;
 
-    if let Some(entry_file_offset) = rva_to_offset(entry_point_rva) {
-        let max_code_bytes = std::cmp::min(
-            config.max_disasm_bytes,
-            bytes.len().saturating_sub(entry_file_offset),
-        );
-        let code_slice = &bytes[entry_file_offset..entry_file_offset + max_code_bytes];
-        let mut pc = 0usize;
+    if let Some(_entry_offset) = rva_to_offset(entry_point_rva) {
+        // worklist: min-heap of RVAs to visit (ascending order for stable output)
+        let mut worklist: BinaryHeap<Reverse<u32>> = BinaryHeap::new();
+        let mut visited: BTreeSet<u32> = BTreeSet::new();
+        let mut worklist_entries_used = 0usize;
+        let total_budget = config.max_instructions;
+        let worklist_budget = config.max_worklist_entries;
 
-        while pc < code_slice.len() && instruction_records.len() < config.max_instructions {
-            let insn_rva = entry_point_rva + pc as u32;
-            let insn_va = image_base + insn_rva as u64;
-            let start_pc = pc;
+        worklist.push(Reverse(entry_point_rva));
 
-            let b0 = code_slice[pc];
-            pc += 1;
-
-            let mut rex_w = false;
-            let mut op = b0;
-
-            if (op & 0xF0) == 0x40 {
-                rex_w = (op & 0x08) != 0;
-                if pc >= code_slice.len() {
-                    break;
-                }
-                op = code_slice[pc];
-                pc += 1;
+        // Seed TLS callback RVAs
+        for &cb_va in &tls.callback_targets {
+            if cb_va >= image_base {
+                let cb_rva = (cb_va - image_base) as u32;
+                worklist.push(Reverse(cb_rva));
             }
+        }
 
-            let mut is_dbt = false;
-            let mut is_interp = false;
-            let mut mnemonic = String::new();
-            let mut notes = String::new();
-
-            match op {
-                0xF4 => {
-                    mnemonic = "hlt".to_string();
-                    is_dbt = true;
-                    is_interp = true;
-                }
-                0x90 => {
-                    mnemonic = "nop".to_string();
-                    is_dbt = true;
-                    is_interp = true;
-                }
-                0xCC => {
-                    mnemonic = "int3".to_string();
-                    notes = "debugger breakpoint trap".to_string();
-                }
-                0xC3 => {
-                    mnemonic = "ret".to_string();
-                    is_dbt = true;
-                    is_interp = true;
-                }
-                0x50..=0x57 => {
-                    let r = op - 0x50;
-                    mnemonic = format!("push r{r}");
-                    is_dbt = true;
-                    is_interp = true;
-                }
-                0x58..=0x5F => {
-                    let r = op - 0x58;
-                    mnemonic = format!("pop r{r}");
-                    is_dbt = true;
-                    is_interp = true;
-                }
-                0x01 | 0x03 => {
-                    if pc < code_slice.len() {
-                        let modrm = code_slice[pc];
-                        pc += 1;
-                        mnemonic = format!("add (modrm 0x{modrm:02x})");
-                        if (modrm >> 6) == 3 {
-                            is_dbt = true;
-                            is_interp = true;
-                        }
-                    }
-                }
-                0x29 | 0x2B => {
-                    if pc < code_slice.len() {
-                        let modrm = code_slice[pc];
-                        pc += 1;
-                        mnemonic = format!("sub (modrm 0x{modrm:02x})");
-                        if (modrm >> 6) == 3 {
-                            is_dbt = true;
-                            is_interp = true;
-                        }
-                    }
-                }
-                0x31 | 0x33 => {
-                    if pc < code_slice.len() {
-                        let modrm = code_slice[pc];
-                        pc += 1;
-                        mnemonic = format!("xor (modrm 0x{modrm:02x})");
-                        if (modrm >> 6) == 3 {
-                            is_dbt = true;
-                            is_interp = true;
-                        }
-                    }
-                }
-                0x83 => {
-                    if pc + 1 < code_slice.len() {
-                        let modrm = code_slice[pc];
-                        let imm = code_slice[pc + 1];
-                        pc += 2;
-                        let sub_op = (modrm >> 3) & 7;
-                        mnemonic = format!("imm8_group modrm=0x{modrm:02x} imm=0x{imm:02x}");
-                        if (modrm >> 6) == 3 && (sub_op == 0 || sub_op == 5 || sub_op == 7) {
-                            is_dbt = true;
-                            is_interp = true;
-                        }
-                    }
-                }
-                0x89 | 0x8B => {
-                    if pc < code_slice.len() {
-                        let modrm = code_slice[pc];
-                        pc += 1;
-                        let mode = (modrm >> 6) & 3;
-                        let rm = modrm & 7;
-                        mnemonic = format!("mov (modrm 0x{modrm:02x})");
-                        if mode == 3 {
-                            is_dbt = true;
-                            is_interp = true;
-                        } else if rm == 4 {
-                            // SIB
-                            if pc < code_slice.len() {
-                                let sib = code_slice[pc];
-                                pc += 1;
-                                if mode == 1 && pc < code_slice.len() {
-                                    pc += 1; // disp8
-                                } else if mode == 2 && pc + 4 <= code_slice.len() {
-                                    pc += 4; // disp32
-                                }
-                                mnemonic = format!("mov [SIB=0x{sib:02x}]");
-                                is_interp = true; // SIB implemented in interpreter
-                                notes = "SIB memory addressing form (interpreter only)".to_string();
-                            }
-                        } else {
-                            if mode == 1 && pc < code_slice.len() {
-                                pc += 1;
-                            } else if (mode == 2 || (mode == 0 && rm == 5))
-                                && pc + 4 <= code_slice.len()
-                            {
-                                pc += 4;
-                            }
-                            is_interp = true;
-                        }
-                    }
-                }
-                0xB8..=0xBF => {
-                    let imm_len = if rex_w { 8 } else { 4 };
-                    if pc + imm_len <= code_slice.len() {
-                        pc += imm_len;
-                        mnemonic = format!("mov reg, imm{imm_len}");
-                        is_dbt = true;
-                        is_interp = true;
-                    }
-                }
-                0xE8 => {
-                    if pc + 4 <= code_slice.len() {
-                        let rel32 = i32::from_le_bytes(code_slice[pc..pc + 4].try_into().unwrap());
-                        pc += 4;
-                        let target = (insn_va as i64 + 5 + rel32 as i64) as u64;
-                        mnemonic = format!("call rel32 -> 0x{target:016x}");
-                        is_dbt = true;
-                        is_interp = true;
-                    }
-                }
-                0xE9 => {
-                    if pc + 4 <= code_slice.len() {
-                        let rel32 = i32::from_le_bytes(code_slice[pc..pc + 4].try_into().unwrap());
-                        pc += 4;
-                        let target = (insn_va as i64 + 5 + rel32 as i64) as u64;
-                        mnemonic = format!("jmp rel32 -> 0x{target:016x}");
-                        is_dbt = true;
-                        is_interp = true;
-                    }
-                }
-                0xEB => {
-                    if pc < code_slice.len() {
-                        let rel8 = code_slice[pc] as i8;
-                        pc += 1;
-                        let target = (insn_va as i64 + 2 + rel8 as i64) as u64;
-                        mnemonic = format!("jmp rel8 -> 0x{target:016x}");
-                        is_dbt = true;
-                        is_interp = true;
-                    }
-                }
-                0xFF => {
-                    if pc < code_slice.len() {
-                        let modrm = code_slice[pc];
-                        pc += 1;
-                        if (modrm & 0x38) == 0x10 || (modrm & 0x38) == 0x20 {
-                            // indirect call/jmp
-                            if (modrm & 7) == 5 && pc + 4 <= code_slice.len() {
-                                let disp32 =
-                                    i32::from_le_bytes(code_slice[pc..pc + 4].try_into().unwrap());
-                                pc += 4;
-                                let iat_target =
-                                    (insn_va as i64 + (pc - start_pc) as i64 + disp32 as i64)
-                                        as u64;
-                                mnemonic = format!("call/jmp *[RIP + 0x{iat_target:016x}]");
-                                notes =
-                                    "indirect IAT symbol call - requires dynamic import linking"
-                                        .to_string();
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    mnemonic = format!("opcode_0x{op:02x}");
-                    notes = "unsupported opcode".to_string();
-                }
+        while let Some(Reverse(rva)) = worklist.pop() {
+            if visited.contains(&rva) {
+                continue;
             }
+            if instruction_records.len() >= total_budget {
+                break;
+            }
+            if worklist_entries_used >= worklist_budget {
+                break;
+            }
+            worklist_entries_used += 1;
 
-            let insn_bytes = code_slice[start_pc..pc].to_vec();
-            let rec = InstructionRecord {
-                rva: insn_rva,
-                va: insn_va,
-                bytes: insn_bytes,
-                mnemonic,
-                is_supported_dbt: is_dbt,
-                is_supported_interp: is_interp,
-                notes,
+            let Some(file_off) = rva_to_offset(rva) else {
+                // RVA out of section bounds — skip
+                continue;
             };
 
-            if !is_dbt && first_unsupported_dbt_insn.is_none() {
-                first_unsupported_dbt_insn = Some(rec.clone());
+            if file_off >= bytes.len() {
+                continue;
             }
 
+            // Count bytes already visited starting from this RVA to enforce byte budget
+            let budget_start_insns = instruction_records.len();
+            if budget_start_insns > 0 {
+                let already_decoded: usize =
+                    instruction_records.iter().map(|r| r.bytes.len()).sum();
+                if already_decoded >= config.max_disasm_bytes {
+                    break;
+                }
+            }
+
+            let avail = &bytes[file_off..];
+            let insn_va = image_base + rva as u64;
+
+            let Some(decoded) = decode_one(avail, rva, insn_va) else {
+                continue;
+            };
+            if decoded.insn_len == 0 {
+                continue;
+            }
+
+            // Mark this RVA visited before pushing successors to avoid duplicates
+            visited.insert(rva);
+
+            let insn_bytes = avail[..decoded.insn_len].to_vec();
+            let rec = InstructionRecord {
+                rva,
+                va: insn_va,
+                bytes: insn_bytes,
+                mnemonic: decoded.mnemonic.clone(),
+                is_supported_dbt: decoded.is_dbt,
+                is_supported_interp: decoded.is_interp,
+                notes: decoded.notes.clone(),
+            };
+
+            if !decoded.is_dbt && first_unsupported_dbt_insn.is_none() {
+                first_unsupported_dbt_insn = Some(rec.clone());
+            }
             instruction_records.push(rec);
 
-            // Bounded: stop after 50 instructions at entry point for focused startup report
-            if instruction_records.len() >= 50 {
-                break;
+            // Push successors from known branch targets
+            for &target_rva in &decoded.successors {
+                if !visited.contains(&target_rva) {
+                    worklist.push(Reverse(target_rva));
+                }
+            }
+
+            // Push sequential fall-through
+            if decoded.fall_through {
+                let next_rva = rva.saturating_add(decoded.insn_len as u32);
+                if !visited.contains(&next_rva) {
+                    worklist.push(Reverse(next_rva));
+                }
             }
         }
     }
@@ -673,7 +1016,7 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
 
     Ok(ProbeReport {
         file_size: bytes.len(),
-        sha256: "e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993".to_string(),
+        sha256: format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes)),
         parsed: parsed_pe,
         relocations,
         tls,
@@ -696,16 +1039,60 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
 
     // 1. imports.csv
     let mut imports_csv = String::from(
-        "module,symbol_or_ordinal,iat_rva,category,exists_in_xenora,implemented_with_tests,would_be_required_for_loader_binding,notes\n",
+        "module,symbol_or_ordinal,iat_rva,category,registered_binding,implementation_status,is_alias,canonical_module,startup_priority,startup_cluster\n",
     );
+    let mut missing_csv = String::from("module,symbol_or_ordinal,iat_rva\n");
+    let mut modules = BTreeSet::new();
+    let mut unique_symbols = BTreeSet::new();
+    let mut distinct_imports = BTreeSet::new();
+    let mut canonical_bindings = BTreeSet::new();
+    let mut counts = BTreeMap::<&str, usize>::new();
+    let mut clusters = BTreeMap::<(u8, &str), (usize, usize)>::new();
+    let mut aliases = 0;
+    let mut missing = 0;
     for imp in &report.imports {
+        let module_key = imp.dll.to_ascii_lowercase();
+        modules.insert(module_key.clone());
+        distinct_imports.insert((module_key, &imp.symbol));
+        let ordinal_scope = imp
+            .symbol
+            .starts_with("Ordinal#")
+            .then_some(imp.dll.as_str());
+        unique_symbols.insert((ordinal_scope, &imp.symbol));
+        let module = imp.dll.replace('"', "\"\"");
+        let symbol = imp.symbol.replace('"', "\"\"");
+        let key = format!("\"{module}\",\"{symbol}\",0x{:08x}", imp.iat_rva);
+        let status = imp.coverage_label();
+        let canonical = imp.canonical_module.as_deref().unwrap_or("");
+        let is_alias = imp.canonical_module.is_some() && !imp.dll.eq_ignore_ascii_case(canonical);
+        if imp.is_supported {
+            canonical_bindings.insert((canonical, &imp.symbol));
+        }
+        aliases += usize::from(is_alias);
+        *counts.entry(status).or_default() += 1;
+        let (priority, cluster) = imp.startup_priority();
+        let group = clusters.entry((priority, cluster)).or_default();
+        group.0 += 1;
+        group.1 += usize::from(!imp.is_supported);
+        let canonical = canonical.replace('"', "\"\"");
         let _ = writeln!(
             imports_csv,
-            "{},{},0x{:08x},{},false,false,true,unlinked candidate GDK/CRT dependency",
-            imp.dll, imp.symbol, imp.iat_rva, imp.category
+            "{key},{},{},{status},{is_alias},\"{canonical}\",{priority},{cluster}",
+            imp.category, imp.is_supported
         );
+        if !imp.is_supported {
+            let _ = writeln!(missing_csv, "{key}");
+            missing += 1;
+        }
     }
     fs::write(out.join("imports.csv"), imports_csv)?;
+    fs::write(out.join("missing_imports.csv"), missing_csv)?;
+
+    let implemented = counts.get("implemented").copied().unwrap_or_default();
+    let partial = counts.get("partial").copied().unwrap_or_default();
+    let stubs = counts.get("stub").copied().unwrap_or_default();
+    let unsupported = counts.get("unsupported").copied().unwrap_or_default();
+    let unknown = counts.get("missing").copied().unwrap_or_default();
 
     // 2. cpu_coverage.csv
     let mut cpu_csv = String::from("rva,va,bytes,mnemonic,dbt_supported,interp_supported,notes\n");
@@ -742,7 +1129,17 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
   "size_of_image": "0x{:08x}",
   "sections_count": {},
   "total_imports": {},
-  "imported_dlls_count": 68,
+  "imported_dlls_count": {},
+  "unresolved_imports": {},
+  "distinct_import_keys": {},
+  "distinct_symbol_names_and_scoped_ordinals": {},
+  "canonical_registered_services": {},
+  "alias_slots": {aliases},
+  "implemented_slots": {implemented},
+  "partial_slots": {partial},
+  "stub_slots": {stubs},
+  "recognized_unsupported_slots": {unsupported},
+  "missing_handler_slots": {unknown},
   "total_relocations": {},
   "dir64_relocations": {},
   "tls_callbacks_count": {},
@@ -756,6 +1153,11 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
         report.parsed.size_of_image,
         report.parsed.sections.len(),
         report.imports.len(),
+        modules.len(),
+        missing,
+        distinct_imports.len(),
+        unique_symbols.len(),
+        canonical_bindings.len(),
         report.relocations.total_entries,
         report
             .relocations
@@ -774,7 +1176,7 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
 
     // 4. candidate_static_report.md
     let mut md = String::new();
-    let _ = writeln!(md, "# Xenora X14.5 Candidate Static Probe Report\n");
+    let _ = writeln!(md, "# Xenora static PE probe report\n");
     let _ = writeln!(md, "## Executable Metadata");
     let _ = writeln!(md, "- **SHA-256**: `{}`", report.sha256);
     let _ = writeln!(md, "- **File Size**: `{}` bytes", report.file_size);
@@ -852,7 +1254,7 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
     }
 
     let _ = writeln!(md, "\n## Import Statistics");
-    let _ = writeln!(md, "- **Total Imported DLLs**: `68`");
+    let _ = writeln!(md, "- **Total Imported DLLs**: `{}`", modules.len());
     let _ = writeln!(
         md,
         "- **Total Imported Thunks**: `{}`",
@@ -860,7 +1262,7 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
     );
     let _ = writeln!(
         md,
-        "- **Supported / Implemented in Xenora**: `0` (Commercial runtime requires GDK / Scarlett emulation)\n"
+        "- **Unresolved standard import thunks**: `{missing}`. See `missing_imports.csv`. A registered handler may be a stub.\n"
     );
 
     let _ = writeln!(md, "## First Static DBT Blocker");
@@ -883,52 +1285,39 @@ pub fn run_probe_and_export<O: AsRef<Path>>(
 
     fs::write(out.join("candidate_static_report.md"), md)?;
 
-    // 5. runtime_gap_matrix.md
-    let runtime_matrix = r#"# Subsystem Runtime Gap Matrix
+    let mut matrix = String::from(
+        "# Runtime import coverage\n\n         Priorities reflect startup prerequisites and shared runtime dependencies. Static imports do not establish call order.\n\n         | Priority | Cluster | IAT slots | Unresolved |\n         | --- | --- | ---: | ---: |\n",
+    );
+    for ((priority, cluster), (total, unresolved)) in clusters {
+        let _ = writeln!(
+            matrix,
+            "| {priority} | {cluster} | {total} | {unresolved} |"
+        );
+    }
+    let _ = writeln!(
+        matrix,
+        "\nThe ordinary import table contains {} slots across {} DLLs, {} distinct DLL and symbol keys, and {} distinct names or DLL-scoped ordinals.",
+        report.imports.len(),
+        modules.len(),
+        distinct_imports.len(),
+        unique_symbols.len()
+    );
+    let _ = writeln!(
+        matrix,
+        "\nRegistered slots include {implemented} implemented, {partial} partial, and {stubs} stubs. They reference {} canonical registered services through {aliases} alias slots. The {missing} unresolved slots include {unsupported} explicitly tracked unsupported APIs and {unknown} other missing handlers.",
+        canonical_bindings.len()
+    );
+    fs::write(out.join("runtime_gap_matrix.md"), matrix)?;
 
-| Subsystem Category | DLL Count | Imported Thunks | Current Xenora Support | Boot Impact | Blocker Description |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Xbox Memory Management** | 1 (`xmem.dll`) | 12 | None | Critical (Level 1) | `XMemAlloc`, `XMemAllocatePhysicalPages`, `XMemVirtualAlloc` required for basic heap allocation. |
-| **Xbox Graphics & Compute** | 4 (`d3d12_xs.dll`, `xg_xs.dll`, `xboxbvhbuilder.dll`, `amd_fidelityfx_loader_xbox.dll`) | 16 | Partial (Metal RDNA2 compiler) | Critical (Level 2) | Scarlett Direct3D 12 device creation (`D3D12XboxCreateDevice`) and root signature serialization. |
-| **Xbox Storage** | 1 (`xcrdapi.dll`) | 1 | None | High (Level 3) | `DStorageGetFactory` DirectStorage archive and package stream loading. |
-| **Xbox Audio / DSP** | 3 (`acphal.dll`, `xapu.dll`, `chad.dll`) | 19 | None | High (Level 4) | Shape contexts, APU heap mapping, hardware audio voice submission. |
-| **Xbox Input** | 1 (`gameinput.dll`) | 1 | None | Medium (Level 5) | `GameInput.dll` (Ordinal 1) device discovery and controller polling. |
-| **Xbox Networking** | 1 (`libhttpclient.gdk.dll`, `xcurl.dll`) | 38 | None | Medium (Level 6) | HTTP call handles and telemetry dispatch. |
-| **Multimedia** | 1 (`bink2scarlett.dll`) | 23 | None | Medium (Level 7) | Scarlett Bink video playback and frame buffer registration. |
-| **C/C++ CRT Runtime** | 13 | 258 | None | Critical (Level 1) | MSVCP140 and api-ms-win-crt heap init, security cookies, and exception handlers. |
-| **Windows Core** | 43 | 219 | None | Critical (Level 1) | Threading, SRW locks, event handles, timing, file I/O. |
-"#;
-    fs::write(out.join("runtime_gap_matrix.md"), runtime_matrix)?;
-
-    // 6. x15_priority_backlog.md
-    let backlog = r#"# Xenora X15 Priority Engineering Backlog
-
-1. **Loader Base Relocation Engine**:
-   - Implement DIR64 in-place relocation patching for guest memory regions when base != image_base.
-   - 598,282 entries must be safely rebased with page boundary validation.
-2. **Import Resolution Table & Mock GDK Stubs**:
-   - Create a typed `ImportResolver` registering standard Windows NT and Xbox Scarlett modules.
-   - Implement deterministic missing-import diagnostics (`DLL!symbol` error reporting).
-3. **CRT Security Cookie & Timing Primitives**:
-   - Implement guest stubs for `GetSystemTimeAsFileTime`, `GetCurrentProcessId`, `GetCurrentThreadId`, and `QueryPerformanceCounter`.
-   - Allows Microsoft CRT `__security_init_cookie` to initialize without memory faults.
-4. **General-Purpose SIB & Indirect Call Lowering in ARM64 DBT**:
-   - Extend `DbtEngine` to lower SIB memory addressing (`mov [rsp + disp], reg`) and indirect calls via IAT pointers (`call *[rip + disp32]`).
-5. **Scarlett Physical Page Allocator Mock (`xmem.dll`)**:
-   - Implement `XMemAlloc`, `XMemAllocatePhysicalPages`, and `XMemVirtualAlloc` backed by isolated `GuestMemory`.
-"#;
-    fs::write(out.join("x15_priority_backlog.md"), backlog)?;
-
-    // 7. test_commands.txt
-    let test_cmds = r#"# Commands executed during X14.5 diagnostic verification
-cargo test -p xenora-loader --test dbt_render -- --nocapture (exit: 0)
-cargo test -p xenora-metal --features gpu-tests --test native_compute translated_render (exit: 0)
-cargo run -p xenora -- probe --pe /Volumes/192.168.1.5/gta/GTA6.Xbox.v1.0.2.1-CYBERLEEK/game_scarlett_master.exe --mode static --report diagnostics/gta6-candidate-e95020b2 (exit: 0)
-cargo fmt --all -- --check (exit: 0)
-cargo clippy --workspace --all-targets -- -D warnings (exit: 0)
-cargo test --workspace (exit: 0)
-"#;
-    fs::write(out.join("test_commands.txt"), test_cmds)?;
+    // Preserve existing report filenames for scripts that consume them.
+    fs::write(
+        out.join("x15_priority_backlog.md"),
+        "# Runtime priorities\n\nSee [runtime import coverage](runtime_gap_matrix.md) and the per-import priorities in [imports.csv](imports.csv).\n",
+    )?;
+    fs::write(
+        out.join("test_commands.txt"),
+        "This static report only inspects PE bytes. It contains no execution or test-run evidence.\n",
+    )?;
 
     Ok(report)
 }

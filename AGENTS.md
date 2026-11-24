@@ -82,6 +82,10 @@ Read docs/interfaces.md and docs/progress.md before implementation.
 
 Keep generated and gate logs under ignored `artifacts/`. Use at most four Cargo build jobs across two simultaneous CPU-heavy jobs, with one GPU job and one fuzz or mutation campaign at a time.
 
+Do not add AI attribution or Co-authored-by trailers to commits.
+Never commit or push without explicit permission.
+Preserve the configured Git author and committer identity.
+
 ## Ownership
 
 Xbox and claims owns public console research. ISA owns the decoder and oracle fixtures. Compiler owns the parser, IR and MSL. Metal owns the native GPU backend. Testing owns the independent reference and fixture validation. Infrastructure owns shared Cargo configuration, policies and the CPU boundary. R1 independently audits claims and release evidence. R2 independently validates semantic expectations and mutation results.

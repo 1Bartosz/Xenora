@@ -27,9 +27,14 @@ impl fmt::Display for TlsError {
                 write!(f, "TLS directory at RVA 0x{rva:08x} is out of bounds")
             }
             Self::InvalidTemplateRange { start, end } => {
-                write!(f, "invalid TLS template range: 0x{start:016x}..0x{end:016x}")
+                write!(
+                    f,
+                    "invalid TLS template range: 0x{start:016x}..0x{end:016x}"
+                )
             }
-            Self::CallbackExecutionFault(e) => write!(f, "fault during TLS callback execution: {e}"),
+            Self::CallbackExecutionFault(e) => {
+                write!(f, "fault during TLS callback execution: {e}")
+            }
             Self::Memory(e) => write!(f, "guest memory fault during TLS setup: {e}"),
         }
     }
@@ -66,16 +71,27 @@ pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDire
     if bytes.len() < coff_offset + 18 {
         return Ok(None);
     }
-    let size_of_opt =
-        u16::from_le_bytes(bytes[coff_offset + 16..coff_offset + 18].try_into().unwrap()) as usize;
+    let size_of_opt = u16::from_le_bytes(
+        bytes[coff_offset + 16..coff_offset + 18]
+            .try_into()
+            .unwrap(),
+    ) as usize;
 
     // TLS directory is directory index 9 (offset 112 + 9 * 8 = 184 in Optional Header)
     if size_of_opt < 192 || bytes.len() < opt_offset + 188 {
         return Ok(None);
     }
 
-    let tls_rva = u32::from_le_bytes(bytes[opt_offset + 184..opt_offset + 188].try_into().unwrap());
-    let tls_size = u32::from_le_bytes(bytes[opt_offset + 188..opt_offset + 192].try_into().unwrap());
+    let tls_rva = u32::from_le_bytes(
+        bytes[opt_offset + 184..opt_offset + 188]
+            .try_into()
+            .unwrap(),
+    );
+    let tls_size = u32::from_le_bytes(
+        bytes[opt_offset + 188..opt_offset + 192]
+            .try_into()
+            .unwrap(),
+    );
 
     if tls_rva == 0 || tls_size == 0 {
         return Ok(None);
@@ -92,8 +108,10 @@ pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDire
     let raw_data_start_va = u64::from_le_bytes(bytes[tls_off..tls_off + 8].try_into().unwrap());
     let raw_data_end_va = u64::from_le_bytes(bytes[tls_off + 8..tls_off + 16].try_into().unwrap());
     let index_address = u64::from_le_bytes(bytes[tls_off + 16..tls_off + 24].try_into().unwrap());
-    let callbacks_address = u64::from_le_bytes(bytes[tls_off + 24..tls_off + 32].try_into().unwrap());
-    let size_of_zero_fill = u32::from_le_bytes(bytes[tls_off + 32..tls_off + 36].try_into().unwrap());
+    let callbacks_address =
+        u64::from_le_bytes(bytes[tls_off + 24..tls_off + 32].try_into().unwrap());
+    let size_of_zero_fill =
+        u32::from_le_bytes(bytes[tls_off + 32..tls_off + 36].try_into().unwrap());
     let characteristics = u32::from_le_bytes(bytes[tls_off + 36..tls_off + 40].try_into().unwrap());
 
     let mut callbacks = Vec::new();
@@ -220,22 +238,21 @@ pub fn execute_tls_callbacks(
         // R8 = 0
         cpu.set(Register::R8, 0);
 
-        // Run until HLT or RET to magic_ret
+        // RET lands at the sentinel, which has no guest code mapped.
         let mut steps = 0;
-        while steps < 100_000 {
+        while cpu.rip != magic_ret {
+            let res = dbt.run(cpu, memory, 100);
             if cpu.rip == magic_ret {
                 break;
             }
-            let res = dbt.run(cpu, memory, 100);
+            if res.exit_reason != ExitReason::StepLimitExceeded {
+                return Err(TlsError::CallbackExecutionFault(res.exit_reason));
+            }
             steps += res.instructions_executed;
-            if res.exit_reason == ExitReason::Halt || cpu.rip == magic_ret {
-                break;
-            }
-            if let ExitReason::MemoryFault(e) = res.exit_reason {
-                return Err(TlsError::CallbackExecutionFault(ExitReason::MemoryFault(e)));
-            }
-            if let ExitReason::IllegalInstruction(op) = res.exit_reason {
-                return Err(TlsError::CallbackExecutionFault(ExitReason::IllegalInstruction(op)));
+            if steps >= 100_000 || res.instructions_executed == 0 {
+                return Err(TlsError::CallbackExecutionFault(
+                    ExitReason::StepLimitExceeded,
+                ));
             }
         }
 

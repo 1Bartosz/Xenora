@@ -1,0 +1,819 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Guest-facing D3D12-style Graphics Runtime Interfaces for Xenora.
+//!
+//! Provides typed guest graphics objects, handle management, resource validation,
+//! command recording, and backend execution dispatch.
+//!
+//! Architecturally maps guest concepts:
+//! - Guest Device (`ID3D12Device` / test device) -> `GraphicsDevice`
+//! - Guest Command Queue (`ID3D12CommandQueue`) -> `GraphicsCommandQueue`
+//! - Guest Command Allocator (`ID3D12CommandAllocator`) -> `GraphicsCommandAllocator`
+//! - Guest Command List (`ID3D12GraphicsCommandList`) -> `GraphicsCommandList`
+//! - Guest Resource (Buffer/Texture) -> `GraphicsResource`
+//! - Guest Swap Chain / Present -> Frame presentation & framebuffer readback.
+
+use crate::memory::{GuestMemory, MemoryError};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+/// Generation-checked opaque guest graphics handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GraphicsHandle {
+    pub id: u32,
+    pub generation: u32,
+}
+
+impl GraphicsHandle {
+    pub const NULL: Self = Self {
+        id: 0,
+        generation: 0,
+    };
+
+    pub fn to_u64(self) -> u64 {
+        ((self.generation as u64) << 32) | (self.id as u64)
+    }
+
+    pub fn from_u64(val: u64) -> Self {
+        Self {
+            id: val as u32,
+            generation: (val >> 32) as u32,
+        }
+    }
+}
+
+/// D3D12 Command List Type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandListType {
+    Direct = 0,
+    Bundle = 1,
+    Compute = 2,
+    Copy = 3,
+}
+
+/// D3D12 Resource Dimension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceDimension {
+    Unknown = 0,
+    Buffer = 1,
+    Texture1D = 2,
+    Texture2D = 3,
+    Texture3D = 4,
+}
+
+/// D3D12 Resource State flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceStates(pub u32);
+
+impl ResourceStates {
+    pub const COMMON: Self = Self(0);
+    pub const VERTEX_AND_CONSTANT_BUFFER: Self = Self(0x1);
+    pub const INDEX_BUFFER: Self = Self(0x2);
+    pub const RENDER_TARGET: Self = Self(0x4);
+    pub const UNORDERED_ACCESS: Self = Self(0x8);
+    pub const DEPTH_WRITE: Self = Self(0x10);
+    pub const DEPTH_READ: Self = Self(0x20);
+    pub const NON_PIXEL_SHADER_RESOURCE: Self = Self(0x40);
+    pub const PIXEL_SHADER_RESOURCE: Self = Self(0x80);
+    pub const COPY_DEST: Self = Self(0x400);
+    pub const COPY_SOURCE: Self = Self(0x800);
+    pub const PRESENT: Self = Self(0);
+}
+
+/// Identity of the graphics execution backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsBackendId {
+    /// Deterministic software reference rasterizer (strictly for tests/CI without Metal).
+    SoftwareReference,
+    /// Native Apple Silicon Metal GPU rendering pipeline.
+    MetalNative,
+}
+
+/// Explicit result of graphics command execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionOutcome {
+    pub backend: GraphicsBackendId,
+    pub pixels: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+    pub draw_count: usize,
+}
+
+/// Typed error for graphics operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphicsError {
+    InvalidDeviceHandle,
+    InvalidQueueHandle,
+    InvalidAllocatorHandle,
+    InvalidCommandListHandle,
+    InvalidResourceHandle,
+    ResourceLifetimeViolation,
+    CommandListNotRecording,
+    CommandListAlreadyClosed,
+    EmptyCommandList,
+    InvalidDescriptor,
+    InvalidViewport,
+    Memory(MemoryError),
+    DeviceCreationFailure(String),
+    BackendError(String),
+    NativeMetalRequired,
+}
+
+impl std::fmt::Display for GraphicsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDeviceHandle => write!(f, "invalid or stale graphics device handle"),
+            Self::InvalidQueueHandle => write!(f, "invalid or stale command queue handle"),
+            Self::InvalidAllocatorHandle => write!(f, "invalid or stale command allocator handle"),
+            Self::InvalidCommandListHandle => write!(f, "invalid or stale command list handle"),
+            Self::InvalidResourceHandle => write!(f, "invalid or stale graphics resource handle"),
+            Self::ResourceLifetimeViolation => write!(f, "graphics resource lifetime violation"),
+            Self::CommandListNotRecording => write!(f, "command list is not in recording state"),
+            Self::CommandListAlreadyClosed => write!(f, "command list has already been closed"),
+            Self::EmptyCommandList => write!(f, "attempted to submit an empty command list"),
+            Self::InvalidDescriptor => write!(f, "invalid descriptor or descriptor range"),
+            Self::InvalidViewport => write!(f, "invalid viewport extent or bounds"),
+            Self::Memory(e) => write!(f, "guest memory error: {e}"),
+            Self::DeviceCreationFailure(msg) => write!(f, "device creation failure: {msg}"),
+            Self::BackendError(msg) => write!(f, "metal backend error: {msg}"),
+            Self::NativeMetalRequired => write!(
+                f,
+                "native Metal backend required but not provided or failed"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GraphicsError {}
+
+impl From<MemoryError> for GraphicsError {
+    fn from(e: MemoryError) -> Self {
+        Self::Memory(e)
+    }
+}
+
+/// Resource description for buffer/texture creation.
+#[derive(Clone, Debug)]
+pub struct ResourceDesc {
+    pub dimension: ResourceDimension,
+    pub width: u64,
+    pub height: u32,
+    pub depth_or_array_size: u16,
+    pub mip_levels: u16,
+    pub format_rgba8: bool,
+}
+
+/// Guest Graphics Resource.
+#[derive(Clone, Debug)]
+pub struct GraphicsResource {
+    pub handle: GraphicsHandle,
+    pub desc: ResourceDesc,
+    pub state: ResourceStates,
+    pub guest_backing_addr: Option<u64>,
+    pub data: Vec<u8>,
+}
+
+/// Primitive Draw Command recorded in a Command List.
+#[derive(Clone, Debug)]
+pub enum GraphicsCommand {
+    ResourceBarrier {
+        resource: GraphicsHandle,
+        before: ResourceStates,
+        after: ResourceStates,
+    },
+    SetRenderTargets {
+        color_target: Option<GraphicsHandle>,
+        clear_color: [u8; 4],
+    },
+    SetViewport {
+        width: usize,
+        height: usize,
+    },
+    SetVertexBuffer {
+        resource: GraphicsHandle,
+        offset: usize,
+        stride: usize,
+    },
+    DrawInstanced {
+        vertex_count_per_instance: u32,
+        instance_count: u32,
+        start_vertex_location: u32,
+        start_instance_location: u32,
+    },
+}
+
+/// Command List in recording or closed state.
+pub struct GraphicsCommandList {
+    pub handle: GraphicsHandle,
+    pub list_type: CommandListType,
+    pub is_recording: bool,
+    pub commands: Vec<GraphicsCommand>,
+}
+
+/// Command Allocator tracking command recording buffers.
+pub struct GraphicsCommandAllocator {
+    pub handle: GraphicsHandle,
+    pub list_type: CommandListType,
+    pub is_reset: bool,
+}
+
+/// Command Queue for command list submission and execution.
+pub struct GraphicsCommandQueue {
+    pub handle: GraphicsHandle,
+    pub list_type: CommandListType,
+    pub submitted_lists: Vec<GraphicsHandle>,
+}
+
+/// Custom backend renderer signature for testing or Metal dispatch.
+pub type BackendRenderer<'a> =
+    dyn Fn(&[[f32; 4]; 3], (usize, usize), [u8; 4]) -> Result<Vec<u8>, GraphicsError> + 'a;
+
+/// Shared thread-safe backend renderer instance.
+pub type SharedBackendRenderer = Arc<
+    dyn Fn(&[[f32; 4]; 3], (usize, usize), [u8; 4]) -> Result<Vec<u8>, GraphicsError> + Send + Sync,
+>;
+
+/// Frame presentation capture holding the last presented frame.
+#[derive(Clone, Debug, Default)]
+pub struct FramePresentation {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
+    pub frame_index: u64,
+    pub backend: Option<GraphicsBackendId>,
+}
+
+/// Central Graphics Context maintaining guest-visible objects and mapping them to Metal.
+pub struct GraphicsContext {
+    next_id: u32,
+    devices: HashMap<GraphicsHandle, bool>,
+    queues: HashMap<GraphicsHandle, GraphicsCommandQueue>,
+    allocators: HashMap<GraphicsHandle, GraphicsCommandAllocator>,
+    command_lists: HashMap<GraphicsHandle, GraphicsCommandList>,
+    resources: HashMap<GraphicsHandle, GraphicsResource>,
+    pub last_presentation: Arc<Mutex<FramePresentation>>,
+    /// Optional active backend renderer (e.g. Native Metal).
+    backend: Option<SharedBackendRenderer>,
+    backend_id: GraphicsBackendId,
+}
+
+impl Default for GraphicsContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphicsContext {
+    pub fn new() -> Self {
+        Self {
+            next_id: 1,
+            devices: HashMap::new(),
+            queues: HashMap::new(),
+            allocators: HashMap::new(),
+            command_lists: HashMap::new(),
+            resources: HashMap::new(),
+            last_presentation: Arc::new(Mutex::new(FramePresentation::default())),
+            backend: None,
+            backend_id: GraphicsBackendId::SoftwareReference,
+        }
+    }
+
+    /// Install a native Metal backend adapter.
+    pub fn set_metal_backend<F>(&mut self, renderer: F)
+    where
+        F: Fn(&[[f32; 4]; 3], (usize, usize), [u8; 4]) -> Result<Vec<u8>, GraphicsError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.backend = Some(Arc::new(renderer));
+        self.backend_id = GraphicsBackendId::MetalNative;
+    }
+
+    /// Explicitly configure context to require native Metal without an attached backend.
+    /// Useful for verifying that missing/unsupported Metal devices correctly fail execution.
+    pub fn set_require_metal_without_backend(&mut self) {
+        self.backend = None;
+        self.backend_id = GraphicsBackendId::MetalNative;
+    }
+
+    /// Retrieve the currently configured backend ID.
+    pub fn current_backend_id(&self) -> GraphicsBackendId {
+        self.backend_id
+    }
+
+    fn allocate_handle(&mut self) -> GraphicsHandle {
+        let id = self.next_id;
+        self.next_id += 1;
+        GraphicsHandle { id, generation: 1 }
+    }
+
+    /// Create guest graphics device (`D3D12CreateDevice` / test device).
+    pub fn create_device(&mut self) -> Result<GraphicsHandle, GraphicsError> {
+        let handle = self.allocate_handle();
+        self.devices.insert(handle, true);
+        Ok(handle)
+    }
+
+    /// Create command queue (`ID3D12Device::CreateCommandQueue`).
+    pub fn create_command_queue(
+        &mut self,
+        device: GraphicsHandle,
+        list_type: CommandListType,
+    ) -> Result<GraphicsHandle, GraphicsError> {
+        if !self.devices.contains_key(&device) {
+            return Err(GraphicsError::InvalidDeviceHandle);
+        }
+        let handle = self.allocate_handle();
+        self.queues.insert(
+            handle,
+            GraphicsCommandQueue {
+                handle,
+                list_type,
+                submitted_lists: Vec::new(),
+            },
+        );
+        Ok(handle)
+    }
+
+    /// Create command allocator (`ID3D12Device::CreateCommandAllocator`).
+    pub fn create_command_allocator(
+        &mut self,
+        device: GraphicsHandle,
+        list_type: CommandListType,
+    ) -> Result<GraphicsHandle, GraphicsError> {
+        if !self.devices.contains_key(&device) {
+            return Err(GraphicsError::InvalidDeviceHandle);
+        }
+        let handle = self.allocate_handle();
+        self.allocators.insert(
+            handle,
+            GraphicsCommandAllocator {
+                handle,
+                list_type,
+                is_reset: true,
+            },
+        );
+        Ok(handle)
+    }
+
+    /// Create command list (`ID3D12Device::CreateCommandList`).
+    pub fn create_command_list(
+        &mut self,
+        device: GraphicsHandle,
+        allocator: GraphicsHandle,
+        list_type: CommandListType,
+    ) -> Result<GraphicsHandle, GraphicsError> {
+        if !self.devices.contains_key(&device) {
+            return Err(GraphicsError::InvalidDeviceHandle);
+        }
+        let alloc = self
+            .allocators
+            .get(&allocator)
+            .ok_or(GraphicsError::InvalidAllocatorHandle)?;
+        if alloc.list_type != list_type {
+            return Err(GraphicsError::InvalidAllocatorHandle);
+        }
+
+        let handle = self.allocate_handle();
+        self.command_lists.insert(
+            handle,
+            GraphicsCommandList {
+                handle,
+                list_type,
+                is_recording: true,
+                commands: Vec::new(),
+            },
+        );
+        Ok(handle)
+    }
+
+    /// Create committed resource (Buffer or Texture).
+    pub fn create_committed_resource(
+        &mut self,
+        device: GraphicsHandle,
+        desc: ResourceDesc,
+        initial_state: ResourceStates,
+        guest_addr: Option<u64>,
+    ) -> Result<GraphicsHandle, GraphicsError> {
+        if !self.devices.contains_key(&device) {
+            return Err(GraphicsError::InvalidDeviceHandle);
+        }
+        let handle = self.allocate_handle();
+        let size = match desc.dimension {
+            ResourceDimension::Buffer => desc.width as usize,
+            ResourceDimension::Texture2D => (desc.width as usize) * (desc.height as usize) * 4,
+            _ => desc.width as usize,
+        };
+        self.resources.insert(
+            handle,
+            GraphicsResource {
+                handle,
+                desc,
+                state: initial_state,
+                guest_backing_addr: guest_addr,
+                data: vec![0u8; size],
+            },
+        );
+        Ok(handle)
+    }
+
+    /// Record resource barrier in command list.
+    pub fn cmd_resource_barrier(
+        &mut self,
+        list: GraphicsHandle,
+        resource: GraphicsHandle,
+        before: ResourceStates,
+        after: ResourceStates,
+    ) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if !cmd_list.is_recording {
+            return Err(GraphicsError::CommandListNotRecording);
+        }
+        if !self.resources.contains_key(&resource) {
+            return Err(GraphicsError::InvalidResourceHandle);
+        }
+        cmd_list.commands.push(GraphicsCommand::ResourceBarrier {
+            resource,
+            before,
+            after,
+        });
+        Ok(())
+    }
+
+    /// Record set render targets.
+    pub fn cmd_set_render_targets(
+        &mut self,
+        list: GraphicsHandle,
+        color_target: Option<GraphicsHandle>,
+        clear_color: [u8; 4],
+    ) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if !cmd_list.is_recording {
+            return Err(GraphicsError::CommandListNotRecording);
+        }
+        if let Some(target) = color_target
+            && !self.resources.contains_key(&target)
+        {
+            return Err(GraphicsError::InvalidResourceHandle);
+        }
+        cmd_list.commands.push(GraphicsCommand::SetRenderTargets {
+            color_target,
+            clear_color,
+        });
+        Ok(())
+    }
+
+    /// Record set viewport.
+    pub fn cmd_set_viewport(
+        &mut self,
+        list: GraphicsHandle,
+        width: usize,
+        height: usize,
+    ) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if !cmd_list.is_recording {
+            return Err(GraphicsError::CommandListNotRecording);
+        }
+        if width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return Err(GraphicsError::InvalidViewport);
+        }
+        cmd_list
+            .commands
+            .push(GraphicsCommand::SetViewport { width, height });
+        Ok(())
+    }
+
+    /// Record set vertex buffer.
+    pub fn cmd_set_vertex_buffer(
+        &mut self,
+        list: GraphicsHandle,
+        resource: GraphicsHandle,
+        offset: usize,
+        stride: usize,
+    ) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if !cmd_list.is_recording {
+            return Err(GraphicsError::CommandListNotRecording);
+        }
+        let res = self
+            .resources
+            .get(&resource)
+            .ok_or(GraphicsError::InvalidResourceHandle)?;
+        if offset + stride > res.data.len() && res.guest_backing_addr.is_none() {
+            return Err(GraphicsError::InvalidDescriptor);
+        }
+        cmd_list.commands.push(GraphicsCommand::SetVertexBuffer {
+            resource,
+            offset,
+            stride,
+        });
+        Ok(())
+    }
+
+    /// Record draw instanced.
+    pub fn cmd_draw_instanced(
+        &mut self,
+        list: GraphicsHandle,
+        vertex_count_per_instance: u32,
+        instance_count: u32,
+        start_vertex_location: u32,
+        start_instance_location: u32,
+    ) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if !cmd_list.is_recording {
+            return Err(GraphicsError::CommandListNotRecording);
+        }
+        cmd_list.commands.push(GraphicsCommand::DrawInstanced {
+            vertex_count_per_instance,
+            instance_count,
+            start_vertex_location,
+            start_instance_location,
+        });
+        Ok(())
+    }
+
+    /// Close command list.
+    pub fn close_command_list(&mut self, list: GraphicsHandle) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if !cmd_list.is_recording {
+            return Err(GraphicsError::CommandListAlreadyClosed);
+        }
+        cmd_list.is_recording = false;
+        Ok(())
+    }
+
+    /// Reset command list with an allocator.
+    pub fn reset_command_list(
+        &mut self,
+        list: GraphicsHandle,
+        allocator: GraphicsHandle,
+    ) -> Result<(), GraphicsError> {
+        if !self.allocators.contains_key(&allocator) {
+            return Err(GraphicsError::InvalidAllocatorHandle);
+        }
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        cmd_list.commands.clear();
+        cmd_list.is_recording = true;
+        Ok(())
+    }
+
+    /// Execute command list on command queue using the configured backend.
+    pub fn execute_command_list(
+        &mut self,
+        queue: GraphicsHandle,
+        list: GraphicsHandle,
+        memory: &GuestMemory,
+    ) -> Result<ExecutionOutcome, GraphicsError> {
+        let backend_closure = self.backend.clone();
+        let backend_id = self.backend_id;
+        let renderer_ref: Option<&BackendRenderer<'_>> = match &backend_closure {
+            Some(arc) => {
+                let r: &BackendRenderer<'_> = arc.as_ref();
+                Some(r)
+            }
+            None => None,
+        };
+        self.execute_command_list_internal(queue, list, memory, renderer_ref, backend_id)
+    }
+
+    /// Execute command list strictly using native Metal. Fails with `GraphicsError::NativeMetalRequired`
+    /// if a native Metal backend is not attached.
+    pub fn execute_command_list_native_metal(
+        &mut self,
+        queue: GraphicsHandle,
+        list: GraphicsHandle,
+        memory: &GuestMemory,
+        metal_renderer: &BackendRenderer<'_>,
+    ) -> Result<ExecutionOutcome, GraphicsError> {
+        self.execute_command_list_internal(
+            queue,
+            list,
+            memory,
+            Some(metal_renderer),
+            GraphicsBackendId::MetalNative,
+        )
+    }
+
+    /// Internal execution state machine.
+    fn execute_command_list_internal(
+        &mut self,
+        queue: GraphicsHandle,
+        list: GraphicsHandle,
+        memory: &GuestMemory,
+        backend_renderer: Option<&BackendRenderer<'_>>,
+        backend_id: GraphicsBackendId,
+    ) -> Result<ExecutionOutcome, GraphicsError> {
+        let cmd_queue = self
+            .queues
+            .get_mut(&queue)
+            .ok_or(GraphicsError::InvalidQueueHandle)?;
+        let cmd_list = self
+            .command_lists
+            .get(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+
+        if cmd_list.is_recording {
+            return Err(GraphicsError::CommandListNotRecording);
+        }
+        if cmd_list.commands.is_empty() {
+            return Err(GraphicsError::EmptyCommandList);
+        }
+
+        cmd_queue.submitted_lists.push(list);
+
+        // State machine parsing recorded commands
+        let mut viewport = (4usize, 3usize);
+        let mut clear_color = [0u8, 0u8, 0u8, 255u8];
+        let mut target_handle: Option<GraphicsHandle> = None;
+        let mut vertex_resource: Option<GraphicsHandle> = None;
+        let mut vertex_offset = 0usize;
+        let mut rendered_output: Option<Vec<u8>> = None;
+        let mut draw_count = 0usize;
+
+        for cmd in &cmd_list.commands {
+            match cmd {
+                GraphicsCommand::ResourceBarrier {
+                    resource,
+                    before,
+                    after,
+                } => {
+                    let res = self
+                        .resources
+                        .get_mut(resource)
+                        .ok_or(GraphicsError::InvalidResourceHandle)?;
+                    if res.state != *before && before != &ResourceStates::COMMON {
+                        return Err(GraphicsError::ResourceLifetimeViolation);
+                    }
+                    res.state = *after;
+                }
+                GraphicsCommand::SetRenderTargets {
+                    color_target,
+                    clear_color: cc,
+                } => {
+                    target_handle = *color_target;
+                    clear_color = *cc;
+                }
+                GraphicsCommand::SetViewport { width, height } => {
+                    viewport = (*width, *height);
+                }
+                GraphicsCommand::SetVertexBuffer {
+                    resource, offset, ..
+                } => {
+                    vertex_resource = Some(*resource);
+                    vertex_offset = *offset;
+                }
+                GraphicsCommand::DrawInstanced {
+                    vertex_count_per_instance,
+                    ..
+                } => {
+                    if *vertex_count_per_instance < 3 {
+                        continue;
+                    }
+                    draw_count += 1;
+                    let v_res_handle =
+                        vertex_resource.ok_or(GraphicsError::InvalidResourceHandle)?;
+                    let v_res = self
+                        .resources
+                        .get(&v_res_handle)
+                        .ok_or(GraphicsError::InvalidResourceHandle)?;
+
+                    // Read vertices from guest memory backing or resource data
+                    let mut raw_vtx = [0u8; 48]; // 3 * 4 * float32
+                    if let Some(guest_addr) = v_res.guest_backing_addr {
+                        memory.read_bytes(guest_addr + vertex_offset as u64, &mut raw_vtx)?;
+                    } else if v_res.data.len() >= vertex_offset + 48 {
+                        raw_vtx.copy_from_slice(&v_res.data[vertex_offset..vertex_offset + 48]);
+                    } else {
+                        return Err(GraphicsError::InvalidDescriptor);
+                    }
+
+                    let mut vertices = [[0.0f32; 4]; 3];
+                    for (i, row) in vertices.iter_mut().enumerate() {
+                        for (j, val) in row.iter_mut().enumerate() {
+                            let off = (i * 4 + j) * 4;
+                            *val = f32::from_le_bytes(raw_vtx[off..off + 4].try_into().unwrap());
+                        }
+                    }
+
+                    let pixels = if let Some(renderer) = backend_renderer {
+                        renderer(&vertices, viewport, clear_color)?
+                    } else if backend_id == GraphicsBackendId::MetalNative {
+                        return Err(GraphicsError::NativeMetalRequired);
+                    } else {
+                        Self::execute_software_reference_draw(&vertices, viewport, clear_color)?
+                    };
+
+                    // Update target resource if present
+                    if let Some(th) = target_handle
+                        && let Some(target_res) = self.resources.get_mut(&th)
+                        && target_res.data.len() >= pixels.len()
+                    {
+                        target_res.data[..pixels.len()].copy_from_slice(&pixels);
+                    }
+
+                    rendered_output = Some(pixels);
+                }
+            }
+        }
+
+        let out = rendered_output.unwrap_or_else(|| {
+            let total = viewport.0 * viewport.1;
+            clear_color.repeat(total)
+        });
+
+        // Store into last presentation
+        if let Ok(mut pres) = self.last_presentation.lock() {
+            pres.width = viewport.0;
+            pres.height = viewport.1;
+            pres.pixels = out.clone();
+            pres.frame_index += 1;
+            pres.backend = Some(backend_id);
+        }
+
+        Ok(ExecutionOutcome {
+            backend: backend_id,
+            pixels: out,
+            width: viewport.0,
+            height: viewport.1,
+            draw_count,
+        })
+    }
+
+    /// Software reference rasterizer for deterministic test verification when GPU tests are off.
+    pub fn execute_software_reference_draw(
+        vertices: &[[f32; 4]; 3],
+        viewport: (usize, usize),
+        clear_color: [u8; 4],
+    ) -> Result<Vec<u8>, GraphicsError> {
+        let (w, h) = viewport;
+        let mut pixels = clear_color.repeat(w * h);
+
+        // Convert clip-space coordinates to window pixels [0, w-1] x [0, h-1]
+        let p0 = [
+            (vertices[0][0] + 1.0) * 0.5 * w as f32,
+            (1.0 - vertices[0][1]) * 0.5 * h as f32,
+        ];
+        let p1 = [
+            (vertices[1][0] + 1.0) * 0.5 * w as f32,
+            (1.0 - vertices[1][1]) * 0.5 * h as f32,
+        ];
+        let p2 = [
+            (vertices[2][0] + 1.0) * 0.5 * w as f32,
+            (1.0 - vertices[2][1]) * 0.5 * h as f32,
+        ];
+
+        // 2D barycentric edge functions
+        let edge = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| -> f32 {
+            (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])
+        };
+
+        let area = edge(p0, p1, p2);
+        if area.abs() < 1e-5 {
+            return Ok(pixels);
+        }
+
+        for y in 0..h {
+            for x in 0..w {
+                let pt = [x as f32 + 0.5, y as f32 + 0.5];
+                let w0 = edge(p1, p2, pt);
+                let w1 = edge(p2, p0, pt);
+                let w2 = edge(p0, p1, pt);
+
+                let inside = if area > 0.0 {
+                    w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0
+                } else {
+                    w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0
+                };
+
+                if inside {
+                    let idx = (y * w + x) * 4;
+                    pixels[idx..idx + 4].copy_from_slice(&[255, 0, 0, 255]);
+                }
+            }
+        }
+
+        Ok(pixels)
+    }
+}

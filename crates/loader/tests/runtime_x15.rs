@@ -7,11 +7,9 @@
 //!    two TLS callbacks, GetSystemTimeAsFileTime import, SIB stack store, indirect call,
 //!    and clean guest exit).
 //! 2. Fixture B: `xmem_guest_allocator` (Xbox Scarlett memory allocator, guest address
-//!    range ownership, read/write validation, and free).
-//! 3. Fixture C: `service_to_metal` (Runtime loader + IAT service dispatch to Metal framebuffer).
-//! 4. Safety isolation: Static candidate probe never executes guest code or host services.
+//!    allocation and read/write validation).
+//! 3. Fixture C: IAT dispatch to a mock service and, with the GPU gate, native Metal readback.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use xenora_loader::cpu::{CpuState, ExitReason, Register};
 use xenora_loader::dbt::DbtEngine;
@@ -21,11 +19,10 @@ use xenora_loader::pe::{
     IMAGE_FILE_MACHINE_AMD64, IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ,
     IMAGE_SCN_MEM_WRITE, PE32_PLUS_MAGIC, ParsedPe,
 };
-use xenora_loader::reloc::{
-    IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64, RelocationReport, apply_relocations,
-};
+use xenora_loader::reloc::{IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64};
 use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
-use xenora_loader::tls::{execute_tls_callbacks, parse_tls_directory, setup_tls};
+use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
+use xenora_loader::tls::TlsError;
 
 /// Builder for synthetic PE32+ executables with optional sections (.text, .rdata, .data, .reloc, .tls).
 struct TestPeBuilder {
@@ -34,7 +31,6 @@ struct TestPeBuilder {
     code_bytes: Vec<u8>,
     reloc_entries: Vec<(u32, u8)>, // (page_rva + offset, type)
     tls_callbacks: Vec<u64>,
-    tls_template: Vec<u8>,
     import_thunks: Vec<(String, String)>, // (module, symbol)
 }
 
@@ -46,7 +42,6 @@ impl TestPeBuilder {
             code_bytes: Vec::new(),
             reloc_entries: Vec::new(),
             tls_callbacks: Vec::new(),
-            tls_template: Vec::new(),
             import_thunks: Vec::new(),
         }
     }
@@ -78,6 +73,7 @@ impl TestPeBuilder {
     }
 
     fn build(self) -> Vec<u8> {
+        assert!(self.import_thunks.len() <= 2);
         let mut pe = vec![0u8; 4096]; // Section alignment 4096, headers in first 4096
         pe[0] = b'M';
         pe[1] = b'Z';
@@ -191,7 +187,7 @@ impl TestPeBuilder {
         // - 0x840 (RVA 0x2040): OriginalFirstThunk (INT)
         // - 0x860 (RVA 0x2060): FirstThunk (IAT)
         // - 0x880 (RVA 0x2080): DLL Name string
-        // - 0x8A0 (RVA 0x20A0): Hint/Name table entry
+        // - 0x8C0 (RVA 0x20C0): Hint/Name table entry
         // - 0x900 (RVA 0x2100): TLS Directory
         // - 0x940 (RVA 0x2140): TLS Callbacks Array
         if !self.import_thunks.is_empty() {
@@ -199,7 +195,7 @@ impl TestPeBuilder {
             let oft_rva = 0x2040u32;
             let ft_rva = 0x2060u32;
             let name_rva = 0x2080u32;
-            let hint_rva = 0x20A0u32;
+            let hint_rva = 0x20C0u32;
 
             // Import descriptor
             pe[desc_off..desc_off + 4].copy_from_slice(&oft_rva.to_le_bytes());
@@ -212,12 +208,23 @@ impl TestPeBuilder {
             pe[0x880 + mod_name.len()] = 0;
 
             // Hint/Name table: 2-byte hint (0) + symbol string + null terminator
-            pe[0x8A0 + 2..0x8A0 + 2 + sym_name.len()].copy_from_slice(sym_name.as_bytes());
-            pe[0x8A0 + 2 + sym_name.len()] = 0;
+            pe[0x8C0 + 2..0x8C0 + 2 + sym_name.len()].copy_from_slice(sym_name.as_bytes());
+            pe[0x8C0 + 2 + sym_name.len()] = 0;
 
             // OFT & FT point to hint_rva
             pe[0x840..0x848].copy_from_slice(&(hint_rva as u64).to_le_bytes());
             pe[0x860..0x868].copy_from_slice(&(hint_rva as u64).to_le_bytes());
+        }
+
+        if let Some((module, symbol)) = self.import_thunks.get(1) {
+            let descriptor = 0x814;
+            pe[descriptor..descriptor + 4].copy_from_slice(&0x2180u32.to_le_bytes());
+            pe[descriptor + 12..descriptor + 16].copy_from_slice(&0x21c0u32.to_le_bytes());
+            pe[descriptor + 16..descriptor + 20].copy_from_slice(&0x21a0u32.to_le_bytes());
+            pe[0x980..0x988].copy_from_slice(&0x2200u64.to_le_bytes());
+            pe[0x9a0..0x9a8].copy_from_slice(&0x2200u64.to_le_bytes());
+            pe[0x9c0..0x9c0 + module.len()].copy_from_slice(module.as_bytes());
+            pe[0xa02..0xa02 + symbol.len()].copy_from_slice(symbol.as_bytes());
         }
 
         // TLS Directory at file offset 0x900 (RVA 0x2100)
@@ -270,154 +277,125 @@ fn test_fixture_a_win64_import_tls_startup() {
     // 3. Main entry point uses:
     //    - sub rsp, 0x28 (Win64 shadow space)
     //    - SIB stack store: mov [rsp + 0x20], rbx
-    //    - RIP-relative load: mov rax, [rip + disp32] (reading relocated constant)
     //    - Indirect call through bound IAT to GetSystemTimeAsFileTime
     //    - Clean exit (HLT).
 
     let pref_base = 0x140000000u64;
     let loaded_base = 0x240000000u64; // Non-preferred base
 
-    // Target addresses for two relocations inside .text:
-    // At RVA 0x1010: a 64-bit pointer pointing to pref_base + 0x1050 (value = 0x140001050)
-    // At RVA 0x1020: a 64-bit pointer pointing to pref_base + 0x2000 (value = 0x140002000)
-
-    // Code at RVA 0x1000:
+    // Code layout at RVA 0x1000:
     // 0x1000: 48 83 ec 28                 sub rsp, 0x28
     // 0x1004: 48 c7 c3 77 00 00 00        mov rbx, 0x77
     // 0x100b: 48 89 5c 24 20              mov [rsp + 0x20], rbx (SIB stack store)
-    // 0x1010: [relocated pointer #1: 8 bytes] (data in code section)
-    // 0x1018: 48 8d 4c 24 10              lea rcx, [rsp + 0x10] (pointer to FILETIME struct)
-    // 0x101d: ff 15 3d 10 00 00           call qword ptr [rip + 0x103d] -> IAT at 0x2060
-    // 0x1023: 48 8b 5c 24 20              mov rbx, [rsp + 0x20] (restore rbx)
-    // 0x1028: 48 83 c4 28                 add rsp, 0x28
-    // 0x102c: f4                          hlt
+    // 0x1010: 48 8d 4c 24 10              lea rcx, [rsp + 0x10] (pointer to FILETIME struct)
+    // 0x1015: ff 15 45 10 00 00           call qword ptr [rip + 0x1045] -> IAT at 0x2060 (0x2060 - 0x101B = 0x1045)
+    // 0x101b: 48 8b 54 24 20              mov rdx, [rsp + 0x20] (read back saved value)
+    // 0x1020: 48 83 c4 28                 add rsp, 0x28
+    // 0x1024: f4                          hlt
+    // 0x1028: [relocated pointer #1: 8 bytes] (at RVA 0x1028: pref_base + 0x1050)
+    // 0x1030: [relocated pointer #2: 8 bytes] (at RVA 0x1030: pref_base + 0x2000)
     let mut code = vec![0u8; 0x100];
     code[0..4].copy_from_slice(&[0x48, 0x83, 0xec, 0x28]);
     code[4..11].copy_from_slice(&[0x48, 0xc7, 0xc3, 0x77, 0x00, 0x00, 0x00]);
     code[11..16].copy_from_slice(&[0x48, 0x89, 0x5c, 0x24, 0x20]);
-    // Relocation #1 at RVA 0x1010: initial value 0x140001050
-    code[16..24].copy_from_slice(&(pref_base + 0x1050).to_le_bytes());
-    // LEA rcx, [rsp + 0x10]: 48 8d 4c 24 10
-    code[24..29].copy_from_slice(&[0x48, 0x8d, 0x4c, 0x24, 0x10]);
-    // Call indirect through IAT at RVA 0x2060:
-    // RIP after opcode (0x101D + 6 = 0x1023). disp32 = 0x2060 - 0x1023 = 0x103D
-    code[29..35].copy_from_slice(&[0xff, 0x15, 0x3d, 0x10, 0x00, 0x00]);
-    // Mov rbx, [rsp + 0x20]: 48 8b 5c 24 20
-    code[35..40].copy_from_slice(&[0x48, 0x8b, 0x5c, 0x24, 0x20]);
-    // Add rsp, 0x28: 48 83 c4 28
-    code[40..44].copy_from_slice(&[0x48, 0x83, 0xc4, 0x28]);
+    // LEA rcx, [rsp + 0x10] (48 8d 4c 24 10)
+    code[16..21].copy_from_slice(&[0x48, 0x8d, 0x4c, 0x24, 0x10]);
+    // Call indirect through IAT at 0x2060: 0x2060 - (0x1015 + 6 = 0x101B) = 0x1045
+    code[21..27].copy_from_slice(&[0xff, 0x15, 0x45, 0x10, 0x00, 0x00]);
+    // Load into RDX so the assertion depends on the guest memory round trip.
+    code[27..32].copy_from_slice(&[0x48, 0x8b, 0x54, 0x24, 0x20]);
+    // Add rsp, 0x28
+    code[32..36].copy_from_slice(&[0x48, 0x83, 0xc4, 0x28]);
     // HLT
-    code[44] = 0xf4;
+    code[36] = 0xf4;
+
+    // Relocation #1 at RVA 0x1028 (offset 40..48):
+    code[40..48].copy_from_slice(&(pref_base + 0x1050).to_le_bytes());
+    // Relocation #2 at RVA 0x1030 (offset 48..56):
+    code[48..56].copy_from_slice(&(pref_base + 0x2000).to_le_bytes());
 
     // TLS Callbacks in .text:
-    // Callback 1 at RVA 0x1060: increments R8 by 1, ret (48 ff c0 c3 -> inc rax / ret)
-    // 0x1060: 48 ff c0 c3
-    code[0x60..0x64].copy_from_slice(&[0x48, 0xff, 0xc0, 0xc3]); // inc rax, ret
-    // Callback 2 at RVA 0x1070: inc rax, ret
-    code[0x70..0x74].copy_from_slice(&[0x48, 0xff, 0xc0, 0xc3]);
+    // Callback 1 at RVA 0x1060: increments RAX by 1, ret (48 ff c0 c3 -> inc rax / ret)
+    code[0x60..0x64].copy_from_slice(&[0x48, 0xff, 0xc0, 0xc3]);
+    // Callback 2 doubles RAX and records it below its stack frame.
+    code[0x70..0x79].copy_from_slice(&[0x48, 0x01, 0xc0, 0x48, 0x89, 0x44, 0x24, 0xf0, 0xc3]);
 
     let pe_bytes = TestPeBuilder::new(pref_base, 0x1000)
         .code(&code)
-        .add_dir64_reloc(0x1010) // Relocation #1 in .text
-        .add_padding_reloc(0x1018) // Padding absolute reloc
-        .add_dir64_reloc(0x1020) // Relocation #2
+        .add_dir64_reloc(0x1028) // Relocation #1
+        .add_padding_reloc(0x1028) // Padding absolute reloc
+        .add_dir64_reloc(0x1030) // Relocation #2
         .add_tls_callback(pref_base + 0x1060)
         .add_tls_callback(pref_base + 0x1070)
         .add_import("kernel32.dll", "GetSystemTimeAsFileTime")
         .build();
 
-    let pe = ParsedPe::parse(&pe_bytes).expect("parse synthetic PE");
-    let mut memory = xenora_loader::memory::GuestMemory::new();
-
-    // Map sections at non-preferred loaded_base
-    for sec in &pe.sections {
-        let base = loaded_base + sec.virtual_address as u64;
-        let size = std::cmp::max(sec.virtual_size, sec.raw_data_size) as usize;
-        let file_off = sec.raw_data_ptr as usize;
-        let data = &pe_bytes[file_off..file_off + sec.raw_data_size as usize];
-        memory
-            .map_region_with_data(base, size, sec.permissions, data)
-            .expect("map section");
-    }
-
-    // 1. Apply base relocations
-    let reloc_report =
-        apply_relocations(&pe, &pe_bytes, loaded_base, &mut memory).expect("apply relocations");
-    assert_eq!(reloc_report.applied_dir64, 2);
-    assert_eq!(reloc_report.skipped_absolute, 1);
-    assert_eq!(reloc_report.delta, 0x100000000);
-
-    // Verify relocated value at 0x240001010
-    let relocated_val = memory
-        .read_u64_bypass(loaded_base + 0x1010)
-        .expect("read relocated value");
-    assert_eq!(relocated_val, loaded_base + 0x1050); // Rebased correctly!
-
-    // 2. Setup TLS
-    let tls_dir = parse_tls_directory(&pe_bytes, &pe)
-        .expect("parse tls")
-        .expect("tls directory present");
-    assert_eq!(tls_dir.callbacks.len(), 2);
-    setup_tls(&tls_dir, loaded_base, pref_base, &mut memory, 0x300000000).expect("setup tls");
-
-    // 3. Bind Imports
-    let mut import_registry = ImportRegistry::new();
-    let clock = Arc::new(MockClock::new(133_000_000_000_000_000)); // Fixed synthetic timestamp
-    let services_state = Arc::new(ServicesState::new(clock.clone()));
-    register_standard_services(&mut import_registry, services_state);
-
-    let bound = import_registry
-        .bind_imports(&pe, &pe_bytes, loaded_base, &mut memory)
-        .expect("bind imports");
-    assert_eq!(bound, 1);
-
-    // 4. Map guest stack
-    let stack_top = 0x500000000u64;
-    memory
-        .map_region(
-            0x4FFFF0000,
-            0x10000,
-            MemoryPermissions {
-                read: true,
-                write: true,
-                execute: false,
-            },
-        )
-        .expect("map stack");
-
-    // 5. Initialize DBT Engine and attach import registry
-    let mut dbt = DbtEngine::new(1024 * 1024).expect("init JIT");
-    dbt.set_import_registry(import_registry);
-
-    // 6. Execute TLS callbacks
-    let mut cpu = CpuState::new(loaded_base + 0x1000, stack_top);
-    cpu.set(Register::Rax, 10);
-    let cb_count = execute_tls_callbacks(
-        &tls_dir.callbacks,
-        loaded_base,
-        pref_base,
+    let stack_top = 0x500000000;
+    let layout = || StartupLayout {
+        image_base: loaded_base,
         stack_top,
-        &mut cpu,
-        &mut memory,
-        &mut dbt,
-    )
-    .expect("execute tls callbacks");
-    assert_eq!(cb_count, 2);
-    assert_eq!(cpu.get(Register::Rax), 12); // Both callbacks incremented RAX (10 + 1 + 1 = 12)
+        tls_base: 0x300000000,
+    };
+    let registry = || {
+        let mut imports = ImportRegistry::new();
+        let clock = Arc::new(MockClock::new(133_000_000_000_000_000));
+        register_standard_services(&mut imports, Arc::new(ServicesState::new(clock)));
+        imports
+    };
+    let probe = xenora_loader::probe_pe_bytes(&pe_bytes, &Default::default()).unwrap();
+    assert_eq!(probe.imports.len(), 1);
+    assert_eq!(probe.imports[0].symbol, "GetSystemTimeAsFileTime");
+    assert!(probe.imports[0].is_supported);
 
-    // 7. Execute main program entry point
-    cpu.rip = loaded_base + 0x1000;
-    cpu.set(Register::Rsp, stack_top);
-    let result = dbt.run(&mut cpu, &mut memory, 1000);
+    let startup =
+        run_synthetic_startup(&pe_bytes, layout(), registry(), 1000).expect("run fixture startup");
+    assert_eq!(startup.relocations.applied_dir64, 2);
+    assert_eq!(startup.relocations.skipped_absolute, 1);
+    assert_eq!(startup.relocations.delta, 0x100000000);
+    assert_eq!(startup.bound_imports, 1);
+    assert_eq!(startup.tls_callbacks, 2);
+    assert_eq!(startup.execution.exit_reason, ExitReason::Halt);
+    assert_eq!(
+        startup.execution.final_state.get(Register::Rsp),
+        stack_top - 40
+    );
+    assert_eq!(startup.execution.final_state.get(Register::Rdx), 0x77);
 
-    assert_eq!(result.exit_reason, ExitReason::Halt);
-    assert_eq!(result.final_state.get(Register::Rbx), 0x77); // SIB store/load preserved RBX!
+    let memory = &startup.image.memory;
+    assert_eq!(
+        memory.read_u64_bypass(loaded_base + 0x1028).unwrap(),
+        loaded_base + 0x1050
+    );
+    assert_eq!(
+        memory.read_u64_bypass(loaded_base + 0x1030).unwrap(),
+        loaded_base + 0x2000
+    );
+    assert_eq!(memory.read_u64(stack_top - 40 - 16).unwrap(), 2); // (0 + 1) * 2
+    assert_eq!(
+        memory.read_u64(stack_top - 40 - 0x28 + 0x10).unwrap(),
+        133_000_000_000_000_000
+    );
 
-    // Verify FILETIME written to stack [RSP + 0x10]
-    let written_ft = memory
-        .read_u64(stack_top - 0x28 + 0x10)
-        .expect("read written filetime");
-    assert_eq!(written_ft, 133_000_000_000_000_000);
+    let mut halting_tls = pe_bytes;
+    let callback_offset = startup.image.pe.rva_to_file_offset(0x1060).unwrap();
+    halting_tls[callback_offset] = 0xf4;
+    let missing = run_synthetic_startup(&halting_tls, layout(), ImportRegistry::new(), 1000)
+        .err()
+        .expect("import binding must fail before the halting callback");
+    assert_eq!(
+        missing.downcast_ref::<xenora_loader::ImportError>(),
+        Some(&xenora_loader::ImportError::UnresolvedImport {
+            module: "kernel32.dll".into(),
+            symbol: "GetSystemTimeAsFileTime".into(),
+        }),
+    );
+    let fault = run_synthetic_startup(&halting_tls, layout(), registry(), 1000)
+        .err()
+        .expect("callback halt must fail startup");
+    assert!(matches!(
+        fault.downcast_ref::<TlsError>(),
+        Some(TlsError::CallbackExecutionFault(ExitReason::Halt))
+    ));
 }
 
 #[test]
@@ -426,7 +404,6 @@ fn test_fixture_b_xmem_guest_allocator() {
     // 1. Invokes XMemAlloc via synthetic IAT call.
     // 2. Writes data to returned guest address.
     // 3. Reads data back and verifies integrity.
-    // 4. Invokes XMemFree.
 
     let pref_base = 0x140000000u64;
     // Code at RVA 0x1000:
@@ -505,11 +482,7 @@ fn test_fixture_b_xmem_guest_allocator() {
     assert_eq!(result.final_state.get(Register::Rcx), 0x42); // Read back correctly!
 }
 
-#[test]
-fn test_fixture_c_service_to_metal_framebuffer() {
-    // Tests end-to-end guest execution dispatching to Metal rendering via service trampoline.
-    // Verifies actual pixel output from guest x86-64 execution.
-
+fn run_fixture_c(handler: xenora_loader::imports::ServiceHandler) {
     let pref_base = 0x140000000u64;
     let mut code = vec![0u8; 0x100];
     // 0x1000: 48 83 ec 28                 sub rsp, 0x28
@@ -521,9 +494,19 @@ fn test_fixture_c_service_to_metal_framebuffer() {
     code[10..14].copy_from_slice(&[0x48, 0x83, 0xc4, 0x28]);
     code[14] = 0xf4;
 
+    // Place an original full-screen triangle in the guest image.
+    let positions: [f32; 12] = [-1., -1., 0.5, 1., 3., -1., 0.5, 1., -1., 3., 0.5, 1.];
+    for (slot, value) in code[0x40..0x70]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(positions)
+    {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
     let pe_bytes = TestPeBuilder::new(pref_base, 0x1000)
         .code(&code)
-        .add_import("d3d12_xs.dll", "RenderFrame")
+        .add_import("xenora_fixture.dll", "RenderFrame")
         .build();
 
     let pe = ParsedPe::parse(&pe_bytes).expect("parse pe");
@@ -539,22 +522,8 @@ fn test_fixture_c_service_to_metal_framebuffer() {
             .expect("map section");
     }
 
-    let rendered_pixels = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let render_capture = rendered_pixels.clone();
-
     let mut import_registry = ImportRegistry::new();
-    import_registry.register(
-        "d3d12_xs.dll",
-        "RenderFrame",
-        move |_args, _cpu, _mem| {
-            // Emulate synthetic frame render (e.g. 8x8 RGBA8 buffer)
-            let mut pixels = vec![0u8; 8 * 8 * 4];
-            pixels[0] = 0xFF; // Red
-            pixels[3] = 0xFF; // Alpha
-            *render_capture.lock().unwrap() = pixels;
-            Ok(0)
-        },
-    );
+    import_registry.register("xenora_fixture.dll", "RenderFrame", handler);
 
     let bound = import_registry
         .bind_imports(&pe, &pe_bytes, pref_base, &mut memory)
@@ -578,10 +547,382 @@ fn test_fixture_c_service_to_metal_framebuffer() {
     dbt.set_import_registry(import_registry);
 
     let mut cpu = CpuState::new(pref_base + 0x1000, stack_top);
+    cpu.set(Register::Rcx, pref_base + 0x1040);
     let result = dbt.run(&mut cpu, &mut memory, 1000);
 
     assert_eq!(result.exit_reason, ExitReason::Halt);
-    let pixels = rendered_pixels.lock().unwrap();
-    assert_eq!(pixels.len(), 256);
-    assert_eq!(pixels[0], 0xFF); // Red pixel verified!
+    assert_eq!(result.final_state.get(Register::Rsp), stack_top);
+    assert_eq!(result.final_state.get(Register::Rax), 0x42);
+    assert_eq!(dbt.metrics.service_calls, 1);
+    assert_eq!(dbt.metrics.interpreter_fallbacks, 0);
+}
+
+#[test]
+fn test_fixture_c_mock_render_service_dispatch() {
+    run_fixture_c(Box::new(|args, _, mem| {
+        assert_eq!(
+            mem.read_u64(args.get(0, mem).map_err(ExitReason::MemoryFault)?)
+                .map_err(ExitReason::MemoryFault)?,
+            0xbf80_0000_bf80_0000
+        );
+        Ok(0x42)
+    }));
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "gpu-tests"),
+    ignore = "needs native Metal; run scripts/test-gpu.sh"
+)]
+fn test_fixture_c_service_to_metal_framebuffer() {
+    use xenora_metal::NativeCompute;
+    use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
+
+    run_fixture_c(Box::new(|args, _, mem| {
+        let mut bytes = [0; 48];
+        let address = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        mem.read_bytes(address, &mut bytes)
+            .map_err(ExitReason::MemoryFault)?;
+        let mut vertices = [[0.0; 4]; 3];
+        for (value, bytes) in vertices.iter_mut().flatten().zip(bytes.as_chunks::<4>().0) {
+            *value = f32::from_le_bytes(*bytes);
+        }
+        let shader = compile_graphics(
+            Architecture::Gfx1030,
+            include_bytes!("../../../fixtures/rdna2/x9-constant-vs.bin"),
+            include_bytes!("../../../fixtures/rdna2/x9-constant-ps.bin"),
+        )
+        .expect("compile original graphics fixture");
+        let pixels = NativeCompute::new()
+            .expect("native Metal device")
+            .render_rgba8(
+                &shader.msl,
+                [VERTEX_ENTRY_POINT, PIXEL_ENTRY_POINT],
+                &vertices,
+                &[[0.0; 4]; 3],
+                [4, 3],
+                [19, 43, 93, 251],
+            )
+            .expect("Metal draw and readback");
+        // The authored triangle covers every pixel and its shader exports opaque red.
+        assert_eq!(pixels, [255, 0, 0, 255].repeat(12));
+        Ok(0x42)
+    }));
+}
+
+const PROCESS_FIXTURE_STACK_TOP: u64 = 0x500000000;
+const PROCESS_FIXTURE_OUTPUT: u64 = PROCESS_FIXTURE_STACK_TOP - 0x100;
+
+fn call_process_fixture(
+    state: &Arc<ServicesState>,
+    module: &str,
+    symbol: &str,
+    rcx: u64,
+    rdx: u64,
+) -> xenora_loader::startup::StartupResult {
+    call_identity_fixture(state, module, symbol, [rcx, rdx, 0])
+}
+
+fn call_identity_fixture(
+    state: &Arc<ServicesState>,
+    module: &str,
+    symbol: &str,
+    args: [u64; 3],
+) -> xenora_loader::startup::StartupResult {
+    let image_base = 0x140000000;
+    let mut code = vec![0x48, 0x83, 0xec, 0x28]; // Win64 home space and alignment
+    for (register, value) in [[0x48, 0xb9], [0x48, 0xba], [0x49, 0xb8]]
+        .into_iter()
+        .zip(args)
+    {
+        code.extend_from_slice(&register); // mov rcx/rdx/r8, imm64
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    code.extend_from_slice(&[0x48, 0xb8]); // mov rax, address of output slot
+    code.extend_from_slice(&PROCESS_FIXTURE_OUTPUT.to_le_bytes());
+    // mov qword ptr [rax], -1, seeding the BOOL and adjacent bytes
+    code.extend_from_slice(&[0x48, 0xc7, 0x00, 0xff, 0xff, 0xff, 0xff]);
+    append_import_call(&mut code, 0x2060);
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]); // release frame and halt
+
+    let bytes = TestPeBuilder::new(image_base, 0x1000)
+        .code(&code)
+        .add_import(module, symbol)
+        .build();
+    let mut imports = ImportRegistry::new();
+    register_standard_services(&mut imports, Arc::clone(state));
+    let result = run_synthetic_startup(
+        &bytes,
+        StartupLayout {
+            image_base,
+            stack_top: PROCESS_FIXTURE_STACK_TOP,
+            tls_base: 0x300000000,
+        },
+        imports,
+        100,
+    )
+    .expect("start process-service PE fixture");
+    assert_eq!(result.bound_imports, 1);
+    assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+    result
+}
+
+#[test]
+fn test_process_priority_boost_setter_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let set = |module, handle, disable| {
+        call_process_fixture(&state, module, "SetProcessPriorityBoost", handle, disable)
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let last_error = || {
+        call_process_fixture(&state, "kernel32.dll", "GetLastError", 0, 0)
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let api_set = "API-MS-WIN-CORE-PROCESSTHREADS-L1-1-2.DLL";
+    assert!(!state.priority_boost_disabled());
+    assert_eq!(set(api_set, u64::MAX, 2), 1);
+    assert!(state.priority_boost_disabled());
+    assert_eq!(set(api_set, u64::MAX, 2), 1);
+    assert!(state.priority_boost_disabled());
+    for invalid in [0, 0x4100, u64::MAX - 1] {
+        assert_eq!(set(api_set, invalid, 0), 0);
+        assert_eq!(last_error(), 6);
+        assert!(state.priority_boost_disabled());
+    }
+    // BOOL occupies the low 32 bits of the argument register.
+    assert_eq!(set("kernel32.dll", u64::MAX, 1 << 32), 1);
+    assert!(!state.priority_boost_disabled());
+    assert_eq!(last_error(), 6);
+}
+
+#[test]
+fn test_current_process_identity_through_iat() {
+    let mut state = ServicesState::new(Arc::new(MockClock::new(0)));
+    state.process_id = 12345;
+    let state = Arc::new(state);
+    let api_set = "api-ms-win-core-processthreads-l1-1-0.dll";
+    let call = |module, symbol, handle| {
+        call_process_fixture(&state, module, symbol, handle, 0)
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let handle = call(api_set, "GetCurrentProcess", 0);
+    assert_eq!(handle, u64::MAX);
+    assert_eq!(call("kernel32.dll", "GetCurrentProcess", 0), handle);
+    assert_eq!(call(api_set, "GetProcessId", handle), 12345);
+    assert_eq!(call(api_set, "GetProcessId", 12345), 0);
+    assert_eq!(
+        call(
+            "api-ms-win-core-errorhandling-l1-1-0.dll",
+            "GetLastError",
+            0
+        ),
+        6
+    );
+    assert_eq!(call("kernel32.dll", "GetProcessId", handle), 12345);
+}
+
+#[test]
+fn test_process_priority_boost_query_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let api_set = "api-ms-win-core-processthreads-l1-1-2.dll";
+    let query =
+        |handle, ptr| call_process_fixture(&state, api_set, "GetProcessPriorityBoost", handle, ptr);
+    let read_output = |result: &xenora_loader::startup::StartupResult| {
+        result
+            .image
+            .memory
+            .read_u64(PROCESS_FIXTURE_OUTPUT)
+            .unwrap()
+    };
+    for (disable, expected) in [(false, 0), (true, 1), (true, 1), (false, 0)] {
+        let setter = call_process_fixture(
+            &state,
+            api_set,
+            "SetProcessPriorityBoost",
+            u64::MAX,
+            u64::from(disable),
+        );
+        assert_eq!(setter.execution.final_state.get(Register::Rax), 1);
+        let result = query(u64::MAX, PROCESS_FIXTURE_OUTPUT);
+        assert_eq!(result.execution.final_state.get(Register::Rax), 1);
+        assert_eq!(read_output(&result), 0xffff_ffff_0000_0000 | expected);
+    }
+
+    for (handle, ptr, error) in [
+        (0, PROCESS_FIXTURE_OUTPUT, 6),
+        (u64::MAX, 0, 998),
+        (u64::MAX, 0x140001000, 998), // Executable section has no write permission.
+        (u64::MAX, PROCESS_FIXTURE_STACK_TOP - 2, 998),
+    ] {
+        let result = query(handle, ptr);
+        assert_eq!(result.execution.final_state.get(Register::Rax), 0);
+        assert_eq!(read_output(&result), u64::MAX);
+        let result = call_process_fixture(&state, "kernel32.dll", "GetLastError", 0, 0);
+        assert_eq!(result.execution.final_state.get(Register::Rax), error);
+    }
+}
+
+fn append_import_call(code: &mut Vec<u8>, slot_rva: i32) {
+    // call qword ptr [rip + disp32], through the fixture's import slot.
+    let next_rva = 0x1000 + code.len() as i32 + 6;
+    code.extend_from_slice(&[0xff, 0x15]);
+    code.extend_from_slice(&(slot_rva - next_rva).to_le_bytes());
+}
+
+#[test]
+fn test_guest_thread_handle_lifecycle_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let api = "api-ms-win-core-processthreads-l1-1-0.dll";
+    let handle_api = "api-ms-win-core-handle-l1-1-0.dll";
+    let call = |module, symbol, args| {
+        call_identity_fixture(&state, module, symbol, args)
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let last_error = || call("kernel32.dll", "GetLastError", [0; 3]);
+    let id = call(api, "GetCurrentThreadId", [0; 3]);
+    let pseudo = call(api, "GetCurrentThread", [0; 3]);
+    assert_eq!(pseudo, u64::MAX - 1);
+
+    const QUERY_LIMITED: u64 = 0x0800;
+    const SET_LIMITED: u64 = 0x0400;
+    let open = |rights, inherit, id| call(api, "OpenThread", [rights, inherit, id]);
+    let query = |handle| call(api, "GetThreadPriority", [handle, 0, 0]);
+    let set = |handle, priority| call(api, "SetThreadPriority", [handle, priority, 0]);
+    let close = |handle| call(handle_api, "CloseHandle", [handle, 0, 0]);
+
+    assert_eq!(open(QUERY_LIMITED, 0, id + 1), 0);
+    assert_eq!(last_error(), 87);
+    assert_eq!(open(QUERY_LIMITED, 1, id), 0);
+    assert_eq!(last_error(), 50);
+    assert_eq!(open(0x0002, 0, id), 0);
+    assert_eq!(last_error(), 50);
+    let query_only = open(QUERY_LIMITED, 0, id);
+    let set_only = open(SET_LIMITED, 0, id);
+    assert_ne!(query_only, 0);
+    assert_ne!(set_only, 0);
+    assert_ne!(query_only, set_only);
+    assert_eq!(query(query_only), 0);
+    assert_eq!(set(query_only, 1), 0);
+    assert_eq!(last_error(), 5);
+    assert_eq!(query(set_only), 0x7fff_ffff);
+    assert_eq!(last_error(), 5);
+    assert_eq!(set(set_only, u64::MAX), 1);
+    assert_eq!(query(query_only), u64::from(u32::MAX)); // signed int -1
+    assert_eq!(query(pseudo), u64::from(u32::MAX));
+    assert_eq!(set(pseudo, 3), 0);
+    assert_eq!(last_error(), 87);
+    assert_eq!(set(pseudo, 0x0001_0000), 0);
+    assert_eq!(last_error(), 50);
+    assert_eq!(query(pseudo), u64::from(u32::MAX));
+    assert_eq!(close(pseudo), 1);
+    assert_eq!(close(query_only), 1);
+    assert_eq!(query(query_only), 0x7fff_ffff);
+    assert_eq!(last_error(), 6);
+    assert_eq!(close(query_only), 0);
+    assert_eq!(last_error(), 6);
+    let reopened = open(QUERY_LIMITED, 0, id);
+    assert_ne!(reopened, query_only);
+    assert_eq!(query(reopened), u64::from(u32::MAX));
+    assert_eq!(last_error(), 6);
+}
+
+#[test]
+fn test_virtual_allocation_release_through_iat() {
+    const IMAGE: u64 = 0x140000000;
+    const HEAP: u64 = 0x8_0000_0000;
+    const MODULE: &str = "api-ms-win-core-memory-l1-1-0.dll";
+
+    let run = |args: [u64; 4], free: Option<[u64; 3]>| {
+        let mut code = vec![0x48, 0x83, 0xec, 0x28]; // Win64 home space and alignment
+        let registers = [[0x48, 0xb9], [0x48, 0xba], [0x49, 0xb8], [0x49, 0xb9]];
+        for (register, value) in registers.into_iter().zip(args) {
+            code.extend_from_slice(&register);
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        append_import_call(&mut code, 0x2060);
+        let mut fixture = TestPeBuilder::new(IMAGE, 0x1000).add_import(MODULE, "VirtualAlloc");
+        if let Some(free) = free {
+            for (register, value) in registers.into_iter().zip(free) {
+                code.extend_from_slice(&register);
+                code.extend_from_slice(&value.to_le_bytes());
+            }
+            append_import_call(&mut code, 0x21a0);
+            fixture = fixture.add_import(MODULE, "VirtualFree");
+        }
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
+        let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+        let mut imports = ImportRegistry::new();
+        register_standard_services(&mut imports, Arc::clone(&state));
+        let result = run_synthetic_startup(
+            &fixture.code(&code).build(),
+            StartupLayout {
+                image_base: IMAGE,
+                stack_top: PROCESS_FIXTURE_STACK_TOP,
+                tls_base: 0x300000000,
+            },
+            imports,
+            100,
+        )
+        .expect("start memory-service PE fixture");
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        assert_eq!(result.bound_imports, if free.is_some() { 2 } else { 1 });
+        let value = result.execution.final_state.get(Register::Rax);
+        let error = state.last_error.load(std::sync::atomic::Ordering::SeqCst);
+        (result.image.memory, value, error)
+    };
+
+    let (mut memory, value, error) = run([HEAP + 0x800, 0x1000, 0x3000, 4], None);
+    assert_eq!((value, error), (HEAP, 0));
+    assert_eq!(memory.read_u32(HEAP + 0x1ffc).unwrap(), 0);
+    memory.write_u32(HEAP, 123).unwrap();
+    assert_eq!(memory.read_u32(HEAP).unwrap(), 123);
+    assert!(memory.read_u32(HEAP + 0x2000).is_err());
+
+    let (memory, value, error) = run([HEAP, 1, 0x3000, 4], Some([HEAP, 0, 0x8000]));
+    assert_eq!((value, error), (1, 0));
+    assert!(memory.read_u32(HEAP).is_err());
+
+    for (free_args, expected_error) in [
+        ([HEAP + 1, 0, 0x8000], 487),
+        ([HEAP, 1, 0x8000], 87),
+        ([HEAP, 0, 0x4000], 50),
+        ([IMAGE + 0x1000, 0, 0x8000], 487),
+        ([PROCESS_FIXTURE_STACK_TOP - 0x1_0000, 0, 0x8000], 487),
+    ] {
+        let (memory, value, error) = run([HEAP, 1, 0x3000, 4], Some(free_args));
+        assert_eq!((value, error), (0, expected_error));
+        assert_eq!(memory.read_u32(HEAP).unwrap(), 0);
+        assert!(memory.fetch_instruction_byte(IMAGE + 0x1000).is_ok());
+    }
+    let (mut memory, address, error) = run([0, 1, 0x3000, 2], None);
+    assert_ne!(address, 0);
+    assert_eq!(address % 65_536, 0);
+    assert_eq!(error, 0);
+    assert_eq!(memory.read_u32(address).unwrap(), 0);
+    assert!(memory.write_u32(address, 1).is_err());
+
+    let (memory, address, error) = run([0, 1, 0x3000, 1], None);
+    assert_ne!(address, 0);
+    assert_eq!(error, 0);
+    assert!(memory.read_u32(address).is_err());
+
+    for (args, expected_error) in [
+        ([0, 0, 0x3000, 4], 87),
+        ([0, u64::MAX, 0x3000, 4], 87),
+        ([0, 65 * 1024 * 1024, 0x3000, 4], 8),
+        ([0, 0x1000, 0x2000, 4], 50),
+        ([0, 0x1000, 0x3000, 0x40], 87),
+        ([IMAGE + 0x1000, 1, 0x3000, 4], 487),
+    ] {
+        let (_, value, error) = run(args, None);
+        assert_eq!((value, error), (0, expected_error));
+    }
 }

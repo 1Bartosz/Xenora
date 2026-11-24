@@ -8,6 +8,7 @@
 pub mod arm64;
 pub mod cpu;
 pub mod dbt;
+pub mod graphics;
 pub mod imports;
 pub mod jit;
 pub mod memory;
@@ -15,12 +16,19 @@ pub mod pe;
 pub mod probe;
 pub mod reloc;
 pub mod services;
+pub mod startup;
 pub mod tls;
 pub mod triage;
 
 pub use arm64::Arm64Assembler;
 pub use cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, RFlags, Register};
 pub use dbt::{DbtEngine, DbtMetrics};
+pub use graphics::{
+    BackendRenderer, CommandListType, ExecutionOutcome, FramePresentation, GraphicsBackendId,
+    GraphicsCommand, GraphicsCommandAllocator, GraphicsCommandList, GraphicsCommandQueue,
+    GraphicsContext, GraphicsError, GraphicsHandle, GraphicsResource, ResourceDesc,
+    ResourceDimension, ResourceStates,
+};
 pub use imports::{ImportError, ImportRegistry, ServiceDescriptor, ServiceHandler, Win64Args};
 pub use jit::{JitError, JitMemory};
 pub use memory::{GuestMemory, MemoryError, MemoryPermissions};

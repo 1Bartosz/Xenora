@@ -11,7 +11,20 @@ remains unsupported.
 
 ### Added
 
-- Added PE32+ runtime support for base relocations, thread-local storage initialization and callbacks, and guest import dispatch. Synthetic runtime tests exercise the new loader paths.
+- Added guest-facing D3D12-style graphics runtime interfaces (`GraphicsContext`, `GraphicsDevice`, `GraphicsCommandQueue`, `GraphicsCommandAllocator`, `GraphicsCommandList`, `GraphicsResource`) with explicit backend selection (`GraphicsBackendId::MetalNative` vs `GraphicsBackendId::SoftwareReference`). Original PE32+ integration tests verify device creation, generation-checked handle ownership, command recording, barriers, and presentation.
+- Connected guest execution via ARM64 DBT and IAT dispatch to native Apple Silicon Metal rendering (`test_guest_dbt_graphics_pipeline_metal_render_dual_inputs`), proving that different guest vertex positions and clear colors produce distinct, verified GPU-rendered framebuffers with active Metal validation on Apple M5.
+- Added explicit test graphics service exports (`xenora_fixture.dll!CreateGraphicsDevice`, `xenora_fixture.dll!SubmitGuestDraw`) cleanly separated from unsupported production Xbox ABI claims.
+- Added control-flow-aware x86-64 static PE probe using worklist CFG traversal, eliminating false-positive startup blocker reports on unreachable INT3 padding.
+- Added `xenora imports sync` command with `--check` verification mode for automated, idempotent import compatibility backlog generation.
+- Added current-process handle and ID queries and a readable priority boost policy for the synthetic guest process. Original PE fixtures verify Win64 arguments, state changes and errors through imported calls.
+- Static import reports identify canonical bindings, API-set aliases, implemented and partial handlers, existing stubs, and missing services.
+
+- Added a single startup path for original PE32+ fixtures that maps and rebases the image, binds imports before running thread-local storage callbacks, then enters the guest.
+- The static PE probe compares ordinary imports with the standard synthetic registry and exports unresolved DLL, symbol or ordinal, and import slot addresses to `missing_imports.csv`.
+
+- Added synthetic PE32+ runtime support for 64-bit base relocations, thread-local storage setup and callbacks, Windows x64 calling convention arguments, and import binding to a limited service registry. The Xbox-style allocation service maps guest memory. Its free entry point remains a stub.
+- Extended native ARM64 dynamic binary translation with selected memory addressing, immediate stores, register increments and decrements, and indirect control flow through guest import slots.
+- Added runtime fixtures for rebasing, ordered callbacks, deterministic timing, guest memory allocation, and mock import dispatch. The GPU gate checks every pixel from a native offscreen draw through a synthetic import.
 
 - Added a static PE compatibility probe that exports section, relocation, thread-local storage, import and bounded x86-64 entry-point analysis. Synthetic tests cover inspection and report export.
 - Added native Apple Silicon ARM64 Dynamic Binary Translation (DBT) engine (`DbtEngine`) with basic block decoding, native ARM64 code lowering, and W^X-compliant JIT code cache (`JitMemory`) utilizing macOS `MAP_JIT` and `pthread_jit_write_protect_np`.
@@ -57,6 +70,12 @@ remains unsupported.
 - Made reading and updating the changelog mandatory for engineering work.
 
 ### Fixed
+
+- Stop ignoring `fixtures/pe/trusted-runner.exe`. The runner embeds it with `include_bytes!`, so ignoring the file made a fresh checkout fail to compile.
+- Corrected the ARM64 STP pre-index encoder, which had a hardcoded -32-byte immediate and therefore adjusted the host stack by the wrong amount once the translator frame grew to 48 bytes. The wrong frame silently corrupted the caller's stack and caused SIGSEGV in every native translation test. Emitter encodings are now checked against LLVM's assembler, and a test asserts that each translated block opens and closes the same 48-byte frame.
+- Translated guest memory faults now stop the block before it commits further architectural effects. A faulting push, call or store leaves guest RSP and registers unchanged, the reported instruction count covers only completed work, and guest RIP identifies the faulting instruction. Previously the block continued after the helper recorded a fault, so later instructions and writes still took effect.
+- Compute the static PE probe SHA-256 from the full input, including trailing bytes.
+- Report TLS callbacks that halt or exhaust their execution budget as failures. Reject unsupported 32-bit increment and decrement forms in the native translator.
 
 - Reject unknown guest experiment arguments with a nonzero exit status.
 

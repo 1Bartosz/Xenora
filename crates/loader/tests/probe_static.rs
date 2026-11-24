@@ -85,6 +85,7 @@ fn test_probe_artifact_export_creates_all_files() {
     assert!(temp_dir.join("candidate_static_report.md").exists());
     assert!(temp_dir.join("candidate_static_report.json").exists());
     assert!(temp_dir.join("imports.csv").exists());
+    assert!(temp_dir.join("missing_imports.csv").exists());
     assert!(temp_dir.join("cpu_coverage.csv").exists());
     assert!(temp_dir.join("runtime_gap_matrix.md").exists());
     assert!(temp_dir.join("x15_priority_backlog.md").exists());
@@ -93,4 +94,79 @@ fn test_probe_artifact_export_creates_all_files() {
     assert_eq!(report.parsed.sections.len(), 1);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn probe_hashes_the_entire_input() {
+    let mut bytes = create_synthetic_probe_pe();
+    let config = ProbeConfig::default();
+    let first = probe_pe_bytes(&bytes, &config).unwrap();
+    bytes.push(42);
+    let second = probe_pe_bytes(&bytes, &config).unwrap();
+    assert_eq!(
+        first.sha256,
+        "72f97ed9d24af84928a313d4c47bfedae0c46e38fab265b3bb8d922566d816f9"
+    );
+    assert_eq!(
+        second.sha256,
+        "7da76a9dfe391814ed41c01417c00b85ab2e9d122d1b0e56e45d39ad4e81df30"
+    );
+}
+
+#[test]
+fn probe_distinguishes_aliases_from_unavailable_services() {
+    use xenora_loader::imports::ServiceStatus;
+
+    let mut pe = create_synthetic_probe_pe();
+    // Import directory in the fixture's file-backed section at RVA 0x1040.
+    pe[0x110..0x114].copy_from_slice(&0x1040u32.to_le_bytes());
+    pe[0x114..0x118].copy_from_slice(&40u32.to_le_bytes());
+    pe[0x240..0x244].copy_from_slice(&0x1120u32.to_le_bytes());
+    pe[0x24c..0x250].copy_from_slice(&0x1090u32.to_le_bytes());
+    pe[0x250..0x254].copy_from_slice(&0x1160u32.to_le_bytes());
+    let dll = b"API-MS-WIN-CORE-PROCESSTHREADS-L1-1-0.DLL";
+    pe[0x290..0x290 + dll.len()].copy_from_slice(dll);
+
+    for (index, (rva, name)) in [
+        (0x1180u64, "GetCurrentProcess"),
+        (0x11a0u64, "CreateThread"),
+        (0x11c0u64, "getcurrentprocess"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let offset = 0x320 + index * 8;
+        pe[offset..offset + 8].copy_from_slice(&rva.to_le_bytes());
+        let name_offset = 0x200 + (rva as usize - 0x1000) + 2;
+        pe[name_offset..name_offset + name.len()].copy_from_slice(name.as_bytes());
+    }
+
+    let report = probe_pe_bytes(&pe, &ProbeConfig::default()).unwrap();
+    assert_eq!(report.imports.len(), 3);
+    let [alias, unsupported, unknown] = report.imports.as_slice() else {
+        unreachable!()
+    };
+    assert_eq!(alias.iat_rva, 0x1160);
+    assert_eq!(alias.canonical_module.as_deref(), Some("kernel32.dll"));
+    assert_eq!(alias.service_status, Some(ServiceStatus::Implemented));
+    assert!(!unsupported.is_supported);
+    assert!(!unknown.is_supported);
+    assert_eq!(unsupported.iat_rva, 0x1168);
+    assert_eq!(unknown.iat_rva, 0x1170);
+
+    let path = std::env::temp_dir().join(format!("xenora-probe-alias-{}", std::process::id()));
+    run_probe_and_export(&pe, &path, &ProbeConfig::default()).unwrap();
+    let csv = std::fs::read_to_string(path.join("imports.csv")).unwrap();
+    assert!(csv.contains("true,implemented,true,\"kernel32.dll\",1"));
+    assert!(csv.contains("false,unsupported,false,\"\",1"));
+    assert!(csv.contains("false,missing,false,\"\",1"));
+    let missing = std::fs::read_to_string(path.join("missing_imports.csv")).unwrap();
+    assert_eq!(missing.lines().count(), 3);
+    assert!(!missing.contains("GetCurrentProcess"));
+    let json = std::fs::read_to_string(path.join("candidate_static_report.json")).unwrap();
+    assert!(json.contains("\"distinct_import_keys\": 3"));
+    assert!(json.contains("\"canonical_registered_services\": 1"));
+    assert!(json.contains("\"unresolved_imports\": 2"));
+    assert!(json.contains("\"recognized_unsupported_slots\": 1"));
+    std::fs::remove_dir_all(path).unwrap();
 }

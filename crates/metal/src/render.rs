@@ -53,6 +53,20 @@ impl NativeCompute {
         )
     }
 
+    /// Draw one offscreen triangle and return readback and GPU command time in seconds.
+    /// Timing is absent if Metal supplies no usable command timestamps.
+    pub fn render_rgba8_profiled(
+        &self,
+        source: &str,
+        entries: [&str; 2],
+        vertices: &[[f32; 4]; 3],
+        colors: &[[f32; 4]; 3],
+        extent: [usize; 2],
+        clear: [u8; 4],
+    ) -> Result<(Vec<u8>, Option<f64>), MetalError> {
+        self.render_rgba8_internal(source, entries, vertices, colors, extent, clear, None)
+    }
+
     /// Draw one triangle with trusted MSL and optional bound sampled texture into a cleared RGBA8Unorm target.
     ///
     /// When `sampled` is provided, the texture is bound to fragment texture slot 0 and
@@ -76,6 +90,32 @@ impl NativeCompute {
             &crate::sampler::MetalSampler,
         )>,
     ) -> Result<Vec<u8>, MetalError> {
+        self.render_rgba8_internal(
+            source,
+            entries,
+            vertices,
+            colors,
+            [width, height],
+            clear,
+            sampled,
+        )
+        .map(|(pixels, _)| pixels)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_rgba8_internal(
+        &self,
+        source: &str,
+        entries: [&str; 2],
+        vertices: &[[f32; 4]; 3],
+        colors: &[[f32; 4]; 3],
+        [width, height]: [usize; 2],
+        clear: [u8; 4],
+        sampled: Option<(
+            &crate::texture_pipeline::MetalRgba8Texture,
+            &crate::sampler::MetalSampler,
+        )>,
+    ) -> Result<(Vec<u8>, Option<f64>), MetalError> {
         let pixels = width
             .checked_mul(height)
             .filter(|&count| (1..=MAX_PIXELS).contains(&count))
@@ -211,7 +251,11 @@ impl NativeCompute {
                     0,
                 );
             }
-            Ok(output)
+            let gpu_start = command.GPUStartTime();
+            let gpu_seconds = command.GPUEndTime() - gpu_start;
+            let gpu_time = (gpu_start > 0.0 && gpu_seconds.is_finite() && gpu_seconds > 0.0)
+                .then_some(gpu_seconds);
+            Ok((output, gpu_time))
         })
     }
 }

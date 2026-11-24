@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::time::Instant;
-use xenora_loader::cpu::{CpuState, Interpreter, Register};
+use std::hint::black_box;
+use std::time::{Duration, Instant};
+use xenora_loader::cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, Register};
 use xenora_loader::dbt::DbtEngine;
 use xenora_loader::memory::MemoryPermissions;
 use xenora_loader::pe::{
@@ -76,61 +77,91 @@ fn build_pe(code: &[u8]) -> Vec<u8> {
     pe
 }
 
+const ADDS: usize = 10_000;
+const INSTRUCTIONS: usize = ADDS + 2;
+const BUDGET: usize = 20_000;
+const STACK_TOP: u64 = 0x2000_8000;
+
+fn check(result: ExecutionResult) {
+    assert_eq!(result.exit_reason, ExitReason::Halt);
+    assert_eq!(result.instructions_executed, INSTRUCTIONS);
+    assert_eq!(result.final_state.get(Register::Rax), ADDS as u64);
+}
+
+fn report(label: &str, samples: &mut [Duration]) {
+    samples.sort_unstable();
+    let median = samples[samples.len() / 2];
+    let min = samples[0];
+    let max = samples[samples.len() - 1];
+    let mips = INSTRUCTIONS as f64 / median.as_secs_f64() / 1_000_000.0;
+    println!(
+        "{label}: {} samples, median {median:?}, min {min:?}, max {max:?}, median {mips:.2} MIPS",
+        samples.len()
+    );
+}
+
 fn main() {
-    let mut code = Vec::new();
-    code.extend_from_slice(&[0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0]); // mov rax, 0
-    for _ in 0..10_000 {
+    let sample_count = std::env::var("XENORA_DBT_BENCH_SAMPLES")
+        .map_or(101, |value| value.parse::<usize>().expect("sample count"));
+    assert!(sample_count > 0);
+
+    let mut code = vec![0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0]; // mov rax, 0
+    for _ in 0..ADDS {
         code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
     }
     code.push(0xF4); // hlt
 
-    // Benchmark Interpreter
-    {
-        let pe_bytes = build_pe(&code);
-        let parsed = ParsedPe::parse(&pe_bytes).unwrap();
-        let mut loaded = parsed.load_into_memory(&pe_bytes).unwrap();
-        loaded
-            .memory
-            .map_region(0x2000_0000, 0x10000, MemoryPermissions::READ_WRITE)
-            .unwrap();
-        let cpu = CpuState::new(loaded.entry_point, 0x2000_8000);
-        let mut interp = Interpreter::new(cpu, &mut loaded.memory, 20_000);
+    let pe_bytes = build_pe(&code);
+    let parsed = ParsedPe::parse(&pe_bytes).unwrap();
+    let mut loaded = parsed.load_into_memory(&pe_bytes).unwrap();
+    loaded
+        .memory
+        .map_region(0x2000_0000, 0x10000, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let initial_cpu = CpuState::new(loaded.entry_point, STACK_TOP);
+    let mut interpreter = Vec::with_capacity(sample_count);
+    let mut cold = Vec::with_capacity(sample_count);
+    let mut warm = Vec::with_capacity(sample_count);
+    let mut cold_metrics = None;
 
-        let t0 = Instant::now();
-        let res = interp.run();
-        let el = t0.elapsed();
-        println!(
-            "BENCHMARK Interpreter: {:?} instructions in {:?} ({:.2} MIPS), final RAX={}",
-            res.instructions_executed,
-            el,
-            (res.instructions_executed as f64 / el.as_secs_f64()) / 1_000_000.0,
-            res.final_state.get(Register::Rax)
-        );
-    }
+    for _ in 0..sample_count {
+        let mut interp = Interpreter::new(initial_cpu.clone(), &mut loaded.memory, BUDGET);
+        let start = Instant::now();
+        let result = black_box(interp.run());
+        interpreter.push(start.elapsed());
+        check(result);
 
-    // Benchmark DBT
-    {
-        let pe_bytes = build_pe(&code);
-        let parsed = ParsedPe::parse(&pe_bytes).unwrap();
-        let mut loaded = parsed.load_into_memory(&pe_bytes).unwrap();
-        loaded
-            .memory
-            .map_region(0x2000_0000, 0x10000, MemoryPermissions::READ_WRITE)
-            .unwrap();
-        let mut cpu = CpuState::new(loaded.entry_point, 0x2000_8000);
         let mut dbt = DbtEngine::new(4 * 1024 * 1024).unwrap();
+        let mut cpu = initial_cpu.clone();
+        let start = Instant::now();
+        let result = black_box(dbt.run(&mut cpu, &mut loaded.memory, BUDGET));
+        cold.push(start.elapsed());
+        check(result);
+        assert!(dbt.metrics.blocks_compiled > 0);
+        assert_eq!(dbt.metrics.cache_hits, 0);
+        assert_eq!(dbt.metrics.cache_misses, dbt.metrics.blocks_compiled);
+        cold_metrics = Some(dbt.metrics);
 
-        let t0 = Instant::now();
-        let res = dbt.run(&mut cpu, &mut loaded.memory, 20_000);
-        let el = t0.elapsed();
-        println!(
-            "BENCHMARK DBT: {:?} instructions in {:?} ({:.2} MIPS), final RAX={}, blocks={}, bytes={}",
-            res.instructions_executed,
-            el,
-            (res.instructions_executed as f64 / el.as_secs_f64()) / 1_000_000.0,
-            res.final_state.get(Register::Rax),
-            dbt.metrics.blocks_compiled,
-            dbt.metrics.native_bytes_emitted
+        let mut cpu = initial_cpu.clone();
+        let start = Instant::now();
+        let result = black_box(dbt.run(&mut cpu, &mut loaded.memory, BUDGET));
+        warm.push(start.elapsed());
+        check(result);
+        assert_eq!(
+            Some(dbt.metrics.blocks_compiled),
+            cold_metrics.map(|m| m.blocks_compiled)
         );
+        assert_eq!(dbt.metrics.cache_hits, dbt.metrics.blocks_compiled);
+        assert_eq!(dbt.metrics.cache_misses, dbt.metrics.blocks_compiled);
     }
+
+    println!("{INSTRUCTIONS} guest instructions per sample, final RAX={ADDS}");
+    report("Interpreter", &mut interpreter);
+    report("Cold DBT", &mut cold);
+    report("Warm DBT", &mut warm);
+    let metrics = cold_metrics.unwrap();
+    println!(
+        "Cold DBT compiled {} blocks and emitted {} native bytes in {} dispatches",
+        metrics.blocks_compiled, metrics.native_bytes_emitted, metrics.dbt_dispatches
+    );
 }

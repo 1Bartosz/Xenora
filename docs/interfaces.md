@@ -60,6 +60,61 @@ byte offset and byte length. The backend validates slot zero, little-endian
 range into a Metal buffer. Slot one holds a separate output buffer. The call
 returns owned words after command completion or a stage-specific error.
 
+## PE32+ fixture startup and static import reports
+
+`xenora_loader::startup::run_synthetic_startup` takes an original, trusted
+fixture, guest memory addresses, a service registry and an entry instruction
+budget. It maps and rebases the image, binds imports, initializes thread-local
+storage, invokes its callbacks and runs the entry point. The fixture entry point
+uses a Win64-aligned stack and terminates with HLT. The result includes the loaded
+guest memory and the entry execution outcome.
+
+`xenora probe --mode static` inventories ordinary PE imports without guest
+execution. `missing_imports.csv` lists unresolved keys with their import address
+table relative virtual addresses. The full inventory records whether each key is registered, its implementation
+status, and the canonical module behind API-set aliases. Runtime-loaded modules
+and services require separate analysis. The coverage matrix groups unresolved
+imports by shared startup prerequisites. Static imports do not reveal call
+order. The JSON report counts import slots, DLL and symbol keys, distinct
+names with DLL-scoped ordinals, and canonical registered handlers separately.
+The unresolved total includes explicitly tracked unsupported APIs and other
+missing handlers. Existing stubs remain visible in the full inventory.
+
+The synthetic process registry supports the current-process pseudo handle and
+its process ID. The priority boost setter and getter record and query a guest
+policy. They are partial until a guest scheduler applies the policy. The process
+ID lookup is limited to the current-process pseudo handle. An unsupported
+handle reports `ERROR_INVALID_HANDLE` through the guest error slot. The getter
+rejects invalid guest output addresses with `ERROR_NOACCESS`.
+
+Win32 references include Microsoft's documentation for
+[GetCurrentProcess](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocess),
+[GetProcessId](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessid),
+[SetProcessPriorityBoost](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocesspriorityboost),
+and [GetProcessPriorityBoost](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesspriorityboost).
+
+### Thread handles and virtual memory
+
+The thread object model exposes one guest thread with a stable synthetic ID.
+`OpenThread` issues rights-checked handles to that thread, and `CloseHandle`
+invalidates real handles. A thread pseudo handle refers to the current synthetic
+thread. The priority APIs store and query the thread's base-priority setting.
+Thread creation, inheritance, debugger exceptions, and scheduling remain outside
+this model.
+
+`VirtualAlloc` supports combined reserve and commit for data-only pages.
+`VirtualFree` supports `MEM_RELEASE` with the exact allocation base and a
+zero size. The guest memory map tracks allocation ownership and bounds live
+virtual allocations to 64 MiB. Decommit, executable pages, and console-specific
+allocation lifecycle remain unsupported.
+
+References include Microsoft's
+[thread handle](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthread),
+[thread priority](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadpriority),
+[handle close](https://learn.microsoft.com/windows/win32/api/handleapi/nf-handleapi-closehandle),
+[virtual allocation](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc),
+and [virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree) contracts.
+
 ## Synthetic tiled textures
 
 The texture crate reads original fixtures in an array-layer-major layout. Each
