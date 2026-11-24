@@ -3,19 +3,22 @@
 use std::fmt;
 
 pub mod meta;
-pub mod semantics;
+pub mod primitive;
 mod rdna2;
+pub mod semantics;
 #[rustfmt::skip]
 mod rdna2_meta;
+#[rustfmt::skip]
+mod semantics_gen;
 pub use rdna2::{
-    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_I32, S_ADD_U32, S_ADDC_U32,
-    S_AND_B32, S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM,
-    S_MOV_B32, S_OR_B32, S_SUB_I32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32,
+    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
+    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT,
     V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_CMP_EQ_I32, V_CMP_EQ_U32, V_CMP_GE_I32,
     V_CMP_GE_U32, V_CMP_GT_I32, V_CMP_GT_U32, V_CMP_LE_I32, V_CMP_LE_U32, V_CMP_LT_I32,
     V_CMP_LT_U32, V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
     V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
+pub use semantics_gen::ScalarAluOp;
 
 /// SGPR index of `vcc_lo`, the Wave32 vector condition code.
 pub const VCC_LO: u8 = 106;
@@ -162,86 +165,6 @@ impl VectorCompareOp {
             CompareRelation::NotEqual => ordering.is_ne(),
             CompareRelation::GreaterOrEqual => ordering.is_ge(),
         }
-    }
-}
-
-/// SOP2 32-bit integer operations in the supported scalar subset.
-///
-/// SCC behaviour follows the pinned AMD RDNA 2 XML descriptions: additions
-/// store the carry-out, subtractions the borrow, ADDC and SUBB also consume
-/// SCC as carry-in or borrow-in, signed forms store signed overflow (RDNA 2 ISA
-/// guide 12.1), and bitwise operations set SCC iff the result is nonzero. See
-/// docs/shaders/scalar-alu.md for the sources.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ScalarAluOp {
-    /// `s_add_u32`: D = S0 + S1, SCC = carry-out.
-    AddU32,
-    /// `s_sub_u32`: D = S0 - S1, SCC = borrow (S1 > S0).
-    SubU32,
-    /// `s_add_i32`: D = S0 + S1, SCC = signed overflow.
-    AddI32,
-    /// `s_sub_i32`: D = S0 - S1, SCC = signed overflow.
-    SubI32,
-    /// `s_addc_u32`: D = S0 + S1 + SCC, SCC = carry-out.
-    AddcU32,
-    /// `s_subb_u32`: D = S0 - S1 - SCC, SCC = borrow.
-    SubbU32,
-    /// `s_and_b32`: D = S0 & S1, SCC = D != 0.
-    AndB32,
-    /// `s_or_b32`: D = S0 | S1, SCC = D != 0.
-    OrB32,
-    /// `s_xor_b32`: D = S0 ^ S1, SCC = D != 0.
-    XorB32,
-}
-
-impl ScalarAluOp {
-    /// Lower-case mnemonic.
-    pub fn mnemonic(self) -> &'static str {
-        match self {
-            Self::AddU32 => "s_add_u32",
-            Self::SubU32 => "s_sub_u32",
-            Self::AddI32 => "s_add_i32",
-            Self::SubI32 => "s_sub_i32",
-            Self::AddcU32 => "s_addc_u32",
-            Self::SubbU32 => "s_subb_u32",
-            Self::AndB32 => "s_and_b32",
-            Self::OrB32 => "s_or_b32",
-            Self::XorB32 => "s_xor_b32",
-        }
-    }
-
-    /// The 32-bit result and the new SCC, with `carry_in` the SCC read by
-    /// ADDC and SUBB (ignored by the other operations).
-    pub fn evaluate(self, src0: u32, src1: u32, carry_in: bool) -> (u32, bool) {
-        let carry = u32::from(carry_in && self.reads_scc());
-        match self {
-            Self::AddU32 | Self::AddcU32 => {
-                let (partial, first) = src0.overflowing_add(src1);
-                let (value, second) = partial.overflowing_add(carry);
-                (value, first || second)
-            }
-            Self::SubU32 | Self::SubbU32 => {
-                let (partial, first) = src0.overflowing_sub(src1);
-                let (value, second) = partial.overflowing_sub(carry);
-                (value, first || second)
-            }
-            Self::AddI32 => {
-                let (value, overflow) = (src0 as i32).overflowing_add(src1 as i32);
-                (value as u32, overflow)
-            }
-            Self::SubI32 => {
-                let (value, overflow) = (src0 as i32).overflowing_sub(src1 as i32);
-                (value as u32, overflow)
-            }
-            Self::AndB32 => (src0 & src1, src0 & src1 != 0),
-            Self::OrB32 => (src0 | src1, src0 | src1 != 0),
-            Self::XorB32 => (src0 ^ src1, src0 ^ src1 != 0),
-        }
-    }
-
-    /// Whether the operation reads SCC as a carry-in or borrow-in.
-    pub fn reads_scc(self) -> bool {
-        matches!(self, Self::AddcU32 | Self::SubbU32)
     }
 }
 

@@ -11,6 +11,8 @@
 
 use crate::meta::EncodingFamily;
 
+pub use crate::semantics_gen::{FORM_IDS, FORMS, GENERATED_SCHEMA};
+
 /// Version of the registry schema this crate was generated against.
 pub const SCHEMA: u32 = 1;
 
