@@ -1,0 +1,232 @@
+# Declarative semantic registry for gfx1030 (AMD RDNA 2) instruction forms.
+#
+# Data only: no code strings, no expressions. Every value is a member of a closed
+# vocabulary that crates/isa/generate_semantics.py validates and turns into static
+# Rust tables (crates/isa/src/semantics_gen.rs). Identity, family, opcode and
+# operand facts are cross-checked against the pinned AMD XML snapshot
+# (crates/isa/data/rdna2.jsonl); behaviour comes from the public AMD guide cited
+# per form, never from the mnemonic. See docs/shaders/semantic-registry.md.
+#
+# Independence: the reference interpreter (crates/ref) and the second
+# interpreter (tests/validation/independent_ref.rs) never read this file.
+
+schema = 1
+architecture = "gfx1030"
+# Must equal the "sha256" of the source line in crates/isa/data/rdna2.jsonl.
+source_sha256 = "d671ecbc36543674ab59e9b2feffd56718fd2137e7ad913c314f2e2508b9f4f7"
+
+# Named public documents that spec references point at.
+[documents.guide]
+title = "AMD RDNA 2 Instruction Set Architecture Reference Guide"
+file = "rdna2-shader-instruction-set-architecture.pdf"
+pages = 291
+
+[documents.xml]
+title = "AMD RDNA 2 machine-readable ISA (pinned XML)"
+file = "amdgpu_isa_rdna2.xml"
+
+# Operand rules shared by a family. A rule names its destination and source
+# classes; the decoder implements each rule once (rules are not per opcode).
+[operand_rules.sop2_sgpr]
+family = "SOP2"
+dst = { field = "SDST", class = "sgpr", min = 0, max = 105 }
+src = [
+  { field = "SSRC0", class = "scalar_source" },
+  { field = "SSRC1", class = "scalar_source" },
+]
+# scalar_source = normal SGPR s0-s105, inline integer -16..64, or a literal word.
+max_literals = 1
+# Encodings this rule rejects, so they stay unsupported rather than guessed.
+unsupported = [
+  "dst_vcc", "dst_exec", "dst_ttmp", "dst_m0", "dst_null",
+  "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_float_inline",
+  "src_special", "two_literals",
+]
+
+# ---- SOP2 32-bit integer and logical forms (migrated from #229/#230) ----
+# Field meanings:
+#   name          XML instruction name (stable identity)
+#   family        encoding family; must match the XML base encoding
+#   opcode        XML opcode; must match
+#   variant       Rust enum variant of the typed op
+#   operation     primitive: add | sub | and | or | xor
+#   signedness    unsigned | signed | bitwise (bitwise iff a logical operation)
+#   carry_in      none | scc  (scc only for unsigned add/sub)
+#   width         operand and result width in bits
+#   scc           carry_out | borrow | signed_overflow | nonzero
+#   vcc, exec     unchanged (stated, not implied)
+#   wave          any | wave32
+#   operands      a key of [operand_rules]
+#   spec          references; at least one guide section with a page
+#   verify        evidence required before the form counts as verified
+
+[[form]]
+name = "S_ADD_U32"
+family = "SOP2"
+opcode = 0
+variant = "AddU32"
+operation = "add"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+scc = "carry_out"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 101 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_SUB_U32"
+family = "SOP2"
+opcode = 1
+variant = "SubU32"
+operation = "sub"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+scc = "borrow"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 101 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_ADD_I32"
+family = "SOP2"
+opcode = 2
+variant = "AddI32"
+operation = "add"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "signed_overflow"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 101 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_SUB_I32"
+family = "SOP2"
+opcode = 3
+variant = "SubI32"
+operation = "sub"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "signed_overflow"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 101 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_ADDC_U32"
+family = "SOP2"
+opcode = 4
+variant = "AddcU32"
+operation = "add"
+signedness = "unsigned"
+carry_in = "scc"
+width = 32
+scc = "carry_out"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 102 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_SUBB_U32"
+family = "SOP2"
+opcode = 5
+variant = "SubbU32"
+operation = "sub"
+signedness = "unsigned"
+carry_in = "scc"
+width = 32
+scc = "borrow"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 102 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_AND_B32"
+family = "SOP2"
+opcode = 14
+variant = "AndB32"
+operation = "and"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_OR_B32"
+family = "SOP2"
+opcode = 16
+variant = "OrB32"
+operation = "or"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_XOR_B32"
+family = "SOP2"
+opcode = 18
+variant = "XorB32"
+operation = "xor"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 102 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]

@@ -7,9 +7,8 @@ pub use xenora_isa::{
     ScalarSource, VectorCompareOp, VectorSource,
 };
 use xenora_isa::{
-    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_I32, S_ADD_U32, S_ADDC_U32,
-    S_AND_B32, S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM,
-    S_MOV_B32, S_OR_B32, S_SUB_I32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32,
+    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
+    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT,
     V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_CMP_EQ_I32, V_CMP_EQ_U32, V_CMP_GE_I32,
     V_CMP_GE_U32, V_CMP_GT_I32, V_CMP_GT_U32, V_CMP_LE_I32, V_CMP_LE_U32, V_CMP_LT_I32,
     V_CMP_LT_U32, V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
@@ -17,19 +16,36 @@ use xenora_isa::{
 };
 
 use xenora_isa::meta::EncodingFamily;
+use xenora_isa::semantics::FORM_IDS;
 
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
-/// operand combination. Operand restrictions are listed in docs/status.toml;
-/// every other form in [`xenora_isa::meta::FORMS`] is rejected as unsupported.
-pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 46] = [
+/// operand combination: the hand-written forms below followed by every form of
+/// the semantic registry ([`xenora_isa::semantics::FORM_IDS`]). Operand
+/// restrictions are listed in docs/status.toml; every other form in
+/// [`xenora_isa::meta::FORMS`] is rejected as unsupported.
+pub const SEMANTIC_FORMS: [(&str, EncodingFamily); HANDWRITTEN_FORMS.len() + FORM_IDS.len()] =
+    concat_forms();
+
+const fn concat_forms<const N: usize>() -> [(&'static str, EncodingFamily); N] {
+    let mut forms = [("", EncodingFamily::Sop2); N];
+    let mut index = 0;
+    while index < N {
+        forms[index] = if index < HANDWRITTEN_FORMS.len() {
+            HANDWRITTEN_FORMS[index]
+        } else {
+            FORM_IDS[index - HANDWRITTEN_FORMS.len()]
+        };
+        index += 1;
+    }
+    forms
+}
+
+/// Decoded forms not yet described by the semantic registry.
+const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 37] = [
     ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
     ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
     ("EXP", EncodingFamily::Exp),
     ("IMAGE_SAMPLE_LZ", EncodingFamily::Mimg),
-    ("S_ADD_I32", EncodingFamily::Sop2),
-    ("S_ADD_U32", EncodingFamily::Sop2),
-    ("S_ADDC_U32", EncodingFamily::Sop2),
-    ("S_AND_B32", EncodingFamily::Sop2),
     ("S_BRANCH", EncodingFamily::Sopp),
     ("S_CBRANCH_EXECZ", EncodingFamily::Sopp),
     ("S_CBRANCH_SCC0", EncodingFamily::Sopp),
@@ -37,13 +53,8 @@ pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 46] = [
     ("S_CMP_EQ_U32", EncodingFamily::Sopc),
     ("S_ENDPGM", EncodingFamily::Sopp),
     ("S_MOV_B32", EncodingFamily::Sop1),
-    ("S_OR_B32", EncodingFamily::Sop2),
-    ("S_SUB_I32", EncodingFamily::Sop2),
-    ("S_SUB_U32", EncodingFamily::Sop2),
-    ("S_SUBB_U32", EncodingFamily::Sop2),
     ("S_WAITCNT", EncodingFamily::Sopp),
     ("S_WAITCNT_VSCNT", EncodingFamily::Sopk),
-    ("S_XOR_B32", EncodingFamily::Sop2),
     ("V_ADD_F32", EncodingFamily::Vop2),
     ("V_ADD_NC_U32", EncodingFamily::Vop3),
     ("V_AND_B32", EncodingFamily::Vop2),
@@ -384,20 +395,8 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         let target = branch_target(first, offset, "s_branch")?;
         return Ok((Instruction::Branch { target }, S_BRANCH.byte_len()));
     }
-    for (opcode, op) in [
-        (S_ADD_U32, ScalarAluOp::AddU32),
-        (S_SUB_U32, ScalarAluOp::SubU32),
-        (S_ADD_I32, ScalarAluOp::AddI32),
-        (S_SUB_I32, ScalarAluOp::SubI32),
-        (S_ADDC_U32, ScalarAluOp::AddcU32),
-        (S_SUBB_U32, ScalarAluOp::SubbU32),
-        (S_AND_B32, ScalarAluOp::AndB32),
-        (S_OR_B32, ScalarAluOp::OrB32),
-        (S_XOR_B32, ScalarAluOp::XorB32),
-    ] {
-        if opcode.matches(first) {
-            return scalar_alu(op, first, bytes);
-        }
+    if let Some(op) = ScalarAluOp::from_word(first) {
+        return scalar_alu(op, first, bytes);
     }
     if S_CBRANCH_SCC0.matches(first) {
         let target = branch_target(first, offset, "s_cbranch_scc0")?;

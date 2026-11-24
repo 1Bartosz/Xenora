@@ -16,6 +16,18 @@ operands, writes a normal SGPR (s0-s105) and sets SCC.
 | `s_xor_b32` | S0 ^ S1 | D != 0 |
 
 Sources are normal SGPRs, inline integers (-16 to 64) or one literal word.
+
+These nine forms are declared as data in the semantic registry,
+`crates/isa/semantics/rdna2.toml`: opcode, operation, signedness, carry-in,
+SCC effect, operand rule and guide references. `crates/isa/generate_semantics.py`
+checks each declaration against the pinned AMD XML snapshot and rejects
+contradictions (for example a carry-in on a bitwise form, or a signed form whose
+SCC is a carry). It then generates `crates/isa/src/semantics_gen.rs`, which holds
+the decoder's opcode dispatch and `ScalarAluOp`'s mnemonic, SCC read and
+evaluation through the shared primitives in `crates/isa/src/primitive.rs`. Run
+`python3 crates/isa/generate_semantics.py validate`, `generate` or `--check`
+(Python 3.11 or newer). The reference and independent interpreters do not use
+the registry.
 `v_mov_b32_e32` may read a normal SGPR, so the results can reach vector code.
 
 ## Sources
