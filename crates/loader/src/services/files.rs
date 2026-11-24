@@ -19,6 +19,7 @@ const FILE_NOT_FOUND: u32 = 2;
 const FILE_EXISTS: u32 = 80;
 const ALREADY_EXISTS: u32 = 183;
 const INVALID_NAME: u32 = 123;
+const NEGATIVE_SEEK: u32 = 131;
 const SHARING_VIOLATION: u32 = 32;
 const DISK_FULL: u32 = 112;
 const MAX_FILES: usize = 256;
@@ -27,7 +28,7 @@ const MAX_TRANSFER: usize = 1024 * 1024;
 
 pub(super) struct OpenFile {
     path: String,
-    position: usize,
+    position: u64,
     access: u32,
     share: u32,
 }
@@ -156,6 +157,73 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    let seek = Arc::clone(state);
+    registry.register(KERNEL32, "SetFilePointerEx", move |args, _, memory| {
+        let mut objects = seek.objects.lock().expect("guest object state");
+        let super::ObjectState { handles, files, .. } = &mut *objects;
+        let Some(GuestObject::File(file)) = handles.get_mut(&args.rcx) else {
+            return seek.fail(ERROR_INVALID_HANDLE, 0);
+        };
+        if file.access & (READ | WRITE) == 0 {
+            return seek.fail(ERROR_ACCESS_DENIED, 0);
+        }
+        let origin = match args.r9 as u32 {
+            0 => None,
+            1 => Some(file.position),
+            2 => Some(files.get(&file.path).expect("open file exists").len() as u64),
+            _ => return seek.fail(ERROR_INVALID_PARAMETER, 0),
+        };
+        let position = match origin {
+            None => args.rdx,
+            Some(origin) => {
+                let distance = args.rdx as i64;
+                if distance.is_negative() && distance.unsigned_abs() > origin {
+                    return seek.fail(NEGATIVE_SEEK, 0);
+                }
+                let Some(position) = origin.checked_add_signed(distance) else {
+                    return seek.fail(ERROR_INVALID_PARAMETER, 0);
+                };
+                position
+            }
+        };
+        if args.r8 != 0 && memory.write_u64(args.r8, position).is_err() {
+            return seek.fail(ERROR_NOACCESS, 0);
+        }
+        file.position = position;
+        Ok(1)
+    });
+
+    let truncate = Arc::clone(state);
+    registry.register(KERNEL32, "SetEndOfFile", move |args, _, _| {
+        let mut objects = truncate.objects.lock().expect("guest object state");
+        let super::ObjectState { handles, files, .. } = &mut *objects;
+        let Some(GuestObject::File(file)) = handles.get(&args.rcx) else {
+            return truncate.fail(ERROR_INVALID_HANDLE, 0);
+        };
+        if file.access & WRITE == 0 {
+            return truncate.fail(ERROR_ACCESS_DENIED, 0);
+        }
+        if file.position > MAX_BYTES as u64 {
+            return truncate.fail(DISK_FULL, 0);
+        }
+        let used = files.values().map(Vec::len).sum::<usize>();
+        let data = files.get_mut(&file.path).expect("open file exists");
+        let length = file.position as usize;
+        let growth = length.saturating_sub(data.len());
+        if growth > MAX_BYTES - used {
+            return truncate.fail(DISK_FULL, 0);
+        }
+        data.try_reserve_exact(growth)
+            .map_err(|_| ExitReason::MemoryFault(MemoryError::AllocationFailed))?;
+        if length < data.len() {
+            data.truncate(length);
+            data.shrink_to_fit();
+        } else {
+            data.resize(length, 0);
+        }
+        Ok(1)
+    });
+
     for (symbol, writing) in [("ReadFile", false), ("WriteFile", true)] {
         let state = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, _, memory| {
@@ -190,7 +258,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 if count == 0 {
                     0
                 } else {
-                    let end = position + count;
+                    let Some(end) = position
+                        .checked_add(count as u64)
+                        .filter(|end| *end <= MAX_BYTES as u64)
+                    else {
+                        return state.fail(DISK_FULL, 0);
+                    };
+                    let end = end as usize;
                     let growth = end.saturating_sub(data.len());
                     if growth > MAX_BYTES - used {
                         return state.fail(DISK_FULL, 0);
@@ -204,11 +278,11 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                             .map_err(|_| ExitReason::MemoryFault(MemoryError::AllocationFailed))?;
                         data.resize(end, 0);
                     }
-                    data[position..end].copy_from_slice(&input);
+                    data[position as usize..end].copy_from_slice(&input);
                     count
                 }
             } else {
-                let start = position.min(data.len());
+                let start = position.min(data.len() as u64) as usize;
                 let transferred = count.min(data.len() - start);
                 if transferred != 0
                     && (args.rdx == 0
@@ -223,12 +297,19 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             memory
                 .write_u32(args.r9, transferred as u32)
                 .map_err(ExitReason::MemoryFault)?;
-            file.position += transferred;
+            file.position += transferred as u64;
             Ok(1)
         });
     }
 
-    for symbol in ["CreateFileW", "GetFileSizeEx", "ReadFile", "WriteFile"] {
+    for symbol in [
+        "CreateFileW",
+        "GetFileSizeEx",
+        "ReadFile",
+        "WriteFile",
+        "SetFilePointerEx",
+        "SetEndOfFile",
+    ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }

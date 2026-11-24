@@ -1198,6 +1198,87 @@ fn test_guest_synthetic_file_io_through_iat() {
     let eof = call("ReadFile", &[reader, output + 8, 8, output, 0]);
     assert_eq!(eof.execution.final_state.get(Register::Rax), 1);
     assert_eq!(eof.image.memory.read_u32(output).unwrap(), 0);
+    let seek = call("SetFilePointerEx", &[reader, (-2i64) as u64, output, 2]);
+    assert_eq!(seek.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(seek.image.memory.read_u64(output).unwrap(), 2);
+    let rejected = call("SetFilePointerEx", &[reader, (-3i64) as u64, output, 1]);
+    assert_eq!(rejected.execution.final_state.get(Register::Rax), 0);
+    let read = call("ReadFile", &[reader, output + 8, 8, output, 0]);
+    assert_eq!(read.image.memory.read_u32(output).unwrap(), 2);
+    assert_eq!(
+        call("SetEndOfFile", &[reader])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+    assert_eq!(
+        call("CloseHandle", &[reader])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+
+    let writer = open("sample.dat", 0xc000_0000, 3);
+    assert_ne!(writer, u64::MAX);
+    assert_eq!(
+        call("SetFilePointerEx", &[writer, 2, 0, 0])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    assert_eq!(
+        call("SetEndOfFile", &[writer])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    let size = call("GetFileSizeEx", &[writer, output]);
+    assert_eq!(size.image.memory.read_u64(output).unwrap(), 2);
+    assert_eq!(
+        call("SetFilePointerEx", &[writer, 6, 0, 0])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    assert_eq!(
+        call("SetEndOfFile", &[writer])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    assert_eq!(
+        call("SetFilePointerEx", &[writer, 0, 0, 0])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    let read = call("ReadFile", &[writer, output + 8, 8, output, 0]);
+    assert_eq!(read.image.memory.read_u32(output).unwrap(), 6);
+    assert_eq!(read.image.memory.read_u64(output + 8).unwrap(), 0xffff);
+
+    assert_eq!(
+        call("SetFilePointerEx", &[writer, u64::MAX, 0, 0])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    assert_eq!(
+        call("WriteFile", &[writer, output, 1, output + 8, 0])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+    let size = call("GetFileSizeEx", &[writer, output]);
+    assert_eq!(size.image.memory.read_u64(output).unwrap(), 6);
 }
 
 #[test]

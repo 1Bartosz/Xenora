@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added file seeking and end-of-file resizing on the synthetic guest drive.
+
 - Added a bounded synthetic guest drive with synchronous file open, read, write, and size queries.
 
 - Added unnamed guest semaphores with checked release and immediate mixed-object waits.

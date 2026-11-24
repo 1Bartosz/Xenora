@@ -197,7 +197,10 @@ same rules with 64-bit results.
 The runtime exposes an in-memory C: drive through CreateFileW, ReadFile,
 WriteFile, GetFileSizeEx, and CloseHandle. It supports root-level UTF-16
 names, ASCII case folding, synchronous I/O, per-handle positions, and
-read/write sharing. Paths cannot access host files. The drive supports
+read/write sharing. SetFilePointerEx supports seeking from the beginning,
+current position, and end. SetEndOfFile truncates or zero-extends writable
+files at the current position. Seeks alone do not change file length.
+Paths cannot access host files. The drive supports
 256 files and 16 MiB of data, with a 1 MiB limit per transfer.
 Directories, persistence, asynchronous I/O, and file handle duplication
 remain outside this subset.

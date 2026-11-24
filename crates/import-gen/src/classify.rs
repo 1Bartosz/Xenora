@@ -971,13 +971,19 @@ impl SymbolDb {
             "CreateFile — stub returning INVALID_HANDLE_VALUE",
         );
         for module in [m, "kernel32.dll"] {
-            for symbol in ["CreateFileW", "ReadFile", "WriteFile", "GetFileSizeEx"] {
+            for symbol in [
+                "CreateFileW",
+                "ReadFile",
+                "WriteFile",
+                "GetFileSizeEx",
+                "SetFilePointerEx",
+                "SetEndOfFile",
+            ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
         }
         self.win32_stub(m, "CloseHandle", false, "CloseHandle — no-op stub");
         self.win32_stub(m, "GetFileSize", false, "GetFileSize — stub returning 0");
-        self.win32_stub(m, "SetFilePointerEx", false, "SetFilePointerEx — stub");
         self.win32_stub(
             m,
             "GetFileAttributesA",
