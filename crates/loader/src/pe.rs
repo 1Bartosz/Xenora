@@ -94,6 +94,9 @@ pub const PE32_PLUS_MAGIC: u16 = 0x020B;
 /// PE32+ optional header length up to and including NumberOfRvaAndSizes.
 const PE32_PLUS_MIN_OPTIONAL_HEADER: usize = 112;
 const SECTION_HEADER_SIZE: usize = 40;
+/// Host memory budget for all mapped sections of one image. This is a loader policy
+/// limit, not a property of the PE format.
+const MAX_MAPPED_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 fn read_u16(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([bytes[at], bytes[at + 1]])
@@ -273,6 +276,17 @@ impl ParsedPe {
     }
 
     pub(crate) fn load_at_base(&self, bytes: &[u8], base: u64) -> Result<LoadedImage, PeError> {
+        // Each section becomes a zero-filled host allocation, so bound the total before
+        // allocating anything. Sections may not overlap, so the sum is the mapped size.
+        let mapped: u64 = self
+            .sections
+            .iter()
+            .map(|sec| u64::from(sec.virtual_size.max(sec.raw_data_size)))
+            .sum();
+        if mapped > MAX_MAPPED_IMAGE_BYTES {
+            return Err(PeError::SectionMappingError(MemoryError::AllocationFailed));
+        }
+
         let mut memory = GuestMemory::new();
 
         for sec in &self.sections {
