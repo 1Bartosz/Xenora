@@ -42,7 +42,7 @@ python3 crates/isa/generate_rdna2.py path/to/amdgpu_isa_rdna2.xml | diff -u crat
 ## Complete instruction metadata
 
 `crates/isa/generate_rdna2_meta.py` reduces the same approved XML to every
-gfx1030 base instruction form: 1,460 forms in 21 encoding families, with
+gfx1030 base instruction form: 1,465 forms in 21 encoding families, with
 identifying bits, field layouts, operands (field, data format, operand type,
 width, direction), control-flow flags and allowed extension words. It runs in
 two stages so regeneration and CI checks need no network and no XML:
@@ -66,8 +66,19 @@ VOP1, VOP2 and VOPC `SRC0` values 0xF9, 0xFA, 0xE9 and 0xEA add an SDWA, DPP16
 or DPP8 control dword (from the RDNA 2 ISA guide's SDWA and DPP sections, not
 the XML); MIMG `NSA` adds that many address dwords. An extension the form does
 not list is rejected. Every LLVM-assembled fixture identifies with exact
-boundaries and matching mnemonics. A broader LLVM comparison of the extension
-rules is still open because it needs the LLVM oracle.
+boundaries and matching mnemonics. `crates/isa/tests/llvm/identify.s` holds one
+instruction per family and extension word (literal, SDWA, DPP16, DPP8 with and
+without fetch-inactive, VOP3 and VOP3P literals, NSA images, MTBUF opcodes
+above 7, MSAA loads); its LLVM oracle compares every name and length:
+
+```sh
+LLVM_BIN=path/to/llvm/bin cargo test --locked -p xenora-isa --test meta_llvm -- --include-ignored
+```
+
+The oracle found five instructions that the XML lists only under a literal
+encoding (`S_SETREG_IMM32_B32`, `V_FMAMK_F32`, `V_FMAAK_F32`, `V_FMAMK_F16`,
+`V_FMAAK_F16`); the generator now treats them as base forms that always carry a
+literal.
 
 Identification is not execution. `xenora shaders coverage` reports forms
 discovered in metadata against forms the semantic decoder accepts

@@ -1,5 +1,5 @@
 {
-  "lease_hours": 24,
+  "lease_hours": 168,
   "upstream": "ranveersoni98/Xenora",
   "maintainers": ["ranveersoni98"],
   "contributors": {

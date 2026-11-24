@@ -16,7 +16,9 @@ use objc2_metal::{
     MTLResourceOptions, MTLShaderValidation, MTLSize, MTLStorageMode, MTLTexture,
     MTLTextureDescriptor, MTLTextureUsage,
 };
-use xenora_texture::{Bc1Upload, BcAlphaFormat, BcAlphaUpload, TiledBc1};
+use xenora_texture::{
+    Bc1Upload, BcAlphaFormat, BcAlphaUpload, BcChannelFormat, BcChannelUpload, TiledBc1,
+};
 
 #[path = "render.rs"]
 mod render;
@@ -35,6 +37,20 @@ kernel void read_bc(texture2d<float, access::read> image [[texture(0)]],
     uint width = image.get_width();
     uint4 channels = uint4(round(image.read(uint2(index % width, index / width)) * 255.0f));
     output[index] = channels.r | (channels.g << 8u) | (channels.b << 16u) | (channels.a << 24u);
+}
+";
+
+// Signed formats return -1.0..=1.0; each byte holds the channel times 127.
+const BC_SNORM_READBACK: &str = r"
+#include <metal_stdlib>
+using namespace metal;
+kernel void read_bc_snorm(texture2d<float, access::read> image [[texture(0)]],
+                          device uint *output [[buffer(1)]],
+                          uint index [[thread_position_in_grid]]) {
+    uint width = image.get_width();
+    float4 texel = clamp(image.read(uint2(index % width, index / width)), -1.0f, 1.0f);
+    uint4 bytes = uint4(int4(round(texel * 127.0f))) & 0xffu;
+    output[index] = bytes.r | (bytes.g << 8u) | (bytes.b << 16u) | (bytes.a << 24u);
 }
 ";
 
@@ -331,6 +347,45 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         )
     }
 
+    /// Read a selected subresource from a validated pitched BC4 or BC5 upload.
+    ///
+    /// The original blocks go to a native `BC4_R*` or `BC5_RG*` texture.
+    /// Unsigned output has the layout of [`Self::read_bc1_upload`]. Signed
+    /// output stores each channel, times 127 and rounded, as a two's-complement
+    /// byte in the same order. Metal fills missing green and blue with 0 and
+    /// alpha with 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid layer or mip, out-of-policy size,
+    /// unavailable BC compression (operation `supportsBCTextureCompression`),
+    /// or Metal setup or execution failure.
+    pub fn read_bc_channel_upload(
+        &self,
+        upload: &BcChannelUpload<'_>,
+        layer: usize,
+        mip: u32,
+    ) -> Result<Vec<u32>, MetalError> {
+        let level = upload
+            .subresource(layer, mip)
+            .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
+        let (format, name) = match upload.format() {
+            BcChannelFormat::Bc4Unorm => (MTLPixelFormat::BC4_RUnorm, "BC4 UNORM"),
+            BcChannelFormat::Bc4Snorm => (MTLPixelFormat::BC4_RSnorm, "BC4 SNORM"),
+            BcChannelFormat::Bc5Unorm => (MTLPixelFormat::BC5_RGUnorm, "BC5 UNORM"),
+            BcChannelFormat::Bc5Snorm => (MTLPixelFormat::BC5_RGSnorm, "BC5 SNORM"),
+        };
+        let pixels = self.validate_bc_extent(level.width, level.height, name)?;
+        self.read_bc_blocks(
+            format,
+            level.bytes,
+            level.row_pitch,
+            level.width,
+            level.height,
+            pixels,
+        )
+    }
+
     fn validate_bc_extent(
         &self,
         width: usize,
@@ -397,12 +452,14 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
                     bytes_per_row,
                 );
             }
-            self.run(
-                BC_READBACK,
-                "read_bc",
-                ComputeInput::Texture(&texture, pixels),
-            )
-            .map(|profile| profile.output)
+            let (source, entry) =
+                if format == MTLPixelFormat::BC4_RSnorm || format == MTLPixelFormat::BC5_RGSnorm {
+                    (BC_SNORM_READBACK, "read_bc_snorm")
+                } else {
+                    (BC_READBACK, "read_bc")
+                };
+            self.run(source, entry, ComputeInput::Texture(&texture, pixels))
+                .map(|profile| profile.output)
         })
     }
 

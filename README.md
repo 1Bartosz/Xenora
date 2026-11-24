@@ -327,6 +327,10 @@ Compiling a shader is not equivalent to proving its GPU output is correct.
 
 ---
 
+### Contributors
+
+[![Contributors](https://contrib.rocks/image?repo=ranveersoni98/Xenora)](https://github.com/ranveersoni98/Xenora/graphs/contributors)
+
 ## License
 
 Xenora is licensed under the [GNU General Public License v3 or later](LICENSE).
