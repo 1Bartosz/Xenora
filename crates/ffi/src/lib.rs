@@ -7,8 +7,11 @@
 //! Every exported function catches panics and reports them as `XENORA_INTERNAL_ERROR`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Mutex;
-use xenora_loader::ParsedPe;
+use std::sync::{Arc, Mutex};
+use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
+use xenora_loader::{ExitReason, ImportRegistry, ParsedPe, Register};
+use xenora_metal::NativeCompute;
+use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 pub const XENORA_ABI_VERSION: u32 = 1;
 
@@ -19,6 +22,12 @@ pub const XENORA_VERSION_MISMATCH: i32 = 3;
 pub const XENORA_INTERNAL_ERROR: i32 = 4;
 pub const XENORA_PE_ERROR: i32 = 5;
 pub const XENORA_LIMIT_EXCEEDED: i32 = 6;
+pub const XENORA_BUFFER_TOO_SMALL: i32 = 7;
+pub const XENORA_EXECUTION_FAILED: i32 = 8;
+
+pub const XENORA_FIXTURE_FRAME_WIDTH: u32 = 4;
+pub const XENORA_FIXTURE_FRAME_HEIGHT: u32 = 3;
+const FRAME_BYTES: usize = (XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4) as usize;
 
 /// Upper bound on simultaneously live sessions.
 const MAX_SESSIONS: usize = 64;
@@ -129,6 +138,134 @@ pub unsafe extern "C" fn xenora_session_inspect_trusted_fixture(
     })
 }
 
+// The trusted fixture's contract, as checked by the CLI runner (crates/cli/src/runner.rs).
+// ponytail: duplicated from the runner so the CLI stays untouched; extract a shared
+// fixture-run function into a library when a third caller appears.
+const IMAGE_BASE: u64 = 0x1_5000_0000;
+const TICKET_ADDRESS: u64 = IMAGE_BASE + 0x3000;
+const TICKET: u64 = 17;
+const DRAW_RESULT: u64 = 0x42;
+const ENTRY_STEPS: usize = 100;
+/// `x9-constant-ps.s` exports (1.0, 0, 0, 1.0) to mrt0; in an RGBA8 target that is opaque red.
+const EXPECTED_PIXEL: [u8; 4] = [255, 0, 0, 255];
+
+fn draw() -> Result<Vec<u8>, String> {
+    let shader = compile_graphics(
+        Architecture::Gfx1030,
+        include_bytes!("../../../fixtures/rdna2/x9-constant-vs.bin"),
+        include_bytes!("../../../fixtures/rdna2/x9-constant-ps.bin"),
+    )
+    .map_err(|e| format!("shader translation: {e}"))?;
+    let gpu = NativeCompute::new().map_err(|e| format!("Metal device: {e}"))?;
+    let pixels = gpu
+        .render_rgba8(
+            &shader.msl,
+            [VERTEX_ENTRY_POINT, PIXEL_ENTRY_POINT],
+            &[
+                [-1.0, -1.0, 0.5, 1.0],
+                [3.0, -1.0, 0.5, 1.0],
+                [-1.0, 3.0, 0.5, 1.0],
+            ],
+            &[[0.0; 4]; 3],
+            [
+                XENORA_FIXTURE_FRAME_WIDTH as usize,
+                XENORA_FIXTURE_FRAME_HEIGHT as usize,
+            ],
+            [19, 43, 93, 251],
+        )
+        .map_err(|e| format!("Metal render: {e}"))?;
+    if pixels != EXPECTED_PIXEL.repeat(FRAME_BYTES / 4) {
+        return Err("read-back frame differs from the fixture shader's output".into());
+    }
+    Ok(pixels)
+}
+
+/// Run the embedded fixture and return its verified frame.
+fn run_fixture() -> Result<Vec<u8>, String> {
+    let frame = Arc::new(Mutex::new(None));
+    let draw_frame = Arc::clone(&frame);
+    let mut imports = ImportRegistry::new();
+    imports.register("xenora.dll", "fixture_draw", move |args, _, memory| {
+        let fault = ExitReason::IllegalInstruction(0xff);
+        let ticket = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+        let mut slot = draw_frame.lock().map_err(|_| fault)?;
+        if slot.is_some()
+            || ticket != TICKET_ADDRESS
+            || memory.read_u64(ticket).map_err(ExitReason::MemoryFault)? != TICKET
+        {
+            return Err(fault);
+        }
+        let result = draw();
+        let ok = result.is_ok();
+        *slot = Some(result);
+        if ok { Ok(DRAW_RESULT) } else { Err(fault) }
+    });
+    let startup = run_synthetic_startup(
+        FIXTURE,
+        StartupLayout {
+            image_base: IMAGE_BASE,
+            stack_top: 0x2_0001_0000,
+            tls_base: 0x3_0000_0000,
+        },
+        imports,
+        ENTRY_STEPS,
+    )
+    .map_err(|e| format!("startup: {e}"))?;
+    let drawn = frame.lock().map_err(|_| "frame lock poisoned")?.take();
+    if let Some(Err(e)) = drawn {
+        return Err(e);
+    }
+    let execution = &startup.execution;
+    if execution.exit_reason != ExitReason::Halt
+        || startup.relocations.applied_dir64 != 4
+        || startup.bound_imports != 1
+        || startup.tls_callbacks != 1
+        || execution.final_state.get(Register::Rax) != DRAW_RESULT
+    {
+        return Err(format!(
+            "unexpected guest result: {:?}",
+            execution.exit_reason
+        ));
+    }
+    drawn.ok_or_else(|| String::from("guest halted without a draw"))?
+}
+
+/// # Safety
+/// `out_rgba` must be null or valid for `capacity` byte writes; each `u32` output
+/// must be null or valid for one aligned write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_run_trusted_fixture(
+    session: u64,
+    out_rgba: *mut u8,
+    capacity: u64,
+    out_width: *mut u32,
+    out_height: *mut u32,
+) -> i32 {
+    guarded(|| {
+        if out_rgba.is_null() || out_width.is_null() || out_height.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        match SESSIONS.lock() {
+            Ok(slots) if is_live(&slots, session) => {}
+            Ok(_) => return XENORA_INVALID_HANDLE,
+            Err(_) => return XENORA_INTERNAL_ERROR,
+        }
+        if capacity < FRAME_BYTES as u64 {
+            return XENORA_BUFFER_TOO_SMALL;
+        }
+        let Ok(pixels) = run_fixture() else {
+            return XENORA_EXECUTION_FAILED;
+        };
+        // SAFETY: non-null and at least FRAME_BYTES long, both checked above.
+        unsafe {
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_rgba, FRAME_BYTES);
+            out_width.write(XENORA_FIXTURE_FRAME_WIDTH);
+            out_height.write(XENORA_FIXTURE_FRAME_HEIGHT);
+        }
+        XENORA_OK
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,9 +309,17 @@ mod tests {
             ("XENORA_INTERNAL_ERROR", XENORA_INTERNAL_ERROR),
             ("XENORA_PE_ERROR", XENORA_PE_ERROR),
             ("XENORA_LIMIT_EXCEEDED", XENORA_LIMIT_EXCEEDED),
+            ("XENORA_BUFFER_TOO_SMALL", XENORA_BUFFER_TOO_SMALL),
+            ("XENORA_EXECUTION_FAILED", XENORA_EXECUTION_FAILED),
         ] {
             assert!(header.contains(&format!("{name} = {value},")), "{name}");
         }
+        assert!(header.contains(&format!(
+            "XENORA_FIXTURE_FRAME_WIDTH {XENORA_FIXTURE_FRAME_WIDTH}u"
+        )));
+        assert!(header.contains(&format!(
+            "XENORA_FIXTURE_FRAME_HEIGHT {XENORA_FIXTURE_FRAME_HEIGHT}u"
+        )));
     }
 
     #[test]
@@ -260,5 +405,34 @@ mod tests {
     #[test]
     fn panics_do_not_cross_the_boundary() {
         assert_eq!(guarded(|| panic!("injected")), XENORA_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn fixture_run_rejects_bad_arguments_before_executing() {
+        let _serial = serial();
+        let handle = create();
+        let (mut buf, mut w, mut h) = ([0u8; 48], 0u32, 0u32);
+        let run = |session, buf: *mut u8, cap, w: *mut u32, h: *mut u32| unsafe {
+            xenora_session_run_trusted_fixture(session, buf, cap, w, h)
+        };
+        assert_eq!(
+            run(handle, buf.as_mut_ptr(), 47, &mut w, &mut h),
+            XENORA_BUFFER_TOO_SMALL
+        );
+        assert_eq!(
+            run(handle, null_mut(), 48, &mut w, &mut h),
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            run(handle, buf.as_mut_ptr(), 48, null_mut(), &mut h),
+            XENORA_INVALID_ARGUMENT
+        );
+        xenora_session_destroy(handle);
+        assert_eq!(
+            run(handle, buf.as_mut_ptr(), 48, &mut w, &mut h),
+            XENORA_INVALID_HANDLE
+        );
+        assert_eq!((w, h), (0, 0), "outputs untouched on failure");
+        assert!(buf.iter().all(|&b| b == 0));
     }
 }
