@@ -24,7 +24,7 @@ mod independent_ref;
 use std::collections::BTreeMap;
 
 use harness::{Case, words};
-use xenora_shader::{Architecture, compile};
+use xenora_shader::{Architecture, CompileError, compile};
 
 /// The eleven forms with their ENC_SOP1 opcodes (guide 12.3).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,7 +125,8 @@ fn expect(form: Form, s0: u32) -> (u32, Option<bool>) {
     }
 }
 
-/// The functional examples printed in guide 12.3, with D only.
+/// The functional examples printed in guide 12.3, with D only; the final five
+/// are derived from the pseudocode, as their comment says.
 const GUIDE_EXAMPLES: [(Form, u32, u32); 39] = [
     (Form::Bcnt0, 0x0000_0000, 32),
     (Form::Bcnt0, 0xcccc_cccc, 16),
@@ -504,10 +505,14 @@ fn sop1_unary_forms_match_the_guide_on_native_metal() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
     for (label, code) in rejections() {
-        assert!(
-            compile(Architecture::Gfx1030, &code).is_err(),
-            "compiler accepted {label}"
-        );
+        // A decode error at the SOP1 word, so a later failure cannot stand in.
+        match compile(Architecture::Gfx1030, &code) {
+            Err(CompileError::Decode(error)) => assert_eq!(
+                error.offset, ALU_OFFSET,
+                "compiler rejected {label} elsewhere: {error:?}"
+            ),
+            other => panic!("compiler did not reject {label} at decode: {other:?}"),
+        }
     }
     let cases = checked_cases();
     let (failures, programs) = harness::check_metal(&cases);
