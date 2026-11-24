@@ -13,7 +13,8 @@
 //! compares, branch, SOP2 unsigned
 //! and signed add and subtract, add-with-carry, subtract-with-borrow, AND, OR
 //! and XOR, the stage C forms ANDN2, ORN2, NAND, NOR, XNOR, LSHL, LSHR and
-//! ASHR (32-bit), VOP1 move
+//! ASHR (32-bit), the 32-bit integer forms MIN/MAX (I32, U32), CSELECT, BFM,
+//! MUL_I32, BFE (U32, I32), ABSDIFF, LSHL1-4_ADD and MUL_HI (U32, I32), VOP1 move
 //! (including from an SGPR),
 //! VOP2 bitwise, shift, arithmetic-shift and float, VOP3 add-no-carry, MUBUF
 //! load/store and the two waits plus `s_endpgm`. Anything else is a controlled
@@ -55,7 +56,8 @@ enum Insn {
     SMov(u8, Src),
     /// SOP1 unary opcode 7, 11, 13, 15, 17, 19, 21, 23, 25, 26 or 52.
     SUnary(u32, u8, Src),
-    /// SOP2 opcode 0-5, 14, 16, 18 or an even opcode 20-34.
+    /// SOP2 opcode 0-10, 14, 16, 18, an even opcode 20-36, 38-40, 44, 46-49,
+    /// 53 or 54.
     SAlu(u32, u8, Src, Src),
     /// SOPC opcode 0-11: `s_cmp_{eq,lg,gt,ge,lt,le}_i32` then `_u32`.
     SCmp(u32, Src, Src),
@@ -318,8 +320,87 @@ fn scalar_alu(
     };
     let (a, b) = (read(a)?, read(b)?);
     let carry_in = || scc.ok_or_else(|| format!("{offset:#x}: uninitialized SCC"));
+    let bit = |word: u32, i: u32| (word >> i) & 1 == 1;
     let (value, flag) = match opcode {
         0 => ripple(a, b, false),
+        // RDNA 2 ISA guide 12.1: MIN/MAX pick S0 iff S0 < S1 (> for MAX), the
+        // order a borrow out of S0 - S1 (or S1 - S0) shows; signed forms flip
+        // both sign bits first. SCC = whether S0 was picked (0 on a tie).
+        6..=9 => {
+            let flip = if opcode % 2 == 0 { 0x8000_0000 } else { 0 };
+            let (x, y) = (a ^ flip, b ^ flip);
+            let (p, q) = if opcode < 8 { (x, y) } else { (y, x) };
+            let first = !ripple(p, !q, true).1;
+            (if first { a } else { b }, first)
+        }
+        // CSELECT: D = SCC ? S0 : S1.
+        10 => {
+            let pick_first = carry_in()?;
+            (if pick_first { a } else { b }, false)
+        }
+        // BFM: bit i of D is set iff S1[4:0] <= i < S1[4:0] + S0[4:0].
+        36 => {
+            let (size, start) = (a % 32, b % 32);
+            let value = (0..32)
+                .filter(|&i| i >= start && i < start + size)
+                .fold(0, |d, i| d | 1 << i);
+            (value, false)
+        }
+        // MUL_I32 and MUL_HI: the 64-bit unsigned product by shift and add;
+        // the signed high word subtracts S1 when S0 < 0 and S0 when S1 < 0
+        // (two's complement correction).
+        38 | 53 | 54 => {
+            let product = (0..32)
+                .filter(|&i| bit(b, i))
+                .fold(0_u64, |sum, i| sum + (u64::from(a) << i));
+            let (low, mut high) = (product as u32, (product >> 32) as u32);
+            if opcode == 54 {
+                if bit(a, 31) {
+                    high = ripple(high, !b, true).0;
+                }
+                if bit(b, 31) {
+                    high = ripple(high, !a, true).0;
+                }
+            }
+            (if opcode == 38 { low } else { high }, false)
+        }
+        // BFE: D[i] = S0[offset + i] for i < width (offset S1[4:0], width
+        // S1[22:16]); positions past bit 31 read 0 (U32) or S0[31] (I32), and
+        // I32 copies D[width - 1] into the bits at and above width. SCC = D != 0.
+        39 | 40 => {
+            let (start, width) = (b % 32, (b >> 16) % 128);
+            let source = |i: u32| match start + i {
+                at @ 0..=31 => bit(a, at),
+                _ => opcode == 40 && bit(a, 31),
+            };
+            let value = (0..32).fold(0, |d, i| {
+                let set = if i < width {
+                    source(i)
+                } else {
+                    opcode == 40 && width > 0 && source(width - 1)
+                };
+                d | u32::from(set) << i
+            });
+            (value, value != 0)
+        }
+        // ABSDIFF: the 32-bit S0 - S1, negated when bit 31 is set
+        // (0x80000000 stays). SCC = D != 0.
+        44 => {
+            let difference = ripple(a, !b, true).0;
+            let value = if bit(difference, 31) {
+                ripple(!difference, 0, true).0
+            } else {
+                difference
+            };
+            (value, value != 0)
+        }
+        // LSHLn_ADD, n = 1-4: D = (S0 << n) + S1; SCC = 1 iff the exact sum
+        // reaches 2^32, i.e. bits shifted out of S0 or a carry out of the add.
+        46..=49 => {
+            let n = opcode - 45;
+            let (value, carry) = ripple(a << n, b, false);
+            (value, carry || a >> (32 - n) != 0)
+        }
         // RDNA 2 ISA guide 12.1: signed overflow from the sign bits,
         // add: S0[31] == S1[31] != D[31]; subtract: S0[31] != S1[31] != D[31].
         2 | 3 => {
@@ -372,7 +453,11 @@ fn scalar_alu(
         }
     };
     sgpr[dst as usize] = Some(value);
-    *scc = Some(flag);
+    // CSELECT, BFM, MUL_I32 and MUL_HI have no SCC line in guide 12.1 ("n" in
+    // Tables 11, 12 and 14): SCC stays as it was, possibly unset.
+    if !matches!(opcode, 10 | 36 | 38 | 53 | 54) {
+        *scc = Some(flag);
+    }
     Ok(())
 }
 
@@ -910,7 +995,24 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
     if first >> 30 == 0b10
         && matches!(
             (first >> 23) & 0x7f,
-            0..=5 | 14 | 16 | 18 | 20 | 22 | 24 | 26 | 28 | 30 | 32 | 34
+            0..=10
+                | 14
+                | 16
+                | 18
+                | 20
+                | 22
+                | 24
+                | 26
+                | 28
+                | 30
+                | 32
+                | 34
+                | 36
+                | 38..=40
+                | 44
+                | 46..=49
+                | 53
+                | 54
         )
     {
         let dst = ((first >> 16) & 0x7f) as u8;
