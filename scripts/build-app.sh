@@ -35,6 +35,16 @@ cat > "$bundle/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Windows Executable</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array><string>com.microsoft.windows-executable</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
