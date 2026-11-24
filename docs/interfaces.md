@@ -252,7 +252,65 @@ with default security attributes. A successful wait consumes one permit.
 that exceeds the maximum without changing the count. Duplicates share
 the same permit count.
 
+`CreateMutexA`, `CreateMutexW` and their `Ex` forms create unnamed mutexes,
+optionally owned by the caller. Ownership belongs to the calling guest
+thread, identified by its TEB. The owner can acquire the mutex again, and
+each acquisition needs a matching `ReleaseMutex`. Another thread sees the
+mutex as unsignaled. A release by a thread that is not the owner fails with
+`ERROR_NOT_OWNER`. Waits, duplicates and wait-all treat mutexes like the
+other waitable objects. Abandonment on thread exit is not modeled, because
+guest threads do not exit yet.
+
 See Microsoft's [event object documentation](https://learn.microsoft.com/windows/win32/sync/event-objects).
+
+### Locks, one-time initialization and thread-local storage
+
+These services keep their state in the runtime and key ownership by guest
+TEB. There is no guest scheduler, so any call that would block stops the
+guest with the runtime-limit fault (`IllegalInstruction(0xFE)`) rather than
+reporting success. Guest code reaches that fault by entering a critical
+section owned by another thread, acquiring a held SRW lock, or beginning a
+one-time initialization that another thread has pending.
+
+- Critical sections use the x64 `RTL_CRITICAL_SECTION` layout from
+  `winnt.h`. Initialization writes the 40-byte structure. `LockCount` is -1
+  when free and -2 when held; the runtime also updates `RecursionCount` and
+  `OwningThread`. The owner may enter recursively. `TryEnterCriticalSection`
+  returns FALSE when another thread owns it. Leaving a section the caller
+  does not own, or using one that was never initialized, stops the guest.
+  The runtime holds up to 4,096 sections.
+- SRW locks allow any number of shared holders or one exclusive holder. The
+  try forms return FALSE instead of waiting. Exclusive acquisition is not
+  recursive. Releasing a mode the caller does not hold stops the guest.
+- Condition variables check that the caller holds the named lock. A
+  zero-timeout sleep returns FALSE with `ERROR_TIMEOUT` and leaves the lock
+  held in its original mode. Longer sleeps return `ERROR_NOT_SUPPORTED`.
+  Wake calls do nothing, because no thread can be sleeping.
+- `InitOnceBeginInitialize` and `InitOnceComplete` support the synchronous
+  mode, `INIT_ONCE_CHECK_ONLY` and `INIT_ONCE_INIT_FAILED`. The completed
+  context is stored in the `INIT_ONCE` word, so later calls read it back.
+  Asynchronous mode returns `ERROR_NOT_SUPPORTED`. `InitOnceExecuteOnce`
+  needs a three-argument guest callback and is not registered.
+- Interlocked SLists use the x64 `SLIST_HEADER` layout. The low 16 bits hold
+  the depth, and bits 4 to 63 of the second quadword hold the first entry.
+  Headers and entries must be 16-byte aligned. Updates are atomic with
+  respect to other services. They are not atomic with respect to guest
+  instructions that modify the header directly on another host thread.
+- TLS provides the documented 1,088 indexes. FLS provides the 128
+  `FLS_MAXIMUM_AVAILABLE` slots defined in the MinGW-w64 headers. Values are
+  per guest thread, new indexes read as zero everywhere, and successful get
+  calls clear the last error. Values live in the runtime, not in the TEB
+  `TlsSlots` array, so guest code that reads the TEB directly does not see
+  them. `FlsFree` stops the guest if it would have to run a cleanup callback.
+
+API-set aliases follow Microsoft's
+[Win32 APIs for UWP apps](https://learn.microsoft.com/uwp/win32-and-com/win32-apis)
+listing: critical sections, SRW locks and mutexes use
+`api-ms-win-core-synch-l1-1-0`; condition variables and one-time
+initialization use `api-ms-win-core-synch-l1-2-0`; SLists use
+`api-ms-win-core-interlocked-l1-1-0`; TLS uses
+`api-ms-win-core-processthreads-l1-1-0`; and FLS uses
+`api-ms-win-core-fibers-l1-1-0`.
 
 ## Synthetic tiled textures
 

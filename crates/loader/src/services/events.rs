@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Unnamed event and semaphore objects and waits that can resolve without a guest scheduler.
+//! Unnamed event, semaphore and mutex objects and waits that can resolve without a guest scheduler.
 
 use super::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS,
@@ -23,27 +23,51 @@ const SEMAPHORE_ALL_ACCESS: u32 = 0x001f_0003;
 const SEMAPHORE_MODIFY_STATE: u32 = 2;
 const ERROR_TOO_MANY_POSTS: u32 = 298;
 
+const MUTEX_ALL_ACCESS: u32 = 0x001f_0001;
+const CREATE_MUTEX_INITIAL_OWNER: u32 = 1;
+const ERROR_NOT_OWNER: u32 = 288;
+
 pub(super) enum Waitable {
-    Event { manual_reset: bool, signaled: bool },
-    Semaphore { count: i32, maximum: i32 },
+    Event {
+        manual_reset: bool,
+        signaled: bool,
+    },
+    Semaphore {
+        count: i32,
+        maximum: i32,
+    },
+    /// Owned by a guest TEB; the owner may acquire it recursively.
+    Mutex {
+        owner: Option<u64>,
+        recursion: u32,
+    },
 }
 
 impl Waitable {
-    fn is_ready(&self) -> bool {
+    fn is_ready(&self, teb: u64) -> bool {
         match self {
             Self::Event { signaled, .. } => *signaled,
             Self::Semaphore { count, .. } => *count > 0,
+            Self::Mutex { owner, .. } => owner.is_none_or(|owner| owner == teb),
         }
     }
 
-    fn consume(&mut self) {
+    fn consume(&mut self, teb: u64) {
         match self {
             Self::Event {
                 manual_reset,
                 signaled,
             } => *signaled = *manual_reset,
             Self::Semaphore { count, .. } => *count -= 1,
+            Self::Mutex { owner, recursion } => {
+                *owner = Some(teb);
+                *recursion += 1;
+            }
         }
+    }
+
+    fn at_recursion_limit(&self) -> bool {
+        matches!(self, Self::Mutex { recursion, .. } if *recursion >= i32::MAX as u32)
     }
 }
 
@@ -65,6 +89,19 @@ fn insert_waitable(
         },
     );
     Ok(handle)
+}
+
+fn insert_mutex(
+    state: &ServicesState,
+    teb: u64,
+    initial_owner: bool,
+    access: u32,
+) -> Result<u64, ExitReason> {
+    let object = Waitable::Mutex {
+        owner: initial_owner.then_some(teb),
+        recursion: u32::from(initial_owner),
+    };
+    insert_waitable(state, teb, object, access)
 }
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
@@ -168,6 +205,58 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    for symbol in ["CreateMutexA", "CreateMutexW"] {
+        let state = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, mem| {
+            let attributes = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+            let initial_owner = args.get(1, mem).map_err(ExitReason::MemoryFault)? as u32 != 0;
+            let name = args.get(2, mem).map_err(ExitReason::MemoryFault)?;
+            if attributes != 0 || name != 0 {
+                return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+            }
+            insert_mutex(&state, cpu.gs_base, initial_owner, MUTEX_ALL_ACCESS)
+        });
+    }
+
+    for symbol in ["CreateMutexExA", "CreateMutexExW"] {
+        let state = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, mem| {
+            let attributes = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+            let name = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
+            let flags = args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32;
+            let access = args.get(3, mem).map_err(ExitReason::MemoryFault)? as u32;
+            if attributes != 0 || name != 0 || access & !MUTEX_ALL_ACCESS != 0 {
+                return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+            }
+            if flags & !CREATE_MUTEX_INITIAL_OWNER != 0 {
+                return state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+            }
+            let initial_owner = flags & CREATE_MUTEX_INITIAL_OWNER != 0;
+            insert_mutex(&state, cpu.gs_base, initial_owner, access)
+        });
+    }
+
+    let release = Arc::clone(state);
+    registry.register(KERNEL32, "ReleaseMutex", move |args, cpu, mem| {
+        let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        let objects = release.objects.lock().expect("guest object state");
+        let Some(GuestObject::Waitable { state, .. }) = objects.handles.get(&handle) else {
+            return release.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        };
+        let mut state = state.lock().expect("guest waitable state");
+        let Waitable::Mutex { owner, recursion } = &mut *state else {
+            return release.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        };
+        if *owner != Some(cpu.gs_base) {
+            return release.fail(cpu.gs_base, ERROR_NOT_OWNER, 0);
+        }
+        *recursion -= 1;
+        if *recursion == 0 {
+            *owner = None;
+        }
+        Ok(1)
+    });
+
     for (symbol, extended) in [
         ("WaitForSingleObject", false),
         ("WaitForSingleObjectEx", true),
@@ -218,6 +307,11 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "CreateSemaphoreA",
         "CreateSemaphoreW",
         "ReleaseSemaphore",
+        "CreateMutexA",
+        "CreateMutexW",
+        "CreateMutexExA",
+        "CreateMutexExW",
+        "ReleaseMutex",
         "WaitForSingleObject",
         "WaitForSingleObjectEx",
         "WaitForMultipleObjects",
@@ -271,7 +365,7 @@ fn wait_for_objects(
     }
     let mut ready = Vec::with_capacity(handles.len());
     for (index, event) in waitables.into_iter().enumerate() {
-        if event.lock().expect("guest waitable state").is_ready() {
+        if event.lock().expect("guest waitable state").is_ready(teb) {
             ready.push((index, event));
             if !all {
                 break;
@@ -285,9 +379,18 @@ fn wait_for_objects(
             state.fail(teb, ERROR_NOT_SUPPORTED, WAIT_FAILED)
         };
     }
+    if ready.iter().any(|(_, object)| {
+        object
+            .lock()
+            .expect("guest waitable state")
+            .at_recursion_limit()
+    }) {
+        // Windows raises STATUS_MUTANT_LIMIT_EXCEEDED; exceptions are unsupported.
+        return Err(ExitReason::IllegalInstruction(0xFE));
+    }
     let first = ready[0].0;
     for (_, event) in ready {
-        event.lock().expect("guest waitable state").consume();
+        event.lock().expect("guest waitable state").consume(teb);
     }
     Ok(WAIT_OBJECT_0 + first as u64)
 }

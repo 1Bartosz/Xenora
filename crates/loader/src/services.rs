@@ -16,6 +16,7 @@ mod gdk_queue;
 mod heap;
 mod modules;
 mod platform_fixture;
+mod synch;
 mod task_fixture;
 mod winsock;
 
@@ -174,6 +175,7 @@ pub struct ServicesState {
     pub thread_id: u32,
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
+    synch: Mutex<synch::Synch>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -194,6 +196,7 @@ impl ServicesState {
             thread_id: 0x4104,  // Synthetic main thread ID
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
+            synch: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -333,6 +336,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     registry.set_status(KERNEL32, "DuplicateHandle", ServiceStatus::Partial);
 
     events::register(registry, &state);
+    synch::register(registry, &state);
     files::register(registry, &state);
     crt::register(registry);
     crt::register_heap(registry);

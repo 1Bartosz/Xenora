@@ -77,6 +77,17 @@ impl SymbolDb {
         self.entries.get(&key)
     }
 
+    /// Every classified `(module, symbol)` pair, sorted, with modules in lowercase.
+    pub fn entries(&self) -> Vec<(&str, &str, &Classification)> {
+        let mut entries: Vec<_> = self
+            .entries
+            .iter()
+            .map(|((module, symbol), class)| (module.as_str(), symbol.as_str(), class))
+            .collect();
+        entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        entries
+    }
+
     /// Build the built-in database.  Every entry here is derived exclusively from
     /// public Microsoft documentation and ISO/POSIX standards.
     pub fn builtin() -> Self {
@@ -784,53 +795,66 @@ impl SymbolDb {
                 "WaitForSingleObjectEx",
                 "WaitForMultipleObjects",
                 "WaitForMultipleObjectsEx",
+                "CreateMutexA",
+                "CreateMutexW",
+                "CreateMutexExA",
+                "CreateMutexExW",
+                "ReleaseMutex",
+                "InitializeCriticalSection",
+                "InitializeCriticalSectionAndSpinCount",
+                "InitializeCriticalSectionEx",
+                "EnterCriticalSection",
+                "TryEnterCriticalSection",
+                "LeaveCriticalSection",
+                "DeleteCriticalSection",
+                "SetCriticalSectionSpinCount",
+                "InitializeSRWLock",
+                "AcquireSRWLockExclusive",
+                "AcquireSRWLockShared",
+                "TryAcquireSRWLockExclusive",
+                "TryAcquireSRWLockShared",
+                "ReleaseSRWLockExclusive",
+                "ReleaseSRWLockShared",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
         }
-        self.win32_stub(m, "CreateMutexA", true, "CreateMutex — stub");
-        self.win32_stub(m, "CreateMutexW", true, "CreateMutex wide — stub");
-        self.win32_stub(m, "ReleaseMutex", false, "ReleaseMutex — stub");
+        for module in ["api-ms-win-core-synch-l1-2-0.dll", "kernel32.dll"] {
+            for symbol in [
+                "InitializeConditionVariable",
+                "WakeConditionVariable",
+                "WakeAllConditionVariable",
+                "SleepConditionVariableCS",
+                "SleepConditionVariableSRW",
+                "InitOnceInitialize",
+                "InitOnceBeginInitialize",
+                "InitOnceComplete",
+            ] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
+        for module in ["api-ms-win-core-interlocked-l1-1-0.dll", "kernel32.dll"] {
+            for symbol in [
+                "InitializeSListHead",
+                "InterlockedPushEntrySList",
+                "InterlockedPopEntrySList",
+                "InterlockedFlushSList",
+                "QueryDepthSList",
+            ] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
+        for module in ["api-ms-win-core-processthreads-l1-1-0.dll", "kernel32.dll"] {
+            for symbol in ["TlsAlloc", "TlsFree", "TlsGetValue", "TlsSetValue"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
+        for module in ["api-ms-win-core-fibers-l1-1-0.dll", "kernel32.dll"] {
+            for symbol in ["FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         self.win32_stub(m, "CloseHandle", false, "CloseHandle — no-op stub");
-        self.win32_stub(
-            m,
-            "InitializeCriticalSection",
-            false,
-            "InitializeCriticalSection — no-op",
-        );
-        self.win32_stub(
-            m,
-            "InitializeCriticalSectionAndSpinCount",
-            false,
-            "CRIT_SECTION with spin — no-op",
-        );
-        self.win32_stub(
-            m,
-            "EnterCriticalSection",
-            false,
-            "EnterCriticalSection — no-op",
-        );
-        self.win32_stub(
-            m,
-            "LeaveCriticalSection",
-            false,
-            "LeaveCriticalSection — no-op",
-        );
-        self.win32_stub(
-            m,
-            "DeleteCriticalSection",
-            false,
-            "DeleteCriticalSection — no-op",
-        );
-        self.win32_stub(
-            m,
-            "TryEnterCriticalSection",
-            false,
-            "TryEnterCriticalSection — returns TRUE",
-        );
-        self.win32_stub(m, "CreateSemaphoreA", true, "CreateSemaphore — stub");
-        self.win32_stub(m, "CreateSemaphoreW", true, "CreateSemaphore wide — stub");
-        self.win32_stub(m, "ReleaseSemaphore", false, "ReleaseSemaphore — stub");
         self.win32_stub(
             m,
             "InterlockedIncrement",
@@ -863,12 +887,11 @@ impl SymbolDb {
             Classification::StandardService,
         );
         self.win32_stub(
-            m2,
+            "api-ms-win-core-synch-l1-2-0.dll",
             "InitOnceExecuteOnce",
             false,
-            "InitOnce — executes callback directly",
+            "needs a guest callback with three arguments and its result",
         );
-        self.win32_stub(m2, "InitOnceInitialize", false, "InitOnce init — no-op");
     }
 
     // ---- Win32 library loader ----------------------------------------------
