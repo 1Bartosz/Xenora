@@ -57,7 +57,11 @@ pub enum Op {
     Compare(Comparison, CompareSource, u8),
     /// SOP2 operation writing an SGPR and SCC.
     Scalar(ScalarAlu, u8, Source, Source),
+    /// SOPC `s_cmp_eq_{i32,u32}` (opcodes 0 and 6, identical per guide 12.4).
     CompareEqual(Source, Source),
+    /// The other SOPC 32-bit integer compares (opcodes 1-5 and 7-11), writing
+    /// only SCC: LG, GT, GE, LT, LE, signed for 1-5, unsigned for 7-11.
+    ScalarCompare(Comparison, Source, Source),
     Branch {
         target: usize,
         condition: BranchCondition,
@@ -293,10 +297,23 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 let (source, length) = decode_scalar(*source, tail, offset)?;
                 (Op::ScalarMove(destination & 0x7f, source), length)
             }
-            [left, right, 6, 0xbf, tail @ ..] if (*left, *right) != (255, 255) => {
+            // SOPC: ENCODING 0b10_1111110 in bits 23-31, OP in 16-22 (guide
+            // 13.1.4); 0-5 signed and 6-11 unsigned EQ, LG, GT, GE, LT, LE.
+            [left, right, op @ 0..=11, 0xbf, tail @ ..] if (*left, *right) != (255, 255) => {
                 let (left, left_length) = decode_scalar(*left, tail, offset)?;
                 let (right, right_length) = decode_scalar(*right, tail, offset)?;
-                (Op::CompareEqual(left, right), left_length.max(right_length))
+                // VOPC relation offsets: LT 1, EQ 2, LE 3, GT 4, NE 5, GE 6.
+                let relation = [2, 5, 4, 6, 1, 3][usize::from(op % 6)];
+                let comparison = Comparison {
+                    offset: relation,
+                    signed: *op < 6,
+                };
+                let op = if relation == 2 {
+                    Op::CompareEqual(left, right)
+                } else {
+                    Op::ScalarCompare(comparison, left, right)
+                };
+                (op, left_length.max(right_length))
             }
             // SOP2: OP in bits 23-29, SDST in bits 16-22, SSRC1, SSRC0.
             [
@@ -679,6 +696,10 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
             }
             Op::CompareEqual(lhs, rhs) => {
                 scc = Some(read_scalar(lhs)? == read_scalar(rhs)?);
+            }
+            // Guide 12.4: SCC = (S0 <relation> S1); no SGPR is written.
+            Op::ScalarCompare(comparison, lhs, rhs) => {
+                scc = Some(comparison.holds(read_scalar(lhs)?, read_scalar(rhs)?));
             }
             Op::Scalar(kind, dst, lhs, rhs) => {
                 if dst < 8 {

@@ -8,7 +8,8 @@
 //! field layout and executes them with an explicit program-counter machine, so
 //! a defect in the production decoder or reference cannot cancel out here.
 //!
-//! Scope matches the demo fixtures: scalar move/compare/branch, SOP2 unsigned
+//! Scope matches the demo fixtures: scalar move, the twelve SOPC 32-bit integer
+//! compares, branch, SOP2 unsigned
 //! and signed add and subtract, add-with-carry, subtract-with-borrow, AND, OR
 //! and XOR, the stage C forms ANDN2, ORN2, NAND, NOR, XNOR, LSHL, LSHR and
 //! ASHR (32-bit), VOP1 move
@@ -53,7 +54,8 @@ enum Insn {
     SMov(u8, Src),
     /// SOP2 opcode 0-5, 14, 16, 18 or an even opcode 20-34.
     SAlu(u32, u8, Src, Src),
-    SCmpEq(Src, Src),
+    /// SOPC opcode 0-11: `s_cmp_{eq,lg,gt,ge,lt,le}_i32` then `_u32`.
+    SCmp(u32, Src, Src),
     BranchScc0(usize),
     BranchMaskZero {
         target: usize,
@@ -219,9 +221,9 @@ fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String>
                     })
                 }
             }
-            Insn::SCmpEq(a, b) => read_s(&sgpr, a).and_then(|a| {
+            Insn::SCmp(opcode, a, b) => read_s(&sgpr, a).and_then(|a| {
                 read_s(&sgpr, b).map(|b| {
-                    scc = Some(a == b);
+                    scc = Some(scalar_compare(opcode, a, b));
                     None
                 })
             }),
@@ -355,6 +357,24 @@ fn scalar_alu(
     sgpr[dst as usize] = Some(value);
     *scc = Some(flag);
     Ok(())
+}
+
+/// RDNA 2 ISA guide 12.4: SCC = (S0 <relation> S1). Signed operands (opcodes
+/// 0-5) are ordered by flipping both sign bits and comparing unsigned.
+fn scalar_compare(opcode: u32, a: u32, b: u32) -> bool {
+    let (a, b) = if opcode < 6 {
+        (a ^ 0x8000_0000, b ^ 0x8000_0000)
+    } else {
+        (a, b)
+    };
+    match opcode % 6 {
+        0 => a == b,
+        1 => a != b,
+        2 => a > b,
+        3 => a >= b,
+        4 => a < b,
+        _ => a <= b,
+    }
 }
 
 fn read_vgpr(lane: &Lane, reg: u8, offset: usize) -> Result<u32, String> {
@@ -831,7 +851,8 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         let (sb, lb) = scalar_source(code, offset, b)?;
         return Ok((Insn::SAlu((first >> 23) & 0x7f, dst, sa, sb), la.max(lb)));
     }
-    if first & 0xffff_0000 == 0xbf06_0000 {
+    // SOPC: ENCODING 0b10_1111110 in bits 23-31, OP in 16-22.
+    if first >> 23 == 0b1_0111_1110 && (first >> 16) & 0x7f <= 11 {
         let a = first as u8;
         let b = (first >> 8) as u8;
         if a == 255 && b == 255 {
@@ -839,7 +860,7 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         }
         let (sa, la) = scalar_source(code, offset, a)?;
         let (sb, lb) = scalar_source(code, offset, b)?;
-        return Ok((Insn::SCmpEq(sa, sb), la.max(lb)));
+        return Ok((Insn::SCmp((first >> 16) & 0x7f, sa, sb), la.max(lb)));
     }
     if first & 0xffff_0000 == 0xbf82_0000 {
         return Ok((Insn::Branch(branch_target(first, offset)?), 4));
