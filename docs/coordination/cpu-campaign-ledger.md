@@ -22,6 +22,7 @@ Evidence below is local to the named host unless stated. Nothing here is indepen
 | 1 | cpu: correct the sign- and zero-extension family | MOVZX/MOVSX/MOVSXD, MOV-immediate regressions, SXTW, 32-bit access width, RIP-relative and LEA addressing, self-contained prefix test | `tests/movsxd.rs`: 9 tests over 93 LLVM-assembled register forms and 32 MOV immediates, each run by the interpreter and as native translated code; 16 of 16 targeted mutations caught |
 | 2 | cpu: share one generated decoder and store guest flags | Registry, generator, shared decoder and semantics, integer expansion, architectural DBT flags, truthful probe support | `tests/x86_integer.rs`, `tests/arm64_encodings.rs`, `tests/x86_generator`; 37 targeted mutations: 36 caught (4 only after new tests), and one equivalent, whose redundant check was removed |
 | 3 | cpu: add SSE2 state, moves and packed integer forms | XMM and MXCSR state, mandatory prefixes, SSE/SSE2 moves and packed integer operations, NEON lowering | `tests/x86_vector.rs` (9 tests, 374 LLVM-assembled instructions, 64 states each), `tests/arm64_encodings.rs`; 35 targeted mutations: 34 caught (1 only after a new test) and one equivalent |
+| 4 | cpu: add exact SSE and SSE2 floating point | Software binary32/binary64 arithmetic with MXCSR, compares and conversions | `tests/x86_float.rs` (9 tests, 6,824 exact-fraction vectors, 172 LLVM-assembled instructions, over 2 million host comparisons); 53 targeted mutations: 52 caught (2 only after directed vectors), and one changes a rule deliberately left unasserted |
 
 Encodings: `clang -target x86_64-apple-macos -c` and `clang -target arm64-apple-macos -c`, read back with `objdump -d`.
 
@@ -59,10 +60,26 @@ Main `19bea60` (#278 and QA tooling) was merged first as `70f1793`; it does not 
 
 The registry now has 139 operations, 306 forms and 401 opcode slots. `dbt_bench`, integer only, middle of three runs: interpreter 11.18, cold DBT 8.62 and warm DBT 430.19 MIPS, with the same 290,184 native bytes as milestone 2. No SIMD throughput benchmark exists yet.
 
+## Verification of milestone 4 (local, real exit codes)
+
+| Gate | Result |
+| --- | --- |
+| Formatting; strict Clippy, workspace, all targets and features | exit 0; exit 0 |
+| `cargo test --locked --workspace --no-fail-fast` | exit 0: 438 passed, 0 failed, 22 ignored |
+| `generate_x86.py --check`, `assemble.py --check`, `float_reference.py --check`, generator tests (10) | exit 0 |
+| RDNA2 metadata, semantic registry, coverage and status checks; their Python tests; claims, dependencies and native audits; release build | exit 0 |
+| `scripts/test-gpu.sh`, `demo.sh`, `build-app.sh`, `--smoke-frame`, `--inspect` | exit 0; GPU 74 passed, 0 failed, 1 ignored |
+| `scripts/assemble-fixture.sh --check` and ignored LLVM AMDGPU tests | not verified: need `llvm-mc` |
+| Fuzz and mutation campaigns | not run |
+
+The registry now has 191 operations, 358 forms and 453 opcode slots. `dbt_bench`, integer only, middle of three runs: interpreter 11.32, cold DBT 8.81 and warm DBT 430.19 MIPS (one warm run read 377.43). No floating-point or SIMD throughput benchmark exists.
+
+Main moved to 15 commits past this branch after milestone 3; they do not touch `crates/loader` and are not merged yet.
+
 ## Known limitations
 
-- Only the forms in `x86/instructions.toml` exist. Floating-point arithmetic, compares and conversions, SSE3 and later, MMX, VEX, string instructions, RCL, RCR, SHLD, SHRD, LOCK, fences and atomics are unsupported.
-- MXCSR is stored but nothing consults it yet.
+- Only the forms in `x86/instructions.toml` exist. The RCP and RSQRT approximations, SSE3 and later, MMX, VEX, string instructions, RCL, RCR, SHLD, SHRD, LOCK, fences and atomics are unsupported.
+- Every floating-point form runs through software arithmetic in the DBT; none is lowered to NEON. No x86 hardware comparison exists, and `docs/cpu/instruction-registry.md` lists the choices left unasserted.
 - Packs, shuffles, high multiplies, PSADBW, sign-mask extraction, word insertion and extraction, byte shifts and shifts by a register count run through the shared semantics in the DBT.
 - XMM6-XMM15 preservation across Win64 service calls has no test yet.
 - 8- and 16-bit ALU operations, shifts, MUL, DIV and bit operations run through the shared semantics in the DBT, not as ARM64.
@@ -76,4 +93,4 @@ The registry now has 139 operations, 306 forms and 401 opcode slots. `dbt_bench`
 
 ## Next task
 
-Scalar and packed floating point (#127, #128): define x86 NaN selection, the default NaN, MXCSR rounding, DAZ, FTZ and sticky exception flags before lowering anything to NEON, because ARM differs in the default NaN, NaN propagation and underflow detection. Then runtime resolution and typed imports. Nothing in those areas is started.
+Runtime resolution and typed import metadata: one lookup for execution and static inspection, conflict detection and truthful unsupported diagnostics. Then Win64 ABI checks, including XMM6-XMM15 across service calls. Nothing in those areas is started.

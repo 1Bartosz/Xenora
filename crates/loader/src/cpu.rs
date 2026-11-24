@@ -137,6 +137,8 @@ pub enum ExitReason {
     DivideError,
     /// A misaligned 16-byte operand or a reserved MXCSR bit (#GP).
     GeneralProtection,
+    /// An unmasked SSE floating-point exception (#XM); MXCSR holds its flags.
+    SimdException,
 }
 
 impl fmt::Display for ExitReason {
@@ -151,6 +153,7 @@ impl fmt::Display for ExitReason {
             Self::StackUnderflow => write!(f, "stack underflow"),
             Self::DivideError => write!(f, "guest divide error"),
             Self::GeneralProtection => write!(f, "guest general-protection fault"),
+            Self::SimdException => write!(f, "guest SIMD floating-point exception"),
         }
     }
 }

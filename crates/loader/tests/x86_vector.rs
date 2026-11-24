@@ -683,8 +683,9 @@ fn mxcsr_resets_loads_stores_and_rejects_reserved_bits() {
 fn unsupported_vector_encodings_are_rejected() {
     let rejected: &[&[u8]] = &[
         &[0x0F, 0xFC, 0xC1],             // paddb mm0, mm1 (MMX)
-        &[0x0F, 0x58, 0xC1],             // addps xmm0, xmm1
-        &[0xF2, 0x0F, 0x58, 0xC1],       // addsd xmm0, xmm1
+        &[0x0F, 0x53, 0xC1],             // rcpps xmm0, xmm1 (approximation)
+        &[0xF3, 0x0F, 0x52, 0xC1],       // rsqrtss xmm0, xmm1 (approximation)
+        &[0x0F, 0x2D, 0xC1],             // cvtps2pi mm0, xmm1 (MMX)
         &[0x66, 0x0F, 0x38, 0x00, 0xC1], // pshufb xmm0, xmm1
         &[0xC5, 0xF9, 0xFC, 0xC1],       // vpaddb (VEX)
         &[0xF2, 0xF3, 0x0F, 0x10, 0xC1], // both mandatory prefixes

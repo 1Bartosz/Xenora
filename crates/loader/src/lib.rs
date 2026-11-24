@@ -16,11 +16,13 @@ pub mod pe;
 pub mod probe;
 pub mod reloc;
 pub mod services;
+pub mod softfloat;
 pub mod startup;
 pub mod tls;
 pub mod triage;
 pub mod x86_decode;
 pub mod x86_exec;
+pub mod x86_float;
 pub mod x86_simd;
 #[rustfmt::skip]
 pub mod x86_table;

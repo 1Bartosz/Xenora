@@ -171,6 +171,60 @@ pextrw = { ref = "sdm PEXTRW" }
 ldmxcsr = { ref = "sdm LDMXCSR" }
 stmxcsr = { ref = "sdm STMXCSR" }
 
+# Floating point. Every form can raise a SIMD floating-point exception.
+sqrtps = { faults = true, ref = "sdm SQRTPS" }
+sqrtpd = { faults = true, ref = "sdm SQRTPD" }
+sqrtss = { faults = true, ref = "sdm SQRTSS" }
+sqrtsd = { faults = true, ref = "sdm SQRTSD" }
+addps = { faults = true, ref = "sdm ADDPS" }
+addpd = { faults = true, ref = "sdm ADDPD" }
+addss = { faults = true, ref = "sdm ADDSS" }
+addsd = { faults = true, ref = "sdm ADDSD" }
+mulps = { faults = true, ref = "sdm MULPS" }
+mulpd = { faults = true, ref = "sdm MULPD" }
+mulss = { faults = true, ref = "sdm MULSS" }
+mulsd = { faults = true, ref = "sdm MULSD" }
+subps = { faults = true, ref = "sdm SUBPS" }
+subpd = { faults = true, ref = "sdm SUBPD" }
+subss = { faults = true, ref = "sdm SUBSS" }
+subsd = { faults = true, ref = "sdm SUBSD" }
+minps = { faults = true, ref = "sdm MINPS" }
+minpd = { faults = true, ref = "sdm MINPD" }
+minss = { faults = true, ref = "sdm MINSS" }
+minsd = { faults = true, ref = "sdm MINSD" }
+divps = { faults = true, ref = "sdm DIVPS" }
+divpd = { faults = true, ref = "sdm DIVPD" }
+divss = { faults = true, ref = "sdm DIVSS" }
+divsd = { faults = true, ref = "sdm DIVSD" }
+maxps = { faults = true, ref = "sdm MAXPS" }
+maxpd = { faults = true, ref = "sdm MAXPD" }
+maxss = { faults = true, ref = "sdm MAXSS" }
+maxsd = { faults = true, ref = "sdm MAXSD" }
+cmpps = { faults = true, ref = "sdm CMPPS" }
+cmppd = { faults = true, ref = "sdm CMPPD" }
+cmpss = { faults = true, ref = "sdm CMPSS" }
+cmpsd = { faults = true, ref = "sdm CMPSD" }
+ucomiss = { writes = "cf zf sf of pf af", faults = true, ref = "sdm UCOMISS" }
+comiss = { writes = "cf zf sf of pf af", faults = true, ref = "sdm COMISS" }
+ucomisd = { writes = "cf zf sf of pf af", faults = true, ref = "sdm UCOMISD" }
+comisd = { writes = "cf zf sf of pf af", faults = true, ref = "sdm COMISD" }
+cvtps2pd = { faults = true, ref = "sdm CVTPS2PD" }
+cvtpd2ps = { faults = true, ref = "sdm CVTPD2PS" }
+cvtss2sd = { faults = true, ref = "sdm CVTSS2SD" }
+cvtsd2ss = { faults = true, ref = "sdm CVTSD2SS" }
+cvtdq2ps = { faults = true, ref = "sdm CVTDQ2PS" }
+cvtps2dq = { faults = true, ref = "sdm CVTPS2DQ" }
+cvttps2dq = { faults = true, ref = "sdm CVTTPS2DQ" }
+cvttpd2dq = { faults = true, ref = "sdm CVTTPD2DQ" }
+cvtdq2pd = { faults = true, ref = "sdm CVTDQ2PD" }
+cvtpd2dq = { faults = true, ref = "sdm CVTPD2DQ" }
+cvtsi2ss = { faults = true, ref = "sdm CVTSI2SS" }
+cvttss2si = { faults = true, ref = "sdm CVTTSS2SI" }
+cvtss2si = { faults = true, ref = "sdm CVTSS2SI" }
+cvtsi2sd = { faults = true, ref = "sdm CVTSI2SD" }
+cvttsd2si = { faults = true, ref = "sdm CVTTSD2SI" }
+cvtsd2si = { faults = true, ref = "sdm CVTSD2SI" }
+
 # The eight classic ALU operations share six opcodes at index*8 and one digit
 # of the immediate groups 80, 81 and 83.
 [alu]
@@ -1776,3 +1830,464 @@ enc = "rm"
 size = "n"
 src = "d"
 memory_only = true
+
+# SSE and SSE2 floating-point forms. RCP and RSQRT approximations are not
+# architecturally exact and are left out.
+
+[[form]]
+op = "sqrtps"
+map = "0f"
+opcode = 0x51
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "sqrtpd"
+map = "0f"
+prefix = "66"
+opcode = 0x51
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "sqrtss"
+map = "0f"
+prefix = "f3"
+opcode = 0x51
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "sqrtsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x51
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "addps"
+map = "0f"
+opcode = 0x58
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "addpd"
+map = "0f"
+prefix = "66"
+opcode = 0x58
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "addss"
+map = "0f"
+prefix = "f3"
+opcode = 0x58
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "addsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x58
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "mulps"
+map = "0f"
+opcode = 0x59
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "mulpd"
+map = "0f"
+prefix = "66"
+opcode = 0x59
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "mulss"
+map = "0f"
+prefix = "f3"
+opcode = 0x59
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "mulsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x59
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "subps"
+map = "0f"
+opcode = 0x5C
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "subpd"
+map = "0f"
+prefix = "66"
+opcode = 0x5C
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "subss"
+map = "0f"
+prefix = "f3"
+opcode = 0x5C
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "subsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x5C
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "minps"
+map = "0f"
+opcode = 0x5D
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "minpd"
+map = "0f"
+prefix = "66"
+opcode = 0x5D
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "minss"
+map = "0f"
+prefix = "f3"
+opcode = 0x5D
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "minsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x5D
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "divps"
+map = "0f"
+opcode = 0x5E
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "divpd"
+map = "0f"
+prefix = "66"
+opcode = 0x5E
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "divss"
+map = "0f"
+prefix = "f3"
+opcode = 0x5E
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "divsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x5E
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "maxps"
+map = "0f"
+opcode = 0x5F
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "maxpd"
+map = "0f"
+prefix = "66"
+opcode = 0x5F
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "maxss"
+map = "0f"
+prefix = "f3"
+opcode = 0x5F
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "maxsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x5F
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "cmpps"
+map = "0f"
+opcode = 0xC2
+enc = "xmm_rm_imm"
+size = "x"
+imm = "ub"
+src = "x"
+
+[[form]]
+op = "cmppd"
+map = "0f"
+prefix = "66"
+opcode = 0xC2
+enc = "xmm_rm_imm"
+size = "x"
+imm = "ub"
+src = "x"
+
+[[form]]
+op = "cmpss"
+map = "0f"
+prefix = "f3"
+opcode = 0xC2
+enc = "xmm_rm_imm"
+size = "x"
+imm = "ub"
+src = "d"
+
+[[form]]
+op = "cmpsd"
+map = "0f"
+prefix = "f2"
+opcode = 0xC2
+enc = "xmm_rm_imm"
+size = "x"
+imm = "ub"
+src = "q"
+
+[[form]]
+op = "ucomiss"
+map = "0f"
+opcode = 0x2E
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "comiss"
+map = "0f"
+opcode = 0x2F
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "ucomisd"
+map = "0f"
+prefix = "66"
+opcode = 0x2E
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "comisd"
+map = "0f"
+prefix = "66"
+opcode = 0x2F
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "cvtps2pd"
+map = "0f"
+opcode = 0x5A
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "cvtpd2ps"
+map = "0f"
+prefix = "66"
+opcode = 0x5A
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "cvtss2sd"
+map = "0f"
+prefix = "f3"
+opcode = 0x5A
+enc = "xmm_rm"
+size = "x"
+src = "d"
+
+[[form]]
+op = "cvtsd2ss"
+map = "0f"
+prefix = "f2"
+opcode = 0x5A
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "cvtdq2ps"
+map = "0f"
+opcode = 0x5B
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "cvtps2dq"
+map = "0f"
+prefix = "66"
+opcode = 0x5B
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "cvttps2dq"
+map = "0f"
+prefix = "f3"
+opcode = 0x5B
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "cvttpd2dq"
+map = "0f"
+prefix = "66"
+opcode = 0xE6
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "cvtdq2pd"
+map = "0f"
+prefix = "f3"
+opcode = 0xE6
+enc = "xmm_rm"
+size = "x"
+src = "q"
+
+[[form]]
+op = "cvtpd2dq"
+map = "0f"
+prefix = "f2"
+opcode = 0xE6
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "cvtsi2ss"
+map = "0f"
+prefix = "f3"
+opcode = 0x2A
+enc = "xmm_gpr"
+size = "y"
+
+[[form]]
+op = "cvttss2si"
+map = "0f"
+prefix = "f3"
+opcode = 0x2C
+enc = "reg_xmm"
+size = "y"
+src = "d"
+
+[[form]]
+op = "cvtss2si"
+map = "0f"
+prefix = "f3"
+opcode = 0x2D
+enc = "reg_xmm"
+size = "y"
+src = "d"
+
+[[form]]
+op = "cvtsi2sd"
+map = "0f"
+prefix = "f2"
+opcode = 0x2A
+enc = "xmm_gpr"
+size = "y"
+
+[[form]]
+op = "cvttsd2si"
+map = "0f"
+prefix = "f2"
+opcode = 0x2C
+enc = "reg_xmm"
+size = "y"
+src = "q"
+
+[[form]]
+op = "cvtsd2si"
+map = "0f"
+prefix = "f2"
+opcode = 0x2D
+enc = "reg_xmm"
+size = "y"
+src = "q"

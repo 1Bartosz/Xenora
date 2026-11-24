@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assemble the original x86-64 fixtures with the LLVM assembler.
 
-  generate   write integer.txt and vector.txt next to this file
+  generate   write integer.txt, vector.txt and float.txt next to this file
   --check    reassemble in memory and fail if a committed fixture differs
 
 Each output line is `<hex bytes> | <Intel-syntax text>`. The assembler is
@@ -132,6 +132,30 @@ def vector_cases():
     return list(dict.fromkeys(out))
 
 
+def float_cases():
+    out = []
+    memory = {"ss": "dword", "sd": "qword", "ps": "xmmword", "pd": "xmmword"}
+    place = " ptr [rsi + 4*rdi + 16]"
+    for kind, width in memory.items():
+        for op in "add sub mul div min max sqrt".split():
+            out += [f"{op}{kind} xmm3, xmm9", f"{op}{kind} xmm3, {width}{place}"]
+        for code in range(8):
+            out += [f"cmp{kind} xmm3, xmm9, {code}", f"cmp{kind} xmm3, {width}{place}, {code}"]
+    for kind in ("ss", "sd"):
+        for op in ("comi", "ucomi"):
+            out += [f"{op}{kind} xmm3, xmm9", f"{op}{kind} xmm3, {memory[kind]}{place}"]
+        for op in ("cvt", "cvtt"):
+            for reg in ("r9d", "r9"):
+                out += [f"{op}{kind}2si {reg}, xmm9", f"{op}{kind}2si {reg}, {memory[kind]}{place}"]
+        for reg, width in (("r9d", "dword"), ("r9", "qword")):
+            out += [f"cvtsi2{kind} xmm3, {reg}", f"cvtsi2{kind} xmm3, {width}{place}"]
+    for op, width in (("cvtss2sd", "dword"), ("cvtsd2ss", "qword"), ("cvtps2pd", "qword"), ("cvtpd2ps", "xmmword"),
+                      ("cvtdq2ps", "xmmword"), ("cvtdq2pd", "qword"), ("cvtps2dq", "xmmword"), ("cvttps2dq", "xmmword"),
+                      ("cvtpd2dq", "xmmword"), ("cvttpd2dq", "xmmword")):
+        out += [f"{op} xmm3, xmm9", f"{op} xmm3, {width}{place}"]
+    return out
+
+
 def assemble(lines):
     with tempfile.TemporaryDirectory() as directory:
         source, obj = Path(directory, "a.s"), Path(directory, "a.o")
@@ -148,7 +172,8 @@ def assemble(lines):
 def main(argv):
     if len(argv) != 2 or argv[1] not in ("generate", "--check"):
         sys.exit("usage: assemble.py generate|--check")
-    for name, lines in (("integer.txt", cases()), ("vector.txt", vector_cases())):
+    for name, lines in (("integer.txt", cases()), ("vector.txt", vector_cases()),
+                        ("float.txt", float_cases())):
         text = assemble(lines)
         if argv[1] == "generate":
             (HERE / name).write_text(text)

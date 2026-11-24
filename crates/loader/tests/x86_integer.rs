@@ -922,7 +922,8 @@ fn every_fixture_instruction_matches_the_reference_in_both_engines() {
 fn every_declared_form_is_executed_by_a_fixture() {
     let mut seen = BTreeSet::new();
     let vector = include_str!("x86/vector.txt");
-    for line in FIXTURE.lines().chain(vector.lines()) {
+    let float = include_str!("x86/float.txt");
+    for line in FIXTURE.lines().chain(vector.lines()).chain(float.lines()) {
         let (hex, _) = line.split_once(" | ").unwrap();
         let code: Vec<u8> = hex
             .split(' ')

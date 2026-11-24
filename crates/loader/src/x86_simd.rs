@@ -3,20 +3,20 @@
 //! Semantic primitives for the SSE and SSE2 moves and packed integer forms.
 //!
 //! Lane 0 is the least significant. Every instruction is all-or-nothing and none
-//! changes RFLAGS. Floating-point arithmetic is not implemented here: MXCSR is
-//! state only, loaded and stored but not yet consulted.
+//! changes RFLAGS. Floating-point arithmetic is in [`crate::x86_float`].
 
 use crate::cpu::{CpuState, ExitReason, Mxcsr};
 use crate::memory::GuestMemory;
 use crate::x86_decode::{Encoding, Insn, RegOperand, RmOperand};
 use crate::x86_exec::{address, read_mem, read_reg, rm_operand, write_mem, write_reg};
+use crate::x86_float;
 use crate::x86_table::{FORMS, Op};
 
 fn lane_mask(bits: u32) -> u128 {
     (1 << bits) - 1
 }
 
-fn lane(value: u128, bits: u32, index: u32) -> u64 {
+pub(crate) fn lane(value: u128, bits: u32, index: u32) -> u64 {
     ((value >> (bits * index)) & lane_mask(bits)) as u64
 }
 
@@ -242,7 +242,11 @@ fn xmm(reg: RegOperand) -> usize {
 }
 
 /// Full XMM register, or zero-extended memory, named by ModRM `rm`.
-fn read_rm(cpu: &CpuState, memory: &GuestMemory, insn: &Insn) -> Result<u128, ExitReason> {
+pub(crate) fn read_rm(
+    cpu: &CpuState,
+    memory: &GuestMemory,
+    insn: &Insn,
+) -> Result<u128, ExitReason> {
     match (aligned_address(cpu, insn)?, rm_operand(insn)?) {
         (Some(address), _) => read_vector(memory, address, insn.rm_size),
         (None, RmOperand::Reg(reg)) => Ok(cpu.xmm[xmm(reg)]),
@@ -256,6 +260,9 @@ pub(crate) fn execute(
     memory: &mut GuestMemory,
     insn: &Insn,
 ) -> Result<(), ExitReason> {
+    if x86_float::execute(cpu, memory, insn)? {
+        return Ok(());
+    }
     let reg = xmm(insn.reg);
     let in_memory = insn.memory().is_some();
     match (insn.op, insn.encoding) {
