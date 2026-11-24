@@ -2,11 +2,19 @@
 
 //! Architectural known answers for the guest CPU (issue #155).
 //!
-//! Every expectation here was derived from the Intel 64 and IA-32 Architectures
-//! Software Developer's Manual, revision 093 (September 2026), before the
-//! interpreter, the DBT or their existing tests were read. Encodings were
-//! produced by Apple clang's x86-64 assembler and read back with `objdump`.
-//! Nothing here was compared with x86 hardware. The AMD APM was not consulted.
+//! Expectations were derived from the Intel 64 and IA-32 Architectures Software
+//! Developer's Manual, revision 093 (September 2026), not from Xenora. Encodings
+//! were produced by Apple clang's x86-64 assembler and read back with `objdump`.
+//! Nothing here was compared with x86 hardware. For MXCSR flags that the Intel text
+//! states less directly, the AMD64 Architecture Programmer's Manual, Volume 1,
+//! revision 3.23 (October 2020) was consulted as well, cited as "APM".
+//!
+//! Chronology: 700 table cases were written before any Xenora CPU source was
+//! opened; one input and a few MXCSR fields were tightened later. The other cases
+//! and the sweeps were written after the public interface and small parts of the
+//! decoder and DBT had been seen, some of them after the first run. Review
+//! follow-ups came after the source behind the first four defects had been read.
+//! The author is the same AI model as the author of the code under test.
 //!
 //! Tests named `defect_*` state what the manual requires where the engines differ
 //! today. They are ignored with a reason, so they never count as passed; run them
@@ -1410,7 +1418,11 @@ cmov_false_still_reads_memory: rsi=U f= => ! PFR U
 @ shl qword ptr [rdi], cl
   48d327
   SDM 2B SAL/SHL (read-modify-write of DEST)
-shift_zero_count_still_accesses_memory: rdi=D rcx=40 m0=0102030405060708 => f=*
+shift_zero_count_leaves_memory_and_flags: rdi=D rcx=40 m0=0102030405060708 => f=*
+@ shl qword ptr [rdi], cl
+  !48d327
+  SDM 2B SAL/SHL (tempDEST := DEST for every count; #PF)
+shift_zero_count_still_reads_memory: rdi=U rcx=40 => ! PFR U
 @ mul qword ptr [rsi]
   !48f726
   SDM 3A 7.5
@@ -1966,8 +1978,8 @@ ftz_ignored_by_moves_and_logic: x2=d:1,80000001,00400000,7f800001 mx=9fc0 => x1=
 ftz_ignored_when_underflow_unmasked: x1=s:00800000 x2=s:3f000000 mx=9780 => mx=9790 f=* ! XM
 @ mulsd xmm1, xmm2
   f20f59ca
-  SDM 1 10.2.3.3; 1 11.5.2.5
-ftz_exact_tiny_result_is_zero: x1=r:8010000000000000 x2=r:3fe0000000000000 mx=9f80 => x1=r:8000000000000000 mx=? f=*
+  SDM 1 10.2.3.3; 1 11.5.2.6; APM 1 4.2.2 (the flush itself is inexact, so UE and PE)
+ftz_exact_tiny_result_is_zero: x1=r:8010000000000000 x2=r:3fe0000000000000 mx=9f80 => x1=r:8000000000000000 mx=9fb0 f=*
 @ addss xmm1, xmm2
   f30f58ca
   SDM 1 10.2.3.4
@@ -2511,9 +2523,12 @@ unmasked_denormal_faults_before_write: x1=s:00000001 x2=s:3f800000 mx=1e80 => mx
 unmasked_precision_faults_before_write: x1=s:3f800000 x2=s:40400000 mx=f80 => mx=fa0 f=* ! XM
 @ mulss xmm1, xmm2
   !f30f59ca
-  SDM 1 11.5.3.2; 3A 7.15 Interrupt 19
+  SDM 1 4.9.1.6; 1 D.4.2.3 Tables D-16 and D-17; APM 1 4.10.2.8
 unmasked_underflow_exact_tiny_faults_before_write: x1=s:00800000 x2=s:3f000000 mx=1780 => mx=1790 f=* ! XM
-unmasked_overflow_faults_before_write: x1=s:7f7fffff x2=s:7f7fffff mx=1b80 => mx=~20:1b88 f=* ! XM
+unmasked_overflow_faults_before_write: x1=s:7f7fffff x2=s:7f7fffff mx=1b80 => mx=1ba8 f=* ! XM
+masked_overflow_with_precision_unmasked_faults: x1=s:7f7fffff x2=s:40000000 mx=f80 => mx=fa8 f=* ! XM
+unmasked_underflow_exact_until_denormalized_sets_ue: x1=s:00800001 x2=s:3f000000 mx=1780 => mx=~20:1790 f=* ! XM
+unmasked_underflow_inexact_sets_ue_and_pe: x1=s:00800001 x2=s:3f000001 mx=1780 => mx=17b0 f=* ! XM
 @ mov eax, 7; addss xmm3, xmm3; divss xmm1, xmm2; mov ecx, 9
   b807000000 f30f58db !f30f5eca b909000000
   SDM 1 11.5.3.2; 3A 7.15 Interrupt 19
@@ -2581,6 +2596,26 @@ add_memory_crosses_contiguous_pages: rdi=D+1000 mffd=ffffffffffffffff => mffd=00
 push_pop_cross_contiguous_pages: rsp=D+1004 rax=1122334455667788 => rbx=1122334455667788 mffc=8877665544332211 f=*
 ";
 
+const DEFECT_EXACT_UNMASKED_OVERFLOW: &str = r"
+@ mulss xmm1, xmm2
+  !f30f59ca
+  SDM 1 D.4.2.3 Table D-16 (PE only if inexact); APM 1 4.10.2.8
+unmasked_overflow_exact_sets_only_oe: x1=s:7f7fffff x2=s:40000000 mx=1b80 => mx=1b88 f=* ! XM
+unmasked_negative_overflow_exact_sets_only_oe: x1=s:ff7fffff x2=s:40000000 mx=1b80 => mx=1b88 f=* ! XM
+@ addsd xmm1, xmm2
+  !f20f58ca
+  SDM 1 D.4.2.3 Table D-16 (PE only if inexact); APM 1 4.10.2.8
+unmasked_overflow_exact_addsd: x1=r:7fefffffffffffff x2=r:7fefffffffffffff mx=1b80 => mx=1b88 f=* ! XM
+@ divss xmm1, xmm2
+  !f30f5eca
+  SDM 1 D.4.2.3 Table D-16 (PE only if inexact); APM 1 4.10.2.8
+unmasked_overflow_exact_divss: x1=s:7f7fffff x2=s:3f000000 mx=1b80 => mx=1b88 f=* ! XM
+@ cvtsd2ss xmm1, xmm2
+  !f20f5aca
+  SDM 1 D.4.2.3 Table D-16 (PE only if inexact); APM 1 4.10.2.8
+unmasked_overflow_exact_cvtsd2ss: x2=r:c7f0000000000000 mx=1b80 => mx=1b88 f=* ! XM
+";
+
 const GROUPS: &[(&str, &str)] = &[
     ("add_sub_flags", ADD_SUB_FLAGS),
     ("carry_chains", CARRY_CHAINS),
@@ -2614,145 +2649,149 @@ const GROUPS: &[(&str, &str)] = &[
     ("fp_mxcsr_and_unmasked", FP_MXCSR_AND_UNMASKED),
     ("fp_beyond_sse2", FP_BEYOND_SSE2),
     ("defect_overlong_instruction", DEFECT_OVERLONG_INSTRUCTION),
+    (
+        "defect_exact_unmasked_overflow",
+        DEFECT_EXACT_UNMASKED_OVERFLOW,
+    ),
     ("page_crossing", PAGE_CROSSING),
 ];
 
-/// Forms both engines refuse today. They are not verified, only required to be
-/// refused before they change guest state.
-const UNSUPPORTED: &[&str] = &[
-    "addr32_load_truncates_effective_address",
-    "addr32_sum_wraps_at_32_bits",
-    "bt_memory_negative_offset",
-    "bt_memory_positive_offset_beyond_operand",
-    "bt_memory_register_offset_can_fault",
-    "btr16_memory_negative_16bit_offset",
-    "bts_memory_negative_offset",
-    "cmpsb_is_rsi_minus_rdi",
-    "cmpxchg16b_equal",
-    "cmpxchg16b_equal_without_lock",
-    "cmpxchg16b_not_equal",
-    "cmpxchg16b_unaligned_is_gp",
-    "cmpxchg16b_unaligned_without_lock_is_gp",
-    "cmpxchg32_equal",
-    "cmpxchg64_memory_equal_without_lock",
-    "cmpxchg64_memory_not_equal",
-    "cmpxchg64_memory_not_equal_without_lock",
-    "cmpxchg8_not_equal_loads_al",
-    "cmpxchg8b_equal",
-    "cmpxchg8b_equal_without_lock",
-    "cmpxchg8b_not_equal",
-    "cmpxchg_mismatch_still_writes",
-    "crc32c_byte_and_qword_forms_agree",
-    "crc32c_check_string",
-    "dpps_mask",
-    "enter_leave_round_trip",
-    "fifteen_byte_instruction_executes",
-    "fs_addr32_truncates_before_adding_base",
-    "fs_rep_movsb_overrides_source_only",
-    "fs_rep_movsb_overrides_source_only_df_clear",
-    "gs_lock_xadd",
-    "gs_xadd_without_lock",
-    "haddps_hsubpd_addsubps",
-    "insertps_zero_mask",
-    "jecxz_tests_low_32_bits",
-    "jrcxz_tests_all_64_bits",
-    "lahf",
-    "lahf_zero",
-    "lea64_addr32_truncates_effective_address",
-    "lock_btc_memory",
-    "lodsd_zero_extends",
-    "lodsd_zero_extends_df_clear",
-    "lodsw_preserves_upper48",
-    "loop_decrements_rcx_without_flags",
-    "loopne_stops_on_zero_flag",
-    "maskmovdqu_selects_bytes",
-    "mov_moffs64_load",
-    "mov_moffs8_store",
-    "movddup_movsldup_movshdup",
-    "movdqa_movaps_aligned_store_and_load",
-    "movsb_forward",
-    "mpsadbw",
-    "pabs_min_is_unchanged",
-    "packusdw",
-    "palignr",
-    "pblendvb_uses_xmm0_msb",
-    "pblendw_blendps",
-    "pcmpeqq_pcmpgtq",
-    "pextr_pinsr_sse41",
-    "phaddsw_pmaddubsw_saturate",
-    "phaddw_phaddd_phsubw",
-    "phminposuw",
-    "pmin_pmax_sse41",
-    "pmovsx_pmovzx",
-    "pmulhrsw",
-    "pmulld_pmuldq",
-    "pshufb",
-    "psign",
-    "ptest_carry_when_source_is_subset",
-    "ptest_flags",
-    "push16_moves_rsp_by_two",
-    "pushfq_popfq_status_round_trip",
-    "rcl16_by16",
-    "rcl16_by17_is_identity",
-    "rcl32_by31",
-    "rcl32_cl32_affects_nothing_but_extension",
-    "rcl64_by63",
-    "rcl8_by1_clear_carry_in",
-    "rcl8_by1_set_carry_in_preserves_szap",
-    "rcl8_by8",
-    "rcl8_by9_is_identity",
-    "rcpps_special_values",
-    "rcpss_relative_error_bound",
-    "rcpss_rsqrtss_signal_nothing",
-    "rcr64_by1",
-    "rcr8_by10_is_by_one_mod_9",
-    "rcr8_by1_clear_carry_in",
-    "rcr8_by1_set_carry_in",
-    "rep_lodsb_source_fault",
-    "rep_movs_zero_count_touches_nothing",
-    "rep_movsb_addr32_uses_32bit_registers",
-    "rep_movsb_fault_df_clear",
-    "rep_movsb_fault_stops_at_failing_iteration",
-    "rep_movsb_overlap_propagates_df_clear",
-    "rep_movsq_overlap_propagates",
-    "rep_movsq_zero_count_df_clear",
-    "rep_movsw_backward",
-    "rep_stosd_df_clear",
-    "rep_stosd_forward",
-    "rep_stosq_fault_df_clear",
-    "rep_stosq_fault_stops_at_failing_iteration",
-    "repe_cmpsb_fault_restores_flags",
-    "repe_cmpsb_fault_restores_flags_df_clear",
-    "repe_cmpsb_stops_at_difference",
-    "repe_cmpsb_stops_at_difference_df_clear",
-    "repe_cmpsb_zero_count_keeps_flags",
-    "repne_scasb_finds_byte",
-    "repne_scasb_finds_byte_df_clear",
-    "repne_scasd_exhausts_count",
-    "rex_not_adjacent_to_opcode_is_ignored",
-    "roundps_uses_mxcsr_rc",
-    "roundsd_suppress_precision",
-    "roundss_imm_modes",
-    "sahf_clear_keeps_of",
-    "sahf_ignores_bits_1_3_5",
-    "shld16_by16_takes_source",
-    "shld32_by1_sign_change",
-    "shld32_by4",
-    "shld32_cl32_is_count_zero",
-    "shld64_by63",
-    "shr_rcr_128bit_right_shift",
-    "shrd32_by8",
-    "shrd64_by1_sign_change",
-    "shrd64_cl64_is_count_zero",
-    "xadd32_reg_reg",
-    "xadd64_memory",
-    "xadd64_memory_without_lock",
-    "xadd64_same_register_doubles",
-    "xadd8_al_ah",
-    "xadd_readonly_page_keeps_register",
-    "xchg_ax_r9w_preserves_both_uppers",
-    "xchg_eax_ebx_clears_both_uppers",
-    "xchg_rax_r8_is_not_nop",
+/// Forms both engines refuse today, with the index of the refused instruction.
+/// They are not verified, only required to be refused without changing state.
+const UNSUPPORTED: &[(&str, usize)] = &[
+    ("addr32_load_truncates_effective_address", 0),
+    ("addr32_sum_wraps_at_32_bits", 0),
+    ("bt_memory_negative_offset", 0),
+    ("bt_memory_positive_offset_beyond_operand", 0),
+    ("bt_memory_register_offset_can_fault", 0),
+    ("btr16_memory_negative_16bit_offset", 0),
+    ("bts_memory_negative_offset", 0),
+    ("cmpsb_is_rsi_minus_rdi", 0),
+    ("cmpxchg16b_equal", 0),
+    ("cmpxchg16b_equal_without_lock", 0),
+    ("cmpxchg16b_not_equal", 0),
+    ("cmpxchg16b_unaligned_is_gp", 0),
+    ("cmpxchg16b_unaligned_without_lock_is_gp", 0),
+    ("cmpxchg32_equal", 0),
+    ("cmpxchg64_memory_equal_without_lock", 0),
+    ("cmpxchg64_memory_not_equal", 0),
+    ("cmpxchg64_memory_not_equal_without_lock", 0),
+    ("cmpxchg8_not_equal_loads_al", 0),
+    ("cmpxchg8b_equal", 0),
+    ("cmpxchg8b_equal_without_lock", 0),
+    ("cmpxchg8b_not_equal", 0),
+    ("cmpxchg_mismatch_still_writes", 0),
+    ("crc32c_byte_and_qword_forms_agree", 0),
+    ("crc32c_check_string", 0),
+    ("dpps_mask", 0),
+    ("enter_leave_round_trip", 0),
+    ("fifteen_byte_instruction_executes", 0),
+    ("fs_addr32_truncates_before_adding_base", 0),
+    ("fs_rep_movsb_overrides_source_only", 0),
+    ("fs_rep_movsb_overrides_source_only_df_clear", 0),
+    ("gs_lock_xadd", 0),
+    ("gs_xadd_without_lock", 0),
+    ("haddps_hsubpd_addsubps", 0),
+    ("insertps_zero_mask", 0),
+    ("jecxz_tests_low_32_bits", 1),
+    ("jrcxz_tests_all_64_bits", 1),
+    ("lahf", 0),
+    ("lahf_zero", 0),
+    ("lea64_addr32_truncates_effective_address", 0),
+    ("lock_btc_memory", 0),
+    ("lodsd_zero_extends", 0),
+    ("lodsd_zero_extends_df_clear", 0),
+    ("lodsw_preserves_upper48", 0),
+    ("loop_decrements_rcx_without_flags", 1),
+    ("loopne_stops_on_zero_flag", 1),
+    ("maskmovdqu_selects_bytes", 0),
+    ("mov_moffs64_load", 0),
+    ("mov_moffs8_store", 0),
+    ("movddup_movsldup_movshdup", 0),
+    ("movdqa_movaps_aligned_store_and_load", 3),
+    ("movsb_forward", 0),
+    ("mpsadbw", 0),
+    ("pabs_min_is_unchanged", 0),
+    ("packusdw", 0),
+    ("palignr", 0),
+    ("pblendvb_uses_xmm0_msb", 0),
+    ("pblendw_blendps", 0),
+    ("pcmpeqq_pcmpgtq", 0),
+    ("pextr_pinsr_sse41", 0),
+    ("phaddsw_pmaddubsw_saturate", 0),
+    ("phaddw_phaddd_phsubw", 0),
+    ("phminposuw", 0),
+    ("pmin_pmax_sse41", 0),
+    ("pmovsx_pmovzx", 0),
+    ("pmulhrsw", 0),
+    ("pmulld_pmuldq", 0),
+    ("pshufb", 0),
+    ("psign", 0),
+    ("ptest_carry_when_source_is_subset", 0),
+    ("ptest_flags", 0),
+    ("push16_moves_rsp_by_two", 0),
+    ("pushfq_popfq_status_round_trip", 0),
+    ("rcl16_by16", 0),
+    ("rcl16_by17_is_identity", 0),
+    ("rcl32_by31", 0),
+    ("rcl32_cl32_affects_nothing_but_extension", 0),
+    ("rcl64_by63", 0),
+    ("rcl8_by1_clear_carry_in", 0),
+    ("rcl8_by1_set_carry_in_preserves_szap", 0),
+    ("rcl8_by8", 0),
+    ("rcl8_by9_is_identity", 0),
+    ("rcpps_special_values", 0),
+    ("rcpss_relative_error_bound", 0),
+    ("rcpss_rsqrtss_signal_nothing", 0),
+    ("rcr64_by1", 0),
+    ("rcr8_by10_is_by_one_mod_9", 0),
+    ("rcr8_by1_clear_carry_in", 0),
+    ("rcr8_by1_set_carry_in", 0),
+    ("rep_lodsb_source_fault", 0),
+    ("rep_movs_zero_count_touches_nothing", 0),
+    ("rep_movsb_addr32_uses_32bit_registers", 0),
+    ("rep_movsb_fault_df_clear", 0),
+    ("rep_movsb_fault_stops_at_failing_iteration", 0),
+    ("rep_movsb_overlap_propagates_df_clear", 0),
+    ("rep_movsq_overlap_propagates", 0),
+    ("rep_movsq_zero_count_df_clear", 0),
+    ("rep_movsw_backward", 0),
+    ("rep_stosd_df_clear", 0),
+    ("rep_stosd_forward", 0),
+    ("rep_stosq_fault_df_clear", 0),
+    ("rep_stosq_fault_stops_at_failing_iteration", 0),
+    ("repe_cmpsb_fault_restores_flags", 0),
+    ("repe_cmpsb_fault_restores_flags_df_clear", 0),
+    ("repe_cmpsb_stops_at_difference", 0),
+    ("repe_cmpsb_stops_at_difference_df_clear", 0),
+    ("repe_cmpsb_zero_count_keeps_flags", 0),
+    ("repne_scasb_finds_byte", 0),
+    ("repne_scasb_finds_byte_df_clear", 0),
+    ("repne_scasd_exhausts_count", 0),
+    ("rex_not_adjacent_to_opcode_is_ignored", 0),
+    ("roundps_uses_mxcsr_rc", 0),
+    ("roundsd_suppress_precision", 0),
+    ("roundss_imm_modes", 0),
+    ("sahf_clear_keeps_of", 0),
+    ("sahf_ignores_bits_1_3_5", 0),
+    ("shld16_by16_takes_source", 0),
+    ("shld32_by1_sign_change", 0),
+    ("shld32_by4", 0),
+    ("shld32_cl32_is_count_zero", 0),
+    ("shld64_by63", 0),
+    ("shr_rcr_128bit_right_shift", 1),
+    ("shrd32_by8", 0),
+    ("shrd64_by1_sign_change", 0),
+    ("shrd64_cl64_is_count_zero", 0),
+    ("xadd32_reg_reg", 0),
+    ("xadd64_memory", 0),
+    ("xadd64_memory_without_lock", 0),
+    ("xadd64_same_register_doubles", 0),
+    ("xadd8_al_ah", 0),
+    ("xadd_readonly_page_keeps_register", 0),
+    ("xchg_ax_r9w_preserves_both_uppers", 0),
+    ("xchg_eax_ebx_clears_both_uppers", 0),
+    ("xchg_rax_r8_is_not_nop", 0),
 ];
 
 // ---------------------------------------------------------------------------
@@ -3143,7 +3182,16 @@ fn run(engine: Engine, cpu: &CpuState, memory: &mut GuestMemory) -> (CpuState, E
             let mut dbt = new_dbt();
             let mut scratch = memory.clone();
             run_dbt(&mut dbt, cpu, &mut scratch, BUDGET);
-            run_dbt(&mut dbt, cpu, memory, BUDGET)
+            let warm = dbt.metrics;
+            let result = run_dbt(&mut dbt, cpu, memory, BUDGET);
+            // Nothing is cached when the first instruction does not decode.
+            assert!(
+                warm.blocks_compiled == 0 || dbt.metrics.cache_hits > warm.cache_hits,
+                "second run missed the cache: {warm:?} then {:?}",
+                dbt.metrics
+            );
+            assert_eq!(dbt.metrics.blocks_compiled, warm.blocks_compiled);
+            result
         }
         Engine::DbtStepped => {
             let mut dbt = new_dbt();
@@ -3327,10 +3375,7 @@ fn check_group(table: &'static str) {
     let cases = parse(table);
     let mut report = Vec::new();
     let mut verified = 0;
-    for case in cases
-        .iter()
-        .filter(|case| !UNSUPPORTED.contains(&case.name))
-    {
+    for case in cases.iter().filter(|case| refused_at(case.name).is_none()) {
         let found = failures(case);
         if found.is_empty() {
             verified += 1;
@@ -3496,6 +3541,12 @@ fn defect_overlong_instruction() {
 }
 
 #[test]
+#[ignore = "known defect (#155): an exact unmasked overflow sets PE as well as OE"]
+fn defect_exact_unmasked_overflow() {
+    check_group(DEFECT_EXACT_UNMASKED_OVERFLOW);
+}
+
+#[test]
 fn page_crossing() {
     check_group(PAGE_CROSSING);
 }
@@ -3512,48 +3563,64 @@ fn case_names_are_unique_and_listed_exceptions_exist() {
     let cases = all_cases();
     let names: BTreeSet<&str> = cases.iter().map(|(_, case)| case.name).collect();
     assert_eq!(names.len(), cases.len(), "duplicate case name");
-    for name in UNSUPPORTED {
+    for (name, _) in UNSUPPORTED {
         assert!(names.contains(name), "unknown case {name}");
     }
 }
 
-/// A form outside the supported set must be refused, never approximated.
+/// The instruction index at which both engines refuse a case, if they do.
+fn refused_at(name: &str) -> Option<usize> {
+    let entry = UNSUPPORTED.iter().find(|(known, _)| *known == name)?;
+    Some(entry.1)
+}
+
+/// A form outside the supported set must be refused at that instruction, never
+/// approximated. The state must be exactly what the instructions before it left:
+/// the reference is an interpreter run of only those instructions, and their
+/// own results are checked by other cases.
 #[test]
 fn unsupported_forms_are_refused_without_changing_state() {
     for (_, case) in all_cases() {
-        if !UNSUPPORTED.contains(&case.name) {
+        let Some(index) = refused_at(case.name) else {
             continue;
-        }
-        let start = initial_state(&case);
-        for engine in ENGINES {
-            let mut memory = start.image.load(&case.code);
-            let (cpu, exit) = run(engine, &start.cpu, &mut memory);
-            assert!(
-                matches!(exit, ExitReason::IllegalInstruction(_)),
-                "{} on {engine:?}: {exit:?}",
-                case.name
-            );
-            let offset = (cpu.rip - CODE) as usize;
-            assert!(case.offsets.contains(&offset), "{}", case.name);
-            if offset == 0 {
-                assert_eq!(cpu, start.cpu, "{} on {engine:?}", case.name);
-                assert_eq!(Image::store(&memory).differences(&start.image), "");
+        };
+        let offset = case.offsets[index];
+        for flags in flag_sweep(&case) {
+            let mut start = initial_state(&case);
+            set_flags(&mut start.cpu.flags, flags);
+            let mut before = start.image.load(&case.code[..offset]);
+            let (mut wanted, exit) = run(Engine::Interpreter, &start.cpu, &mut before);
+            assert_eq!(exit, ExitReason::Halt, "{} prefix", case.name);
+            wanted.rip = CODE + offset as u64;
+            for engine in ENGINES {
+                let mut memory = start.image.load(&case.code);
+                let (cpu, exit) = run(engine, &start.cpu, &mut memory);
+                let what = format!("{} on {engine:?}", case.name);
+                assert!(
+                    matches!(exit, ExitReason::IllegalInstruction(_)),
+                    "{what}: {exit:?}"
+                );
+                assert_eq!(cpu, wanted, "{what}");
+                // Scratch stack included: a refused push must not write it.
+                let (got, wanted) = (Image::store(&memory), Image::store(&before));
+                assert!(got == wanted, "{what}: memory changed");
             }
         }
     }
 }
 
 /// Which route each verified instruction takes in the DBT. The per-instruction
-/// answer of `is_native` must agree with the engine's own fallback counter, so
-/// helper calls cannot be mistaken for translated code. Run with `--nocapture`
-/// for the list.
+/// answer of `is_native` must agree with the engine's own fallback counter for
+/// every straight-line case that does not fault; for the others the route is only
+/// what `is_native` predicts. Run with `--nocapture` for the list.
 #[test]
 fn dbt_route_of_every_case_is_recorded() {
     let mut native: BTreeSet<&str> = BTreeSet::new();
     let mut helper: BTreeSet<&str> = BTreeSet::new();
     let mut counts: BTreeMap<&str, [usize; 3]> = BTreeMap::new();
+    let (mut counted, mut predicted) = (0, 0);
     for (group, case) in all_cases() {
-        if UNSUPPORTED.contains(&case.name) {
+        if refused_at(case.name).is_some() {
             continue;
         }
         let start = initial_state(&case);
@@ -3580,19 +3647,33 @@ fn dbt_route_of_every_case_is_recorded() {
             (false, false) => continue,
         };
         counts.entry(group).or_default()[kind] += 1;
-        if let ([only], 1, true) = (routes.as_slice(), case.offsets.len(), case.fault.is_empty()) {
+        // Straight-line cases run each instruction once, so the counter must equal
+        // the number of helper instructions.
+        let labelled = text.iter().any(|piece| {
+            piece
+                .split_once(':')
+                .is_some_and(|(label, _)| label.parse::<u8>().is_ok())
+        });
+        if !labelled && case.fault.is_empty() && routes.len() == case.offsets.len() {
             let mut dbt = new_dbt();
             let mut memory = memory.clone();
             run_dbt(&mut dbt, &start.cpu, &mut memory, BUDGET);
             assert_eq!(
                 dbt.metrics.interpreter_fallbacks,
-                usize::from(!only),
+                routes.iter().filter(|native| !**native).count(),
                 "{}: {:?}",
                 case.name,
                 dbt.metrics
             );
+            counted += 1;
+        } else {
+            predicted += 1;
         }
     }
+    println!(
+        "{counted} cases confirmed by the fallback counter; {predicted} cases with branches or \
+         faults are only predicted by is_native"
+    );
     println!("group: cases with only native code / only helpers / both");
     for (group, [only_native, only_helper, both]) in counts {
         println!("{group}: {only_native} / {only_helper} / {both}");
@@ -4475,6 +4556,9 @@ const UE: u32 = 16;
 const PE: u32 = 32;
 const DAZ: u32 = 0x40;
 const FTZ: u32 = 0x8000;
+const DM: u32 = 0x100;
+const OM: u32 = 0x400;
+const UM: u32 = 0x800;
 const MASKS: u32 = 0x1f80;
 
 /// Binary32 or binary64 (SDM 1 4.2.2).
@@ -4650,7 +4734,8 @@ fn deliver(
     let precision = format.precision as i32;
     let leading = 127 - significand.leading_zeros() as i32 + exponent;
     let lowest = leading - precision + 1;
-    let (unbounded, _) = round_to(significand, exponent, sticky, lowest, negative, mode);
+    let (unbounded, unbounded_exact) =
+        round_to(significand, exponent, sticky, lowest, negative, mode);
     let carried = unbounded >> precision != 0;
     let rounded_exponent = leading + i32::from(carried);
     let tiny = rounded_exponent < format.min_exponent();
@@ -4663,23 +4748,29 @@ fn deliver(
         lowest += 1;
     }
     let inexact = if exact { 0 } else { PE };
-    if mxcsr & MASKS == 0 && tiny {
-        // Unmasked underflow is reported for any tiny result.
+    // Unmasked overflow and underflow set PE only if rounding to the destination
+    // precision with an unbounded exponent is inexact (D.4.2.3 Tables D-16, D-17).
+    let unbounded_inexact = if unbounded_exact { 0 } else { PE };
+    if mxcsr & UM == 0 && tiny {
+        // When only denormalizing would lose bits, D-17 leaves PE clear while
+        // AMD APM 1 4.10.2.8 can be read as setting it.
         return Outcome {
-            result: 0,
-            flags: UE | inexact,
-            open: PE,
+            open: if unbounded_exact && !exact { PE } else { 0 },
+            ..outcome(0, UE | unbounded_inexact)
         };
     }
     if mxcsr & FTZ != 0 && tiny {
-        // The flags of an exact tiny result that is flushed are ambiguous.
-        return Outcome {
-            result: format.signed(negative, 0),
-            flags: UE | PE,
-            open: if exact { UE | PE } else { 0 },
-        };
+        return outcome(format.signed(negative, 0), UE | PE);
     }
     if lowest + precision - 1 > format.max_exponent() {
+        if mxcsr & OM == 0 {
+            // PE of an exact overflow is `defect_exact_unmasked_overflow`; this
+            // sweep compares every other bit.
+            return Outcome {
+                open: if unbounded_exact { PE } else { 0 },
+                ..outcome(0, OE | unbounded_inexact)
+            };
+        }
         let to_infinity = match mode {
             0 => true,
             1 => negative,
@@ -4687,11 +4778,7 @@ fn deliver(
             _ => false,
         };
         let magnitude = format.infinity() - u64::from(!to_infinity);
-        return Outcome {
-            result: format.signed(negative, magnitude),
-            flags: OE | PE,
-            open: if mxcsr & MASKS == 0 { PE } else { 0 },
-        };
+        return outcome(format.signed(negative, magnitude), OE | PE);
     }
     let field = (lowest - floor) as u64;
     let magnitude = (field << format.fraction_bits()) + value as u64;
@@ -4761,7 +4848,7 @@ fn float(op: &str, format: Format, a: u64, b: u64, mxcsr: u32) -> Outcome {
     let (zero_a, zero_b) = (format.is_zero(a), format.is_zero(b));
     let with_denormal = |mut result: Outcome| {
         // An unmasked pre-computation exception hides later ones (11.5.3.2).
-        if mxcsr & MASKS == 0 && denormal != 0 {
+        if mxcsr & DM == 0 && denormal != 0 {
             result.flags = 0;
             result.open = 0;
         }
@@ -4917,7 +5004,7 @@ fn convert_format(from: Format, to: Format, value: u64, mxcsr: u32) -> Outcome {
     let (significand, exponent) = from.split(value);
     let mut result = deliver(to, negative, significand, exponent, false, mxcsr);
     if denormal {
-        if mxcsr & MASKS == 0 {
+        if mxcsr & DM == 0 {
             (result.flags, result.open) = (0, 0);
         }
         result.flags |= DE;
@@ -4966,6 +5053,9 @@ fn expect_float(
     write: impl Fn(&mut CpuState, u64),
 ) {
     let faults = must_fault(want.flags, cpu.mxcsr.0);
+    if !faults && must_fault(want.open, cpu.mxcsr.0) {
+        return; // The manual leaves open whether this raises #XM.
+    }
     let mut wanted = cpu.clone();
     if !faults {
         write(&mut wanted, want.result);
@@ -5010,13 +5100,19 @@ fn low(format: Format, base: u128, value: u64) -> u128 {
     base & !u128::from(mask(format.bits)) | u128::from(value)
 }
 
-/// Every rounding mode with and without FTZ and DAZ, masked and unmasked.
+/// Every rounding mode with and without FTZ and DAZ, all masked and all unmasked,
+/// and each exception unmasked alone.
 fn mxcsr_values() -> Vec<u32> {
     let mut values = Vec::new();
     for mode in 0..4 {
         for flush in [0, FTZ, DAZ, FTZ | DAZ] {
             for masks in [MASKS, 0] {
                 values.push(masks | mode << 13 | flush);
+            }
+        }
+        for flush in [0, FTZ | DAZ] {
+            for only in 7..13 {
+                values.push(MASKS & !(1 << only) | mode << 13 | flush);
             }
         }
     }
