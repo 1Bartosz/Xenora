@@ -1189,6 +1189,74 @@ fn guest_gdk_dispatch_runs_callback_and_resumes_caller() {
 }
 
 #[test]
+fn guest_gdk_termination_cancels_pending_callback() {
+    const IMAGE: u64 = 0x140000000;
+    const MODULE: &str = "xgameruntime.dll";
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call = |symbol, args: &[u64]| call_service_fixture(&state, MODULE, symbol, args);
+    let output = PROCESS_FIXTURE_STACK_TOP - 0x400;
+    let created = call("XTaskQueueCreate", &[0, 0, output]);
+    let queue = created.image.memory.read_u64(output).unwrap();
+    let submit = [queue, 0, 60_000, output, IMAGE + 0x1100];
+    assert_eq!(
+        call("XTaskQueueSubmitDelayedCallback", &submit)
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+    assert_eq!(
+        call("XTaskQueueTerminate", &[queue, 0, 0, 0])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+    assert_eq!(
+        call("XTaskQueueSubmitDelayedCallback", &submit)
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0x8000_4004
+    );
+
+    let mut code = vec![0x48, 0x83, 0xec, 0x48, 0x48, 0xb9];
+    code.extend_from_slice(&queue.to_le_bytes());
+    code.extend_from_slice(&[0x31, 0xd2, 0x45, 0x31, 0xc0]); // port and timeout zero
+    append_import_call(&mut code, 0x2060);
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x48, 0xf4]);
+    code.resize(0x100, 0);
+    code.extend_from_slice(&[0x48, 0x89, 0x11, 0xc3]); // store canceled at context
+    let image = TestPeBuilder::new(IMAGE, 0x1000)
+        .add_import(MODULE, "XTaskQueueDispatch")
+        .code(&code)
+        .build();
+    let mut registry = ImportRegistry::new();
+    register_standard_services(&mut registry, Arc::clone(&state));
+    let result = run_synthetic_startup(
+        &image,
+        StartupLayout {
+            image_base: IMAGE,
+            stack_top: PROCESS_FIXTURE_STACK_TOP,
+            tls_base: 0x300000000,
+        },
+        registry,
+        100,
+    )
+    .unwrap();
+    assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+    assert_eq!(result.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(result.image.memory.read_u64(output).unwrap(), 1);
+    assert_eq!(
+        call("XTaskQueueDispatch", &[queue, 0, 1000])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+}
+
+#[test]
 fn guest_gdk_manual_queue_handles_have_independent_lifetimes() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let call = |symbol, args: &[u64]| {

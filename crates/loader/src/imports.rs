@@ -201,6 +201,7 @@ const MAX_CALLBACK_DEPTH: usize = 32;
 pub(crate) struct GuestCallback {
     pub(crate) entry: u64,
     pub(crate) context: u64,
+    pub(crate) cancelled: bool,
 }
 
 type CallbackDispatch = Box<
@@ -595,7 +596,7 @@ impl ImportRegistry {
                     },
                 );
                 cpu.set(Register::Rcx, callback.context);
-                cpu.set(Register::Rdx, 0);
+                cpu.set(Register::Rdx, u64::from(callback.cancelled));
                 cpu.rip = callback.entry;
                 return Ok(());
             }

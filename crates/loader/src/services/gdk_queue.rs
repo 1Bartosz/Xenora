@@ -8,7 +8,7 @@ use crate::cpu::ExitReason;
 use crate::imports::{GuestCallback, ImportRegistry, ServiceStatus};
 use crate::memory::GuestMemory;
 use crate::runtime::HResult;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,15 +18,24 @@ const MAX_DISPATCH_WAIT_MS: u32 = 1_000;
 const MAX_CALLBACKS_PER_PORT: usize = 32;
 const ERROR_OUTOFMEMORY: u32 = 14;
 const MANUAL: u32 = 0;
+const E_ABORT: u64 = 0x8000_4004;
 
 #[derive(Default)]
 pub(super) struct QueueHandles {
     last_id: u64,
-    queues: BTreeMap<u64, [u64; 2]>,
+    queues: BTreeMap<u64, Queue>,
+    terminated: BTreeSet<u64>,
     pending: BTreeMap<u64, VecDeque<ScheduledCallback>>,
 }
 
+#[derive(Clone, Copy)]
+struct Queue {
+    id: u64,
+    ports: [u64; 2],
+}
+
 struct ScheduledCallback {
+    owner: u64,
     ready_at: Instant,
     callback: GuestCallback,
 }
@@ -34,7 +43,8 @@ struct ScheduledCallback {
 impl QueueHandles {
     fn open(
         &mut self,
-        ports: Option<[u64; 2]>,
+        duplicate: Option<Queue>,
+        composite: Option<[u64; 2]>,
         output: u64,
         memory: &mut GuestMemory,
     ) -> Result<(), u32> {
@@ -56,15 +66,22 @@ impl QueueHandles {
         self.last_id = next;
         self.queues.insert(
             handle,
-            ports.unwrap_or([0x5157_0000_0000_0000 | next, 0x5143_0000_0000_0000 | next]),
+            duplicate.unwrap_or(Queue {
+                id: handle,
+                ports: composite
+                    .unwrap_or([0x5157_0000_0000_0000 | next, 0x5143_0000_0000_0000 | next]),
+            }),
         );
         Ok(())
     }
 
     fn close(&mut self, handle: u64) {
-        if let Some(ports) = self.queues.remove(&handle) {
-            for port in ports {
-                if !self.queues.values().any(|live| live.contains(&port)) {
+        if let Some(queue) = self.queues.remove(&handle) {
+            if !self.queues.values().any(|live| live.id == queue.id) {
+                self.terminated.remove(&queue.id);
+            }
+            for port in queue.ports {
+                if !self.queues.values().any(|live| live.ports.contains(&port)) {
                     self.pending.remove(&port);
                 }
             }
@@ -75,10 +92,12 @@ impl QueueHandles {
         &mut self,
         handle: u64,
         selector: u32,
-        callback: ScheduledCallback,
+        mut callback: ScheduledCallback,
     ) -> Result<(), u32> {
-        let ports = self.queues.get(&handle).ok_or(ERROR_INVALID_HANDLE)?;
-        let port = ports
+        let queue = self.queues.get(&handle).ok_or(ERROR_INVALID_HANDLE)?;
+        callback.owner = queue.id;
+        let port = queue
+            .ports
             .get(selector as usize)
             .ok_or(ERROR_INVALID_PARAMETER)?;
         let queue = self.pending.entry(*port).or_default();
@@ -109,7 +128,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 return Ok(guest_hresult(Err(ERROR_NOT_SUPPORTED)));
             }
             let mut queues = create.gdk_queues.lock().expect("GDK queue handle table");
-            Ok(guest_hresult(queues.open(None, args.r8, memory)))
+            Ok(guest_hresult(queues.open(None, None, args.r8, memory)))
         },
     );
 
@@ -123,7 +142,12 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             let Some(&object) = queues.queues.get(&args.rcx) else {
                 return Ok(guest_hresult(Err(ERROR_INVALID_HANDLE)));
             };
-            Ok(guest_hresult(queues.open(Some(object), args.rdx, memory)))
+            Ok(guest_hresult(queues.open(
+                Some(object),
+                None,
+                args.rdx,
+                memory,
+            )))
         },
     );
 
@@ -153,6 +177,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 let queues = get.gdk_queues.lock().expect("GDK queue handle table");
                 let ports = queues.queues.get(&args.rcx).ok_or(ERROR_INVALID_HANDLE)?;
                 let port = ports
+                    .ports
                     .get(args.rdx as u32 as usize)
                     .ok_or(ERROR_INVALID_PARAMETER)?;
                 if args.r8 == 0 {
@@ -176,11 +201,16 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             let ports = [args.rcx, args.rdx];
             if ports
                 .iter()
-                .any(|port| !queues.queues.values().any(|live| live.contains(port)))
+                .any(|port| !queues.queues.values().any(|live| live.ports.contains(port)))
             {
                 return Ok(guest_hresult(Err(ERROR_INVALID_HANDLE)));
             }
-            Ok(guest_hresult(queues.open(Some(ports), args.r8, memory)))
+            Ok(guest_hresult(queues.open(
+                None,
+                Some(ports),
+                args.r8,
+                memory,
+            )))
         },
     );
 
@@ -206,9 +236,21 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     return Ok(guest_hresult(Err(ERROR_INVALID_PARAMETER)));
                 }
                 let mut queues = submit.gdk_queues.lock().expect("GDK queue handle table");
+                if queues
+                    .queues
+                    .get(&args.rcx)
+                    .is_some_and(|queue| queues.terminated.contains(&queue.id))
+                {
+                    return Ok(E_ABORT);
+                }
                 let callback = ScheduledCallback {
+                    owner: 0,
                     ready_at: Instant::now() + Duration::from_millis(u64::from(delay)),
-                    callback: GuestCallback { entry, context },
+                    callback: GuestCallback {
+                        entry,
+                        context,
+                        cancelled: false,
+                    },
                 };
                 let result = queues.submit(args.rcx, args.rdx as u32, callback);
                 if result.is_ok() {
@@ -218,6 +260,33 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             },
         );
     }
+    let terminate = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "XTaskQueueTerminate",
+        ServiceStatus::Partial,
+        move |args, _, _| {
+            if args.rdx as u8 != 0 || args.r9 != 0 {
+                return Ok(guest_hresult(Err(ERROR_NOT_SUPPORTED)));
+            }
+            let mut queues = terminate.gdk_queues.lock().expect("GDK queue handle table");
+            let Some(&queue) = queues.queues.get(&args.rcx) else {
+                return Ok(guest_hresult(Err(ERROR_INVALID_HANDLE)));
+            };
+            if queues.terminated.insert(queue.id) {
+                let now = Instant::now();
+                for pending in queues.pending.values_mut() {
+                    for item in pending.iter_mut().filter(|item| item.owner == queue.id) {
+                        item.ready_at = item.ready_at.min(now);
+                        item.callback.cancelled = true;
+                    }
+                    pending.make_contiguous().sort_by_key(|item| item.ready_at);
+                }
+                terminate.gdk_queue_changed.notify_all();
+            }
+            Ok(0)
+        },
+    );
     let dispatch = Arc::clone(state);
     registry.register_callback_dispatch(MODULE, "XTaskQueueDispatch", move |args, memory| {
         let timeout = args.r8 as u32;
@@ -227,25 +296,31 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let deadline = Instant::now() + Duration::from_millis(u64::from(timeout));
         let mut queues = dispatch.gdk_queues.lock().expect("GDK queue handle table");
         loop {
-            let Some(&port) = queues
-                .queues
-                .get(&args.rcx)
-                .and_then(|ports| ports.get(args.rdx as u32 as usize))
-            else {
+            let Some(&queue) = queues.queues.get(&args.rcx) else {
                 return Ok(None);
             };
+            let Some(&port) = queue.ports.get(args.rdx as u32 as usize) else {
+                return Ok(None);
+            };
+            let terminated = queues.terminated.contains(&queue.id);
             let now = Instant::now();
             let mut wake_at = deadline;
             if let Some(pending) = queues.pending.get_mut(&port)
-                && let Some(item) = pending.front()
+                && let Some((index, item)) = pending
+                    .iter()
+                    .enumerate()
+                    .find(|(_, item)| !terminated || item.owner == queue.id)
             {
                 if item.ready_at <= now {
                     memory
                         .fetch_instruction_byte(item.callback.entry)
                         .map_err(ExitReason::MemoryFault)?;
-                    return Ok(pending.pop_front().map(|item| item.callback));
+                    return Ok(pending.remove(index).map(|item| item.callback));
                 }
                 wake_at = wake_at.min(item.ready_at);
+            }
+            if terminated {
+                return Ok(None);
             }
             let remaining = wake_at.saturating_duration_since(now);
             if remaining.is_zero() {
