@@ -1307,6 +1307,18 @@ addr32_sum_wraps_at_32_bits: rbx=ffff0000 rcx=10000+D rax=0 m0=44332211 => rax=1
   486601d8
   SDM 2A 2.2.1
 rex_not_adjacent_to_opcode_is_ignored: rax=112233445566ffff rbx=1 => rax=1122334455660000 f=CPAZso
+@ .byte 0x41,0x66,0x01,0xd8
+  416601d8
+  SDM 2A 2.2.1
+ignored_rex_b_does_not_select_r8: rax=112233445566ffff rbx=1 r8=5 => rax=1122334455660000 f=CPAZso
+@ .byte 0x48,0x64,0x8b,0x03
+  48648b03
+  SDM 2A 2.2.1; 1 3.4.1.1
+ignored_rex_w_before_segment_prefix_loads_32_bits: rax=ffffffffffffffff rbx=8 fs8=1122334455667788 => rax=44332211 f=*
+@ .byte 0x41,0x66,0x41,0x01,0xd8
+  41664101d8
+  SDM 2A 2.2.1
+rex_after_ignored_rex_applies: rax=7 rbx=1 r8=112233445566ffff => r8=1122334455660000 f=CPAZso
 @ .byte 0x66,0x48,0x01,0xd8
   664801d8
   SDM 2A 2.2.1.2
@@ -2746,7 +2758,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("repne_scasb_finds_byte", 1),
     ("repne_scasb_finds_byte_df_clear", 0),
     ("repne_scasd_exhausts_count", 1),
-    ("rex_not_adjacent_to_opcode_is_ignored", 0),
     ("roundps_uses_mxcsr_rc", 0),
     ("roundsd_suppress_precision", 0),
     ("roundss_imm_modes", 0),
