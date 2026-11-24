@@ -38,3 +38,38 @@ Run from the checkout root after extracting the approved XML.
 ```sh
 python3 crates/isa/generate_rdna2.py path/to/amdgpu_isa_rdna2.xml | diff -u crates/isa/src/rdna2.rs -
 ```
+
+## Complete instruction metadata
+
+`crates/isa/generate_rdna2_meta.py` reduces the same approved XML to every
+gfx1030 base instruction form: 1,460 forms in 21 encoding families, with
+identifying bits, field layouts, operands (field, data format, operand type,
+width, direction), control-flow flags and allowed extension words. It runs in
+two stages so regeneration and CI checks need no network and no XML:
+
+```sh
+python3 crates/isa/generate_rdna2_meta.py --xml path/to/amdgpu_isa_rdna2.xml  # XML -> snapshot -> Rust
+python3 crates/isa/generate_rdna2_meta.py --check                              # snapshot -> Rust, compare
+```
+
+The snapshot `crates/isa/data/rdna2.jsonl` is sorted, normalised MIT data
+under the AMD notice in `crates/isa/LICENSE-AMD`. The generator rejects a
+different XML hash, another architecture, unclassified encodings, duplicate
+variants, identifying bits outside a mask and overlapping encodings. Two
+details are not in the identifier masks and are handled explicitly: MIMG
+opcode bit 7 sits at bit 0, and MTBUF opcode bit 3 sits at bit 53.
+
+The XML names literal, SDWA, DPP8, DPP16 and NSA variants without a rule for
+when they apply. `xenora_isa::meta::identify` implements those length rules by
+hand: a source field equal to 255 (`SRC_LITERAL` in the XML) adds a literal;
+VOP1, VOP2 and VOPC `SRC0` values 0xF9, 0xFA, 0xE9 and 0xEA add an SDWA, DPP16
+or DPP8 control dword (from the RDNA 2 ISA guide's SDWA and DPP sections, not
+the XML); MIMG `NSA` adds that many address dwords. An extension the form does
+not list is rejected. Every LLVM-assembled fixture identifies with exact
+boundaries and matching mnemonics. A broader LLVM comparison of the extension
+rules is still open because it needs the LLVM oracle.
+
+Identification is not execution. `xenora shaders coverage` reports forms
+discovered in metadata against forms the semantic decoder accepts
+(`xenora_decoder::SEMANTIC_FORMS`); reference, Metal and native GPU evidence
+per form remains in `docs/status.toml`.
