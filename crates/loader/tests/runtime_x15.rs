@@ -1122,6 +1122,76 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn test_guest_waits_for_multiple_events_through_iat() {
+    const IMAGE: u64 = 0x140000000;
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call = |symbol, args: &[u64]| {
+        call_service_fixture(&state, "kernel32.dll", symbol, args)
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let wait = |handles: [u64; 2], all: bool| {
+        let mut code = vec![0x48, 0x83, 0xec, 0x28];
+        for (register, value) in [
+            ([0x48, 0xb9], 2u64),
+            ([0x48, 0xba], IMAGE + 0x1080),
+            ([0x49, 0xb8], u64::from(all)),
+            ([0x49, 0xb9], 0),
+        ] {
+            code.extend_from_slice(&register);
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        append_import_call(&mut code, 0x2060);
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
+        code.resize(0x80, 0);
+        for handle in handles {
+            code.extend_from_slice(&handle.to_le_bytes());
+        }
+        let bytes = TestPeBuilder::new(IMAGE, 0x1000)
+            .add_import("api-ms-win-core-synch-l1-2-1.dll", "WaitForMultipleObjects")
+            .code(&code)
+            .build();
+        let mut imports = ImportRegistry::new();
+        register_standard_services(&mut imports, state.clone());
+        let result = run_synthetic_startup(
+            &bytes,
+            StartupLayout {
+                image_base: IMAGE,
+                stack_top: PROCESS_FIXTURE_STACK_TOP,
+                tls_base: 0x300000000,
+            },
+            imports,
+            100,
+        )
+        .unwrap();
+        assert_eq!(result.bound_imports, 1);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result.execution.final_state.get(Register::Rax)
+    };
+
+    let first = call("CreateEventW", &[0, 0, 1, 0]);
+    let second = call("CreateEventW", &[0, 0, 0, 0]);
+    assert_eq!(wait([first, second], true), 258);
+    assert_eq!(wait([second, first], false), 1);
+    assert_eq!(wait([first, second], false), 258);
+
+    assert_eq!(call("SetEvent", &[first]), 1);
+    assert_eq!(call("SetEvent", &[second]), 1);
+    assert_eq!(wait([first, second], false), 0);
+    assert_eq!(call("SetEvent", &[first]), 1);
+    assert_eq!(wait([first, second], true), 0);
+    assert_eq!(wait([first, second], false), 258);
+
+    assert_eq!(call("SetEvent", &[first]), 1);
+    assert_eq!(wait([first, first], true), u64::from(u32::MAX));
+    assert_eq!(call("GetLastError", &[]), 87);
+    assert_eq!(wait([first, 0], false), u64::from(u32::MAX));
+    assert_eq!(call("GetLastError", &[]), 6);
+    assert_eq!(wait([second, first], false), 1);
+}
+
+#[test]
 fn test_guest_event_signaling_through_iat() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let call = |module, symbol, args: &[u64]| {

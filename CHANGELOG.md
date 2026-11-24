@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added immediate wait-any and wait-all for guest event handles.
+
 - Added guest CRT signed and unsigned 64-bit conversions for narrow and wide strings.
 
 - Added bounded guest CRT long-integer parsing for byte and wide strings.

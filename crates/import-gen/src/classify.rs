@@ -777,6 +777,7 @@ impl SymbolDb {
                 "SetEvent",
                 "ResetEvent",
                 "WaitForSingleObject",
+                "WaitForMultipleObjects",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
@@ -856,11 +857,10 @@ impl SymbolDb {
         );
 
         let m2 = "api-ms-win-core-synch-l1-2-1.dll";
-        self.win32_stub(
+        self.ins(
             m2,
             "WaitForMultipleObjects",
-            false,
-            "WaitForMultipleObjects — stub returning 0",
+            Classification::StandardService,
         );
         self.win32_stub(
             m2,
