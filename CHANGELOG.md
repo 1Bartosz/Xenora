@@ -22,6 +22,16 @@ remains unsupported.
   zero as specified. The ten two-subset modes are rejected with `Bc6hError::UnsupportedMode`
   and are not implemented. Tests check hand-derived values and 128 known-answer vectors from a
   separate clean-room reference decoder.
+- Added native Metal upload and readback of BC4 and BC5 textures (UNORM and SNORM):
+  `xenora-texture` gains a pitched `BcChannelUpload`, and `NativeCompute::read_bc_channel_upload`
+  sends the original blocks to `BC4_R*` or `BC5_RG*` textures when the device reports BC
+  support, failing with `supportsBCTextureCompression` otherwise. GPU tests cover six- and
+  eight-value interpolation, equal and extreme endpoints (signed -128 reads as -1.0), red-green
+  channel order, padded row and slice pitches, two layers and two mips against the CPU decoders
+  and hand-derived anchors. On an Apple M5 Pro interpolated codes were within 1.71 codes of the
+  exact values and up to two codes from the truncating CPU reference.
+  Edge levels of 5×3 and 1×1 and invalid payloads (zero extents, short, oversized or
+  block-count-mismatched buffers) are covered.
 - Added native Metal upload and readback of BC2 and BC3 textures: `xenora-texture` gains a
   pitched `BcAlphaUpload` for 16-byte blocks, and `NativeCompute::read_bc_alpha_upload` sends
   the original blocks to `BC2_RGBA` or `BC3_RGBA` textures when the device reports BC support.

@@ -20,6 +20,7 @@ pub use bc6h::{
 pub use sampler::{AddressMode, FilterMode, SamplerDesc, SamplerError, TextureMetadata};
 pub use upload::{
     Bc1Subresource, Bc1Upload, Bc1UploadDesc, BcAlphaFormat, BcAlphaUpload, BcAlphaUploadDesc,
+    BcChannelFormat, BcChannelUpload, BcChannelUploadDesc,
 };
 
 const BLOCK_BYTES: usize = 8;
