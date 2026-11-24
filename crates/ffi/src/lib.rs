@@ -6,10 +6,11 @@
 //! 32 bits hold that slot's generation, so a stale handle never reaches a reused slot.
 //! Every exported function catches panics and reports them as `XENORA_INTERNAL_ERROR`.
 
+use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
-use xenora_loader::{ExitReason, ImportRegistry, ParsedPe, Register};
+use xenora_loader::{ExitReason, ImportRegistry, ParsedPe, ProbeConfig, Register, probe_pe_bytes};
 use xenora_metal::NativeCompute;
 use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
@@ -266,6 +267,133 @@ pub unsafe extern "C" fn xenora_session_run_trusted_fixture(
     })
 }
 
+pub const XENORA_MAX_INSPECT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Build the read-only inspection report and its status: `XENORA_OK`, `XENORA_PE_ERROR`
+/// for a rejected file, or `XENORA_INTERNAL_ERROR` if Xenora's own probe failed.
+fn inspection_report(bytes: &[u8]) -> (i32, String) {
+    let mut out = String::from("Xenora read-only inspection: nothing in this file was executed.\n");
+    let _ = writeln!(out, "file_size: {} bytes", bytes.len());
+    let probed = catch_unwind(AssertUnwindSafe(|| {
+        probe_pe_bytes(bytes, &ProbeConfig::default())
+    }));
+    let report = match probed {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => {
+            let _ = writeln!(out, "verdict: not a supported PE32+ (x86-64) image: {e}");
+            return (XENORA_PE_ERROR, out);
+        }
+        Err(_) => {
+            out.push_str(
+                "verdict: inspection failed inside Xenora's static probe. This is a Xenora \
+                 defect, not a finding about the file.\n",
+            );
+            return (XENORA_INTERNAL_ERROR, out);
+        }
+    };
+    let pe = &report.parsed;
+    let _ = writeln!(out, "sha256: {}", report.sha256);
+    let _ = writeln!(
+        out,
+        "machine: {:#06x}  image_base: {:#x}  entry_rva: {:#x}  size_of_image: {:#x}",
+        pe.machine, pe.image_base, pe.entry_point_rva, pe.size_of_image
+    );
+    match ParsedPe::parse(bytes) {
+        Ok(_) => out.push_str("loader_validation: accepted\n"),
+        Err(e) => {
+            let _ = writeln!(out, "loader_validation: rejected: {e}");
+        }
+    }
+    let _ = writeln!(out, "\nsections ({}):", pe.sections.len());
+    for s in &pe.sections {
+        let p = s.permissions;
+        let _ = writeln!(
+            out,
+            "  {:<8} rva {:#010x}  vsize {:#x}  raw {:#x}  {}{}{}",
+            s.name,
+            s.virtual_address,
+            s.virtual_size,
+            s.raw_data_size,
+            if p.read { 'r' } else { '-' },
+            if p.write { 'w' } else { '-' },
+            if p.execute { 'x' } else { '-' },
+        );
+    }
+    let missing: Vec<_> = report.imports.iter().filter(|i| !i.is_supported).collect();
+    let _ = writeln!(
+        out,
+        "\nimports: {} total, {} provided by Xenora's standard runtime services, {} not provided",
+        report.imports.len(),
+        report.imports.len() - missing.len(),
+        missing.len()
+    );
+    for i in &missing {
+        let _ = writeln!(out, "  not provided: {}!{}", i.dll, i.symbol);
+    }
+    let decoded = report.instruction_records.len();
+    let unsupported = report
+        .instruction_records
+        .iter()
+        .filter(|r| !r.is_supported_dbt)
+        .count();
+    let _ = writeln!(
+        out,
+        "\nstatic disassembly (bounded): {decoded} instructions decoded, {unsupported} not supported by the ARM64 DBT"
+    );
+    if let Some(first) = &report.first_unsupported_dbt_insn {
+        let hex: String = first.bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let _ = writeln!(
+            out,
+            "  first unsupported: rva {:#x}  {}  [{hex}]",
+            first.rva, first.mnemonic
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nrelocations: {} entries\ntls callbacks: {}",
+        report.relocations.total_entries,
+        report.tls.callback_targets.len()
+    );
+    out.push_str("\nExecution of opened files is not available (see #257).\n");
+    (XENORA_OK, out)
+}
+
+/// # Safety
+/// `bytes` must be valid for `length` reads; `out_report` must be null or valid
+/// for `capacity` writes; `out_required` must be null or valid for one `u64` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_inspect_executable(
+    bytes: *const u8,
+    length: u64,
+    out_report: *mut std::ffi::c_char,
+    capacity: u64,
+    out_required: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if bytes.is_null() || out_report.is_null() || out_required.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        if length > XENORA_MAX_INSPECT_BYTES {
+            return XENORA_LIMIT_EXCEEDED;
+        }
+        // SAFETY: non-null, and the caller guarantees `length` readable bytes.
+        let input = unsafe { std::slice::from_raw_parts(bytes, length as usize) };
+        let (status, text) = inspection_report(input);
+        let required = text.len() as u64 + 1;
+        // SAFETY: non-null, checked above.
+        unsafe { out_required.write(required) };
+        if capacity < required {
+            return XENORA_BUFFER_TOO_SMALL;
+        }
+        // SAFETY: `capacity >= required`, checked above.
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), out_report.cast::<u8>(), text.len());
+            out_report.add(text.len()).write(0);
+        }
+        status
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +562,97 @@ mod tests {
         );
         assert_eq!((w, h), (0, 0), "outputs untouched on failure");
         assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    fn inspect_bytes(bytes: &[u8]) -> (i32, String) {
+        let mut required = 0;
+        let mut buf = vec![0 as std::ffi::c_char; 1];
+        let status = unsafe {
+            xenora_inspect_executable(
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                buf.as_mut_ptr(),
+                1,
+                &mut required,
+            )
+        };
+        assert_eq!(status, XENORA_BUFFER_TOO_SMALL);
+        assert_eq!(buf[0], 0, "nothing written when the buffer is too small");
+        buf.resize(required as usize, 0);
+        let status = unsafe {
+            xenora_inspect_executable(
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                buf.as_mut_ptr(),
+                required,
+                &mut required,
+            )
+        };
+        let text = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(text.len() as u64 + 1, required);
+        (status, text)
+    }
+
+    #[test]
+    fn inspection_reports_independently_read_facts_of_a_fixture() {
+        let (status, text) = inspect_bytes(FIXTURE);
+        assert_eq!(status, XENORA_OK);
+        let lfanew = u32::from_le_bytes(FIXTURE[0x3C..0x40].try_into().unwrap()) as usize;
+        let sections = u16::from_le_bytes(FIXTURE[lfanew + 6..lfanew + 8].try_into().unwrap());
+        let entry = u32::from_le_bytes(FIXTURE[lfanew + 40..lfanew + 44].try_into().unwrap());
+        assert!(text.contains(&format!("file_size: {} bytes", FIXTURE.len())));
+        assert!(text.contains(&format!("entry_rva: {entry:#x}")));
+        assert!(text.contains(&format!("sections ({sections}):")));
+        assert!(text.contains("loader_validation: accepted"));
+        assert!(
+            text.contains("xenora.dll") || text.contains("1 provided by Xenora"),
+            "{text}"
+        );
+        assert!(text.contains("nothing in this file was executed"));
+    }
+
+    #[test]
+    fn inspection_rejects_malformed_and_oversized_input() {
+        for bad in [&b""[..], b"not a pe file", &[0u8; 0x100]] {
+            let (status, text) = inspect_bytes(bad);
+            assert_eq!(status, XENORA_PE_ERROR, "{text}");
+            assert!(text.contains("not a supported PE32+"), "{text}");
+        }
+        // Every truncation of a valid file yields a report and a deterministic status.
+        // Some truncations currently hit a panic inside the loader's static probe
+        // (probe.rs, #270); the boundary must turn it into a report.
+        for len in (0..FIXTURE.len()).step_by(7) {
+            let (status, text) = inspect_bytes(&FIXTURE[..len]);
+            assert!(
+                matches!(status, XENORA_OK | XENORA_PE_ERROR | XENORA_INTERNAL_ERROR),
+                "len {len}"
+            );
+            assert_eq!(
+                inspect_bytes(&FIXTURE[..len]),
+                (status, text),
+                "len {len} is deterministic"
+            );
+        }
+        let (mut req, mut c) = (0u64, 0 as std::ffi::c_char);
+        let one = [0u8];
+        assert_eq!(
+            unsafe {
+                xenora_inspect_executable(
+                    one.as_ptr(),
+                    XENORA_MAX_INSPECT_BYTES + 1,
+                    &mut c,
+                    1,
+                    &mut req,
+                )
+            },
+            XENORA_LIMIT_EXCEEDED
+        );
+        assert_eq!(
+            unsafe { xenora_inspect_executable(std::ptr::null(), 0, &mut c, 1, &mut req) },
+            XENORA_INVALID_ARGUMENT
+        );
     }
 }
