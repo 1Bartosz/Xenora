@@ -348,6 +348,9 @@ Testing distinguishes between:
 
 Compiling a shader is not equivalent to proving its GPU output is correct.
 
+### Where the work is heading
+
+See the [roadmap table](#development-milestones) for proposed milestones, and the [changelog](CHANGELOG.md) for the current unreleased additions, such as the native blend pass, indexed draws and the depth pass. The remaining research steps are the outstanding items in [current limitations](#current-limitations).
 
 ---
 
