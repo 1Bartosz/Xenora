@@ -188,6 +188,11 @@ impl Arm64Assembler {
         self.emit(0x93403c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
     }
 
+    /// SXTW (64-bit/sign-extended): SXTW Xd, Wn (SBFM Xd, Xn, #0, #31)
+    pub fn sxtw_64(&mut self, xd: u8, wn: u8) {
+        self.emit(0x93407d00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
+    }
+
     /// ADD (extended/shifted register, 32-bit): ADD Wd, Wn, Wm
     pub fn add_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
         self.emit(

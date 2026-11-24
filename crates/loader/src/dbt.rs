@@ -495,6 +495,27 @@ impl DbtEngine {
                     asm.str_uoff_64(X9, X19, (dst as u32) * 8);
                 }
 
+                // MOVSXD r/m32, r (0x63 with REX.W): sign-extend the source
+                // register word into the destination via the native SXTW.
+                0x63 => {
+                    insn_count += 1;
+                    let modrm = memory
+                        .fetch_instruction_byte(cur_rip)
+                        .map_err(ExitReason::MemoryFault)?;
+                    cur_rip += 1;
+                    if (modrm >> 6) != 3 {
+                        return Err(ExitReason::IllegalInstruction(op));
+                    }
+                    let dst_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
+                    let src_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+                    asm.ldr_uoff_64(X10, X19, (src_idx as u32) * 8);
+                    asm.sxtw_64(X9, X10);
+                    if !rex_w {
+                        asm.mov_reg_32(X9, X9); // zero extend
+                    }
+                    asm.str_uoff_64(X9, X19, (dst_idx as u32) * 8);
+                }
+
                 // Imm8 group (0x83): ADD/SUB reg, imm8
                 0x83 => {
                     insn_count += 1;

@@ -4,6 +4,7 @@
 //! see issue #117.
 
 use xenora_loader::cpu::{CpuState, ExitReason, Interpreter, Register};
+use xenora_loader::dbt::DbtEngine;
 use xenora_loader::memory::{GuestMemory, MemoryPermissions};
 
 const ENTRY: u64 = 0x1000;
@@ -75,4 +76,23 @@ fn movsxd_rejects_non_register_addressing() {
         ExitReason::IllegalInstruction(_)
     ));
     assert_eq!(result.instructions_executed, 0);
+}
+
+#[test]
+fn movsxd_runs_through_the_native_dbt() {
+    // 48 63 D8 = MOVSXD rbx, eax, executed through the native ARM64 DBT.
+    let code = [0x48u8, 0x63, 0xD8];
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region_with_data(ENTRY, code.len(), MemoryPermissions::READ_EXECUTE, &code)
+        .unwrap();
+    let mut cpu = CpuState::new(ENTRY, 0);
+    cpu.gpr[Register::Rax as usize] = 0xFFFF_FFF1;
+    let result = DbtEngine::new(16 * 1024)
+        .expect("JIT memory")
+        .run(&mut cpu, &mut memory, 1);
+    assert_eq!(
+        result.final_state.gpr[Register::Rbx as usize],
+        0xFFFF_FFFF_FFFF_FFF1
+    );
 }
