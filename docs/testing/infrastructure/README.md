@@ -29,10 +29,13 @@ PYTHONPATH=scripts python3 -m unittest discover -s tests/release
 ## Phase II CLIs
 
 ```sh
-PYTHONPATH=scripts python3 -m qa rdna2 inventory
-PYTHONPATH=scripts python3 -m qa rdna2 candidates --limit 50
-PYTHONPATH=scripts python3 -m qa rdna2 plan
+PYTHONPATH=scripts python3 -m qa rdna2 inventory --compact
+PYTHONPATH=scripts python3 -m qa rdna2 candidates --family SOP2 --status reuse-primitives --limit 50
+PYTHONPATH=scripts python3 -m qa rdna2 plan --limit 20 --compact
+PYTHONPATH=scripts python3 -m qa rdna2 manifests --status reuse-primitives --limit 10 --claims claims.json
+PYTHONPATH=scripts python3 -m qa rdna2 reconcile --compact
 PYTHONPATH=scripts python3 -m qa rdna2 discrepancies
+PYTHONPATH=scripts python3 -m qa rdna2 diff --before before.json --after after.json --compact
 PYTHONPATH=scripts python3 -m qa verify quick
 PYTHONPATH=scripts python3 -m qa cpu-coverage --blockers
 PYTHONPATH=scripts python3 -m qa bench-compare --baseline b.json --current c.json
@@ -40,4 +43,6 @@ PYTHONPATH=scripts python3 -m release readiness --revision HEAD --live --binary 
 ```
 
 RDNA2 planning is read-only over the AMD snapshot, semantic registry, decoder tables and
-`docs/status.toml`. Candidates are never counted as implemented forms.
+`docs/status.toml`. Candidates and manifests are never counted as implemented forms.
+Family claims exclude those families; path-only claims block candidates whose default
+permitted files overlap. Reconcile reports mismatches without adjusting planner counts.
