@@ -13,6 +13,12 @@ remains unsupported.
 
 - Added an agent task queue for the cpu, gpu, runtime, shared and qa areas: an *Agent task* issue form with priority and interface fields, a workflow that decides `/claim`, `/release`, `/reassign`, `/progress`, `/blocked`, `/unblock` and `/approve-acceptance` comments one at a time (dependency, cycle and file-overlap checks, 24-hour leases renewed by progress), a pull request check (linked claimed task, file ownership, overlap with other pull requests, independent `/verified <head sha>`), `scripts/agent-queue.sh` and `scripts/agent-sync.sh` (upstream fetch every 12 minutes, task branches in separate worktrees) and a machine-readable queue summary. The rules are standard-library Python in `scripts/agent_queue/` with unit tests in `tests/agent_queue/`; issue text is never executed and acceptance commands need maintainer approval. Only comments that start with a command start a job, so ordinary pull request comments never re-run verification, and only an accepted `/verified <full head sha>` evaluates the check again; and each claim run decides every unanswered command in order, so commands whose pending runs GitHub cancelled are still answered. See `docs/coordination/agent-tasks.md`. Unit tests pass locally; the workflows have not run on GitHub yet, and the pull request check stays advisory (it never blocks a merge) until a live smoke test and the migration of existing issues are done.
 - Added explicit claim-before-work rules for contributors and coding agents to `AGENTS.md`, `CONTRIBUTING.md` and the pull request template: check for existing claims, claim with `/claim`, keep a 24-hour lease alive with `/progress`, `/release` when stopping, and link the claimed issue. Without the claim workflow, the earliest valid claim comment wins.
+- Added a CPU decoder for a bounded subset of BC6H (signed and unsigned HDR) in
+  `xenora-texture`: the four single-subset modes (Khronos modes 3, 7, 11 and 15, Microsoft
+  modes 11 to 14), listed in `BC6H_SUPPORTED_MODES`, plus the reserved modes, which decode to
+  zero as specified. The ten two-subset modes are rejected with `Bc6hError::UnsupportedMode`
+  and are not implemented. Tests check hand-derived values and 128 known-answer vectors from a
+  separate clean-room reference decoder.
 - Added native Metal upload and readback of BC2 and BC3 textures: `xenora-texture` gains a
   pitched `BcAlphaUpload` for 16-byte blocks, and `NativeCompute::read_bc_alpha_upload` sends
   the original blocks to `BC2_RGBA` or `BC3_RGBA` textures when the device reports BC support.

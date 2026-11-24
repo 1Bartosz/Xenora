@@ -8,10 +8,14 @@
 #![forbid(unsafe_code)]
 
 mod bc;
+mod bc6h;
 pub mod sampler;
 mod upload;
 pub use bc::{
     decode_bc2, decode_bc3, decode_bc4_snorm, decode_bc4_unorm, decode_bc5_snorm, decode_bc5_unorm,
+};
+pub use bc6h::{
+    BC6H_SUPPORTED_MODES, Bc6hError, bc6h_mode, decode_bc6h_sfloat, decode_bc6h_ufloat,
 };
 pub use sampler::{AddressMode, FilterMode, SamplerDesc, SamplerError, TextureMetadata};
 pub use upload::{
