@@ -5,7 +5,8 @@ use xenora_isa::semantics::{
     CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, MaskEffect, SCHEMA, SccEffect, Signedness, Wave,
 };
 use xenora_isa::{
-    CompareRelation, ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorCompareOp,
+    CompareRelation, ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op,
+    VectorCompareOp,
 };
 
 #[test]
@@ -163,15 +164,9 @@ fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
 
 #[test]
 fn vop3_variant_dispatch_selects_exactly_the_registry_vop3_rows() {
-    for row in FORMS
-        .iter()
-        .filter(|row| row.family == EncodingFamily::Vop3)
-    {
-        let op = VectorAluOp::ALL
-            .into_iter()
-            .find(|op| op.semantics().name == row.name)
-            .unwrap_or_else(|| panic!("{} has no base VOP2 form", row.name));
-        let base = op.semantics();
+    for op in VectorAluVop3Op::ALL {
+        let (row, base) = (op.semantics(), op.base().semantics());
+        assert_eq!((row.name, row.family), (base.name, EncodingFamily::Vop3));
         // The variant inherits the base declaration; only identity and the
         // operand rule differ.
         assert_eq!(
@@ -184,12 +179,23 @@ fn vop3_variant_dispatch_selects_exactly_the_registry_vop3_rows() {
             ),
             (row.operation, row.signedness, row.scc, row.vcc, row.exec)
         );
-        assert_eq!(
-            op.vop3_assembly_name(),
-            Some(format!("{}_e64", op.mnemonic()).as_str())
-        );
+        assert_eq!(row.swap_sources, base.swap_sources);
+        assert_eq!(op.assembly_name(), format!("{}_e64", op.base().mnemonic()));
     }
     dispatch_selects_exactly(EncodingFamily::Vop3, |word| {
-        VectorAluOp::from_vop3_word(word).map(|op| op.semantics().name)
+        VectorAluVop3Op::from_word(word).map(|op| op.semantics().name)
     });
+    // No first word of the other 64-bit families (VOP3B shares VOP3's
+    // encoding bits) selects a variant.
+    for meta in META_FORMS
+        .iter()
+        .filter(|form| form.family != EncodingFamily::Vop3 && form.bytes == 8)
+    {
+        assert_eq!(
+            VectorAluVop3Op::from_word(meta.bits as u32),
+            None,
+            "{}",
+            meta.name
+        );
+    }
 }

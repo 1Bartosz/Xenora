@@ -4,7 +4,8 @@ use std::fmt;
 
 pub use xenora_isa::{
     Architecture, CompareRelation, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp,
-    ScalarCompareOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorCompareOp, VectorSource,
+    ScalarCompareOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp,
+    VectorSource,
 };
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
@@ -326,7 +327,7 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     if let Some(op) = VectorCompareOp::from_word(first) {
         return vector_compare(op, first, bytes);
     }
-    if let Some(op) = VectorAluOp::from_vop3_word(first) {
+    if let Some(op) = VectorAluVop3Op::from_word(first) {
         let second = word(bytes, 8)?;
         return Ok((vop3_vgpr2(op, first, second)?, 8));
     }
@@ -749,13 +750,16 @@ fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKi
 /// in bits 0-8 and 9-17 of the second (RDNA 2 ISA section 13.3.4, VOP3A). Both sources
 /// are VGPRs, ABS, OP_SEL, CLAMP, OMOD and NEG are clear, and the unused SRC2 is
 /// the gfx1030 assembler's inline-zero operand encoding.
-fn vop3_vgpr2(op: VectorAluOp, first: u32, second: u32) -> Result<Instruction, DecodeErrorKind> {
+fn vop3_vgpr2(
+    op: VectorAluVop3Op,
+    first: u32,
+    second: u32,
+) -> Result<Instruction, DecodeErrorKind> {
     let src0 = second & 0x1ff;
     let src1 = (second >> 9) & 0x1ff;
     if first & 0xff00 != 0 || second >> 18 != 128 || src0 < 256 || src1 < 256 {
         return Err(unsupported(
-            op.vop3_assembly_name()
-                .expect("VOP3 dispatch selects only declared variants"),
+            op.assembly_name(),
             "expected two VGPR sources and no modifiers",
         ));
     }

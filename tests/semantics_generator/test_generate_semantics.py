@@ -876,12 +876,31 @@ class Validate(unittest.TestCase):
             row[1] = U32
         self.rejects(variants(), "V_MIN_I32: signedness signed contradicts XML format FMT_NUM_U32", snap)
 
+    def test_rejects_a_variant_destination_format_that_differs_from_the_form(self):
+        snap = snapshot()
+        snap["variants"][("V_MIN_I32", "ENC_VOP3")]["operands"][0][1] = "FMT_NUM_F32"
+        self.rejects(
+            variants(),
+            "V_MIN_I32 (VOP3): XML operand formats ['FMT_NUM_F32', 'FMT_NUM_I32', 'FMT_NUM_I32'] "
+            "differ from the form's ['FMT_NUM_I32', 'FMT_NUM_I32', 'FMT_NUM_I32']",
+            snap,
+        )
+
+    def test_rejects_malformed_variant_fields_without_a_traceback(self):
+        for key in ("of", "operands", "family"):
+            with self.subTest(key=key):
+                reg = variants()
+                reg["encoding_variant"][0][key] = []
+                self.rejects(reg, f"[{key!r}] must be strings")
+
     def test_renders_variant_dispatch_and_rows(self):
         text = gen.render(variants(), snapshot())
-        self.assertIn("pub const fn from_vop3_word(word: u32) -> Option<Self> {", text)
+        self.assertIn("pub enum VectorAluVop3Op {", text)
+        self.assertIn("pub const fn from_word(word: u32) -> Option<Self> {", text.split("pub enum VectorAluVop3Op", 1)[1])
         self.assertIn("if word & 0xfc00_0000 != 0xd400_0000 {", text)
         self.assertIn("273 => Some(Self::AddU32),", text)  # V_MIN_I32's variant name
-        self.assertIn('Self::SubrevNcU32 => Some("v_subrev_nc_u32_e64"),', text)
+        self.assertIn("Self::AddU32 => VectorAluOp::AddU32,", text)
+        self.assertIn('Self::SubrevNcU32 => "v_subrev_nc_u32_e64",', text)
         self.assertIn('("V_MIN_I32", EncodingFamily::Vop3),', text)
         self.assertIn("operands: OperandRule::Vop3Vgpr2,", text)
         # The VOP3 row inherits SUBREV's reversed sources.
@@ -1209,6 +1228,13 @@ class LoadRegistry(unittest.TestCase):
     def test_rejects_root_keys_in_a_family_file(self):
         root = self.write('include = ["rdna2/sop2.toml"]\n', {"sop2.toml": "schema = 1\n"})
         self.fails(root, "rdna2/sop2.toml: keys ['schema'] belong in the root file")
+
+    def test_rejects_includes_outside_the_family_directory(self):
+        for include in ("../sop2.toml", "./rdna2/sop2.toml", "other/sop2.toml", "rdna2/SOP2.toml",
+                        "rdna2/sub/sop2.toml"):
+            with self.subTest(include=include):
+                root = self.write(f'include = ["{include}"]\n', {"sop2.toml": ""})
+                self.fails(root, f"include {include!r} is not rdna2/<family>.toml")
 
     def test_rejects_a_missing_or_repeated_include(self):
         self.fails(self.write('include = ["rdna2/sop2.toml"]\n', {}), "included family file rdna2/sop2.toml does not exist")

@@ -1872,11 +1872,23 @@ impl VectorCompareOp {
     }
 }
 
-impl VectorAluOp {
-    /// Selects the operation from the first word of its VOP3 encoding (operand
-    /// rule `vop3_vgpr2`): the encoding bits (mask 0xfc00_0000) and then
-    /// the OP field (bits 16-25). `None` for undeclared opcodes.
-    pub const fn from_vop3_word(word: u32) -> Option<Self> {
+/// VOP3 encodings of registry forms (operand rule `vop3_vgpr2`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VectorAluVop3Op {
+    /// `v_add_nc_u32_e64` (VOP3 opcode 293).
+    AddNcU32,
+}
+
+impl VectorAluVop3Op {
+    /// Every variant, in registry order.
+    pub const ALL: [Self; 1] = [
+        Self::AddNcU32,
+    ];
+
+    /// Selects the variant from the first word of its VOP3 encoding: the
+    /// encoding bits (mask 0xfc00_0000) and then the OP field (bits
+    /// 16-25). `None` for undeclared opcodes.
+    pub const fn from_word(word: u32) -> Option<Self> {
         if word & 0xfc00_0000 != 0xd400_0000 {
             return None;
         }
@@ -1886,13 +1898,25 @@ impl VectorAluOp {
         }
     }
 
-    /// Assembler name of the VOP3 encoding, as LLVM prints it, if declared.
-    pub const fn vop3_assembly_name(self) -> Option<&'static str> {
+    /// The form this encodes, whose declaration it inherits.
+    pub const fn base(self) -> VectorAluOp {
         match self {
-            Self::AddNcU32 => Some("v_add_nc_u32_e64"),
-            #[allow(unreachable_patterns)]
-            _ => None,
+            Self::AddNcU32 => VectorAluOp::AddNcU32,
         }
+    }
+
+    /// Assembler name of the VOP3 encoding, as LLVM prints it.
+    pub const fn assembly_name(self) -> &'static str {
+        match self {
+            Self::AddNcU32 => "v_add_nc_u32_e64",
+        }
+    }
+
+    /// The validated registry row of this encoding.
+    pub fn semantics(self) -> &'static FormSemantics {
+        &FORMS[match self {
+            Self::AddNcU32 => 84,
+        }]
     }
 }
 

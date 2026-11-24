@@ -19,7 +19,7 @@ pub use rdna2::{
     V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 pub use semantics_gen::{
-    ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorCompareOp,
+    ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp,
 };
 
 /// SGPR index of `vcc_lo`, the Wave32 vector condition code.
@@ -157,7 +157,7 @@ pub enum Instruction {
     /// VOP3 encoding of a registry VOP2 integer operation (operand rule
     /// `vop3_vgpr2`): two VGPR sources and no input or output modifiers.
     VectorAluVop3 {
-        op: VectorAluOp,
+        op: VectorAluVop3Op,
         dst: u8,
         src0: u8,
         src1: u8,
@@ -277,9 +277,7 @@ impl Instruction {
             Self::WaitLoad => "s_waitcnt",
             Self::WaitStore => "s_waitcnt_vscnt",
             Self::MoveB32 { .. } => "v_mov_b32_e32",
-            Self::VectorAluVop3 { op, .. } => op
-                .vop3_assembly_name()
-                .expect("decoded VOP3 variants have a VOP3 name"),
+            Self::VectorAluVop3 { op, .. } => op.assembly_name(),
             Self::ScalarMoveB32 { .. } => "s_mov_b32",
             Self::ScalarUnary { op, .. } => op.mnemonic(),
             Self::ScalarAlu { op, .. } => op.mnemonic(),

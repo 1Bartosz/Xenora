@@ -143,21 +143,21 @@ def parse_generated(source):
 
 
 def load_registry(path):
-    """The root registry with its `include`d family files merged in order.
+    """The root registry with its family files merged, by the generator's loader.
 
-    Only the merge is done here; crates/isa/generate_semantics.py validates
-    which family each file may hold.
+    One loader for every consumer, so the family-file guards (one family per
+    file, include paths, duplicates) apply here too.
     """
-    registry = tomllib.loads(path.read_text(encoding="utf-8"))
-    for include in registry.pop("include", []):
-        part = tomllib.loads((path.parent / include).read_text(encoding="utf-8"))
-        for name, rule in part.get("operand_rules", {}).items():
-            if name in registry.setdefault("operand_rules", {}):
-                raise ValueError(f"{REGISTRY}: operand rule {name} is declared twice")
-            registry["operand_rules"][name] = rule
-        registry.setdefault("form", []).extend(part.get("form", []))
-        registry.setdefault("encoding_variant", []).extend(part.get("encoding_variant", []))
-    return registry
+    import importlib.util
+
+    script = ROOT / "crates/isa/generate_semantics.py"
+    spec = importlib.util.spec_from_file_location("generate_semantics", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.load_registry(path)
+    except module.RegistryError as error:
+        raise ValueError(f"{REGISTRY}: {error}") from error
 
 
 def read_declarations(registry, identified):

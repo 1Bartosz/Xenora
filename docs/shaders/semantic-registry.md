@@ -13,7 +13,7 @@ The registry covers the nine SOP2 forms listed in [SOP2 scalar ALU](scalar-alu.m
 | File | Role |
 | --- | --- |
 | `crates/isa/semantics/rdna2.toml` | The registry root: schema, architecture, the snapshot hash, the cited documents and the ordered `include` list of family files. |
-| `crates/isa/semantics/rdna2/<family>.toml` | One file per encoding family (`sop2.toml`, `sopc.toml`, `sop1.toml`, `vop2.toml`, `vopc.toml`): that family's operand rules and forms only. Data only: every value comes from a closed vocabulary. |
+| `crates/isa/semantics/rdna2/<family>.toml` | One file per encoding family (`sop2.toml`, `sopc.toml`, `sop1.toml`, `vop2.toml`, `vopc.toml`, `vop3.toml`): that family's operand rules, forms and encoding variants only. Data only: every value comes from a closed vocabulary. |
 | `crates/isa/generate_semantics.py` | Validates the registry and writes the Rust tables. Python 3.11 or newer, standard library only. |
 | `crates/isa/data/rdna2.jsonl` | Pinned snapshot of the AMD machine-readable ISA XML, used to cross-check identity and operands. |
 | `crates/isa/src/semantics_gen.rs` | Generated output. Never edit it by hand. |
@@ -27,10 +27,12 @@ The root lists its family files under `include`. The generator merges them in
 that order, and forms keep their order within each file, so the merged registry
 equals one file with the parts concatenated (splitting the original single file
 left `semantics_gen.rs` byte-identical). A family file may hold only
-`[operand_rules.*]` and `[[form]]` entries of the family it is named after:
-`rdna2/vop2.toml` holds VOP2 rules and forms and nothing else. The loader
-rejects a form or rule of another family, a rule declared in two files, root
-keys in a family file, and a missing or repeated include. Work on different
+`[operand_rules.*]`, `[[form]]` and `[[encoding_variant]]` entries of the family
+it is named after: `rdna2/vop2.toml` holds VOP2 rules and forms and nothing else.
+Each include must be `rdna2/<lower-case family>.toml`. The loader rejects a form,
+rule or variant of another family, a rule declared in two files, root keys in a
+family file, any other include path, and a missing or repeated include. The
+coverage report and the RDNA2 planner use the same loader. Work on different
 families therefore never edits the same registry file. To add a family, create
 `rdna2/<family>.toml` and append it to `include`; the generated order (and so
 the generated file) changes only where the new file is placed.
@@ -52,9 +54,13 @@ file of its encoding (`rdna2/vop3.toml`) and has exactly these fields:
 Everything else (operation, signedness, effects, source order) is inherited
 from the base form, and the XML check runs on that inherited declaration with
 the variant's family, opcode and operand rule, so the VOP3 operand widths and
-formats must agree with it. The generator emits, on the base enum,
-`from_<family>_word` (encoding bits, then an explicit match on the OP field) and
-`<family>_assembly_name`, and one `FORMS` row per variant after the forms. A
+formats must agree with it. The generator emits one enum per variant rule (`VectorAluVop3Op` for
+`vop3_vgpr2`) holding exactly the declared variants, with `from_word` (encoding
+bits, then an explicit match on the OP field), `base()` (the inherited form),
+`assembly_name()` and `semantics()`, and one `FORMS` row per variant after the
+forms. Because the enum has no undeclared members, an instruction cannot name a
+VOP3 encoding that does not exist. Every explicit XML operand of the variant,
+destination included, must have the base encoding's data format. A
 variant-only rule (one marked `variant_of` in the generator) cannot be used by a
 form. The validator rejects a variant of an undeclared form, one in the form's
 own family, a duplicate encoding of a form or a duplicate `(family, opcode)`, a

@@ -9,7 +9,7 @@ pub use graphics::{PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 pub use xenora_decoder::Architecture;
 use xenora_decoder::{
-    DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorAluOp, VectorBinary,
+    DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorAluVop3Op, VectorBinary,
     VectorCompareOp, VectorSource,
 };
 
@@ -685,7 +685,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 Instruction::MoveB32 { dst, .. }
                 // Of the VOP3 variants, the contract admits only v_add_nc_u32_e64.
                 | Instruction::VectorAluVop3 {
-                    op: VectorAluOp::AddNcU32,
+                    op: VectorAluVop3Op::AddNcU32,
                     dst,
                     ..
                 }
@@ -840,6 +840,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 src0,
                 src1,
             } => {
+                let op = op.base();
                 let (left, right) = if op.swaps_sources() {
                     (read(src1)?, read(src0)?)
                 } else {

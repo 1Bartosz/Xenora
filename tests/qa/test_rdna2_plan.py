@@ -66,6 +66,20 @@ class Rdna2Plan(unittest.TestCase):
         ranks = [c.priority_rank for c in mixed]
         self.assertEqual(ranks, sorted(ranks))
 
+    def test_variant_only_rules_do_not_make_a_family_reuse_ready(self):
+        # A rule that only encoding variants use (vop3_vgpr2 re-encodes declared
+        # VOP2 forms) cannot host a new VOP3 form such as V_FMA_F32.
+        variant_rules = {
+            variant["operands"] for variant in self.data["registry"].get("encoding_variant", [])
+        }
+        if not variant_rules:
+            self.skipTest("no encoding variants declared")
+        vop3 = classify_unsupported(self.data, families=["VOP3"])
+        self.assertTrue(vop3)
+        for cand in vop3:
+            self.assertNotIn(cand.operand_layout, variant_rules, cand.name)
+            self.assertNotEqual(cand.status, "reuse-primitives", cand.name)
+
     def test_manifests_exclude_claims_and_stay_deterministic(self):
         cands = classify_unsupported(self.data, statuses=["reuse-primitives"], limit=50)
         with tempfile.TemporaryDirectory() as tmp:
