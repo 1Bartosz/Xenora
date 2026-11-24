@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use xenora_decoder::{
-    Architecture, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction, ScalarAluOp,
-    ScalarSource, VectorSource, decode, decode_at,
+    Architecture, CompareRelation, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction,
+    ScalarAluOp, ScalarSource, VectorSource, decode, decode_at,
 };
-use xenora_ref::{BranchCondition, Op, ScalarAlu, Source, VectorAlu};
+use xenora_ref::{BranchCondition, CompareSource, Comparison, Op, ScalarAlu, Source, VectorAlu};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
 const BITWISE_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/bitwise-branch.bin");
@@ -97,7 +97,12 @@ fn rejects_other_opcodes_and_noncanonical_operands() {
         (&[0xe070_2000, 0x801b_0100], "buffer_store_dword"),
         (&[0xbf8c_3f71], "s_waitcnt"),
         (&[0xbbfd_0001], "s_waitcnt_vscnt"),
-        (&[0x7e04_026a], "v_mov_b32_e32"), // VCC_LO is outside the SGPR subset.
+        (&[0x7e04_026b], "v_mov_b32_e32"), // VCC_HI is outside the source subset.
+        (&[0x7d02_046b], "v_cmp_lt_i32_e32"), // VCC_HI source.
+        (&[0x7d02_047e], "v_cmp_lt_i32_e32"), // EXEC_LO source.
+        (&[0x7d02_04f0], "v_cmp_lt_i32_e32"), // Inline 0.5 source.
+        (&[0x7d84_04f9, 0x0606_0601], "v_cmp_eq_u32_e32"), // SDWA.
+        (&[0x7d84_04fa, 0], "v_cmp_eq_u32_e32"), // DPP16.
         (&[0x7e04_02fa, 0], "v_mov_b32_e32"),
         (&[0xd525_8001, 0x0202_0501], "v_add_nc_u32_e64"),
         (&[0xd525_0001, 0x0202_0480], "v_add_nc_u32_e64"),
@@ -389,6 +394,25 @@ fn reference_op(instruction: Instruction) -> Op {
             panic!("compute reference matrix received a graphics/image instruction")
         }
 
+        Instruction::VectorCompare { op, src0, src1 } => Op::Compare(
+            Comparison {
+                offset: match op.relation {
+                    CompareRelation::Less => 1,
+                    CompareRelation::Equal => 2,
+                    CompareRelation::LessOrEqual => 3,
+                    CompareRelation::Greater => 4,
+                    CompareRelation::NotEqual => 5,
+                    CompareRelation::GreaterOrEqual => 6,
+                },
+                signed: op.signed,
+            },
+            match src0 {
+                VectorSource::Register(reg) => CompareSource::Vector(reg),
+                VectorSource::Scalar(reg) => CompareSource::Scalar(reg),
+                VectorSource::Immediate(bits) => CompareSource::Immediate(bits),
+            },
+            src1,
+        ),
         Instruction::EndProgram => Op::End,
     }
 }
@@ -410,12 +434,13 @@ fn compares_fixture_instructions_against_llvm() {
         SHIFT_FIXTURE,
         include_bytes!("../../../fixtures/rdna2/ashr.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-alu.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 30, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 42, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -423,6 +448,7 @@ fn compares_fixture_instructions_against_llvm() {
 }
 
 fn assemble_matrix() -> Vec<u8> {
+    use std::fmt::Write as _;
     // Cover register banks and extrema, immediate classes in both scalar
     // compare positions, zero displacement and branches over literal words.
     let mut assembly = String::from(
@@ -474,9 +500,29 @@ fn assemble_matrix() -> Vec<u8> {
         s_xor_b32 s7, s7, lit(0x1)
         v_mov_b32_e32 v255, s105
         v_mov_b32_e32 v0, s0
+        v_mov_b32_e32 v128, vcc_lo
     ",
     );
-    use std::fmt::Write as _;
+    // Every supported VOPC form with each source class: VGPR, SGPR, vcc_lo,
+    // inline integers at both ends, inline zero and a literal.
+    for relation in ["lt", "eq", "le", "gt", "ne", "ge"] {
+        for kind in ["i32", "u32"] {
+            for src0 in [
+                "v255",
+                "v0",
+                "s0",
+                "s105",
+                "vcc_lo",
+                "-16",
+                "64",
+                "0",
+                "0x80000000",
+            ] {
+                writeln!(assembly, "v_cmp_{relation}_{kind}_e32 vcc_lo, {src0}, v128").unwrap();
+            }
+            writeln!(assembly, "v_cmp_{relation}_{kind}_e32 vcc_lo, v1, v255").unwrap();
+        }
+    }
     for value in -16..=64 {
         writeln!(assembly, "v_mov_b32_e32 v255, {value}").unwrap();
         writeln!(assembly, "s_mov_b32 s105, {value}").unwrap();
@@ -605,7 +651,11 @@ fn distinguishes_llvm_invalid_encodings_from_xenora_subset_rejections() {
         &[0xd516_0001],
     ];
     let outside_subset: &[&[u32]] = &[
-        &[0x7e04_026a],                                        // VOP1 VCC_LO source
+        &[0x7e04_026b],                                        // VOP1 VCC_HI source
+        &[0x7da2_0501],                                        // v_cmpx_eq_u32_e32
+        &[0x7d00_0501],                                        // v_cmp_f_i32_e32
+        &[0x7d0e_0501],                                        // v_cmp_t_i32_e32
+        &[0xd482_006a, 0x0002_0501],                           // v_cmp_lt_i32_e64
         &[0x8788_0908],                                        // s_and_b64
         &[0x8008_ffff, 0x1234_5678],                           // SOP2 with two literal sources
         &[0x806c_0908],                                        // SOP2 TTMP destination
@@ -673,6 +723,17 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
             let displacement: usize = operands.parse().unwrap();
             let target = next_offset + displacement * 4;
             format!("{mnemonic} -> 0x{target:04x}")
+        }
+        mnemonic if mnemonic.starts_with("v_cmp_") => {
+            let mut parts: Vec<String> = operands.split(", ").map(str::to_owned).collect();
+            parts[1] = match literal_bits(&parts[1]) {
+                Some(bits) => format!("0x{bits:x}"),
+                None => parts[1].parse::<i32>().map_or_else(
+                    |_| parts[1].clone(),
+                    |value| format!("0x{:x}", value as u32),
+                ),
+            };
+            format!("{mnemonic} {}", parts.join(", "))
         }
         "v_mov_b32_e32" => {
             let (destination, source) = operands.split_once(", ").unwrap();

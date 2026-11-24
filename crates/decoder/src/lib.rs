@@ -3,15 +3,17 @@
 use std::fmt;
 
 pub use xenora_isa::{
-    Architecture, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp, ScalarSource,
-    VectorSource,
+    Architecture, CompareRelation, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp,
+    ScalarSource, VectorCompareOp, VectorSource,
 };
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_I32, S_ADD_U32, S_ADDC_U32,
     S_AND_B32, S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM,
     S_MOV_B32, S_OR_B32, S_SUB_I32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32,
-    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32,
-    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_CMP_EQ_I32, V_CMP_EQ_U32, V_CMP_GE_I32,
+    V_CMP_GE_U32, V_CMP_GT_I32, V_CMP_GT_U32, V_CMP_LE_I32, V_CMP_LE_U32, V_CMP_LT_I32,
+    V_CMP_LT_U32, V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
+    V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32, VCC_LO,
 };
 
 use xenora_isa::meta::EncodingFamily;
@@ -19,7 +21,7 @@ use xenora_isa::meta::EncodingFamily;
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
 /// operand combination. Operand restrictions are listed in docs/status.toml;
 /// every other form in [`xenora_isa::meta::FORMS`] is rejected as unsupported.
-pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 34] = [
+pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 46] = [
     ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
     ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
     ("EXP", EncodingFamily::Exp),
@@ -46,6 +48,18 @@ pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 34] = [
     ("V_ADD_NC_U32", EncodingFamily::Vop3),
     ("V_AND_B32", EncodingFamily::Vop2),
     ("V_ASHRREV_I32", EncodingFamily::Vop2),
+    ("V_CMP_EQ_I32", EncodingFamily::Vopc),
+    ("V_CMP_EQ_U32", EncodingFamily::Vopc),
+    ("V_CMP_GE_I32", EncodingFamily::Vopc),
+    ("V_CMP_GE_U32", EncodingFamily::Vopc),
+    ("V_CMP_GT_I32", EncodingFamily::Vopc),
+    ("V_CMP_GT_U32", EncodingFamily::Vopc),
+    ("V_CMP_LE_I32", EncodingFamily::Vopc),
+    ("V_CMP_LE_U32", EncodingFamily::Vopc),
+    ("V_CMP_LT_I32", EncodingFamily::Vopc),
+    ("V_CMP_LT_U32", EncodingFamily::Vopc),
+    ("V_CMP_NE_I32", EncodingFamily::Vopc),
+    ("V_CMP_NE_U32", EncodingFamily::Vopc),
     ("V_INTERP_P1_F32", EncodingFamily::Vintrp),
     ("V_INTERP_P2_F32", EncodingFamily::Vintrp),
     ("V_LSHLREV_B32", EncodingFamily::Vop2),
@@ -312,6 +326,27 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     }
     if V_MOV_B32.matches(first) {
         return move_b32(first, bytes);
+    }
+    {
+        use CompareRelation::{Equal, Greater, GreaterOrEqual, Less, LessOrEqual, NotEqual};
+        for (opcode, relation, signed) in [
+            (V_CMP_LT_I32, Less, true),
+            (V_CMP_EQ_I32, Equal, true),
+            (V_CMP_LE_I32, LessOrEqual, true),
+            (V_CMP_GT_I32, Greater, true),
+            (V_CMP_NE_I32, NotEqual, true),
+            (V_CMP_GE_I32, GreaterOrEqual, true),
+            (V_CMP_LT_U32, Less, false),
+            (V_CMP_EQ_U32, Equal, false),
+            (V_CMP_LE_U32, LessOrEqual, false),
+            (V_CMP_GT_U32, Greater, false),
+            (V_CMP_NE_U32, NotEqual, false),
+            (V_CMP_GE_U32, GreaterOrEqual, false),
+        ] {
+            if opcode.matches(first) {
+                return vector_compare(VectorCompareOp { relation, signed }, first, bytes);
+            }
+        }
     }
     if V_ADD_NC_U32.matches(first) {
         let len = V_ADD_NC_U32.byte_len();
@@ -646,12 +681,47 @@ fn buffer_operands(
     Ok((data, index, resource))
 }
 
+/// VOPC: SRC0 in bits 0-8, VSRC1 in bits 9-16 (RDNA 2 ISA section 12.9). The
+/// destination is implicitly `vcc_lo`. SRC0 excludes inline float constants,
+/// `vcc_hi`, EXEC, M0, TTMPs and the condition selectors (SDWA 249, DPP 250/233).
+fn vector_compare(
+    op: VectorCompareOp,
+    first: u32,
+    bytes: &[u8],
+) -> Result<(Instruction, u8), DecodeErrorKind> {
+    let source = first & 0x1ff;
+    let src1 = ((first >> 9) & 0xff) as u8;
+    let base_len = 4;
+    let (src0, len) = match source {
+        0..=106 => (VectorSource::Scalar(source as u8), base_len),
+        128..=192 => (VectorSource::Immediate(source - 128), base_len),
+        193..=208 => (
+            VectorSource::Immediate(192u32.wrapping_sub(source)),
+            base_len,
+        ),
+        255 => {
+            let len = base_len + 4;
+            (VectorSource::Immediate(word(bytes, len)?), len)
+        }
+        256..=511 => (VectorSource::Register(source as u8), base_len),
+        _ => {
+            return Err(unsupported(
+                op.mnemonic(),
+                "expected a VGPR, normal SGPR, vcc_lo, inline integer or literal",
+            ));
+        }
+    };
+    Ok((Instruction::VectorCompare { op, src0, src1 }, len))
+}
+
 fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKind> {
     let dst = (first >> 17) as u8;
     let source = first & 0x1ff;
     let base_len = V_MOV_B32.byte_len();
     let (src, len) = match source {
         0..=105 => (VectorSource::Scalar(source as u8), base_len),
+        // vcc_lo, which may hold a lane-derived compare mask (docs/shaders/vector-compare.md).
+        106 => (VectorSource::Scalar(VCC_LO), base_len),
         128..=192 => (VectorSource::Immediate(source - 128), base_len),
         193..=208 => (
             VectorSource::Immediate(192u32.wrapping_sub(source)),
@@ -667,7 +737,7 @@ fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKi
         _ => {
             return Err(unsupported(
                 "v_mov_b32_e32",
-                "expected a VGPR, normal SGPR, inline integer, inline +1.0f or literal",
+                "expected a VGPR, normal SGPR, vcc_lo, inline integer, inline +1.0f or literal",
             ));
         }
     };

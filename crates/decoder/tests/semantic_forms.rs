@@ -39,10 +39,7 @@ fn declared_semantic_forms_are_exactly_those_decoded_from_fixtures() {
         .difference(&decoded)
         .map(|(name, _)| *name)
         .collect();
-    assert_eq!(
-        inline_only,
-        BTreeSet::from(["IMAGE_SAMPLE_LZ", "S_CBRANCH_EXECZ", "S_CBRANCH_VCCZ"])
-    );
+    assert_eq!(inline_only, BTreeSet::from(["IMAGE_SAMPLE_LZ"]));
     for (name, family) in SEMANTIC_FORMS {
         assert!(
             FORMS

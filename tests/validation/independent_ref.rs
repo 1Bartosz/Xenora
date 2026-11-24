@@ -18,6 +18,16 @@
 //! two rather than with a host signed shift, so the oracle does not share the
 //! production operator. SOP2 arithmetic runs through a bit-serial ripple
 //! adder (subtraction as addition of the complement), not host integer ops.
+//!
+//! Wave32 VOPC integer compares (`v_cmp_{lt,eq,le,gt,ne,ge}_{i32,u32}_e32`,
+//! contract `docs/shaders/vector-compare.md`) need all lanes of a wave, so execution
+//! runs lockstep waves of 32 consecutive dispatch indices with wave-uniform
+//! scalar state and per-lane vector state. A lane-local failure stops only that
+//! lane and the lowest-index error is reported, so programs without compares
+//! fail exactly as independent per-lane runs did. Signed compares flip the sign
+//! bit of both operands and then compare unsigned. VCC_LO is uninitialized,
+//! known or lane-derived; a lane-derived VCC_LO feeds `s_cbranch_vccz` only
+//! after a static check of the skipped region.
 
 const MAX_CODE_BYTES: usize = 1024;
 const MAX_INPUT_WORDS: usize = 4096;
@@ -26,6 +36,15 @@ const MAX_INPUT_WORDS: usize = 4096;
 enum Src {
     Reg(u8),
     Imm(u32),
+}
+
+/// A VOPC SRC0 operand (contract 2 allowlist).
+#[derive(Clone, Copy, Debug)]
+enum CmpSrc {
+    Sgpr(u8),
+    Vcc,
+    Imm(u32),
+    Vgpr(u8),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -42,6 +61,15 @@ enum Insn {
     Branch(usize),
     VMov(u8, Src),
     VMovFromSgpr(u8, u8),
+    /// `v_mov_b32_e32 vD, vcc_lo`.
+    VMovFromVcc(u8),
+    /// VOPC compare into VCC_LO: relation 1 lt, 2 eq, 3 le, 4 gt, 5 ne, 6 ge.
+    VCmp {
+        relation: u8,
+        signed: bool,
+        src0: CmpSrc,
+        src1: u8,
+    },
     VAddNc(u8, u8, u8),
     VAnd(u8, u8, u8),
     VOr(u8, u8, u8),
@@ -67,35 +95,64 @@ pub fn execute(code: &[u8], input: &[u32]) -> Result<Vec<u32>, String> {
         return Err("code exceeds limit".to_string());
     }
     let program = decode(code)?;
-    input
-        .iter()
-        .enumerate()
-        .map(|(index, &word)| run_lane(&program, word, index % 32))
-        .collect()
+    let mut output = Vec::with_capacity(input.len());
+    for wave in input.chunks(32) {
+        output.extend(run_wave(&program, wave)?);
+    }
+    Ok(output)
 }
 
-fn run_lane(program: &[(usize, Insn)], lane_input: u32, lane: usize) -> Result<u32, String> {
-    let mut vgpr = [None::<u32>; 256];
+/// Per-lane vector and memory state of one wave lane.
+struct Lane {
+    input: u32,
+    vgpr: [Option<u32>; 256],
+    pending_read: Option<u8>,
+    pending_write: Option<u32>,
+    written: Option<u32>,
+    /// A lane-local failure; the lane stops executing.
+    error: Option<String>,
+}
+
+/// The lowest-index failed lane's error, in dispatch order.
+fn first_error(lanes: &[Lane]) -> Option<String> {
+    lanes.iter().find_map(|lane| lane.error.clone())
+}
+
+/// Fail every still-running lane with a wave-uniform error and report the
+/// lowest-index failure, exactly as independent per-lane runs would.
+fn wave_error(lanes: &mut [Lane], error: String) -> String {
+    for lane in lanes.iter_mut() {
+        lane.error.get_or_insert_with(|| error.clone());
+    }
+    first_error(lanes).unwrap_or(error)
+}
+
+fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String> {
+    let mut lanes: Vec<Lane> = wave
+        .iter()
+        .map(|&input| Lane {
+            input,
+            vgpr: [None; 256],
+            pending_read: None,
+            pending_write: None,
+            written: None,
+            error: None,
+        })
+        .collect();
+    // Scalar state is wave-uniform and shared by all lanes.
     let mut sgpr = [None::<u32>; 128];
     sgpr[126] = Some(u32::MAX);
     let mut scc: Option<bool> = None;
-    let mut pending_read: Option<u8> = None;
-    let mut pending_write: Option<u32> = None;
-    let mut written: Option<u32> = None;
+    // sgpr[106] holds VCC_LO's value; this flag marks it lane-derived.
+    let mut vcc_lane_derived = false;
     let mut pc = 0usize;
 
     while pc < program.len() {
         let (offset, insn) = program[pc];
-        let read_v = |reg: u8| -> Result<u32, String> {
-            if reg == 0 {
-                return Err(format!("{offset:#x}: v0 is the resource index"));
-            }
-            if pending_read == Some(reg) {
-                return Err(format!("{offset:#x}: read before load wait"));
-            }
-            vgpr[reg as usize].ok_or_else(|| format!("{offset:#x}: uninitialized v{reg}"))
-        };
-        let read_s = |src: Src| -> Result<u32, String> {
+        if lanes.iter().all(|lane| lane.error.is_some()) {
+            break;
+        }
+        let read_s = |sgpr: &[Option<u32>; 128], src: Src| -> Result<u32, String> {
             match src {
                 Src::Imm(value) => Ok(value),
                 Src::Reg(reg) => {
@@ -103,210 +160,459 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32, lane: usize) -> Result<u
                 }
             }
         };
+        let execution_mask = match read_s(&sgpr, Src::Reg(126)) {
+            Ok(mask) => mask,
+            Err(error) => return Err(wave_error(&mut lanes, error)),
+        };
 
-        let execution_mask = read_s(Src::Reg(126))?;
-        if execution_mask.count_ones() < 32 {
-            match insn {
-                Insn::Load(_) | Insn::Store(_) => {
-                    return Err(format!(
-                        "{offset:#x}: incomplete EXEC on a buffer instruction"
-                    ));
-                }
-                Insn::VMov(dst, _)
-                | Insn::VMovFromSgpr(dst, _)
-                | Insn::VAddNc(dst, ..)
-                | Insn::VAnd(dst, ..)
-                | Insn::VOr(dst, ..)
-                | Insn::VXor(dst, ..)
-                | Insn::VShiftLeft(dst, ..)
-                | Insn::VShiftRight(dst, ..)
-                | Insn::VShiftRightArithmetic(dst, ..)
-                | Insn::VAddF(dst, ..)
-                | Insn::VMulF(dst, ..) => {
-                    if execution_mask != 0 && vgpr[usize::from(dst)].is_none() {
-                        return Err(format!("{offset:#x}: partial EXEC on uninitialized VGPR"));
-                    }
-                    if let (Insn::VMovFromSgpr(_, src), true) = (insn, execution_mask != 0) {
-                        read_s(Src::Reg(src))?;
-                    }
-                    if (execution_mask.rotate_right(lane as u32) & 1) == 0 {
-                        pc += 1;
-                        continue;
+        let scalar: Result<Option<usize>, String> = match insn {
+            Insn::End => {
+                for lane in lanes.iter_mut().filter(|lane| lane.error.is_none()) {
+                    if lane.pending_read.is_some() || lane.pending_write.is_some() {
+                        lane.error = Some(format!("{offset:#x}: outstanding transfer at end"));
+                    } else if lane.written.is_none() {
+                        lane.error = Some(format!("{offset:#x}: missing output store"));
                     }
                 }
-                _ => {}
-            }
-        }
-
-        match insn {
-            Insn::Load(data) => {
-                if data == 0 || pending_read.is_some() {
-                    return Err(format!("{offset:#x}: invalid or overlapping load"));
+                if let Some(error) = first_error(&lanes) {
+                    return Err(error);
                 }
-                pending_read = Some(data);
+                return Ok(lanes.iter().map(|lane| lane.written.unwrap()).collect());
             }
-            Insn::Store(data) => {
-                let value = read_v(data)?;
-                if pending_write.is_some() || written.is_some() {
-                    return Err(format!("{offset:#x}: multiple output writes"));
+            Insn::VCmp {
+                relation,
+                signed,
+                src0,
+                src1,
+            } => {
+                // A compare couples lanes; a failed lane has no defined
+                // contribution, so the wave stops with its error.
+                if let Some(error) = first_error(&lanes) {
+                    return Err(error);
                 }
-                pending_write = Some(value);
-            }
-            Insn::WaitRead => {
-                if let Some(dst) = pending_read.take() {
-                    vgpr[dst as usize] = Some(lane_input);
-                }
-            }
-            Insn::WaitWrite => {
-                if let Some(value) = pending_write.take() {
-                    written = Some(value);
-                }
-            }
-            Insn::VMov(dst, src) => {
-                let value = match src {
-                    Src::Imm(value) => value,
-                    Src::Reg(reg) => read_v(reg)?,
-                };
-                check_destination(dst, pending_read, offset)?;
-                vgpr[dst as usize] = Some(value);
-            }
-            Insn::VMovFromSgpr(dst, src) => {
-                let value = read_s(Src::Reg(src))?;
-                check_destination(dst, pending_read, offset)?;
-                vgpr[dst as usize] = Some(value);
-            }
-            Insn::VAddNc(dst, a, b) => {
-                check_destination(dst, pending_read, offset)?;
-                let sum = u64::from(read_v(a)?) + u64::from(read_v(b)?);
-                vgpr[dst as usize] = Some(sum as u32);
-            }
-            Insn::VAnd(dst, a, b) => {
-                check_destination(dst, pending_read, offset)?;
-                let value = read_v(a)? & read_v(b)?;
-                vgpr[dst as usize] = Some(value);
-            }
-            Insn::VOr(dst, a, b) => {
-                check_destination(dst, pending_read, offset)?;
-                let value = read_v(a)? | read_v(b)?;
-                vgpr[dst as usize] = Some(value);
-            }
-            Insn::VShiftLeft(dst, count, value) => {
-                check_destination(dst, pending_read, offset)?;
-                let factor = 2_u64.pow(read_v(count)? % 32);
-                let product = u64::from(read_v(value)?) * factor;
-                vgpr[dst as usize] = Some((product % (1_u64 << 32)) as u32);
-            }
-            Insn::VShiftRight(dst, count, value) => {
-                check_destination(dst, pending_read, offset)?;
-                let divisor = 2_u32.pow(read_v(count)? % 32);
-                vgpr[dst as usize] = Some(read_v(value)? / divisor);
-            }
-            Insn::VShiftRightArithmetic(dst, count, value) => {
-                check_destination(dst, pending_read, offset)?;
-                // Floor division of the sign-extended value, reduced modulo
-                // 2^32. This is arithmetic shift without using `>>`.
-                let shifted =
-                    i64::from(read_v(value)? as i32).div_euclid(1_i64 << (read_v(count)? % 32));
-                vgpr[dst as usize] = Some(shifted.rem_euclid(1_i64 << 32) as u32);
-            }
-            Insn::VXor(dst, a, b) => {
-                check_destination(dst, pending_read, offset)?;
-                let value = read_v(a)? ^ read_v(b)?;
-                vgpr[dst as usize] = Some(value);
-            }
-            Insn::VAddF(dst, a, b) => {
-                check_destination(dst, pending_read, offset)?;
-                let value = exact_float(true, read_v(a)?, read_v(b)?, offset)?;
-                vgpr[dst as usize] = Some(value);
-            }
-            Insn::VMulF(dst, a, b) => {
-                check_destination(dst, pending_read, offset)?;
-                let value = exact_float(false, read_v(a)?, read_v(b)?, offset)?;
-                vgpr[dst as usize] = Some(value);
+                compare(
+                    &lanes,
+                    &sgpr,
+                    execution_mask,
+                    (relation, signed, src0, src1),
+                    offset,
+                )
+                .map(|mask| {
+                    sgpr[106] = Some(mask);
+                    // VCC_HI has no known value after a compare (contract 3).
+                    sgpr[107] = None;
+                    vcc_lane_derived = execution_mask != 0;
+                    None
+                })
             }
             Insn::SMov(dst, src) => {
                 if dst < 8 {
-                    return Err(format!("{offset:#x}: write to a resource SGPR"));
-                }
-                let value = read_s(src)?;
-                sgpr[dst as usize] = Some(value);
-            }
-            Insn::SCmpEq(a, b) => {
-                scc = Some(read_s(a)? == read_s(b)?);
-            }
-            Insn::SAlu(opcode, dst, a, b) => {
-                if dst < 8 {
-                    return Err(format!("{offset:#x}: write to a resource SGPR"));
-                }
-                let (a, b) = (read_s(a)?, read_s(b)?);
-                let carry_in = || scc.ok_or_else(|| format!("{offset:#x}: uninitialized SCC"));
-                let (value, flag) = match opcode {
-                    0 => ripple(a, b, false),
-                    // RDNA 2 ISA guide 12.1: signed overflow from the sign bits,
-                    // add: S0[31] == S1[31] != D[31]; subtract: S0[31] != S1[31] != D[31].
-                    2 | 3 => {
-                        let value = if opcode == 2 {
-                            ripple(a, b, false).0
-                        } else {
-                            ripple(a, !b, true).0
-                        };
-                        let sign = |word: u32| word & 0x8000_0000 != 0;
-                        let same = sign(a) == sign(b);
-                        let overflow =
-                            (if opcode == 2 { same } else { !same }) && sign(a) != sign(value);
-                        (value, overflow)
-                    }
-                    4 => ripple(a, b, carry_in()?),
-                    // a - b - borrow = a + !b + (1 - borrow); borrow-out = !carry-out.
-                    1 | 5 => {
-                        let borrow = opcode == 5 && carry_in()?;
-                        let (value, carry) = ripple(a, !b, !borrow);
-                        (value, !carry)
-                    }
-                    _ => {
-                        let mut value = 0;
-                        for bit in 0..32 {
-                            let (x, y) = ((a >> bit) & 1 == 1, (b >> bit) & 1 == 1);
-                            let set = match opcode {
-                                14 => x && y,
-                                16 => x || y,
-                                _ => x != y,
-                            };
-                            value |= u32::from(set) << bit;
+                    Err(format!("{offset:#x}: write to a resource SGPR"))
+                } else {
+                    read_s(&sgpr, src).map(|value| {
+                        sgpr[dst as usize] = Some(value);
+                        if dst == 106 {
+                            vcc_lane_derived = false;
                         }
-                        (value, value != 0)
+                        None
+                    })
+                }
+            }
+            Insn::SCmpEq(a, b) => read_s(&sgpr, a).and_then(|a| {
+                read_s(&sgpr, b).map(|b| {
+                    scc = Some(a == b);
+                    None
+                })
+            }),
+            Insn::SAlu(opcode, dst, a, b) => {
+                scalar_alu(&mut sgpr, &mut scc, (opcode, dst, a, b), offset).map(|()| None)
+            }
+            Insn::BranchScc0(target) => scc
+                .ok_or_else(|| format!("{offset:#x}: uninitialized SCC"))
+                .and_then(|condition| {
+                    if condition {
+                        Ok(None)
+                    } else {
+                        index_of(program, target, offset).map(Some)
                     }
-                };
-                sgpr[dst as usize] = Some(value);
-                scc = Some(flag);
-            }
-            Insn::BranchScc0(target) => {
-                let condition = scc.ok_or_else(|| format!("{offset:#x}: uninitialized SCC"))?;
-                if !condition {
-                    pc = index_of(program, target, offset)?;
-                    continue;
-                }
-            }
+                }),
             Insn::BranchMaskZero { target, register } => {
-                if sgpr[register].ok_or_else(|| format!("{offset:#x}: uninitialized mask"))? == 0 {
-                    pc = index_of(program, target, offset)?;
-                    continue;
+                if register == 106 && vcc_lane_derived {
+                    let live = lanes.iter().find(|lane| lane.error.is_none()).unwrap();
+                    check_runtime_region(program, pc, target, live, &sgpr, execution_mask, offset)
+                        .and_then(|()| {
+                            if sgpr[106] == Some(0) {
+                                index_of(program, target, offset).map(Some)
+                            } else {
+                                Ok(None)
+                            }
+                        })
+                } else {
+                    sgpr[register]
+                        .ok_or_else(|| format!("{offset:#x}: uninitialized mask"))
+                        .and_then(|mask| {
+                            if mask == 0 {
+                                index_of(program, target, offset).map(Some)
+                            } else {
+                                Ok(None)
+                            }
+                        })
                 }
             }
-            Insn::Branch(target) => {
-                pc = index_of(program, target, offset)?;
-                continue;
-            }
-            Insn::End => {
-                if pending_read.is_some() || pending_write.is_some() {
-                    return Err(format!("{offset:#x}: outstanding transfer at end"));
+            Insn::Branch(target) => index_of(program, target, offset).map(Some),
+            _ => {
+                for (lane_index, lane) in lanes.iter_mut().enumerate() {
+                    if lane.error.is_none()
+                        && let Err(error) =
+                            lane_step(lane, &sgpr, execution_mask, insn, offset, lane_index)
+                    {
+                        lane.error = Some(error);
+                    }
                 }
-                return written.ok_or_else(|| format!("{offset:#x}: missing output store"));
+                Ok(None)
             }
+        };
+        match scalar {
+            Ok(Some(next)) => pc = next,
+            Ok(None) => pc += 1,
+            Err(error) => return Err(wave_error(&mut lanes, error)),
         }
-        pc += 1;
     }
-    Err("stream ended without s_endpgm".to_string())
+    Err(first_error(&lanes).unwrap_or_else(|| "stream ended without s_endpgm".to_string()))
+}
+
+fn scalar_alu(
+    sgpr: &mut [Option<u32>; 128],
+    scc: &mut Option<bool>,
+    (opcode, dst, a, b): (u32, u8, Src, Src),
+    offset: usize,
+) -> Result<(), String> {
+    if dst < 8 {
+        return Err(format!("{offset:#x}: write to a resource SGPR"));
+    }
+    let read = |src: Src| match src {
+        Src::Imm(value) => Ok(value),
+        Src::Reg(reg) => {
+            sgpr[reg as usize].ok_or_else(|| format!("{offset:#x}: uninitialized s{reg}"))
+        }
+    };
+    let (a, b) = (read(a)?, read(b)?);
+    let carry_in = || scc.ok_or_else(|| format!("{offset:#x}: uninitialized SCC"));
+    let (value, flag) = match opcode {
+        0 => ripple(a, b, false),
+        // RDNA 2 ISA guide 12.1: signed overflow from the sign bits,
+        // add: S0[31] == S1[31] != D[31]; subtract: S0[31] != S1[31] != D[31].
+        2 | 3 => {
+            let value = if opcode == 2 {
+                ripple(a, b, false).0
+            } else {
+                ripple(a, !b, true).0
+            };
+            let sign = |word: u32| word & 0x8000_0000 != 0;
+            let same = sign(a) == sign(b);
+            let overflow = (if opcode == 2 { same } else { !same }) && sign(a) != sign(value);
+            (value, overflow)
+        }
+        4 => ripple(a, b, carry_in()?),
+        // a - b - borrow = a + !b + (1 - borrow); borrow-out = !carry-out.
+        1 | 5 => {
+            let borrow = opcode == 5 && carry_in()?;
+            let (value, carry) = ripple(a, !b, !borrow);
+            (value, !carry)
+        }
+        _ => {
+            let mut value = 0;
+            for bit in 0..32 {
+                let (x, y) = ((a >> bit) & 1 == 1, (b >> bit) & 1 == 1);
+                let set = match opcode {
+                    14 => x && y,
+                    16 => x || y,
+                    _ => x != y,
+                };
+                value |= u32::from(set) << bit;
+            }
+            (value, value != 0)
+        }
+    };
+    sgpr[dst as usize] = Some(value);
+    *scc = Some(flag);
+    Ok(())
+}
+
+fn read_vgpr(lane: &Lane, reg: u8, offset: usize) -> Result<u32, String> {
+    if reg == 0 {
+        return Err(format!("{offset:#x}: v0 is the resource index"));
+    }
+    if lane.pending_read == Some(reg) {
+        return Err(format!("{offset:#x}: read before load wait"));
+    }
+    lane.vgpr[reg as usize].ok_or_else(|| format!("{offset:#x}: uninitialized v{reg}"))
+}
+
+/// Evaluate one VOPC compare for the whole wave and return the new VCC_LO.
+fn compare(
+    lanes: &[Lane],
+    sgpr: &[Option<u32>; 128],
+    execution_mask: u32,
+    (relation, signed, src0, src1): (u8, bool, CmpSrc, u8),
+    offset: usize,
+) -> Result<u32, String> {
+    if execution_mask == 0 {
+        // Encoding already validated; nothing is read (contract 5).
+        return Ok(0);
+    }
+    let scalar_src0 = match src0 {
+        CmpSrc::Sgpr(reg) => {
+            Some(sgpr[reg as usize].ok_or_else(|| format!("{offset:#x}: uninitialized s{reg}"))?)
+        }
+        CmpSrc::Vcc => Some(sgpr[106].ok_or_else(|| format!("{offset:#x}: uninitialized vcc_lo"))?),
+        CmpSrc::Imm(value) => Some(value),
+        CmpSrc::Vgpr(_) => None,
+    };
+    // VGPR readiness is wave-uniform; validate it on every existing lane so
+    // acceptance does not depend on which lanes are active.
+    for lane in lanes {
+        if let CmpSrc::Vgpr(reg) = src0 {
+            read_vgpr(lane, reg, offset)?;
+        }
+        read_vgpr(lane, src1, offset)?;
+    }
+    let mut mask = 0u32;
+    for (n, lane) in lanes.iter().enumerate() {
+        if (execution_mask >> n) & 1 == 0 {
+            continue;
+        }
+        let a = match (scalar_src0, src0) {
+            (Some(value), _) => value,
+            (None, CmpSrc::Vgpr(reg)) => read_vgpr(lane, reg, offset)?,
+            (None, _) => unreachable!(),
+        };
+        let b = read_vgpr(lane, src1, offset)?;
+        // Signed order equals unsigned order after flipping the sign bit.
+        let (a, b) = if signed {
+            (a ^ 0x8000_0000, b ^ 0x8000_0000)
+        } else {
+            (a, b)
+        };
+        let pass = match relation {
+            1 => a < b,
+            2 => a == b,
+            3 => a <= b,
+            4 => a > b,
+            5 => a != b,
+            _ => a >= b,
+        };
+        mask |= u32::from(pass) << n;
+    }
+    Ok(mask)
+}
+
+/// Static acceptance of the region skipped by a runtime `s_cbranch_vccz`
+/// (contract 6), independent of lane data, EXEC and the branch outcome.
+fn check_runtime_region(
+    program: &[(usize, Insn)],
+    pc: usize,
+    target: usize,
+    lane: &Lane,
+    sgpr: &[Option<u32>; 128],
+    execution_mask: u32,
+    offset: usize,
+) -> Result<(), String> {
+    // Contract 6 forbids an outstanding load; a pending store is waited for later.
+    if lane.pending_read.is_some() {
+        return Err(format!("{offset:#x}: load outstanding at a runtime branch"));
+    }
+    let end = index_of(program, target, offset)?;
+    for &(at, insn) in &program[pc + 1..end] {
+        // (destination, VGPR sources, SGPR source)
+        let (dst, vgprs, scalar): (u8, Vec<u8>, Option<u8>) = match insn {
+            Insn::VMov(dst, Src::Reg(reg)) => (dst, vec![reg], None),
+            Insn::VMov(dst, Src::Imm(_)) => (dst, vec![], None),
+            Insn::VMovFromSgpr(dst, src) => (dst, vec![], Some(src)),
+            Insn::VMovFromVcc(dst) => (dst, vec![], Some(106)),
+            Insn::VAddNc(dst, a, b)
+            | Insn::VAnd(dst, a, b)
+            | Insn::VOr(dst, a, b)
+            | Insn::VXor(dst, a, b)
+            | Insn::VShiftLeft(dst, a, b)
+            | Insn::VShiftRight(dst, a, b)
+            | Insn::VShiftRightArithmetic(dst, a, b) => (dst, vec![a, b], None),
+            _ => {
+                return Err(format!(
+                    "{at:#x}: instruction not allowed in a runtime branch region"
+                ));
+            }
+        };
+        if dst == 0 || lane.vgpr[dst as usize].is_none() {
+            return Err(format!(
+                "{at:#x}: runtime branch region writes an uninitialized VGPR"
+            ));
+        }
+        // Sources are read only when some lane executes (contract 6).
+        if execution_mask == 0 {
+            continue;
+        }
+        for reg in vgprs {
+            read_vgpr(lane, reg, at)?;
+        }
+        if let Some(reg) = scalar {
+            sgpr[reg as usize].ok_or_else(|| format!("{at:#x}: uninitialized s{reg}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// One per-lane vector, memory or wait instruction; behaviour and errors match
+/// the former independent per-lane interpreter.
+fn lane_step(
+    lane: &mut Lane,
+    sgpr: &[Option<u32>; 128],
+    execution_mask: u32,
+    insn: Insn,
+    offset: usize,
+    lane_index: usize,
+) -> Result<(), String> {
+    let read_s = |reg: u8| -> Result<u32, String> {
+        sgpr[reg as usize].ok_or_else(|| format!("{offset:#x}: uninitialized s{reg}"))
+    };
+    let read_vcc = || sgpr[106].ok_or_else(|| format!("{offset:#x}: uninitialized vcc_lo"));
+    if execution_mask.count_ones() < 32 {
+        match insn {
+            Insn::Load(_) | Insn::Store(_) => {
+                return Err(format!(
+                    "{offset:#x}: incomplete EXEC on a buffer instruction"
+                ));
+            }
+            Insn::VMov(dst, _)
+            | Insn::VMovFromSgpr(dst, _)
+            | Insn::VMovFromVcc(dst)
+            | Insn::VAddNc(dst, ..)
+            | Insn::VAnd(dst, ..)
+            | Insn::VOr(dst, ..)
+            | Insn::VXor(dst, ..)
+            | Insn::VShiftLeft(dst, ..)
+            | Insn::VShiftRight(dst, ..)
+            | Insn::VShiftRightArithmetic(dst, ..)
+            | Insn::VAddF(dst, ..)
+            | Insn::VMulF(dst, ..) => {
+                if execution_mask != 0 && lane.vgpr[usize::from(dst)].is_none() {
+                    return Err(format!("{offset:#x}: partial EXEC on uninitialized VGPR"));
+                }
+                if execution_mask != 0 {
+                    match insn {
+                        Insn::VMovFromSgpr(_, src) => {
+                            read_s(src)?;
+                        }
+                        Insn::VMovFromVcc(_) => {
+                            read_vcc()?;
+                        }
+                        _ => {}
+                    }
+                }
+                if (execution_mask.rotate_right(lane_index as u32) & 1) == 0 {
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let read_v = |reg: u8| read_vgpr(lane, reg, offset);
+    let pending_read = lane.pending_read;
+    let value = match insn {
+        Insn::Load(data) => {
+            if data == 0 || pending_read.is_some() {
+                return Err(format!("{offset:#x}: invalid or overlapping load"));
+            }
+            lane.pending_read = Some(data);
+            return Ok(());
+        }
+        Insn::Store(data) => {
+            let value = read_v(data)?;
+            if lane.pending_write.is_some() || lane.written.is_some() {
+                return Err(format!("{offset:#x}: multiple output writes"));
+            }
+            lane.pending_write = Some(value);
+            return Ok(());
+        }
+        Insn::WaitRead => {
+            if let Some(dst) = lane.pending_read.take() {
+                lane.vgpr[dst as usize] = Some(lane.input);
+            }
+            return Ok(());
+        }
+        Insn::WaitWrite => {
+            if let Some(value) = lane.pending_write.take() {
+                lane.written = Some(value);
+            }
+            return Ok(());
+        }
+        Insn::VMov(dst, src) => {
+            let value = match src {
+                Src::Imm(value) => value,
+                Src::Reg(reg) => read_v(reg)?,
+            };
+            check_destination(dst, pending_read, offset)?;
+            (dst, value)
+        }
+        Insn::VMovFromSgpr(dst, src) => {
+            let value = read_s(src)?;
+            check_destination(dst, pending_read, offset)?;
+            (dst, value)
+        }
+        Insn::VMovFromVcc(dst) => {
+            let value = read_vcc()?;
+            check_destination(dst, pending_read, offset)?;
+            (dst, value)
+        }
+        Insn::VAddNc(dst, a, b) => {
+            check_destination(dst, pending_read, offset)?;
+            let sum = u64::from(read_v(a)?) + u64::from(read_v(b)?);
+            (dst, sum as u32)
+        }
+        Insn::VAnd(dst, a, b) => {
+            check_destination(dst, pending_read, offset)?;
+            (dst, read_v(a)? & read_v(b)?)
+        }
+        Insn::VOr(dst, a, b) => {
+            check_destination(dst, pending_read, offset)?;
+            (dst, read_v(a)? | read_v(b)?)
+        }
+        Insn::VShiftLeft(dst, count, value) => {
+            check_destination(dst, pending_read, offset)?;
+            let factor = 2_u64.pow(read_v(count)? % 32);
+            let product = u64::from(read_v(value)?) * factor;
+            (dst, (product % (1_u64 << 32)) as u32)
+        }
+        Insn::VShiftRight(dst, count, value) => {
+            check_destination(dst, pending_read, offset)?;
+            let divisor = 2_u32.pow(read_v(count)? % 32);
+            (dst, read_v(value)? / divisor)
+        }
+        Insn::VShiftRightArithmetic(dst, count, value) => {
+            check_destination(dst, pending_read, offset)?;
+            // Floor division of the sign-extended value, reduced modulo
+            // 2^32. This is arithmetic shift without using `>>`.
+            let shifted =
+                i64::from(read_v(value)? as i32).div_euclid(1_i64 << (read_v(count)? % 32));
+            (dst, shifted.rem_euclid(1_i64 << 32) as u32)
+        }
+        Insn::VXor(dst, a, b) => {
+            check_destination(dst, pending_read, offset)?;
+            (dst, read_v(a)? ^ read_v(b)?)
+        }
+        Insn::VAddF(dst, a, b) => {
+            check_destination(dst, pending_read, offset)?;
+            (dst, exact_float(true, read_v(a)?, read_v(b)?, offset)?)
+        }
+        Insn::VMulF(dst, a, b) => {
+            check_destination(dst, pending_read, offset)?;
+            (dst, exact_float(false, read_v(a)?, read_v(b)?, offset)?)
+        }
+        _ => unreachable!("scalar instruction in lane_step"),
+    };
+    lane.vgpr[value.0 as usize] = Some(value.1);
+    Ok(())
 }
 
 /// Bit-serial addition with carry-in; returns the sum and the carry-out.
@@ -426,6 +732,9 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         if selector <= 105 {
             return Ok((Insn::VMovFromSgpr(dst, selector as u8), 4));
         }
+        if selector == 106 {
+            return Ok((Insn::VMovFromVcc(dst), 4));
+        }
         let (src, len) = if selector == 255 {
             (Src::Imm(word(code, offset + 4)?), 8)
         } else {
@@ -435,6 +744,38 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
             )
         };
         return Ok((Insn::VMov(dst, src), len));
+    }
+    // VOPC: bits 31:25 = 0b0111110, OP 24:17, VSRC1 16:9, SRC0 8:0.
+    if first >> 25 == 0b011_1110 {
+        let opcode = (first >> 17) & 0xff;
+        let (signed, relation) = match opcode {
+            129..=134 => (true, opcode - 128),
+            193..=198 => (false, opcode - 192),
+            _ => return Err(fail("unsupported VOPC opcode")),
+        };
+        let selector = first & 0x1ff;
+        let (src0, len) = match selector {
+            0..=105 => (CmpSrc::Sgpr(selector as u8), 4),
+            106 => (CmpSrc::Vcc, 4),
+            128..=192 => (CmpSrc::Imm(selector - 128), 4),
+            193..=208 => (CmpSrc::Imm(192u32.wrapping_sub(selector)), 4),
+            255 => (
+                CmpSrc::Imm(
+                    word(code, offset + 4)
+                        .map_err(|_| format!("{offset:#x}: truncated VOPC literal"))?,
+                ),
+                8,
+            ),
+            256..=511 => (CmpSrc::Vgpr(selector as u8), 4),
+            _ => return Err(fail("bad VOPC source")),
+        };
+        let insn = Insn::VCmp {
+            relation: relation as u8,
+            signed,
+            src0,
+            src1: (first >> 9) as u8,
+        };
+        return Ok((insn, len));
     }
     if first & 0xffff_0000 == 0xd525_0000 {
         let second = word(code, offset + 4)?;
