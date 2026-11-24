@@ -395,6 +395,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
 
     events::register(registry, &state);
     crt::register(registry);
+    crt::register_heap(registry);
     heap::register(registry, &state);
 
     // 1. GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *mut FILETIME)

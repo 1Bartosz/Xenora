@@ -1193,6 +1193,78 @@ fn test_guest_event_signaling_through_iat() {
 }
 
 #[test]
+fn test_guest_crt_allocation_and_resize_through_iat() {
+    const IMAGE: u64 = 0x140000000;
+    const MODULE: &str = "api-ms-win-crt-heap-l1-1-0.dll";
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let calloc = call_service_fixture(&state, MODULE, "calloc", &[3, 8]);
+    let block = calloc.execution.final_state.get(Register::Rax);
+    assert_ne!(block, 0);
+    let mut bytes = [1; 24];
+    calloc.image.memory.read_bytes(block, &mut bytes).unwrap();
+    assert_eq!(bytes, [0; 24]);
+    let overflow = call_service_fixture(&state, MODULE, "calloc", &[u64::MAX, 2]);
+    assert_eq!(overflow.execution.final_state.get(Register::Rax), 0);
+
+    let resize = |size: u64, function| {
+        let mut code = vec![0x48, 0x83, 0xec, 0x28, 0x48, 0xb9];
+        code.extend_from_slice(&16u64.to_le_bytes());
+        append_import_call(&mut code, 0x2060);
+        // Save the allocation, seed it, and pass it as the first argument.
+        code.extend_from_slice(&[0x48, 0x89, 0xc3, 0x48, 0xc7, 0x00, 0x78, 0x56, 0x34, 0x12]);
+        code.extend_from_slice(&[0x48, 0x89, 0xc1, 0x48, 0xba]);
+        code.extend_from_slice(&size.to_le_bytes());
+        append_import_call(&mut code, 0x21a0);
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
+        let bytes = TestPeBuilder::new(IMAGE, 0x1000)
+            .add_import("ucrtbase.dll", "malloc")
+            .add_import(MODULE, function)
+            .code(&code)
+            .build();
+        let mut imports = ImportRegistry::new();
+        register_standard_services(&mut imports, state.clone());
+        let result = run_synthetic_startup(
+            &bytes,
+            StartupLayout {
+                image_base: IMAGE,
+                stack_top: PROCESS_FIXTURE_STACK_TOP,
+                tls_base: 0x300000000,
+            },
+            imports,
+            100,
+        )
+        .unwrap();
+        assert_eq!(result.bound_imports, 2);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result
+    };
+    let grown = resize(32, "realloc");
+    let block = grown.execution.final_state.get(Register::Rax);
+    assert_ne!(block, 0);
+    assert_eq!(grown.image.memory.read_u64(block).unwrap(), 0x1234_5678);
+    assert_eq!(grown.image.memory.read_u8(block + 31).unwrap(), 0);
+
+    let rejected = resize(u64::MAX, "realloc");
+    assert_eq!(rejected.execution.final_state.get(Register::Rax), 0);
+    let original = rejected.execution.final_state.get(Register::Rbx);
+    assert_eq!(
+        rejected.image.memory.read_u64(original).unwrap(),
+        0x1234_5678
+    );
+
+    for function in ["realloc", "free"] {
+        let freed = resize(0, function);
+        assert!(
+            freed
+                .image
+                .memory
+                .read_u8(freed.execution.final_state.get(Register::Rbx))
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn test_guest_creates_and_allocates_private_heap_through_iat() {
     const IMAGE: u64 = 0x140000000;
     const MODULE: &str = "api-ms-win-core-heap-l1-1-0.dll";

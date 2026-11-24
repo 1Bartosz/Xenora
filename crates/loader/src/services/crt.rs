@@ -4,7 +4,7 @@
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
-use crate::memory::{GuestMemory, MemoryError};
+use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
 
 const SCAN_BUDGET: u64 = 1_048_576;
 const UCRT: &str = "ucrtbase.dll";
@@ -162,5 +162,56 @@ pub(super) fn register(registry: &mut ImportRegistry) {
     for symbol in ["memset", "memcpy", "memmove", "memcmp"] {
         registry.alias(CRT_STRING_API, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
+    }
+}
+
+pub(super) fn register_heap(registry: &mut ImportRegistry) {
+    registry.register(UCRT, "malloc", |args, _, memory| {
+        Ok(memory
+            .map_heap_allocation(PROCESS_HEAP, args.rcx.max(1) as usize)
+            .unwrap_or(0))
+    });
+    registry.register(UCRT, "calloc", |args, _, memory| {
+        let Some(size) = args.rcx.checked_mul(args.rdx) else {
+            return Ok(0);
+        };
+        Ok(memory
+            .map_heap_allocation(PROCESS_HEAP, size.max(1) as usize)
+            .unwrap_or(0))
+    });
+    registry.register(UCRT, "realloc", |args, _, memory| {
+        let address = args.rcx;
+        let size = args.rdx;
+        if address == 0 {
+            return Ok(memory
+                .map_heap_allocation(PROCESS_HEAP, size.max(1) as usize)
+                .unwrap_or(0));
+        }
+        if size == 0 {
+            free(memory, address)?;
+            return Ok(0);
+        }
+        Ok(memory
+            .resize_heap_allocation(PROCESS_HEAP, address, size as usize, false)
+            .unwrap_or(0))
+    });
+    registry.register(UCRT, "free", |args, _, memory| {
+        free(memory, args.rcx)?;
+        Ok(0)
+    });
+
+    for symbol in ["malloc", "calloc", "realloc", "free"] {
+        registry.alias("api-ms-win-crt-heap-l1-1-0.dll", UCRT, symbol);
+        registry.set_status(UCRT, symbol, ServiceStatus::Partial);
+    }
+}
+
+fn free(memory: &mut GuestMemory, address: u64) -> Result<(), ExitReason> {
+    if address == 0 || memory.release_heap_allocation(PROCESS_HEAP, address) {
+        Ok(())
+    } else {
+        Err(ExitReason::MemoryFault(MemoryError::UnmappedAddress(
+            address,
+        )))
     }
 }

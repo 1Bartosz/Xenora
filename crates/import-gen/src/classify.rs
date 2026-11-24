@@ -117,10 +117,6 @@ impl SymbolDb {
         self.ins(module, sym, Classification::Win32Stub { return_zero, note });
     }
 
-    fn manual(&mut self, module: &str, sym: &str, reason: &'static str) {
-        self.ins(module, sym, Classification::Manual { reason });
-    }
-
     fn runtime_helper(&mut self, module: &str, sym: &str, note: &'static str) {
         self.ins(module, sym, Classification::RuntimeHelper { note });
     }
@@ -502,9 +498,10 @@ impl SymbolDb {
 
     fn populate_crt_heap(&mut self) {
         let m = "api-ms-win-crt-heap-l1-1-0.dll";
-        // These map to guest VirtualAlloc, not host malloc — Manual
-        for sym in &["malloc", "free", "calloc", "realloc"] {
-            self.manual(m, sym, "Must use guest VirtualAlloc, not host malloc");
+        for module in [m, "ucrtbase.dll"] {
+            for symbol in ["malloc", "free", "calloc", "realloc"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
         }
         self.win32_stub(m, "_set_new_handler", false, "new handler — stub");
     }

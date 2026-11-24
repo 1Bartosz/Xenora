@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added guest CRT allocation, zeroed array allocation, resizing, and release.
+
 - Added private guest heap creation and destruction with per-heap allocation ownership.
 
 - Added default guest heap reallocation with data preservation and an in-place-only option.

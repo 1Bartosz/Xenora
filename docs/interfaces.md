@@ -172,6 +172,13 @@ The initial size is checked against the budget and backing is allocated on
 demand. `HeapDestroy` frees all blocks owned by that private heap and
 invalidates its handle. The default heap cannot be destroyed. See the [Windows heap API reference](https://learn.microsoft.com/windows/win32/api/heapapi/).
 
+UCRT and the CRT heap API set expose `malloc`, `calloc`, `realloc`, and
+`free` on the bounded default guest heap. `calloc` checks for size overflow.
+`realloc(NULL, size)` allocates a new block, and resizing a nonnull block to
+zero frees it. Allocation failures return null and preserve existing blocks.
+CRT `errno` and new-handler callbacks remain unsupported. See
+[Microsoft CRT allocation documentation](https://learn.microsoft.com/cpp/c-runtime-library/memory-allocation).
+
 ### Event signaling
 
 The synthetic runtime supports unnamed manual-reset and auto-reset events
