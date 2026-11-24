@@ -2761,9 +2761,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("shrd32_by8", 0),
     ("shrd64_by1_sign_change", 0),
     ("shrd64_cl64_is_count_zero", 0),
-    ("xchg_ax_r9w_preserves_both_uppers", 0),
-    ("xchg_eax_ebx_clears_both_uppers", 0),
-    ("xchg_rax_r8_is_not_nop", 0),
 ];
 
 // ---------------------------------------------------------------------------

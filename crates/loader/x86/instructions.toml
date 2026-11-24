@@ -401,6 +401,51 @@ opcode = 0x87
 enc = "rm_reg"
 size = "v"
 
+# The accumulator with the register in the opcode. Opcode 0x90 is NOP; with
+# REX.B the decoder reads it as 0x91 with register 0, which is then r8. A row
+# of eight would have to start at 0x90, so each opcode is its own form.
+[[form]]
+op = "xchg"
+opcode = 0x91
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x92
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x93
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x94
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x95
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x96
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x97
+enc = "op_reg"
+size = "v"
+
 [[form]]
 op = "mov"
 opcode = 0x88

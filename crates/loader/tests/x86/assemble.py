@@ -98,6 +98,11 @@ def cases():
             "cbw", "cwde", "cdqe", "cwd", "cdq", "cqo", "clc", "stc", "cmc", "nop", "cpuid",
             "nop dword ptr [rax + 8]", "pause", "push r9", "push rbx", "push -5", "push 0x12345678",
             f"push {mem(64)}", "pop rbx", "pop r12", f"pop {mem(64)}", "leave"]
+    # The accumulator short form of XCHG: 91..97, and 90 with REX.B.
+    for index in range(1, 16):
+        bits = (16, 32, 64)[index % 3]
+        out.append(f"xchg {reg(0, bits)}, {reg(index, bits)}")
+    out += ["xchg r8w, ax", "xchg r8, rax", "xchg r8d, eax", "xchg ecx, eax", "xchg r15w, ax"]
     return list(dict.fromkeys(out))
 
 

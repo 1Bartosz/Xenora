@@ -1222,7 +1222,7 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0x66, 0xE8, 0, 0],       // call rel16
         &[0x66, 0x0F, 0xC9],       // bswap cx (undefined)
         &[0x66, 0x63, 0xC1],       // 16-bit movsxd
-        &[0x41, 0x90],             // xchg r8, rax
+        &[0xF3, 0x41, 0x90],       // F3 on xchg r8, rax
         &[0x8D, 0xC0],             // lea with a register operand
         &[0x0F, 0xA3, 0x06],       // bt [rsi], eax
         &[0xC0, 0xD0, 0x01],       // rcl al, 1
