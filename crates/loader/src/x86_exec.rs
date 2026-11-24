@@ -49,6 +49,26 @@ pub fn address(cpu: &CpuState, operand: &MemOperand) -> u64 {
     base.wrapping_add(offset(cpu, operand))
 }
 
+/// Whether a 64-bit guest address is canonical under the x86-64 48-bit
+/// virtual-address rule (Intel SDM Vol. 1, section 3.3.7.1).
+pub(crate) fn is_canonical(address: u64) -> bool {
+    matches!(address >> 47, 0 | 0x1_ffff)
+}
+
+/// Whether every byte of a data access has a canonical address. An overflowing
+/// range is left to [`GuestMemory`] so it keeps its existing overflow fault.
+pub(crate) fn canonical_access(address: u64, size: u8) -> bool {
+    if !is_canonical(address) {
+        return false;
+    }
+    if size <= 1 {
+        return true;
+    }
+    address
+        .checked_add(u64::from(size) - 1)
+        .is_none_or(is_canonical)
+}
+
 /// Effective address without a segment base, as LEA computes it.
 fn offset(cpu: &CpuState, operand: &MemOperand) -> u64 {
     let base = operand.base.map_or(0, |index| cpu.gpr[usize::from(index)]);
@@ -78,6 +98,9 @@ pub(crate) fn write_reg(cpu: &mut CpuState, reg: RegOperand, size: u8, value: u6
 }
 
 pub(crate) fn read_mem(memory: &GuestMemory, address: u64, size: u8) -> Result<u64, ExitReason> {
+    if !canonical_access(address, size) {
+        return Err(ExitReason::GeneralProtection);
+    }
     match size {
         1 => memory.read_u8(address).map(u64::from),
         2 => memory.read_u16(address).map(u64::from),
@@ -93,6 +116,9 @@ pub(crate) fn write_mem(
     size: u8,
     value: u64,
 ) -> Result<(), ExitReason> {
+    if !canonical_access(address, size) {
+        return Err(ExitReason::GeneralProtection);
+    }
     match size {
         1 => memory.write_u8(address, value as u8),
         2 => memory.write_u16(address, value as u16),

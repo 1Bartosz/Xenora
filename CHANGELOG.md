@@ -25,6 +25,7 @@ remains unsupported.
 - Extended the read-only RDNA2 planning CLI (`python3 -m qa rdna2`) with family/status filters, compact summaries, Codex-ready manifests under `artifacts/`, active-claim exclusion (family claims exclude those families; path-only claims block overlapping permitted files), coverage reconcile against `semantic_coverage` without inflating counts, and inventory diffs. Covered by `tests/qa/test_rdna2_plan.py`; planning only, no GPU production edits.
 
 ### Fixed
+- Non-canonical 64-bit guest data addresses now raise `#GP` instead of a memory fault in both the interpreter and native DBT, including accesses that cross the canonical-address boundary. The synthetic architectural test is enabled again.
 - Made the native semantic-review timeout in `scripts/test-gpu.sh` configurable with `XENORA_SEMANTIC_TIMEOUT` and raised its default from 120 to 300 seconds, so cold Apple Silicon runs do not fail while the expanded Metal known-answer suite is still progressing.
 - Added a Python 3 fallback for `timeout` in `scripts/test-gpu.sh`, so the native Metal suite runs on stock macOS without GNU coreutils while preserving bounded execution and the usual timeout exit status.
 
