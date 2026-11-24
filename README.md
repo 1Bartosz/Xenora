@@ -296,6 +296,10 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 ```
 
+The format, lint and test trio is the standard check set. The native Metal
+passes use Metal API and shader validation; `scripts/audit/status.py --check`
+verifies the generated status tables.
+
 ### Run native Metal tests
 
 These require a Metal-capable Apple Silicon Mac.
