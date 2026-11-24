@@ -466,6 +466,12 @@ impl<'a> Interpreter<'a> {
 
             0x0F => match self.fetch_u8()? {
                 0x05 => Ok(Some(ExitReason::Syscall(self.cpu.get(Register::Rax)))),
+                // MOVZX r32/r64, r/m8 (0xB6), MOVZX r32/r64, r/m16 (0xB7),
+                // MOVSX r32/r64, r/m8 (0xBE), MOVSX r32/r64, r/m16 (0xBF).
+                op @ (0xB6 | 0xB7 | 0xBE | 0xBF) => {
+                    let modrm = self.fetch_u8()?;
+                    self.execute_mov_ext(modrm, &prefixes, op)
+                }
                 op @ 0xC8..=0xCF => {
                     let reg = Register::from_index((op & 7) | (u8::from(prefixes.rex_b) << 3));
                     let value = self.cpu.get(reg);
@@ -722,6 +728,72 @@ impl<'a> Interpreter<'a> {
         Ok((Register::from_index(reg_idx), Register::from_index(rm_idx)))
     }
 
+    /// Execute a MOVZX or MOVSX extension instruction.
+    ///
+    /// `op` is the second opcode byte: `0xB6` extends a byte, `0xB7` extends
+    /// a word, `0xBE` sign-extends a byte and `0xBF` sign-extends a word.
+    ///
+    /// The source width follows the opcode and the destination width follows
+    /// REX.W: without REX.W the destination is 32 bits and its upper half is
+    /// cleared, and with REX.W it is 64 bits. MOVSX sign-extends to the
+    /// destination width, so a 32-bit destination keeps the sign in bits
+    /// 31:0 and a zeroed upper half, while a 64-bit destination keeps the
+    /// sign extension across all 64 bits.
+    fn execute_mov_ext(
+        &mut self,
+        modrm: u8,
+        prefixes: &Prefixes,
+        op: u8,
+    ) -> Result<Option<ExitReason>, ExitReason> {
+        let mode = (modrm >> 6) & 3;
+        let reg_idx = ((modrm >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 };
+        let rm_idx = (modrm & 7) + if prefixes.rex_b { 8 } else { 0 };
+        let reg = Register::from_index(reg_idx);
+        let is_word = op == 0xB7 || op == 0xBF;
+        let is_signed = op == 0xBE || op == 0xBF;
+
+        let source = if mode == 3 {
+            // Register source: only the low 8 or 16 bits are read.
+            let value = self.cpu.get(Register::from_index(rm_idx));
+            if is_word {
+                value as u16 as u64
+            } else {
+                value as u8 as u64
+            }
+        } else {
+            let address = self.effective_address(modrm, prefixes)?;
+            if is_word {
+                self.memory
+                    .read_u16(address)
+                    .map_err(ExitReason::MemoryFault)? as u64
+            } else {
+                self.memory
+                    .read_u8(address)
+                    .map_err(ExitReason::MemoryFault)? as u64
+            }
+        };
+
+        let extended = if is_signed {
+            if is_word {
+                source as u16 as i16 as i64 as u64
+            } else {
+                source as u8 as i8 as i64 as u64
+            }
+        } else {
+            source
+        };
+
+        // A 32-bit destination holds a 32-bit result, so its upper half is
+        // cleared; a 64-bit destination keeps the full extension.
+        let result = if prefixes.rex_w {
+            extended
+        } else {
+            extended as u32 as u64
+        };
+        self.cpu.set(reg, result);
+        Ok(None)
+    }
+
     fn execute_mov_rm(
         &mut self,
         modrm: u8,
@@ -761,6 +833,49 @@ impl<'a> Interpreter<'a> {
         }
 
         // Memory operand [rm + disp] or SIB
+        let effective_addr = self.effective_address(modrm, prefixes)?;
+
+        if is_load {
+            // Load from memory to reg
+            if prefixes.rex_w {
+                let val = self
+                    .memory
+                    .read_u64(effective_addr)
+                    .map_err(ExitReason::MemoryFault)?;
+                self.cpu.set(reg, val);
+            } else {
+                let val = self
+                    .memory
+                    .read_u32(effective_addr)
+                    .map_err(ExitReason::MemoryFault)?;
+                self.cpu.set(reg, val as u64);
+            }
+        } else {
+            // Store from reg to memory
+            let val = self.cpu.get(reg);
+            if prefixes.rex_w {
+                self.memory
+                    .write_u64(effective_addr, val)
+                    .map_err(ExitReason::MemoryFault)?;
+            } else {
+                self.memory
+                    .write_u32(effective_addr, val as u32)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Compute the effective address of a memory operand.
+    ///
+    /// Consumes the SIB byte and the displacement from the instruction
+    /// stream. The FS or GS segment base is added when the corresponding
+    /// segment override prefix is present.
+    fn effective_address(&mut self, modrm: u8, prefixes: &Prefixes) -> Result<u64, ExitReason> {
+        let mode = (modrm >> 6) & 3;
+        let rm_idx = (modrm & 7) + if prefixes.rex_b { 8 } else { 0 };
+
         let (base_val, disp): (u64, i64) = if (rm_idx & 7) == 4 {
             // SIB byte follows ModR/M
             let sib = self.fetch_u8()?;
@@ -832,36 +947,7 @@ impl<'a> Interpreter<'a> {
             effective_addr = effective_addr.wrapping_add(self.cpu.fs_base);
         }
 
-        if is_load {
-            // Load from memory to reg
-            if prefixes.rex_w {
-                let val = self
-                    .memory
-                    .read_u64(effective_addr)
-                    .map_err(ExitReason::MemoryFault)?;
-                self.cpu.set(reg, val);
-            } else {
-                let val = self
-                    .memory
-                    .read_u32(effective_addr)
-                    .map_err(ExitReason::MemoryFault)?;
-                self.cpu.set(reg, val as u64);
-            }
-        } else {
-            // Store from reg to memory
-            let val = self.cpu.get(reg);
-            if prefixes.rex_w {
-                self.memory
-                    .write_u64(effective_addr, val)
-                    .map_err(ExitReason::MemoryFault)?;
-            } else {
-                self.memory
-                    .write_u32(effective_addr, val as u32)
-                    .map_err(ExitReason::MemoryFault)?;
-            }
-        }
-
-        Ok(None)
+        Ok(effective_addr)
     }
 
     fn update_flags_logic(&mut self, val: u64, is_64: bool) {

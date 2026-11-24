@@ -462,3 +462,250 @@ fn test_sib_index_field_100b_without_rex_x_means_no_index() {
         0x1234_5678_9abc_def0
     );
 }
+
+/// Build a guest program that loads `value` into `rdi` and then runs `body`.
+///
+/// `mov rdi, imm64` is 48 BF <imm64>.
+fn program_with_rdi(value: u64, body: &[u8]) -> Vec<u8> {
+    let mut code = vec![0x48, 0xBF];
+    code.extend_from_slice(&value.to_le_bytes());
+    code.extend_from_slice(body);
+    code.push(0xF4); // hlt
+    code
+}
+
+/// Run `code` on the interpreter and return the final state and exit reason.
+fn run_interpreter(code: &[u8]) -> (CpuState, ExitReason) {
+    let pe_bytes = build_synthetic_pe32_plus(code);
+    let parsed = ParsedPe::parse(&pe_bytes).expect("parse");
+    let mut loaded = parsed.load_into_memory(&pe_bytes).expect("load");
+    loaded
+        .memory
+        .map_region(STACK_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("stack mapping should succeed");
+    loaded
+        .memory
+        .map_region(DATA_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("data mapping should succeed");
+
+    let cpu = CpuState::new(loaded.entry_point, STACK_BASE + 0x8000);
+    let mut interp = Interpreter::new(cpu, &mut loaded.memory, 100);
+    let result = interp.run();
+    (result.final_state, result.exit_reason)
+}
+
+/// MOVZX with a register source, for both destination widths.
+///
+/// The encodings are `movzbl eax, bl` (0F B6 C3) and
+/// `movzbq rdx, bl` (48 0F B6 D3), as produced by LLVM 23.1.6
+/// `llvm-mc -show-encoding`. A zero extension always produces a zero-extended
+/// value, so the 32-bit form clears the upper half of rax while the 64-bit
+/// form produces the same 64-bit value.
+#[test]
+fn test_movzx_register_source_zero_extends() {
+    // mov rbx, 0xffffffffffffffff (48 BB <imm64>)
+    let mut code = vec![0x48, 0xBB];
+    code.extend_from_slice(&u64::MAX.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0xB6, 0xC3]); // movzbl eax, bl
+    code.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xD3]); // movzbq rdx, bl
+    code.push(0xF4); // hlt
+
+    let (state, reason) = run_interpreter(&code);
+    assert_eq!(reason, ExitReason::Halt);
+    // The 32-bit destination holds a zero-extended byte: 0x00000000000000ff.
+    assert_eq!(state.get(Register::Rax), 0x0000_0000_0000_00ff);
+    // The 64-bit destination holds the same zero-extended value.
+    assert_eq!(state.get(Register::Rdx), 0x0000_0000_0000_00ff);
+}
+
+/// MOVSX with a register source, for both destination widths.
+///
+/// The encodings are `movsbl eax, bl` (0F BE C3) and
+/// `movsbq rdx, bl` (48 0F BE D3), as produced by LLVM 23.1.6
+/// `llvm-mc -show-encoding`. A sign extension reaches the destination width,
+/// so the 32-bit form keeps the sign in bits 31:0 and clears the upper half,
+/// while the 64-bit form sign-extends across all 64 bits.
+#[test]
+fn test_movsx_register_source_sign_extends_to_the_destination_width() {
+    // mov rbx, 0xffffffffffffffff (48 BB <imm64>)
+    let mut code = vec![0x48, 0xBB];
+    code.extend_from_slice(&u64::MAX.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0xBE, 0xC3]); // movsbl eax, bl
+    code.extend_from_slice(&[0x48, 0x0F, 0xBE, 0xD3]); // movsbq rdx, bl
+    code.push(0xF4); // hlt
+
+    let (state, reason) = run_interpreter(&code);
+    assert_eq!(reason, ExitReason::Halt);
+    // The 32-bit destination holds 0xffffffff and its upper half is cleared.
+    assert_eq!(state.get(Register::Rax), 0x0000_0000_ffff_ffff);
+    // The 64-bit destination keeps the sign extension across all 64 bits.
+    assert_eq!(state.get(Register::Rdx), 0xffff_ffff_ffff_ffff);
+}
+
+/// MOVSX from a 16-bit source sign-extends to the destination width.
+///
+/// The encodings are `movswl eax, bx` (0F BF C3) and
+/// `movswq rdx, bx` (48 0F BF D3), as produced by LLVM 23.1.6
+/// `llvm-mc -show-encoding`.
+#[test]
+fn test_movsx_word_register_source_sign_extends() {
+    // mov rbx, 0xffffffffffffffff (48 BB <imm64>)
+    let mut code = vec![0x48, 0xBB];
+    code.extend_from_slice(&u64::MAX.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0xBF, 0xC3]); // movswl eax, bx
+    code.extend_from_slice(&[0x48, 0x0F, 0xBF, 0xD3]); // movswq rdx, bx
+    code.push(0xF4); // hlt
+
+    let (state, reason) = run_interpreter(&code);
+    assert_eq!(reason, ExitReason::Halt);
+    assert_eq!(state.get(Register::Rax), 0x0000_0000_ffff_ffff);
+    assert_eq!(state.get(Register::Rdx), 0xffff_ffff_ffff_ffff);
+}
+
+/// MOVZX with a memory source reads only the low byte of the operand.
+///
+/// The encodings are `movzbl eax, byte [rdi]` (0F B6 07) and
+/// `movzbq rdx, byte [rdi]` (48 0F B6 17), as produced by LLVM 23.1.6
+/// `llvm-mc -show-encoding`.
+#[test]
+fn test_movzx_memory_source_reads_one_byte() {
+    // mov rdi, DATA_BASE (48 BF <imm64>)
+    // movzbl eax, byte [rdi] (0F B6 07)
+    // movzbq rdx, byte [rdi] (48 0F B6 17)
+    let code = program_with_rdi(DATA_BASE, &[0x0F, 0xB6, 0x07, 0x48, 0x0F, 0xB6, 0x17]);
+
+    let pe_bytes = build_synthetic_pe32_plus(&code);
+    let parsed = ParsedPe::parse(&pe_bytes).expect("parse");
+    let mut loaded = parsed.load_into_memory(&pe_bytes).expect("load");
+    loaded
+        .memory
+        .map_region(STACK_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("stack mapping should succeed");
+    loaded
+        .memory
+        .map_region(DATA_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("data mapping should succeed");
+    // The byte at the source address has the high bit set, so a sign
+    // extension would produce a negative value and a zero extension must not.
+    loaded
+        .memory
+        .write_u8(DATA_BASE, 0xFF)
+        .expect("source byte");
+
+    let cpu = CpuState::new(loaded.entry_point, STACK_BASE + 0x8000);
+    let mut interp = Interpreter::new(cpu, &mut loaded.memory, 100);
+    let result = interp.run();
+
+    assert_eq!(result.exit_reason, ExitReason::Halt);
+    assert_eq!(result.final_state.get(Register::Rax), 0x0000_0000_0000_00ff);
+    assert_eq!(result.final_state.get(Register::Rdx), 0x0000_0000_0000_00ff);
+}
+
+/// MOVSX with a memory source sign-extends the byte that was read.
+///
+/// The encodings are `movsbl eax, byte [rdi]` (0F BE 07) and
+/// `movsbq rdx, byte [rdi]` (48 0F BE 17), as produced by LLVM 23.1.6
+/// `llvm-mc -show-encoding`.
+#[test]
+fn test_movsx_memory_source_sign_extends() {
+    // mov rdi, DATA_BASE (48 BF <imm64>)
+    // movsbl eax, byte [rdi] (0F BE 07)
+    // movsbq rdx, byte [rdi] (48 0F BE 17)
+    let code = program_with_rdi(DATA_BASE, &[0x0F, 0xBE, 0x07, 0x48, 0x0F, 0xBE, 0x17]);
+
+    let pe_bytes = build_synthetic_pe32_plus(&code);
+    let parsed = ParsedPe::parse(&pe_bytes).expect("parse");
+    let mut loaded = parsed.load_into_memory(&pe_bytes).expect("load");
+    loaded
+        .memory
+        .map_region(STACK_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("stack mapping should succeed");
+    loaded
+        .memory
+        .map_region(DATA_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("data mapping should succeed");
+    loaded
+        .memory
+        .write_u8(DATA_BASE, 0xFF)
+        .expect("source byte");
+
+    let cpu = CpuState::new(loaded.entry_point, STACK_BASE + 0x8000);
+    let mut interp = Interpreter::new(cpu, &mut loaded.memory, 100);
+    let result = interp.run();
+
+    assert_eq!(result.exit_reason, ExitReason::Halt);
+    // The 32-bit destination holds 0xffffffff with the upper half cleared.
+    assert_eq!(result.final_state.get(Register::Rax), 0x0000_0000_ffff_ffff);
+    // The 64-bit destination keeps the sign extension across all 64 bits.
+    assert_eq!(result.final_state.get(Register::Rdx), 0xffff_ffff_ffff_ffff);
+}
+
+/// The interpreter must implement the same extension opcodes as the native
+/// DBT translator.
+///
+/// The program exercises all four opcodes with both a register and a memory
+/// source, and both destination widths:
+///
+/// - `movzbl eax, bl` (0F B6 C3), `movzbq rdx, bl` (48 0F B6 D3)
+/// - `movswl eax, bx` (0F BF C3), `movswq rdx, bx` (48 0F BF D3)
+/// - `movzbl eax, byte [rdi]` (0F B6 07), `movzbq rdx, byte [rdi]`
+///   (48 0F B6 17)
+/// - `movsbl eax, byte [rdi]` (0F BE 07), `movsbq rdx, byte [rdi]`
+///   (48 0F BE 17)
+///
+/// All encodings were produced by LLVM 23.1.6 `llvm-mc -show-encoding`.
+///
+/// The expected values follow the Intel SDM rules for MOVZX and MOVSX: MOVZX
+/// always zero-extends, and MOVSX sign-extends to the destination width, so a
+/// 32-bit destination keeps the sign in bits 31:0 and clears the upper half
+/// while a 64-bit destination keeps the sign extension across all 64 bits.
+#[test]
+fn test_interpreter_implements_the_extension_opcodes() {
+    let code = program_with_rdi(
+        DATA_BASE,
+        &[
+            0x0F, 0xB6, 0xC3, // movzbl eax, bl
+            0x48, 0x0F, 0xB6, 0xD3, // movzbq rdx, bl
+            0x0F, 0xBF, 0xC3, // movswl eax, bx
+            0x48, 0x0F, 0xBF, 0xD3, // movswq rdx, bx
+            0x0F, 0xB6, 0x07, // movzbl eax, byte [rdi]
+            0x48, 0x0F, 0xB6, 0x17, // movzbq rdx, byte [rdi]
+            0x0F, 0xBE, 0x07, // movsbl eax, byte [rdi]
+            0x48, 0x0F, 0xBE, 0x17, // movsbq rdx, byte [rdi]
+        ],
+    );
+
+    let pe_bytes = build_synthetic_pe32_plus(&code);
+    let parsed = ParsedPe::parse(&pe_bytes).expect("parse");
+    let mut loaded = parsed.load_into_memory(&pe_bytes).expect("load");
+    loaded
+        .memory
+        .map_region(STACK_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("stack mapping should succeed");
+    loaded
+        .memory
+        .map_region(DATA_BASE, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("data mapping should succeed");
+    // The bytes at the source address have the high bit set and clear, so a
+    // sign extension and a zero extension give different results.
+    loaded
+        .memory
+        .write_u8(DATA_BASE, 0xFF)
+        .expect("source byte");
+    loaded
+        .memory
+        .write_u8(DATA_BASE + 1, 0x7F)
+        .expect("source byte");
+    let mut cpu = CpuState::new(loaded.entry_point, STACK_BASE + 0x8000);
+    // rbx and rsi hold the register-source values.
+    cpu.set(Register::Rbx, u64::MAX);
+    cpu.set(Register::Rsi, 0x0000_0000_0000_7FFF);
+    let mut interp = Interpreter::new(cpu, &mut loaded.memory, 100);
+    let result = interp.run();
+
+    assert_eq!(result.exit_reason, ExitReason::Halt);
+    // The last write to rax is the 32-bit sign extension of the byte 0xFF.
+    assert_eq!(result.final_state.get(Register::Rax), 0x0000_0000_ffff_ffff);
+    // The last write to rdx is the 64-bit sign extension of the same byte.
+    assert_eq!(result.final_state.get(Register::Rdx), 0xffff_ffff_ffff_ffff);
+}
