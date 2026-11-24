@@ -35,7 +35,7 @@ mod independent_ref;
 use std::collections::BTreeMap;
 
 use harness::{Case, words};
-use xenora_shader::{Architecture, compile};
+use xenora_shader::{Architecture, CompileError, compile};
 
 /// The twelve forms with their ENC_VOP2 opcodes (guide 12.7).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -766,11 +766,15 @@ fn other_vop2_opcodes_stay_unsupported() {
 fn vop2_integer_forms_match_the_guide_on_native_metal() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
-    for (label, code, _) in rejections() {
-        assert!(
-            compile(Architecture::Gfx1030, &code).is_err(),
-            "compiler accepted {label}"
-        );
+    for (label, code, offset) in rejections() {
+        // Refused at the same word as by the interpreters, so a later failure
+        // cannot stand in.
+        let at = match compile(Architecture::Gfx1030, &code) {
+            Err(CompileError::Decode(error)) => error.offset,
+            Err(CompileError::Verify { offset, .. }) => offset,
+            other => panic!("compiler did not reject {label}: {other:?}"),
+        };
+        assert_eq!(at, offset, "compiler rejected {label} elsewhere");
     }
     let cases = checked_cases();
     let (failures, programs) = harness::check_metal(&cases);

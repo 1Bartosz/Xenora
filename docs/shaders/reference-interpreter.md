@@ -15,6 +15,7 @@
 | VOPC `V_CMP_{LT,EQ,LE,GT,NE,GE}_{I32,U32}` | Compare widened 64-bit values per active lane. VCC_LO gets EXEC & the test results and is fully written, so empty EXEC gives 0. A later `S_CBRANCH_VCCZ` on such a mask checks the skipped code statically ([VOPC integer compares](vector-compare.md)). |
 | SOPP `S_BRANCH`, `S_CBRANCH_SCC0` | Use a signed dword displacement from the next instruction (CLAIM-RDNA2-SOPP-BRANCH-DISPLACEMENT). Require a nonnegative word displacement to a decoded instruction boundary, including for untaken edges. |
 | VOP2 `V_AND_B32`, `V_XOR_B32` | Apply the bitwise operator to two VGPRs. |
+| VOP2 `V_MUL_{I32_I24,HI_I32_I24,U32_U24,HI_U32_U24}`, `V_MIN_{I32,U32}`, `V_MAX_{I32,U32}`, `V_XNOR_B32`, `V_ADD_NC_U32`, `V_SUB_NC_U32`, `V_SUBREV_NC_U32` | The guide's section 12.7 result per active lane, computed exactly: the 24-bit multiplies use S0[23:0] and S1[23:0] (sign-extended for I24) and keep bits 31:0 or 63:32; SUBREV gives S1 - S0. SRC0 is a VGPR, s0-s105, `vcc_lo`, an inline integer or a literal. Inactive lanes keep VDST; no SCC or VCC write. |
 | VOP2 `V_ADD_F32`, `V_MUL_F32` | Require exact binary32 results by checking the inputs and the wider intermediate. Multiplication of the significands fits in binary64. Addition must also recover the smaller operand by subtracting the larger. |
 | SOPP `S_ENDPGM` | Stop at the end of the byte stream. The synthetic contract requires explicitly completed transfers and a produced output first (CLAIM-RDNA2-TRANSFER-WAITS). |
 

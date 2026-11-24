@@ -51,12 +51,13 @@ error.
 | `family` | Encoding family; must match the XML base encoding | e.g. `SOP2` |
 | `opcode` | Opcode; must match the XML | non-negative integer |
 | `variant` | Rust enum variant of the typed operation | CamelCase, e.g. `AddU32` |
-| `operation` | The primitive the form uses | `add`, `sub`, `and`, `or`, `xor`, `andn2`, `orn2`, `nand`, `nor`, `xnor`, `lshl`, `lshr`, `ashr`, `min`, `max`, `cselect`, `bfm`, `mul`, `mul_hi`, `bfe`, `absdiff`, `lshl_add`, `compare` and the SOP1 unaries |
+| `operation` | The primitive the form uses | `add`, `sub`, `and`, `or`, `xor`, `andn2`, `orn2`, `nand`, `nor`, `xnor`, `lshl`, `lshr`, `ashr`, `min`, `max`, `cselect`, `bfm`, `mul`, `mul_hi`, `bfe`, `absdiff`, `lshl_add`, `mul24`, `mul_hi24` (vector only), `compare` and the SOP1 unaries |
 | `signedness` | How operands are read | `unsigned`, `signed`, `bitwise` (always `bitwise` for the logical operations, `cselect` and `bfm`; never for the arithmetic ones, `add`, `sub`, `min`, `max`, `mul`, `mul_hi`, `bfe`, `absdiff` and `lshl_add`; shifts take their primitive's signedness) |
 | `carry_in` | Whether the form reads SCC: carry-in, borrow-in or the select condition | `none`, `scc` (`scc` only for unsigned `add` and `sub`, and required for `cselect`) |
 | `width` | Operand and result width in bits | `32` |
 | `source_bits` | Sign extension only: the low bits of S0 that are read. The XML must list S0 with that size and format (`FMT_NUM_I8` or `FMT_NUM_I16`) | `8`, `16`; required for `sext`, rejected elsewhere |
 | `relation` | Compares only: the relation tested with S0 on the left | `eq`, `lg` (not equal), `gt`, `ge`, `lt`, `le`; required for `compare`, rejected elsewhere |
+| `source_order` | Vector forms only: `reversed` when the guide computes `op(S1, S0)` (the XML records no operand order); absent otherwise | `reversed` |
 | `shift_amount` | `lshl_add` only: the fixed left shift of S0 before the add | `1` to `4`; required for `lshl_add`, rejected elsewhere |
 | `shift_count_bits` | Shifts only: the low bits of S1 used as the count. The generator masks S1 with it, and the XML must list S1 as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
 | `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `relation` (compares only), `selected_src0` (min and max: S0 won the strict compare, so a tie gives 0), `unchanged` |
@@ -93,6 +94,17 @@ fixes the `scc` value:
 | `lshl_add` / `unsigned` | `carry_out` | `lshl_add_carry_u32` (with `shift_amount`) | no |
 | `compare` / `signed` or `unsigned` | `relation` | `eq_b32`, `ne_b32` (for both signednesses), `gt_i32`/`gt_u32`, `ge_*`, `lt_*`, `le_*` | no |
 
+Vector forms (operand rule `vop2_vgpr`, kind `vector`) use a separate table:
+the pair picks the per-lane `VectorBinary` the MSL lowering uses, and `scc`
+must be `unchanged` (VOP2 integer forms write no SCC, VCC or EXEC):
+
+| `operation` / `signedness` | `VectorBinary` |
+| --- | --- |
+| `add` / `unsigned`, `sub` / `unsigned` | `Add`, `Sub` |
+| `xnor` / `bitwise` | `Xnor` |
+| `min`, `max` / `signed` or `unsigned` | `MinSigned`, `MinUnsigned`, `MaxSigned`, `MaxUnsigned` |
+| `mul24`, `mul_hi24` / `signed` or `unsigned` | `Mul24Signed`, `Mul24Unsigned`, `MulHi24Signed`, `MulHi24Unsigned` |
+
 A compare must use an operand rule of the compare kind (`sopc_scalar`: two
 sources, no destination), a unary operation one of the unary kind (`sop1_sgpr`:
 one source and an SGPR destination), and a two-source ALU operation
@@ -107,8 +119,8 @@ vocabularies above, it rejects:
 
 - contradictions: a declared `scc` or `carry_in` that the primitive does not
   have, `bitwise` on an arithmetic operation or the reverse;
-- duplicates: the same `name`, the same `(family, opcode)` or the same
-  `variant` declared twice;
+- duplicates: the same `name`, the same `(family, opcode)`, or the same
+  `variant` twice in one generated enum;
 - XML disagreements: a family with no XML encoding, a form with no default XML
   variant, a different opcode, an SCC input or output the XML does not show (or
   that the declaration omits), an operand width other than `width`, a signed

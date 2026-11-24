@@ -4,7 +4,7 @@ use std::fmt;
 
 pub use xenora_isa::{
     Architecture, CompareRelation, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp,
-    ScalarCompareOp, ScalarSource, ScalarUnaryOp, VectorCompareOp, VectorSource,
+    ScalarCompareOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorCompareOp, VectorSource,
 };
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
@@ -17,6 +17,7 @@ use xenora_isa::{
 
 use xenora_isa::meta::EncodingFamily;
 use xenora_isa::semantics::FORM_IDS;
+pub use xenora_isa::semantics::VectorBinary;
 
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
 /// operand combination: the hand-written forms below followed by every form of
@@ -429,6 +430,21 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
             S_CBRANCH_VCCZ.byte_len(),
         ));
     }
+    if let Some(op) = VectorAluOp::from_word(first) {
+        // VOP2: SRC0 in bits 0-8, VSRC1 in bits 9-16, VDST in bits 17-24.
+        let dst = ((first >> 17) & 0xff) as u8;
+        let src1 = ((first >> 9) & 0xff) as u8;
+        let (src0, len) = vector_src0(first, bytes, op.assembly_name())?;
+        return Ok((
+            Instruction::VectorAlu {
+                op,
+                dst,
+                src0,
+                src1,
+            },
+            len,
+        ));
+    }
     if V_LSHLREV_B32.matches(first) {
         let (dst, src0, src1) = vop2_registers(first, "v_lshlrev_b32_e32")?;
         return Ok((
@@ -698,10 +714,21 @@ fn vector_compare(
     first: u32,
     bytes: &[u8],
 ) -> Result<(Instruction, u8), DecodeErrorKind> {
-    let source = first & 0x1ff;
     let src1 = ((first >> 9) & 0xff) as u8;
+    let (src0, len) = vector_src0(first, bytes, op.mnemonic())?;
+    Ok((Instruction::VectorCompare { op, src0, src1 }, len))
+}
+
+/// The 9-bit SRC0 of a VOPC or VOP2 word: a VGPR, `s0-s105`, `vcc_lo`, an
+/// inline integer -16..64 or a literal word; everything else is unsupported.
+fn vector_src0(
+    first: u32,
+    bytes: &[u8],
+    mnemonic: &'static str,
+) -> Result<(VectorSource, u8), DecodeErrorKind> {
+    let source = first & 0x1ff;
     let base_len = 4;
-    let (src0, len) = match source {
+    Ok(match source {
         0..=106 => (VectorSource::Scalar(source as u8), base_len),
         128..=192 => (VectorSource::Immediate(source - 128), base_len),
         193..=208 => (
@@ -715,12 +742,11 @@ fn vector_compare(
         256..=511 => (VectorSource::Register(source as u8), base_len),
         _ => {
             return Err(unsupported(
-                op.mnemonic(),
+                mnemonic,
                 "expected a VGPR, normal SGPR, vcc_lo, inline integer or literal",
             ));
         }
-    };
-    Ok((Instruction::VectorCompare { op, src0, src1 }, len))
+    })
 }
 
 fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKind> {
