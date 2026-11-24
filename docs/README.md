@@ -54,3 +54,4 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Legal scope](legal.md), [dependency licensing](licenses.md), and [third-party notices](../THIRD_PARTY_NOTICES.md) — Input policy, attribution, and redistribution findings.
 - [Contribution guidelines](../CONTRIBUTING.md) — Original authorship, Developer Certificate of Origin sign-off, and evidence requirements.
 - [Agent task queue](coordination/agent-tasks.md) — Areas, claiming, leases, upstream sync, verification and the security model for parallel contributors and coding agents.
+- [CPU/runtime expansion campaign ledger](coordination/cpu-campaign-ledger.md) — Progress ledger for the Xenora native CPU and runtime compatibility campaign: starting/current commits, completed batches, new forms, verification evidence and the next implementation target.
