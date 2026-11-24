@@ -51,6 +51,9 @@ SCC = {
 }
 MASK = {"unchanged": "Unchanged"}
 WAVE = {"any": "Any", "wave32": "Wave32"}
+# The decoder has no wave-size input at the registry dispatch yet, so a Wave32
+# restriction could be declared but not enforced. Reject it until it can be.
+ENFORCED_WAVES = {"any"}
 EVIDENCE = {
     "reference": "Reference",
     "independent": "Independent",
@@ -91,10 +94,14 @@ OPERAND_RULES = {
             ],
             "max_literals": 1,
         },
+        # Every one of these is rejected by the decoder's SOP2 operand checks.
+        "unsupported": UNSUPPORTED_COMBOS,
     },
 }
 
 VARIANT = re.compile(r"^[A-Z][A-Za-z0-9]*$")
+RESERVED_VARIANTS = {"Self", "ALL"}
+U16_MAX = 0xFFFF
 NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 SECTION = re.compile(r"^[0-9]+(\.[0-9]+)*$")
 
@@ -142,6 +149,10 @@ def _check_rule(name, rule, errors):
         errors.append(f"operand rule {name}: unknown unsupported combos {unknown}")
     if len(set(unsupported)) != len(unsupported):
         errors.append(f"operand rule {name}: duplicate unsupported combos")
+    if set(unsupported) != implemented["unsupported"]:
+        errors.append(
+            f"operand rule {name}: unsupported combos differ from those the decoder rejects"
+        )
     declared = {key: value for key, value in rule.items() if key != "unsupported"}
     if declared != implemented["shape"]:
         errors.append(
@@ -220,9 +231,15 @@ def validate(registry, snapshot):
     if registry.get("source_sha256") != snapshot["source"].get("sha256"):
         errors.append("source_sha256 does not match the XML snapshot")
     documents = registry.get("documents", {})
-    for name in documents:
+    for name, document in documents.items():
         if name not in DOCUMENTS:
             errors.append(f"unknown document {name}")
+        elif not (isinstance(document, dict) and isinstance(document.get("title"), str)
+                  and document["title"] and isinstance(document.get("file"), str)
+                  and document["file"]):
+            errors.append(f"document {name}: needs a title and a file")
+    if "guide" not in documents:
+        errors.append("the guide document is not declared")
     rules = registry.get("operand_rules", {})
     for name, rule in rules.items():
         _check_rule(name, rule, errors)
@@ -250,9 +267,13 @@ def validate(registry, snapshot):
             errors.append(f"{label}: invalid name")
         if not isinstance(form["variant"], str) or not VARIANT.match(form["variant"]):
             errors.append(f"{label}: invalid variant {form['variant']!r}")
-        if not isinstance(form["opcode"], int) or isinstance(form["opcode"], bool) or form["opcode"] < 0:
+        if form["variant"] in RESERVED_VARIANTS:
+            errors.append(f"{label}: variant {form['variant']!r} is reserved")
+        if type(form["opcode"]) is not int or not 0 <= form["opcode"] <= U16_MAX:
             errors.append(f"{label}: invalid opcode")
-        if form["width"] not in WIDTHS:
+        if form["wave"] in WAVE and form["wave"] not in ENFORCED_WAVES:
+            errors.append(f"{label}: wave {form['wave']} has no decoder enforcement yet")
+        if type(form["width"]) is not int or form["width"] not in WIDTHS:
             errors.append(f"{label}: width {form['width']} is not supported")
         for key, value in (
             ("name", form["name"]),
@@ -305,9 +326,9 @@ def _check_spec(label, spec, documents, errors):
             errors.append(f"{label}: spec cites undeclared document {ref['document']!r}")
         if not SECTION.match(str(ref["section"])):
             errors.append(f"{label}: invalid spec section {ref['section']!r}")
-        if not isinstance(ref["page"], int) or ref["page"] < 0:
+        if type(ref["page"]) is not int or not 0 <= ref["page"] <= U16_MAX:
             errors.append(f"{label}: invalid spec page")
-        if ref["document"] == "guide" and isinstance(ref["page"], int) and ref["page"] > 0:
+        if ref["document"] == "guide" and type(ref["page"]) is int and ref["page"] > 0:
             has_guide = True
     if not has_guide:
         errors.append(f"{label}: missing a guide section and page reference")

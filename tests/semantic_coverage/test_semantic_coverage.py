@@ -36,11 +36,11 @@ class SemanticCoverageTests(unittest.TestCase):
             "form": "s_sub_u32", "encoding": "SOP2, scalar operands",
             "llvm": "three-way passed", "lowering": "resolved scalar state and SCC",
             "reference": "implemented", "cpu": "fixture verified",
-            "gpu": "fixture verified on Apple M5",
+            "gpu": "fixture verified on Apple M5", "decoded": True,
         })
         self.assertEqual(counts, {
             "Identified": 2, "Encoding-validated": 1, "Declared": 1,
-            "Decoder-supported": 2, "IR": 1, "MSL": 1, "Reference-verified": 1,
+            "Decoder-supported": 1, "IR": 1, "MSL": 1, "Reference-verified": 1,
             "Metal-verified": 1, "Unsupported operand variants": 1,
         })
 
@@ -54,8 +54,29 @@ class SemanticCoverageTests(unittest.TestCase):
         self.assertEqual(counts["Reference-verified"], 0)
         self.assertEqual(counts["IR"], 1)
 
+    def test_verified_evidence_needs_a_decoding_row(self):
+        counts = self.counts({
+            "form": "s_sub_u32", "encoding": "SOP2", "reference": "implemented",
+            "cpu": "fixture verified", "gpu": "fixture verified", "decoded": False,
+        })
+        self.assertEqual(counts["Reference-verified"], 0)
+        self.assertEqual(counts["Metal-verified"], 0)
+
+    def test_declared_but_not_compiled_is_not_decoder_supported(self):
+        # S_ADD_U32 is declared in the registry but absent from the compiled tables.
+        self.assertEqual(self.counts()["Decoder-supported"], 1)
+
+    def test_generated_table_parser(self):
+        source = (
+            "pub const FORM_IDS: [(&str, EncodingFamily); 1] = [\n"
+            '    ("S_ADD_U32", EncodingFamily::Sop2),\n];'
+        )
+        self.assertEqual(coverage.parse_generated(source), {("SOP2", "S_ADD_U32")})
+        with self.assertRaisesRegex(ValueError, "length mismatch"):
+            coverage.parse_generated(source.replace("; 1]", "; 2]"))
+
     def test_stub_or_unrecognized_lowering_fails(self):
-        for lowering in ("stub", "MSL placeholder add", "something new"):
+        for lowering in ("stub", "MSL placeholder add", "MSL unimplemented", "something new"):
             with self.assertRaisesRegex(ValueError, "unrecognized lowering"):
                 self.counts({"form": "s_add_u32", "encoding": "SOP2", "lowering": lowering})
 
