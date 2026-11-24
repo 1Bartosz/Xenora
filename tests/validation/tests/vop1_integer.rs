@@ -217,7 +217,7 @@ const COUNTS: [(&str, usize); 17] = [
 /// supported subset (107-127 and 209-254, with the SDWA and DPP extension
 /// dword where one belongs); for V_SWAP_B32 every selector 0-255; and for
 /// all six a read of and a write to a VGPR with a load outstanding.
-const REJECTIONS: usize = 5 * (1 + 21 + 46) + 256 + 6 * 2;
+const REJECTIONS: usize = 5 * (1 + 21 + 46) + 256 + 2 + 6 * 2;
 
 const LITERAL: u32 = 255;
 const VCC_LO: u32 = 106;
@@ -682,8 +682,15 @@ fn rejections() -> Vec<(String, Vec<u8>, usize)> {
         let code = program(&swap_setup, &alu, &[], 2);
         all.push((format!("{SWAP_NAME} src0 {src0}"), code, swap_offset));
     }
+    // V_SWAP_B32 also writes v0 (the dispatch index) through either operand:
+    // v0 as SRC0 and v0 as VDST, under full EXEC.
+    for (dst, src0, what) in [(2, 0, "SRC0"), (0, 2, "VDST")] {
+        let code = program(&swap_setup, &[vop1(SWAP, dst, vgpr(src0))], &[], 2);
+        all.push((format!("{SWAP_NAME} v0 as {what}"), code, swap_offset));
+    }
     // v3 with a load into it outstanding (no wait): read as SRC0, then
-    // written as VDST (the swap also reads it as VDST).
+    // written as VDST. The swap reads its VDST first, so for it the second
+    // case is also a read; no supported form writes v3 without reading it.
     let mut pending = swap_setup.clone();
     pending.extend(PENDING_LOAD_V3);
     let pending_offset = alu_offset(&pending);
@@ -691,6 +698,11 @@ fn rejections() -> Vec<(String, Vec<u8>, usize)> {
     for (op, name) in ops.chain([(SWAP, SWAP_NAME)]) {
         for (dst, src0, what) in [(2, 3, "read"), (3, if op == SWAP { 2 } else { 1 }, "write")] {
             let code = program(&pending, &[vop1(op, dst, vgpr(src0))], &[], 2);
+            let what = if op == SWAP && what == "write" {
+                "VDST read"
+            } else {
+                what
+            };
             let label = format!("{name} {what} of v3 with its load outstanding");
             all.push((label, code, pending_offset));
         }
