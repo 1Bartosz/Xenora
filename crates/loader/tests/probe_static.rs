@@ -199,3 +199,63 @@ fn probe_distinguishes_aliases_from_unavailable_services() {
     assert!(json.contains("\"recognized_unsupported_slots\": 1"));
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn trusted_runner_callback_and_report_match_the_fixture() {
+    let pe = include_bytes!("../../../fixtures/pe/trusted-runner.exe");
+    let path = std::env::temp_dir().join(format!("xenora-probe-trusted-{}", std::process::id()));
+    let report = run_probe_and_export(pe, &path, &ProbeConfig::default()).unwrap();
+    let read = |name| std::fs::read_to_string(path.join(name)).unwrap();
+    let md = read("candidate_static_report.md");
+    let json = read("candidate_static_report.json");
+    let imports = read("imports.csv");
+    std::fs::remove_dir_all(path).unwrap();
+
+    let callback: Vec<_> = report
+        .instruction_records
+        .iter()
+        .filter(|i| i.rva >= 0x1040)
+        .collect();
+    assert_eq!(
+        callback.iter().map(|i| i.rva).collect::<Vec<_>>(),
+        [0x1040, 0x1047, 0x104e]
+    );
+    assert_eq!(callback[1].bytes, [0x48, 0xc7, 0, 17, 0, 0, 0]);
+    assert!(callback[1].is_supported_dbt);
+    assert!(!callback[1].is_supported_interp);
+    assert!(report.first_unsupported_dbt_insn.is_none());
+    assert!(md.contains("Sections Census (4)"));
+    assert!(json.contains("\"sections_count\": 4"));
+    assert!(!report.imports[0].is_supported);
+    assert!(
+        imports
+            .lines()
+            .any(|line| line.contains("fixture_draw") && line.ends_with(",true"))
+    );
+    assert!(json.contains("\"trusted_runner_binding_slots\": 1"));
+    assert!(json.contains("\"unresolved_imports\": 1"));
+}
+
+#[test]
+fn probe_consumes_complete_c7_operands_even_when_native_support_is_missing() {
+    for (encoding, supported) in [
+        (&[0x48, 0xc7, 0x05, 0, 0, 0, 0, 17, 0, 0, 0][..], true),
+        (&[0xc7, 0xc0, 17, 0, 0, 0], true),
+        (&[0x66, 0xc7, 0xc0, 17, 0], false),
+        (&[0xc7, 0x00, 17, 0, 0, 0], false),
+        (&[0x48, 0xc7, 0x40, 4, 17, 0, 0, 0], false),
+        (&[0x48, 0xc7, 0x04, 0x25, 0, 0, 0, 0, 17, 0, 0, 0], false),
+    ] {
+        let mut pe = create_synthetic_probe_pe();
+        let end = 0x200 + encoding.len();
+        pe[0x200..end].copy_from_slice(encoding);
+        pe[end] = 0xcc;
+        let report = probe_pe_bytes(&pe, &ProbeConfig::default()).unwrap();
+        let records = report.instruction_records;
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].bytes, encoding);
+        assert_eq!(records[0].is_supported_dbt, supported);
+        assert_eq!(records[1].rva, 0x1000 + encoding.len() as u32);
+        assert!(!records[1].is_supported_dbt);
+    }
+}
