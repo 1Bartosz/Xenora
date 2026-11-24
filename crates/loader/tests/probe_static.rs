@@ -259,3 +259,106 @@ fn probe_consumes_complete_c7_operands_even_when_native_support_is_missing() {
         assert!(!records[1].is_supported_dbt);
     }
 }
+
+#[test]
+fn exported_reports_agree_across_fixtures_and_blocker_locations() {
+    let dir =
+        std::env::temp_dir().join(format!("xenora-report-consistency-{}", std::process::id()));
+    // (file offset, RVA) for a reachable instruction immediately after a MOV.
+    for (fixture, file_offset, rva, sections, imports) in [
+        (create_synthetic_probe_pe(), 0x209, 0x1009_u32, 1, 0),
+        (
+            include_bytes!("../../../fixtures/pe/trusted-runner.exe").to_vec(),
+            0x44e,
+            0x104e,
+            4,
+            1,
+        ),
+    ] {
+        assert_eq!(fixture[file_offset], 0xc3);
+        for padding in [None, Some(0), Some(1), Some(7)] {
+            let mut pe = fixture.clone();
+            let blocker = padding.map(|n| {
+                pe[file_offset..file_offset + n].fill(0x90);
+                pe[file_offset + n] = 0xcc;
+                rva + n as u32
+            });
+            run_probe_and_export(&pe, &dir, &ProbeConfig::default()).unwrap();
+            let read = |name| std::fs::read_to_string(dir.join(name)).unwrap();
+            let md = read("candidate_static_report.md");
+            let json = read("candidate_static_report.json");
+            let cpu = read("cpu_coverage.csv");
+            let import_csv = read("imports.csv");
+            std::fs::remove_dir_all(&dir).unwrap();
+
+            let json_field = |name: &str| {
+                let prefix = format!("\"{name}\": ");
+                json.lines()
+                    .find_map(|line| line.trim().strip_prefix(&prefix))
+                    .unwrap()
+                    .trim_end_matches(',')
+                    .trim_matches('"')
+            };
+            assert_eq!(json_field("sections_count"), sections.to_string());
+            assert!(
+                md.lines()
+                    .any(|line| line == format!("## Sections Census ({sections})"))
+            );
+            assert_eq!(
+                md.lines()
+                    .filter(|line| line.contains(" VirtualSize: "))
+                    .count(),
+                sections
+            );
+
+            assert_eq!(json_field("total_imports"), imports.to_string());
+            assert!(
+                md.lines()
+                    .any(|line| line == format!("- **Total Imported Thunks**: `{imports}`"))
+            );
+            assert_eq!(import_csv.lines().skip(1).count(), imports);
+
+            let expected = blocker.map(|addr| format!("0x{addr:08x}"));
+            assert_eq!(
+                json_field("first_unsupported_dbt_rva"),
+                expected.as_deref().unwrap_or("none")
+            );
+            let md_rvas: Vec<_> = md
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("- **RVA**: `")?
+                        .split_once('`')
+                        .map(|(addr, _)| addr)
+                })
+                .collect();
+            assert_eq!(md_rvas, expected.iter().collect::<Vec<_>>());
+
+            // The first columns precede quoted fields. Read the support flags from
+            // the closing quote of the mnemonic, which can itself contain commas.
+            let mut unsupported = Vec::new();
+            let mut tail = Vec::new();
+            for row in cpu.lines().skip(1) {
+                let (addr, rest) = row.split_once(',').unwrap();
+                let (_, fields) = rest.split_once(",\"").unwrap();
+                let (bytes, mnemonic) = fields.split_once("\",\"").unwrap();
+                let (_, flags) = mnemonic.split_once("\",").unwrap();
+                if flags.split(',').next() == Some("false") {
+                    unsupported.push(addr);
+                }
+                let address = u32::from_str_radix(addr.strip_prefix("0x").unwrap(), 16).unwrap();
+                if address >= rva {
+                    tail.push((address, bytes));
+                }
+            }
+            assert_eq!(unsupported, expected.iter().collect::<Vec<_>>());
+            let mut expected_tail = Vec::new();
+            if let Some(end) = blocker {
+                expected_tail.extend((rva..end).map(|addr| (addr, "90")));
+                expected_tail.push((end, "cc"));
+            } else {
+                expected_tail.push((rva, "c3"));
+            }
+            assert_eq!(tail, expected_tail);
+        }
+    }
+}
