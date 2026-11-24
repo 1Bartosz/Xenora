@@ -72,6 +72,11 @@ pub enum Op {
     /// VOP2 32-bit integer form: VDST, SRC0 (VGPR, SGPR, `vcc_lo`, inline
     /// integer or literal) and VSRC1. Writes neither VCC nor SCC.
     VectorInteger(VectorInteger, u8, CompareSource, u8),
+    /// VOP1 32-bit integer or bit form: VDST and SRC0 (VGPR, SGPR, `vcc_lo`,
+    /// inline integer or literal). Writes neither VCC nor SCC.
+    VectorUnary(VectorUnary, u8, CompareSource),
+    /// VOP1 `v_swap_b32` (opcode 101): exchanges VDST and the SRC0 VGPR.
+    Swap(u8, u8),
     End,
 }
 
@@ -319,6 +324,54 @@ impl VectorInteger {
             Self::Add => a.wrapping_add(b),
             Self::Subtract => a.wrapping_sub(b),
             Self::SubtractReverse => b.wrapping_sub(a),
+        }
+    }
+}
+
+/// VOP1 32-bit integer and bit forms with a general SRC0 (AMD RDNA 2 ISA
+/// guide section 12.8). None writes VCC or SCC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VectorUnary {
+    /// 55: D = ~S0.
+    Not,
+    /// 56: D[31:0] = S0[0:31].
+    ReverseBits,
+    /// 57: zeros before the first one from the MSB, -1 if none.
+    FindFirstOneFromMsb,
+    /// 58: position of the first one from the LSB, -1 if none.
+    FindFirstOneFromLsb,
+    /// 59: bits after the sign bit that equal it, from the MSB; -1 if all
+    /// 32 bits are equal.
+    FindSignChange,
+}
+
+impl VectorUnary {
+    /// Opcode bits 16-9 of the VOP1 word.
+    fn from_opcode(opcode: u8) -> Option<Self> {
+        Some(match opcode {
+            55 => Self::Not,
+            56 => Self::ReverseBits,
+            57 => Self::FindFirstOneFromMsb,
+            58 => Self::FindFirstOneFromLsb,
+            59 => Self::FindSignChange,
+            _ => return None,
+        })
+    }
+
+    fn apply(self, s0: u32) -> u32 {
+        // -1 (all ones) when the scan finds nothing.
+        let found = |index: u32| if index == 32 { u32::MAX } else { index };
+        match self {
+            Self::Not => !s0,
+            Self::ReverseBits => s0.reverse_bits(),
+            Self::FindFirstOneFromMsb => found(s0.leading_zeros()),
+            Self::FindFirstOneFromLsb => found(s0.trailing_zeros()),
+            Self::FindSignChange => {
+                // Normalize to a non-negative word: the run after the sign bit
+                // is then a run of zeros.
+                let positive = if (s0 as i32) < 0 { !s0 } else { s0 };
+                found(positive.leading_zeros())
+            }
         }
     }
 }
@@ -604,6 +657,26 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                     decode_vector_source(*lo, *packed, tail, offset, "unsupported VOP2 source")?;
                 (Op::VectorInteger(kind, dst, src0, vsrc1), length)
             }
+            // VOP1 integer forms (bits 31-25 = 0b0111111): VDST bits 17-24,
+            // OP 9-16, SRC0 0-8.
+            [lo, packed, upper, tag @ 0x7e..=0x7f, tail @ ..]
+                if VectorUnary::from_opcode((packed >> 1) | ((upper & 1) << 7)).is_some() =>
+            {
+                let kind = VectorUnary::from_opcode((packed >> 1) | ((upper & 1) << 7)).unwrap();
+                let dst = (upper >> 1) | ((tag & 1) << 7);
+                let (src0, length) =
+                    decode_vector_source(*lo, *packed, tail, offset, "unsupported VOP1 source")?;
+                (Op::VectorUnary(kind, dst, src0), length)
+            }
+            // v_swap_b32: SRC0 must be a VGPR (256-511), since it is written.
+            [lo, packed, upper, tag @ 0x7e..=0x7f, ..]
+                if (packed >> 1) | ((upper & 1) << 7) == 101 =>
+            {
+                if packed & 1 == 0 {
+                    return Err(error(offset, "v_swap_b32 SRC0 is not a VGPR"));
+                }
+                (Op::Swap((upper >> 1) | ((tag & 1) << 7), *lo), 4)
+            }
             [lo, packed, upper, tag @ 0x7e..=0x7f, tail @ ..]
                 if packed & 0xfe == 2 && upper & 1 == 0 =>
             {
@@ -807,7 +880,9 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                 | Op::MoveScalar(dst, _)
                 | Op::Add(dst, ..)
                 | Op::Vector(_, dst, ..)
-                | Op::VectorInteger(_, dst, ..) => {
+                | Op::VectorInteger(_, dst, ..)
+                | Op::VectorUnary(_, dst, _)
+                | Op::Swap(dst, _) => {
                     if exec != 0
                         && registers
                             .iter()
@@ -912,6 +987,49 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                         CompareSource::Immediate(bits) => bits,
                     };
                     results[lane] = Some((dst, kind.apply(s0, read(lane, src1)?)));
+                }
+            }
+            Op::VectorUnary(kind, dst, src0) => {
+                if exec != 0 {
+                    // Sources are checked once for the wave, as for VOP2.
+                    match src0 {
+                        CompareSource::Vector(register) => {
+                            (0..lanes).try_for_each(|lane| read(lane, register).map(|_| ()))?
+                        }
+                        CompareSource::Scalar(register) => {
+                            read_scalar(Source::Register(register))?;
+                        }
+                        CompareSource::Immediate(_) => {}
+                    }
+                }
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    let s0 = match src0 {
+                        CompareSource::Vector(register) => read(lane, register)?,
+                        CompareSource::Scalar(register) => read_scalar(Source::Register(register))?,
+                        CompareSource::Immediate(bits) => bits,
+                    };
+                    results[lane] = Some((dst, kind.apply(s0)));
+                }
+            }
+            // Guide 12.8: tmp = D; D = S0; S0 = tmp, in each active lane.
+            Op::Swap(dst, src0) => {
+                if exec != 0 {
+                    for register in [dst, src0] {
+                        (0..lanes).try_for_each(|lane| read(lane, register).map(|_| ()))?;
+                    }
+                }
+                let mut swapped = Vec::new();
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    swapped.push((lane, read(lane, dst)?, read(lane, src0)?));
+                }
+                if !swapped.is_empty()
+                    && pending_read.is_some_and(|register| register == dst || register == src0)
+                {
+                    return Err(error(offset, "write to immutable or pending VGPR"));
+                }
+                for (lane, old_dst, old_src0) in swapped {
+                    registers[lane][usize::from(dst)] = Some(old_src0);
+                    registers[lane][usize::from(src0)] = Some(old_dst);
                 }
             }
             Op::ScalarMove(dst, src) => {

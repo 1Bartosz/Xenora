@@ -15,7 +15,9 @@
 //! and XOR, the stage C forms ANDN2, ORN2, NAND, NOR, XNOR, LSHL, LSHR and
 //! ASHR (32-bit), the 32-bit integer forms MIN/MAX (I32, U32), CSELECT, BFM,
 //! MUL_I32, BFE (U32, I32), ABSDIFF, LSHL1-4_ADD and MUL_HI (U32, I32), VOP1 move
-//! (including from an SGPR),
+//! (including from an SGPR), the VOP1 integer forms NOT, BFREV, FFBH_U32,
+//! FFBL_B32 and FFBH_I32 (any SRC0 a VOPC compare takes; bit scans as the
+//! guide's loops over bits from integer division) and SWAP_B32 (VGPR SRC0),
 //! VOP2 bitwise, shift, arithmetic-shift and float, the VOP2 integer forms
 //! MUL_I32_I24, MUL_HI_I32_I24, MUL_U32_U24, MUL_HI_U32_U24, MIN/MAX (I32,
 //! U32), XNOR and ADD/SUB/SUBREV_NC_U32 (any SRC0 a VOPC compare takes; a
@@ -91,6 +93,10 @@ enum Insn {
     VXor(u8, u8, u8),
     /// VOP2 integer opcode 9-12, 17-20, 30 or 37-39: VDST, SRC0, VSRC1.
     VInt(u32, u8, CmpSrc, u8),
+    /// VOP1 integer opcode 55-59: VDST, SRC0.
+    VUnary(u32, u8, CmpSrc),
+    /// `v_swap_b32 vD, vS` (VOP1 opcode 101).
+    VSwap(u8, u8),
     VAddF(u8, u8, u8),
     VMulF(u8, u8, u8),
     Load(u8),
@@ -685,6 +691,8 @@ fn lane_step(
             | Insn::VShiftRight(dst, ..)
             | Insn::VShiftRightArithmetic(dst, ..)
             | Insn::VInt(_, dst, ..)
+            | Insn::VUnary(_, dst, _)
+            | Insn::VSwap(dst, _)
             | Insn::VAddF(dst, ..)
             | Insn::VMulF(dst, ..) => {
                 if execution_mask != 0 && lane.vgpr[usize::from(dst)].is_none() {
@@ -713,6 +721,22 @@ fn lane_step(
                                 CmpSrc::Imm(_) => {}
                             }
                             read_vgpr(lane, src1, offset)?;
+                        }
+                        Insn::VUnary(_, _, src0) => match src0 {
+                            CmpSrc::Sgpr(reg) => {
+                                read_s(reg)?;
+                            }
+                            CmpSrc::Vcc => {
+                                read_vcc()?;
+                            }
+                            CmpSrc::Vgpr(reg) => {
+                                read_vgpr(lane, reg, offset)?;
+                            }
+                            CmpSrc::Imm(_) => {}
+                        },
+                        Insn::VSwap(dst, src0) => {
+                            read_vgpr(lane, dst, offset)?;
+                            read_vgpr(lane, src0, offset)?;
                         }
                         _ => {}
                     }
@@ -819,6 +843,25 @@ fn lane_step(
             };
             (dst, vector_integer(opcode, a, read_v(src1)?))
         }
+        Insn::VUnary(opcode, dst, src0) => {
+            check_destination(dst, pending_read, offset)?;
+            let a = match src0 {
+                CmpSrc::Sgpr(reg) => read_s(reg)?,
+                CmpSrc::Vcc => read_vcc()?,
+                CmpSrc::Imm(value) => value,
+                CmpSrc::Vgpr(reg) => read_v(reg)?,
+            };
+            (dst, vector_unary(opcode, a))
+        }
+        // Guide 12.8: tmp = D; D = S0; S0 = tmp. Both are VGPR writes.
+        Insn::VSwap(dst, src0) => {
+            let (old_dst, old_src0) = (read_v(dst)?, read_v(src0)?);
+            check_destination(dst, pending_read, offset)?;
+            check_destination(src0, pending_read, offset)?;
+            lane.vgpr[dst as usize] = Some(old_src0);
+            lane.vgpr[src0 as usize] = Some(old_dst);
+            return Ok(());
+        }
         Insn::VAddF(dst, a, b) => {
             check_destination(dst, pending_read, offset)?;
             (dst, exact_float(true, read_v(a)?, read_v(b)?, offset)?)
@@ -831,6 +874,22 @@ fn lane_step(
     };
     lane.vgpr[value.0 as usize] = Some(value.1);
     Ok(())
+}
+
+/// D of VOP1 integer opcode `opcode` (guide 12.8 pseudocode) for S0 = `value`.
+fn vector_unary(opcode: u32, value: u32) -> u32 {
+    // Bit i of S0, by integer division rather than a host shift.
+    let bit = |i: u32| (value / 2_u32.pow(i)) % 2 == 1;
+    // D = -1 unless the loop finds a position.
+    let found = |position: Option<u32>| position.unwrap_or(u32::MAX);
+    match opcode {
+        55 => u32::MAX - value,
+        // D[31:0] = S0[0:31]: S0 bit 0 becomes D bit 31.
+        56 => (0..32).fold(0, |word, i| word * 2 + u32::from(bit(i))),
+        57 => found((0..32).find(|&i| bit(31 - i))),
+        58 => found((0..32).find(|&i| bit(i))),
+        _ => found((1..32).find(|&i| bit(31 - i) != bit(31))),
+    }
 }
 
 /// D of VOP2 integer opcode `opcode` (guide 12.7) for S0 = `a`, S1 = `b`.
@@ -1034,6 +1093,24 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
             )
         };
         return Ok((Insn::VMov(dst, src), len));
+    }
+    // VOP1 integer forms: bits 31:25 = 0b0111111, VDST 24:17, OP 16:9, SRC0 8:0.
+    if first >> 25 == 0b011_1111 {
+        let dst = (first >> 17) as u8;
+        match (first >> 9) & 0xff {
+            opcode @ 55..=59 => {
+                let (src0, len) = vector_src0(code, offset, first, "VOP1")?;
+                return Ok((Insn::VUnary(opcode, dst, src0), len));
+            }
+            // SRC0 is written back, so only a VGPR is meaningful.
+            101 => {
+                return match vector_src0(code, offset, first, "VOP1")? {
+                    (CmpSrc::Vgpr(src0), _) => Ok((Insn::VSwap(dst, src0), 4)),
+                    _ => Err(fail("v_swap_b32 needs a VGPR SRC0")),
+                };
+            }
+            _ => {}
+        }
     }
     // VOPC: bits 31:25 = 0b0111110, OP 24:17, VSRC1 16:9, SRC0 8:0.
     if first >> 25 == 0b011_1110 {
