@@ -355,12 +355,19 @@ def _check_xml(form, rule, snapshot, errors):
         errors.append(f"{label}: opcode {form['opcode']} is not an identifier of {encoding_name}")
     operands = {}
     scc_in = scc_out = False
+    implicit = set()
     for field, data_format, kind, size, is_input, is_output, _implicit, _encoded in variant["operands"]:
         if kind == "OPR_SSRC_SPECIAL_SCC":
             scc_in |= is_input
             scc_out |= is_output
         elif field:
             operands[field] = (data_format, size, is_input, is_output)
+        else:
+            implicit.add(kind)
+    # The vocabulary can state only SCC effects (vcc and exec are "unchanged"),
+    # so any other implicit XML operand, such as VCC, is undeclared.
+    if implicit:
+        errors.append(f"{label}: XML implicit operands {sorted(implicit)} are not declared")
     if scc_in != (form["carry_in"] == "scc"):
         errors.append(f"{label}: carry_in {form['carry_in']} contradicts the XML SCC input")
     if scc_out != (form["scc"] != "unchanged"):

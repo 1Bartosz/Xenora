@@ -649,6 +649,13 @@ class Validate(unittest.TestCase):
         reg["operand_rules"]["vop2_vgpr"]["unsupported"].remove("src_null")
         self.rejects(reg, "operand rule vop2_vgpr: unsupported combos differ from those the decoder rejects")
 
+    def test_rejects_an_implicit_vcc_operand_in_the_xml(self):
+        snap = snapshot()
+        snap["variants"][("V_MIN_I32", "ENC_VOP2")]["operands"].append(
+            ["", "FMT_NUM_B32", "OPR_VCC", 32, True, False, True, False]
+        )
+        self.rejects(vectors(), "V_MIN_I32: XML implicit operands ['OPR_VCC'] are not declared", snap)
+
     def test_renders_vector_lowering_and_source_order(self):
         text = gen.render(vectors(), snapshot())
         self.assertIn("pub enum VectorAluOp {", text)

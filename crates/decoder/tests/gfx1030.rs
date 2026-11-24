@@ -815,7 +815,13 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
             let target = next_offset + displacement * 4;
             format!("{mnemonic} -> 0x{target:04x}")
         }
-        mnemonic if mnemonic.starts_with("v_cmp_") => {
+        // VOPC and the registry VOP2 forms print SRC0 (the second operand) as bits.
+        mnemonic
+            if mnemonic.starts_with("v_cmp_")
+                || VectorAluOp::ALL
+                    .iter()
+                    .any(|op| op.assembly_name() == mnemonic) =>
+        {
             let mut parts: Vec<String> = operands.split(", ").map(str::to_owned).collect();
             parts[1] = match literal_bits(&parts[1]) {
                 Some(bits) => format!("0x{bits:x}"),

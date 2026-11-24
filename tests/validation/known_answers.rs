@@ -806,6 +806,20 @@ mod review {
         v2 ^ v3 ^ v4 ^ v5 ^ v6 ^ v7 ^ v8 ^ v9 ^ v10 ^ v11 ^ v12 ^ v13
     }
 
+    /// LLVM-assembled: v_cmp_ne_u32_e32 vcc_lo, 0, v1 then
+    /// v_add_nc_u32_e32 v2, vcc_lo, v1, with the usual load and store.
+    const VCC_LANE_ADD: [u32; 9] = [
+        0xe030_2000,
+        0x8000_0100,
+        0xbf8c_3f70,
+        0x7d8a_0280,
+        0x4a04_026a,
+        0xe070_2000,
+        0x8001_0200,
+        0xbbfd_0000,
+        0xbf81_0000,
+    ];
+
     /// Lane inputs covering both 24-bit signs, the bits above 23, zero and the
     /// signed and unsigned extremes.
     const VECTOR_INTEGER_INPUT: [u32; 12] = [
@@ -993,6 +1007,37 @@ mod review {
         );
         let distinct: std::collections::BTreeSet<_> = expected.iter().collect();
         assert_eq!(distinct.len(), expected.len());
+    }
+
+    #[test]
+    fn vector_integer_reads_a_lane_derived_vcc_lo() {
+        // LLVM: v_cmp_ne_u32_e32 vcc_lo, 0, v1; v_add_nc_u32_e32 v2, vcc_lo, v1.
+        // Lane 0 (x = 0) fails the compare and lane 1 (x = 7) passes, so the
+        // mask is 0b10 and every lane adds 2.
+        let code = words(&VCC_LANE_ADD);
+        verify(&code, &[0, 7], Some(&[2, 9]));
+        verify(&code, &[7, 7], Some(&[10, 10]));
+    }
+
+    #[test]
+    fn vector_integer_is_refused_in_a_runtime_vccz_skip_region() {
+        // LLVM: v_mov_b32 v2, 0; v_cmp_ne_u32 vcc_lo, 0, v1; s_cbranch_vccz
+        // over v_add_nc_u32_e32 v2, vcc_lo, v1 (at 0x18), whatever the mask.
+        let code = words(&[
+            0xe030_2000,
+            0x8000_0100,
+            0xbf8c_3f70,
+            0x7e04_0280,
+            0x7d8a_0280,
+            0xbf86_0001,
+            0x4a04_026a,
+            0xe070_2000,
+            0x8001_0200,
+            0xbbfd_0000,
+            0xbf81_0000,
+        ]);
+        rejected_at_with(&code, 0x18, &[0, 7]);
+        rejected_at_with(&code, 0x18, &[7, 7]);
     }
 
     #[test]
@@ -1247,6 +1292,7 @@ mod review {
             .map(|&x| vector_integer_key(x))
             .collect();
         assert_eq!(run(VECTOR_INTEGER_FIXTURE, &VECTOR_INTEGER_INPUT), lanes);
+        assert_eq!(run(&words(&VCC_LANE_ADD), &[0, 7]), [2, 9]);
         let mut vectors = sop2_vectors();
         vectors.extend(sop2_operand_cases());
         vectors.extend(signed_immediate_overflows());
@@ -1254,8 +1300,8 @@ mod review {
             assert_eq!(&run(code, &[0, u32::MAX]), expected);
         }
         eprintln!(
-            "{} SOP2 programs matched on native Metal",
-            vectors.len() + 6
+            "{} SOP2 programs and fixtures matched on native Metal",
+            vectors.len() + 7
         );
     }
 
