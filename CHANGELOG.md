@@ -9,6 +9,10 @@ exact revision and known limitations.
 Guest execution uses original, purpose-built test programs. Commercial Xbox game execution
 remains unsupported.
 
+### Added
+
+- Added an agent task queue: an *Agent task* issue template, a workflow that serialises `/claim`, `/release` and `/blocked` comments and returns claims idle for 24 hours, and `scripts/agent-queue.sh` for listing, claiming and posting tasks. See `docs/coordination/agent-tasks.md`. The workflow has not run on GitHub yet.
+
 ## [X18] - Automated Import Compatibility Generation & Metadata Ingestion
 
 Guest execution uses original, purpose-built test programs. Commercial Xbox game execution
