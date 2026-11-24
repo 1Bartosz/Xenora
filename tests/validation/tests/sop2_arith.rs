@@ -218,13 +218,14 @@ const BFE_EXTRA: [u32; 2] = [0x0084_0004, 0xff80_ffe4];
 const BFM_FIELDS: [u32; 9] = [0, 1, 4, 16, 31, 32, 33, 63, 0xffff_ffe1];
 const INPUT: [u32; 2] = [0, u32::MAX];
 
-const COUNTS: [(&str, usize); 6] = [
+const COUNTS: [(&str, usize); 7] = [
     ("sop2 arith domain", 16 * 13 * 13 * 2),
     ("sop2 arith bit field", (2 * 13 * (10 * 8 + 2) + 9 * 9) * 2),
     ("sop2 arith guide example", 18 * 2),
     ("sop2 arith aliasing", 16 * 2 * 5 * 2),
     ("sop2 arith inline integer", 16 * 81 * 2 * 2 * 2),
     ("sop2 arith literal", 16 * 6 * 2 * 2),
+    ("sop2 arith max register", 16 * 4 * 2),
 ];
 /// Per form: two literals, 6 destinations and 15 sources in each slot outside
 /// the supported subset; and CSELECT with SCC never written.
@@ -361,6 +362,22 @@ fn cases() -> Vec<Case> {
                         cases.push(case((form, name), family, label, code, operands, scc, None));
                     }
                 }
+            }
+            // The highest SGPR, s105 (0b1101001), as destination, either
+            // source or all three; s8 and s105 differ in sign and as BFE fields.
+            let (a, b, top) = (0x0004_0001, 0x0003_0002, 0x8000_0006);
+            for (dst, src0, src1) in [(105, 8, 9), (10, 105, 8), (10, 8, 105), (105, 105, 105)] {
+                let pick = |reg| match reg {
+                    8 => a,
+                    9 => b,
+                    _ => top,
+                };
+                let alu = [sop2(op, dst, src0, src1)];
+                let code = program(&[(8, a), (9, b), (105, top)], Some(scc), &alu, dst);
+                let label = format!("s{dst} = s{src0}, s{src1}");
+                let operands = (pick(src0), pick(src1));
+                let family = "sop2 arith max register";
+                cases.push(case((form, name), family, label, code, operands, scc, None));
             }
             // A 32-bit literal dword after the SOP2 word in each source slot.
             for value in [0, 1, 0x7fff_ffff, 0x8000_0000, u32::MAX, 0x0021_0003] {
