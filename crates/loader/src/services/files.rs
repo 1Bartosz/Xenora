@@ -10,6 +10,7 @@ use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{GuestMemory, MemoryError};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const FILE_API: &str = "api-ms-win-core-file-l1-1-0.dll";
 const INVALID_HANDLE: u64 = u64::MAX;
@@ -29,10 +30,13 @@ const MAX_DIRECTORIES: usize = 256;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TRANSFER: usize = 1024 * 1024;
 
+#[derive(Clone)]
 pub(super) struct OpenFile {
     path: String,
-    position: u64,
-    access: u32,
+    // The object table serializes all operations on this open instance.
+    position: Arc<AtomicU64>,
+    open_access: u32,
+    pub(super) access: u32,
     share: u32,
 }
 
@@ -190,7 +194,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         for object in objects.handles.values() {
             if let GuestObject::File(file) = object
                 && file.path == path
-                && (share_mask(access) & !file.share != 0 || share_mask(file.access) & !share != 0)
+                && (share_mask(access) & !file.share != 0
+                    || share_mask(file.open_access) & !share != 0)
             {
                 return open.fail(SHARING_VIOLATION, INVALID_HANDLE);
             }
@@ -213,7 +218,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             handle,
             GuestObject::File(OpenFile {
                 path,
-                position: 0,
+                position: Arc::new(AtomicU64::new(0)),
+                open_access: access,
                 access,
                 share,
             }),
@@ -464,7 +470,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
         let origin = match args.r9 as u32 {
             0 => None,
-            1 => Some(file.position),
+            1 => Some(file.position.load(Ordering::Relaxed)),
             2 => Some(files.get(&file.path).expect("open file exists").len() as u64),
             _ => return seek.fail(ERROR_INVALID_PARAMETER, 0),
         };
@@ -484,7 +490,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         if args.r8 != 0 && memory.write_u64(args.r8, position).is_err() {
             return seek.fail(ERROR_NOACCESS, 0);
         }
-        file.position = position;
+        file.position.store(position, Ordering::Relaxed);
         Ok(1)
     });
 
@@ -498,12 +504,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         if file.access & WRITE == 0 {
             return truncate.fail(ERROR_ACCESS_DENIED, 0);
         }
-        if file.position > MAX_BYTES as u64 {
+        let position = file.position.load(Ordering::Relaxed);
+        if position > MAX_BYTES as u64 {
             return truncate.fail(DISK_FULL, 0);
         }
         let used = files.values().map(Vec::len).sum::<usize>();
         let data = files.get_mut(&file.path).expect("open file exists");
-        let length = file.position as usize;
+        let length = position as usize;
         let growth = length.saturating_sub(data.len());
         if growth > MAX_BYTES - used {
             return truncate.fail(DISK_FULL, 0);
@@ -548,7 +555,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 0
             };
             let data = files.get_mut(&file.path).expect("open file exists");
-            let position = file.position;
+            let position = file.position.load(Ordering::Relaxed);
             let transferred = if writing {
                 if count == 0 {
                     0
@@ -592,7 +599,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             memory
                 .write_u32(args.r9, transferred as u32)
                 .map_err(ExitReason::MemoryFault)?;
-            file.position += transferred as u64;
+            file.position
+                .store(position + transferred as u64, Ordering::Relaxed);
             Ok(1)
         });
     }

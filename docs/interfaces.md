@@ -196,7 +196,7 @@ same rules with 64-bit results.
 
 The runtime exposes an in-memory C: drive through CreateFileW, ReadFile,
 WriteFile, GetFileSizeEx, and CloseHandle. It supports UTF-16 file and
-directory names, ASCII case folding, synchronous I/O, per-handle positions, and
+directory names, ASCII case folding, synchronous I/O, per-open file positions, and
 read/write sharing. SetFilePointerEx supports seeking from the beginning,
 current position, and end. SetEndOfFile truncates or zero-extends writable
 files at the current position. Seeks alone do not change file length.
@@ -211,8 +211,10 @@ FindFirstFileW, FindNextFileW, and FindClose enumerate a sorted snapshot of
 direct children. The final path component accepts literal names, * and ?
 wildcards, and *.* matches every name. Results include attributes, byte size,
 and a UTF-16 name. Times and alternate names are zero. Up to 32 searches
-can be open. DOS wildcard edge cases, persistence, asynchronous I/O,
-and file handle duplication remain outside this subset.
+can be open. Same-process file handle duplicates share the file position and keep the
+original sharing reservation until the last duplicate closes. Access can
+be reduced per handle. DOS wildcard edge cases, persistence, and
+asynchronous I/O remain outside this subset.
 
 ### Event and semaphore signaling
 

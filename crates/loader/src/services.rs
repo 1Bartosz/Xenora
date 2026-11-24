@@ -365,15 +365,23 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             return s.fail(ERROR_NOT_SUPPORTED, 0);
         }
         let mut thread = s.objects.lock().expect("guest object state");
-        let (granted, event) = if source == CURRENT_THREAD {
-            (THREAD_SUPPORTED_RIGHTS, None)
+        let (granted, mut object) = if source == CURRENT_THREAD {
+            (
+                THREAD_SUPPORTED_RIGHTS,
+                GuestObject::Thread(THREAD_SUPPORTED_RIGHTS),
+            )
         } else {
             match thread.handles.get(&source) {
-                Some(GuestObject::Thread(rights)) => (*rights, None),
-                Some(GuestObject::Waitable { state, access }) => (*access, Some(Arc::clone(state))),
-                Some(GuestObject::File(_) | GuestObject::Search(_)) => {
-                    return s.fail(ERROR_NOT_SUPPORTED, 0);
-                }
+                Some(GuestObject::Thread(rights)) => (*rights, GuestObject::Thread(*rights)),
+                Some(GuestObject::Waitable { state, access }) => (
+                    *access,
+                    GuestObject::Waitable {
+                        state: Arc::clone(state),
+                        access: *access,
+                    },
+                ),
+                Some(GuestObject::File(file)) => (file.access, GuestObject::File(file.clone())),
+                Some(GuestObject::Search(_)) => return s.fail(ERROR_NOT_SUPPORTED, 0),
                 None => return s.fail(ERROR_INVALID_HANDLE, 0),
             }
         };
@@ -390,10 +398,13 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         if output == 0 || mem.write_u64(output, handle).is_err() {
             return s.fail(ERROR_NOACCESS, 0);
         }
-        let object = match event {
-            Some(state) => GuestObject::Waitable { state, access },
-            None => GuestObject::Thread(access),
-        };
+        match &mut object {
+            GuestObject::Thread(rights) | GuestObject::Waitable { access: rights, .. } => {
+                *rights = access
+            }
+            GuestObject::File(file) => file.access = access,
+            GuestObject::Search(_) => unreachable!("search handles cannot be duplicated"),
+        }
         thread.insert_handle(handle, object);
         Ok(1)
     });

@@ -1402,6 +1402,41 @@ fn test_guest_synthetic_file_io_through_iat() {
             .get(Register::Rax),
         0
     );
+    let duplicate = call(
+        "DuplicateHandle",
+        &[u64::MAX, moved, u64::MAX, output, 0x8000_0000, 0, 0],
+    );
+    assert_eq!(duplicate.execution.final_state.get(Register::Rax), 1);
+    let duplicate = duplicate.image.memory.read_u64(output).unwrap();
+    assert_ne!(duplicate, moved);
+    let read = call("ReadFile", &[moved, output + 8, 2, output, 0]);
+    assert_eq!(read.image.memory.read_u32(output).unwrap(), 2);
+    let read = call("ReadFile", &[duplicate, output + 8, 8, output, 0]);
+    assert_eq!(read.image.memory.read_u32(output).unwrap(), 4);
+    assert_eq!(read.image.memory.read_u64(output + 8).unwrap(), 0);
+    assert_eq!(
+        call("CloseHandle", &[moved])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    assert_eq!(open("archive/moved.dat", 0x8000_0000, 3), u64::MAX);
+    assert_eq!(
+        call("WriteFile", &[duplicate, output, 1, output + 8, 0])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+    assert_eq!(
+        call("CloseHandle", &[duplicate])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    assert_ne!(open("archive/moved.dat", 0x8000_0000, 3), u64::MAX);
 }
 
 #[test]

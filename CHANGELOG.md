@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added same-process guest file handle duplication with a shared file position.
+
 - Added guest file and directory enumeration with typed search handles.
 
 - Added closed-file moves and file and directory attribute queries on the synthetic guest drive.
