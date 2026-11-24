@@ -75,6 +75,8 @@ struct Worker<T, E> {
     callback: Callback<T, E>,
     thread: JoinHandle<Result<T, E>>,
     cancellation: Option<CancellationToken>,
+    deadline: Option<Duration>,
+    timed_out: bool,
 }
 
 /// A manual task queue whose capacity covers pending work and undelivered completions.
@@ -181,7 +183,7 @@ impl<T, E> TaskQueue<T, E> {
 
     /// Run one queued operation. An expired operation completes without running.
     pub fn dispatch_work(&mut self, now: Duration) -> bool {
-        self.collect_worker();
+        self.advance_time(now);
         if self.worker.is_some() {
             return false;
         }
@@ -211,6 +213,21 @@ impl<T, E> TaskQueue<T, E> {
         true
     }
 
+    /// Advance the queue's clock and request cooperative exit from expired work.
+    /// A completion already available when the clock is sampled keeps its result.
+    pub fn advance_time(&mut self, now: Duration) {
+        self.collect_worker();
+        if let Some(worker) = &mut self.worker
+            && worker.deadline.is_some_and(|deadline| now >= deadline)
+            && worker
+                .cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::request)
+        {
+            worker.timed_out = true;
+        }
+    }
+
     fn collect_worker(&mut self) {
         if self
             .worker
@@ -220,6 +237,7 @@ impl<T, E> TaskQueue<T, E> {
             let worker = self.worker.take().expect("finished worker");
             let result = match worker.thread.join() {
                 Err(_) => TaskResult::WorkerPanicked,
+                Ok(_) if worker.timed_out => TaskResult::TimedOut,
                 Ok(_)
                     if worker
                         .cancellation
@@ -242,7 +260,7 @@ impl<T, E> TaskQueue<T, E> {
 impl<T: Send + 'static, E: Send + 'static> TaskQueue<T, E> {
     /// Start one background operation. At most one worker runs per queue.
     pub fn dispatch_background(&mut self, now: Duration) -> std::io::Result<bool> {
-        self.collect_worker();
+        self.advance_time(now);
         if self.worker.is_some() {
             return Ok(false);
         }
@@ -264,6 +282,8 @@ impl<T: Send + 'static, E: Send + 'static> TaskQueue<T, E> {
             callback: task.callback,
             thread,
             cancellation: task.cancellation,
+            deadline: task.deadline,
+            timed_out: false,
         });
         Ok(true)
     }
@@ -282,42 +302,61 @@ impl<T, E> Drop for TaskQueue<T, E> {
 
 #[cfg(test)]
 #[test]
-fn running_task_observes_cancellation_before_completion() {
+fn running_task_observes_cancellation_and_deadlines_before_completion() {
     use std::sync::mpsc::channel;
     use std::time::Instant;
 
-    let mut queue = TaskQueue::<u32, u32>::new(1);
-    let (running, started) = channel();
-    let (completed, results) = channel();
-    let id = queue
-        .submit_cancellable(
-            None,
-            move |token| {
-                running.send(()).unwrap();
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while !token.is_cancelled() {
-                    assert!(
-                        Instant::now() < deadline,
-                        "work did not observe cancellation"
-                    );
-                    std::thread::yield_now();
+    let timeout = Duration::from_millis(5);
+    for expire in [false, true] {
+        let mut queue = TaskQueue::<u32, u32>::new(1);
+        let (running, started) = channel();
+        let (completed, results) = channel();
+        let id = queue
+            .submit_cancellable(
+                Some(timeout),
+                move |token| {
+                    running.send(()).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while !token.is_cancelled() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "work did not observe cancellation"
+                        );
+                        std::thread::yield_now();
+                    }
+                    Ok(17)
+                },
+                move |id, result| completed.send((id, result)).unwrap(),
+            )
+            .unwrap();
+        assert!(queue.dispatch_background(Duration::ZERO).unwrap());
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        if expire {
+            queue.advance_time(timeout - Duration::from_millis(1));
+            assert!(!queue.dispatch_completion());
+            queue.advance_time(timeout);
+        } else {
+            assert!(queue.cancel(id));
+        }
+        assert!(!queue.cancel(id));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !queue.dispatch_completion() {
+            assert!(Instant::now() < deadline, "worker did not complete");
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            results.try_recv().unwrap(),
+            (
+                id,
+                if expire {
+                    TaskResult::TimedOut
+                } else {
+                    TaskResult::Cancelled
                 }
-                Ok(17)
-            },
-            move |id, result| completed.send((id, result)).unwrap(),
-        )
-        .unwrap();
-    assert!(queue.dispatch_background(Duration::ZERO).unwrap());
-    started.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(queue.cancel(id));
-    assert!(!queue.cancel(id));
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !queue.dispatch_completion() {
-        assert!(Instant::now() < deadline, "worker did not complete");
-        std::thread::yield_now();
+            )
+        );
+        assert!(!queue.dispatch_completion());
     }
-    assert_eq!(results.try_recv().unwrap(), (id, TaskResult::Cancelled));
-    assert!(!queue.dispatch_completion());
 }
 
 #[cfg(test)]

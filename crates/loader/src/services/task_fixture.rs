@@ -35,9 +35,14 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let deadline = (args.rdx != 0).then(|| now + Duration::from_millis(args.rdx));
         let mut tasks = submit.task_fixture.lock().expect("fixture task queue");
         let delivered = Arc::clone(&tasks.delivered);
-        match tasks.queue.submit(
+        match tasks.queue.submit_cancellable(
             deadline,
-            move || input.checked_mul(input).ok_or(ERROR_INVALID_PARAMETER),
+            move |token| {
+                if token.is_cancelled() {
+                    return Err(995);
+                }
+                input.checked_mul(input).ok_or(ERROR_INVALID_PARAMETER)
+            },
             move |id, result| {
                 *delivered.lock().expect("fixture task completion") = Some((id, result));
             },
@@ -79,6 +84,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 return completion.fail(cpu.gs_base, ERROR_NOACCESS, 0);
             }
             let mut tasks = completion.task_fixture.lock().expect("fixture task queue");
+            tasks
+                .queue
+                .advance_time(Duration::from_millis(completion.uptime_millis()));
             if !tasks.queue.dispatch_completion() {
                 return Ok(0);
             }
