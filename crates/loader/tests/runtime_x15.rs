@@ -1158,6 +1158,32 @@ fn guest_gdk_manual_queue_handles_have_independent_lifetimes() {
     call("XTaskQueueCloseHandle", &[second]);
     call("XTaskQueueCloseHandle", &[third]);
     assert_eq!(open("XTaskQueueGetPort", &[composite, 1, output]), work);
+    assert_eq!(
+        call("XTaskQueueSubmitCallback", &[composite, 0, 17, output])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0x8007_0057
+    );
+    for index in 0..32 {
+        assert_eq!(
+            call(
+                "XTaskQueueSubmitCallback",
+                &[composite, index % 2, index, 0x140001000]
+            )
+            .execution
+            .final_state
+            .get(Register::Rax),
+            0
+        );
+    }
+    assert_eq!(
+        call("XTaskQueueSubmitCallback", &[composite, 1, 0, 0x140001000])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0x8007_000e
+    );
     let stale = call("XTaskQueueCreateComposite", &[work, completion, output]);
     assert_eq!(stale.execution.final_state.get(Register::Rax), 0x8007_0006);
     call("XTaskQueueCloseHandle", &[composite]);

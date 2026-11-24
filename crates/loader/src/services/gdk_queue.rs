@@ -7,11 +7,12 @@ use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED};
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::GuestMemory;
 use crate::runtime::HResult;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 const MODULE: &str = "xgameruntime.dll";
 const MAX_HANDLES: usize = 64;
+const MAX_CALLBACKS_PER_PORT: usize = 32;
 const ERROR_OUTOFMEMORY: u32 = 14;
 const MANUAL: u32 = 0;
 
@@ -19,6 +20,13 @@ const MANUAL: u32 = 0;
 pub(super) struct QueueHandles {
     last_id: u64,
     queues: BTreeMap<u64, [u64; 2]>,
+    pending: BTreeMap<u64, VecDeque<GuestCallback>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GuestCallback {
+    entry: u64,
+    context: u64,
 }
 
 impl QueueHandles {
@@ -48,6 +56,29 @@ impl QueueHandles {
             handle,
             ports.unwrap_or([0x5157_0000_0000_0000 | next, 0x5143_0000_0000_0000 | next]),
         );
+        Ok(())
+    }
+
+    fn close(&mut self, handle: u64) {
+        if let Some(ports) = self.queues.remove(&handle) {
+            for port in ports {
+                if !self.queues.values().any(|live| live.contains(&port)) {
+                    self.pending.remove(&port);
+                }
+            }
+        }
+    }
+
+    fn submit(&mut self, handle: u64, selector: u32, callback: GuestCallback) -> Result<(), u32> {
+        let ports = self.queues.get(&handle).ok_or(ERROR_INVALID_HANDLE)?;
+        let port = ports
+            .get(selector as usize)
+            .ok_or(ERROR_INVALID_PARAMETER)?;
+        let queue = self.pending.entry(*port).or_default();
+        if queue.len() >= MAX_CALLBACKS_PER_PORT {
+            return Err(ERROR_OUTOFMEMORY);
+        }
+        queue.push_back(callback);
         Ok(())
     }
 }
@@ -98,8 +129,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 .gdk_queues
                 .lock()
                 .expect("GDK queue handle table")
-                .queues
-                .remove(&args.rcx);
+                .close(args.rcx);
             Ok(0)
         },
     );
@@ -142,6 +172,28 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 return Ok(guest_hresult(Err(ERROR_INVALID_HANDLE)));
             }
             Ok(guest_hresult(queues.open(Some(ports), args.r8, memory)))
+        },
+    );
+
+    let submit = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "XTaskQueueSubmitCallback",
+        ServiceStatus::Partial,
+        move |args, _, memory| {
+            if args.r9 == 0 || memory.fetch_instruction_byte(args.r9).is_err() {
+                return Ok(guest_hresult(Err(ERROR_INVALID_PARAMETER)));
+            }
+            let callback = GuestCallback {
+                entry: args.r9,
+                context: args.r8,
+            };
+            let mut queues = submit.gdk_queues.lock().expect("GDK queue handle table");
+            Ok(guest_hresult(queues.submit(
+                args.rcx,
+                args.rdx as u32,
+                callback,
+            )))
         },
     );
 }
