@@ -214,3 +214,105 @@ pub const fn abs_nonzero_i32(a: u32) -> (u32, bool) {
     let value = (a as i32).wrapping_abs() as u32;
     (value, value != 0)
 }
+
+/// Two's-complement minimum and whether S0 was strictly smaller (so equal
+/// operands give S1 and `false`).
+pub const fn min_i32(a: u32, b: u32) -> (u32, bool) {
+    let first = (a as i32) < (b as i32);
+    (if first { a } else { b }, first)
+}
+
+/// Unsigned minimum and whether S0 was strictly smaller.
+pub const fn min_u32(a: u32, b: u32) -> (u32, bool) {
+    let first = a < b;
+    (if first { a } else { b }, first)
+}
+
+/// Two's-complement maximum and whether S0 was strictly greater (so equal
+/// operands give S1 and `false`).
+pub const fn max_i32(a: u32, b: u32) -> (u32, bool) {
+    let first = (a as i32) > (b as i32);
+    (if first { a } else { b }, first)
+}
+
+/// Unsigned maximum and whether S0 was strictly greater.
+pub const fn max_u32(a: u32, b: u32) -> (u32, bool) {
+    let first = a > b;
+    (if first { a } else { b }, first)
+}
+
+/// `a` when `condition` (SCC) is set, otherwise `b`.
+pub const fn cselect_b32(a: u32, b: u32, condition: bool) -> u32 {
+    if condition { a } else { b }
+}
+
+/// `((1 << a[4:0]) - 1) << b[4:0]`: a mask of `a[4:0]` ones starting at bit `b[4:0]`.
+pub const fn bfm_b32(a: u32, b: u32) -> u32 {
+    ((1u32 << (a & 0x1f)) - 1) << (b & 0x1f)
+}
+
+/// The low 32 bits of the product (identical for signed and unsigned operands).
+pub const fn mul_lo_i32(a: u32, b: u32) -> u32 {
+    a.wrapping_mul(b)
+}
+
+/// The high 32 bits of the unsigned 64-bit product.
+pub const fn mul_hi_u32(a: u32, b: u32) -> u32 {
+    ((a as u64 * b as u64) >> 32) as u32
+}
+
+/// The high 32 bits of the two's-complement 64-bit product.
+pub const fn mul_hi_i32(a: u32, b: u32) -> u32 {
+    ((a as i32 as i64 * b as i32 as i64) >> 32) as u32
+}
+
+/// The `bfe` field descriptor: offset `b[4:0]` and width `b[22:16]` (0-127).
+const fn bfe_field(b: u32) -> (u32, u32) {
+    (b & 0x1f, (b >> 16) & 0x7f)
+}
+
+/// Unsigned bit-field extract: `(a >> offset) & ((1 << width) - 1)`, where a
+/// width of 32 or more keeps every shifted bit; and whether the result is nonzero.
+pub const fn bfe_nonzero_u32(a: u32, b: u32) -> (u32, bool) {
+    let (offset, width) = bfe_field(b);
+    let shifted = a >> offset;
+    let value = if width == 0 {
+        0
+    } else if width >= 32 {
+        shifted
+    } else {
+        shifted & ((1 << width) - 1)
+    };
+    (value, value != 0)
+}
+
+/// Signed bit-field extract: `a` shifted arithmetically by the offset, the low
+/// `width` bits kept and sign-extended from bit `width - 1` (a width of 32 or
+/// more keeps the whole shifted word); and whether the result is nonzero.
+pub const fn bfe_nonzero_i32(a: u32, b: u32) -> (u32, bool) {
+    let (offset, width) = bfe_field(b);
+    let shifted = ((a as i32) >> offset) as u32;
+    let value = if width == 0 {
+        0
+    } else if width >= 32 {
+        shifted
+    } else {
+        let unused = 32 - width;
+        (((shifted << unused) as i32) >> unused) as u32
+    };
+    (value, value != 0)
+}
+
+/// `|a - b|` of the wrapped 32-bit difference (so `0x80000000` stays) and
+/// whether the result is nonzero.
+pub const fn absdiff_nonzero_i32(a: u32, b: u32) -> (u32, bool) {
+    let value = (a.wrapping_sub(b) as i32).unsigned_abs();
+    (value, value != 0)
+}
+
+/// `(a << shift) + b` and the carry out of the exact sum, which counts the bits
+/// shifted out of `a`; `shift` is 1 to 4.
+pub const fn lshl_add_carry_u32(a: u32, b: u32, shift: u32) -> (u32, bool) {
+    let sum = ((a as u64) << shift) + b as u64;
+    (sum as u32, sum >> 32 != 0)
+}

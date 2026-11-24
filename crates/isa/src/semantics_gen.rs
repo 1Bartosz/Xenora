@@ -344,17 +344,17 @@ impl ScalarUnaryOp {
     /// The validated registry row.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
-            Self::NotB32 => 29,
-            Self::BrevB32 => 30,
-            Self::Bcnt0I32B32 => 31,
-            Self::Bcnt1I32B32 => 32,
-            Self::Ff0I32B32 => 33,
-            Self::Ff1I32B32 => 34,
-            Self::FlbitI32B32 => 35,
-            Self::FlbitI32 => 36,
-            Self::SextI32I8 => 37,
-            Self::SextI32I16 => 38,
-            Self::AbsI32 => 39,
+            Self::NotB32 => 45,
+            Self::BrevB32 => 46,
+            Self::Bcnt0I32B32 => 47,
+            Self::Bcnt1I32B32 => 48,
+            Self::Ff0I32B32 => 49,
+            Self::Ff1I32B32 => 50,
+            Self::FlbitI32B32 => 51,
+            Self::FlbitI32 => 52,
+            Self::SextI32I8 => 53,
+            Self::SextI32I16 => 54,
+            Self::AbsI32 => 55,
         }]
     }
 
@@ -443,6 +443,38 @@ pub enum ScalarAluOp {
     LshrB32,
     /// `s_ashr_i32` (SOP2 opcode 34): signed ashr, SCC = nonzero.
     AshrI32,
+    /// `s_min_i32` (SOP2 opcode 6): signed min, SCC = selected_src0.
+    MinI32,
+    /// `s_min_u32` (SOP2 opcode 7): unsigned min, SCC = selected_src0.
+    MinU32,
+    /// `s_max_i32` (SOP2 opcode 8): signed max, SCC = selected_src0.
+    MaxI32,
+    /// `s_max_u32` (SOP2 opcode 9): unsigned max, SCC = selected_src0.
+    MaxU32,
+    /// `s_cselect_b32` (SOP2 opcode 10): bitwise cselect plus SCC, SCC = unchanged.
+    CselectB32,
+    /// `s_bfm_b32` (SOP2 opcode 36): bitwise bfm, SCC = unchanged.
+    BfmB32,
+    /// `s_mul_i32` (SOP2 opcode 38): signed mul, SCC = unchanged.
+    MulI32,
+    /// `s_bfe_u32` (SOP2 opcode 39): unsigned bfe, SCC = nonzero.
+    BfeU32,
+    /// `s_bfe_i32` (SOP2 opcode 40): signed bfe, SCC = nonzero.
+    BfeI32,
+    /// `s_absdiff_i32` (SOP2 opcode 44): signed absdiff, SCC = nonzero.
+    AbsdiffI32,
+    /// `s_lshl1_add_u32` (SOP2 opcode 46): unsigned lshl_add, SCC = carry_out.
+    Lshl1AddU32,
+    /// `s_lshl2_add_u32` (SOP2 opcode 47): unsigned lshl_add, SCC = carry_out.
+    Lshl2AddU32,
+    /// `s_lshl3_add_u32` (SOP2 opcode 48): unsigned lshl_add, SCC = carry_out.
+    Lshl3AddU32,
+    /// `s_lshl4_add_u32` (SOP2 opcode 49): unsigned lshl_add, SCC = carry_out.
+    Lshl4AddU32,
+    /// `s_mul_hi_u32` (SOP2 opcode 53): unsigned mul_hi, SCC = unchanged.
+    MulHiU32,
+    /// `s_mul_hi_i32` (SOP2 opcode 54): signed mul_hi, SCC = unchanged.
+    MulHiI32,
 }
 
 /// ScalarAluOp by SOP2 OP field value; `None` for undeclared opcodes.
@@ -453,11 +485,11 @@ const SCALAR_ALU_OP_BY_OPCODE: [Option<ScalarAluOp>; 128] = [
     Some(ScalarAluOp::SubI32),
     Some(ScalarAluOp::AddcU32),
     Some(ScalarAluOp::SubbU32),
-    None,
-    None,
-    None,
-    None,
-    None,
+    Some(ScalarAluOp::MinI32),
+    Some(ScalarAluOp::MinU32),
+    Some(ScalarAluOp::MaxI32),
+    Some(ScalarAluOp::MaxU32),
+    Some(ScalarAluOp::CselectB32),
     None,
     None,
     None,
@@ -483,25 +515,25 @@ const SCALAR_ALU_OP_BY_OPCODE: [Option<ScalarAluOp>; 128] = [
     None,
     Some(ScalarAluOp::AshrI32),
     None,
+    Some(ScalarAluOp::BfmB32),
+    None,
+    Some(ScalarAluOp::MulI32),
+    Some(ScalarAluOp::BfeU32),
+    Some(ScalarAluOp::BfeI32),
     None,
     None,
     None,
+    Some(ScalarAluOp::AbsdiffI32),
+    None,
+    Some(ScalarAluOp::Lshl1AddU32),
+    Some(ScalarAluOp::Lshl2AddU32),
+    Some(ScalarAluOp::Lshl3AddU32),
+    Some(ScalarAluOp::Lshl4AddU32),
     None,
     None,
     None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
+    Some(ScalarAluOp::MulHiU32),
+    Some(ScalarAluOp::MulHiI32),
     None,
     None,
     None,
@@ -579,7 +611,7 @@ const SCALAR_ALU_OP_BY_OPCODE: [Option<ScalarAluOp>; 128] = [
 
 impl ScalarAluOp {
     /// Every operation, in registry order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 33] = [
         Self::AddU32,
         Self::SubU32,
         Self::AddI32,
@@ -597,6 +629,22 @@ impl ScalarAluOp {
         Self::LshlB32,
         Self::LshrB32,
         Self::AshrI32,
+        Self::MinI32,
+        Self::MinU32,
+        Self::MaxI32,
+        Self::MaxU32,
+        Self::CselectB32,
+        Self::BfmB32,
+        Self::MulI32,
+        Self::BfeU32,
+        Self::BfeI32,
+        Self::AbsdiffI32,
+        Self::Lshl1AddU32,
+        Self::Lshl2AddU32,
+        Self::Lshl3AddU32,
+        Self::Lshl4AddU32,
+        Self::MulHiU32,
+        Self::MulHiI32,
     ];
 
     /// Selects the operation from a first instruction word: the SOP2 encoding
@@ -628,6 +676,22 @@ impl ScalarAluOp {
             Self::LshlB32 => "s_lshl_b32",
             Self::LshrB32 => "s_lshr_b32",
             Self::AshrI32 => "s_ashr_i32",
+            Self::MinI32 => "s_min_i32",
+            Self::MinU32 => "s_min_u32",
+            Self::MaxI32 => "s_max_i32",
+            Self::MaxU32 => "s_max_u32",
+            Self::CselectB32 => "s_cselect_b32",
+            Self::BfmB32 => "s_bfm_b32",
+            Self::MulI32 => "s_mul_i32",
+            Self::BfeU32 => "s_bfe_u32",
+            Self::BfeI32 => "s_bfe_i32",
+            Self::AbsdiffI32 => "s_absdiff_i32",
+            Self::Lshl1AddU32 => "s_lshl1_add_u32",
+            Self::Lshl2AddU32 => "s_lshl2_add_u32",
+            Self::Lshl3AddU32 => "s_lshl3_add_u32",
+            Self::Lshl4AddU32 => "s_lshl4_add_u32",
+            Self::MulHiU32 => "s_mul_hi_u32",
+            Self::MulHiI32 => "s_mul_hi_i32",
         }
     }
 
@@ -651,10 +715,26 @@ impl ScalarAluOp {
             Self::LshlB32 => 14,
             Self::LshrB32 => 15,
             Self::AshrI32 => 16,
+            Self::MinI32 => 17,
+            Self::MinU32 => 18,
+            Self::MaxI32 => 19,
+            Self::MaxU32 => 20,
+            Self::CselectB32 => 21,
+            Self::BfmB32 => 22,
+            Self::MulI32 => 23,
+            Self::BfeU32 => 24,
+            Self::BfeI32 => 25,
+            Self::AbsdiffI32 => 26,
+            Self::Lshl1AddU32 => 27,
+            Self::Lshl2AddU32 => 28,
+            Self::Lshl3AddU32 => 29,
+            Self::Lshl4AddU32 => 30,
+            Self::MulHiU32 => 31,
+            Self::MulHiI32 => 32,
         }]
     }
 
-    /// Whether the operation reads SCC as a carry-in or borrow-in.
+    /// Whether the operation reads SCC (carry-in, borrow-in or select condition).
     pub const fn reads_scc(self) -> bool {
         match self {
             Self::AddU32 => false,
@@ -674,30 +754,186 @@ impl ScalarAluOp {
             Self::LshlB32 => false,
             Self::LshrB32 => false,
             Self::AshrI32 => false,
+            Self::MinI32 => false,
+            Self::MinU32 => false,
+            Self::MaxI32 => false,
+            Self::MaxU32 => false,
+            Self::CselectB32 => true,
+            Self::BfmB32 => false,
+            Self::MulI32 => false,
+            Self::BfeU32 => false,
+            Self::BfeI32 => false,
+            Self::AbsdiffI32 => false,
+            Self::Lshl1AddU32 => false,
+            Self::Lshl2AddU32 => false,
+            Self::Lshl3AddU32 => false,
+            Self::Lshl4AddU32 => false,
+            Self::MulHiU32 => false,
+            Self::MulHiI32 => false,
         }
     }
 
-    /// The result and the new SCC, with `carry_in` the SCC read by forms that
-    /// consume it (ignored by the others).
-    pub const fn evaluate(self, src0: u32, src1: u32, carry_in: bool) -> (u32, bool) {
+    /// Whether the operation writes SCC.
+    pub const fn writes_scc(self) -> bool {
         match self {
-            Self::AddU32 => primitive::add_carry_u32(src0, src1, false),
-            Self::SubU32 => primitive::sub_borrow_u32(src0, src1, false),
-            Self::AddI32 => primitive::add_overflow_i32(src0, src1),
-            Self::SubI32 => primitive::sub_overflow_i32(src0, src1),
-            Self::AddcU32 => primitive::add_carry_u32(src0, src1, carry_in),
-            Self::SubbU32 => primitive::sub_borrow_u32(src0, src1, carry_in),
-            Self::AndB32 => primitive::and_nonzero_b32(src0, src1),
-            Self::OrB32 => primitive::or_nonzero_b32(src0, src1),
-            Self::XorB32 => primitive::xor_nonzero_b32(src0, src1),
-            Self::Andn2B32 => primitive::andn2_nonzero_b32(src0, src1),
-            Self::Orn2B32 => primitive::orn2_nonzero_b32(src0, src1),
-            Self::NandB32 => primitive::nand_nonzero_b32(src0, src1),
-            Self::NorB32 => primitive::nor_nonzero_b32(src0, src1),
-            Self::XnorB32 => primitive::xnor_nonzero_b32(src0, src1),
-            Self::LshlB32 => primitive::lshl_nonzero_b32(src0, src1 & 0x1f),
-            Self::LshrB32 => primitive::lshr_nonzero_b32(src0, src1 & 0x1f),
-            Self::AshrI32 => primitive::ashr_nonzero_i32(src0, src1 & 0x1f),
+            Self::AddU32 => true,
+            Self::SubU32 => true,
+            Self::AddI32 => true,
+            Self::SubI32 => true,
+            Self::AddcU32 => true,
+            Self::SubbU32 => true,
+            Self::AndB32 => true,
+            Self::OrB32 => true,
+            Self::XorB32 => true,
+            Self::Andn2B32 => true,
+            Self::Orn2B32 => true,
+            Self::NandB32 => true,
+            Self::NorB32 => true,
+            Self::XnorB32 => true,
+            Self::LshlB32 => true,
+            Self::LshrB32 => true,
+            Self::AshrI32 => true,
+            Self::MinI32 => true,
+            Self::MinU32 => true,
+            Self::MaxI32 => true,
+            Self::MaxU32 => true,
+            Self::CselectB32 => false,
+            Self::BfmB32 => false,
+            Self::MulI32 => false,
+            Self::BfeU32 => true,
+            Self::BfeI32 => true,
+            Self::AbsdiffI32 => true,
+            Self::Lshl1AddU32 => true,
+            Self::Lshl2AddU32 => true,
+            Self::Lshl3AddU32 => true,
+            Self::Lshl4AddU32 => true,
+            Self::MulHiU32 => false,
+            Self::MulHiI32 => false,
+        }
+    }
+
+    /// The result and, for forms that write it, the new SCC (`None` leaves SCC
+    /// unchanged). `scc_in` is the SCC read by forms that consume it (ignored by
+    /// the others).
+    pub const fn evaluate(self, src0: u32, src1: u32, scc_in: bool) -> (u32, Option<bool>) {
+        match self {
+            Self::AddU32 => {
+                let (value, scc) = primitive::add_carry_u32(src0, src1, false);
+                (value, Some(scc))
+            }
+            Self::SubU32 => {
+                let (value, scc) = primitive::sub_borrow_u32(src0, src1, false);
+                (value, Some(scc))
+            }
+            Self::AddI32 => {
+                let (value, scc) = primitive::add_overflow_i32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::SubI32 => {
+                let (value, scc) = primitive::sub_overflow_i32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::AddcU32 => {
+                let (value, scc) = primitive::add_carry_u32(src0, src1, scc_in);
+                (value, Some(scc))
+            }
+            Self::SubbU32 => {
+                let (value, scc) = primitive::sub_borrow_u32(src0, src1, scc_in);
+                (value, Some(scc))
+            }
+            Self::AndB32 => {
+                let (value, scc) = primitive::and_nonzero_b32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::OrB32 => {
+                let (value, scc) = primitive::or_nonzero_b32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::XorB32 => {
+                let (value, scc) = primitive::xor_nonzero_b32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::Andn2B32 => {
+                let (value, scc) = primitive::andn2_nonzero_b32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::Orn2B32 => {
+                let (value, scc) = primitive::orn2_nonzero_b32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::NandB32 => {
+                let (value, scc) = primitive::nand_nonzero_b32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::NorB32 => {
+                let (value, scc) = primitive::nor_nonzero_b32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::XnorB32 => {
+                let (value, scc) = primitive::xnor_nonzero_b32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::LshlB32 => {
+                let (value, scc) = primitive::lshl_nonzero_b32(src0, src1 & 0x1f);
+                (value, Some(scc))
+            }
+            Self::LshrB32 => {
+                let (value, scc) = primitive::lshr_nonzero_b32(src0, src1 & 0x1f);
+                (value, Some(scc))
+            }
+            Self::AshrI32 => {
+                let (value, scc) = primitive::ashr_nonzero_i32(src0, src1 & 0x1f);
+                (value, Some(scc))
+            }
+            Self::MinI32 => {
+                let (value, scc) = primitive::min_i32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::MinU32 => {
+                let (value, scc) = primitive::min_u32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::MaxI32 => {
+                let (value, scc) = primitive::max_i32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::MaxU32 => {
+                let (value, scc) = primitive::max_u32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::CselectB32 => (primitive::cselect_b32(src0, src1, scc_in), None),
+            Self::BfmB32 => (primitive::bfm_b32(src0, src1), None),
+            Self::MulI32 => (primitive::mul_lo_i32(src0, src1), None),
+            Self::BfeU32 => {
+                let (value, scc) = primitive::bfe_nonzero_u32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::BfeI32 => {
+                let (value, scc) = primitive::bfe_nonzero_i32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::AbsdiffI32 => {
+                let (value, scc) = primitive::absdiff_nonzero_i32(src0, src1);
+                (value, Some(scc))
+            }
+            Self::Lshl1AddU32 => {
+                let (value, scc) = primitive::lshl_add_carry_u32(src0, src1, 1);
+                (value, Some(scc))
+            }
+            Self::Lshl2AddU32 => {
+                let (value, scc) = primitive::lshl_add_carry_u32(src0, src1, 2);
+                (value, Some(scc))
+            }
+            Self::Lshl3AddU32 => {
+                let (value, scc) = primitive::lshl_add_carry_u32(src0, src1, 3);
+                (value, Some(scc))
+            }
+            Self::Lshl4AddU32 => {
+                let (value, scc) = primitive::lshl_add_carry_u32(src0, src1, 4);
+                (value, Some(scc))
+            }
+            Self::MulHiU32 => (primitive::mul_hi_u32(src0, src1), None),
+            Self::MulHiI32 => (primitive::mul_hi_i32(src0, src1), None),
         }
     }
 }
@@ -910,18 +1146,18 @@ impl ScalarCompareOp {
     /// The validated registry row.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
-            Self::CmpEqI32 => 17,
-            Self::CmpLgI32 => 18,
-            Self::CmpGtI32 => 19,
-            Self::CmpGeI32 => 20,
-            Self::CmpLtI32 => 21,
-            Self::CmpLeI32 => 22,
-            Self::CmpEqU32 => 23,
-            Self::CmpLgU32 => 24,
-            Self::CmpGtU32 => 25,
-            Self::CmpGeU32 => 26,
-            Self::CmpLtU32 => 27,
-            Self::CmpLeU32 => 28,
+            Self::CmpEqI32 => 33,
+            Self::CmpLgI32 => 34,
+            Self::CmpGtI32 => 35,
+            Self::CmpGeI32 => 36,
+            Self::CmpLtI32 => 37,
+            Self::CmpLeI32 => 38,
+            Self::CmpEqU32 => 39,
+            Self::CmpLgU32 => 40,
+            Self::CmpGtU32 => 41,
+            Self::CmpGeU32 => 42,
+            Self::CmpLtU32 => 43,
+            Self::CmpLeU32 => 44,
         }]
     }
 
@@ -963,7 +1199,7 @@ impl ScalarCompareOp {
 }
 
 /// Identity of every registry form, in registry order.
-pub const FORM_IDS: [(&str, EncodingFamily); 40] = [
+pub const FORM_IDS: [(&str, EncodingFamily); 56] = [
     ("S_ADD_U32", EncodingFamily::Sop2),
     ("S_SUB_U32", EncodingFamily::Sop2),
     ("S_ADD_I32", EncodingFamily::Sop2),
@@ -981,6 +1217,22 @@ pub const FORM_IDS: [(&str, EncodingFamily); 40] = [
     ("S_LSHL_B32", EncodingFamily::Sop2),
     ("S_LSHR_B32", EncodingFamily::Sop2),
     ("S_ASHR_I32", EncodingFamily::Sop2),
+    ("S_MIN_I32", EncodingFamily::Sop2),
+    ("S_MIN_U32", EncodingFamily::Sop2),
+    ("S_MAX_I32", EncodingFamily::Sop2),
+    ("S_MAX_U32", EncodingFamily::Sop2),
+    ("S_CSELECT_B32", EncodingFamily::Sop2),
+    ("S_BFM_B32", EncodingFamily::Sop2),
+    ("S_MUL_I32", EncodingFamily::Sop2),
+    ("S_BFE_U32", EncodingFamily::Sop2),
+    ("S_BFE_I32", EncodingFamily::Sop2),
+    ("S_ABSDIFF_I32", EncodingFamily::Sop2),
+    ("S_LSHL1_ADD_U32", EncodingFamily::Sop2),
+    ("S_LSHL2_ADD_U32", EncodingFamily::Sop2),
+    ("S_LSHL3_ADD_U32", EncodingFamily::Sop2),
+    ("S_LSHL4_ADD_U32", EncodingFamily::Sop2),
+    ("S_MUL_HI_U32", EncodingFamily::Sop2),
+    ("S_MUL_HI_I32", EncodingFamily::Sop2),
     ("S_CMP_EQ_I32", EncodingFamily::Sopc),
     ("S_CMP_LG_I32", EncodingFamily::Sopc),
     ("S_CMP_GT_I32", EncodingFamily::Sopc),
@@ -1007,7 +1259,7 @@ pub const FORM_IDS: [(&str, EncodingFamily); 40] = [
 ];
 
 /// One validated row per registry form, in registry order.
-pub static FORMS: [FormSemantics; 40] = [
+pub static FORMS: [FormSemantics; 56] = [
     FormSemantics {
         name: "S_ADD_U32",
         family: EncodingFamily::Sop2,
@@ -1017,6 +1269,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::CarryOut,
@@ -1036,6 +1289,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Borrow,
@@ -1055,6 +1309,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::SignedOverflow,
@@ -1074,6 +1329,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::SignedOverflow,
@@ -1093,6 +1349,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::Scc,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::CarryOut,
@@ -1112,6 +1369,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::Scc,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Borrow,
@@ -1131,6 +1389,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1150,6 +1409,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1169,6 +1429,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1188,6 +1449,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1207,6 +1469,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1226,6 +1489,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1245,6 +1509,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1264,6 +1529,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1283,6 +1549,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 5,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1302,6 +1569,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 5,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1321,6 +1589,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 5,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1332,6 +1601,326 @@ pub static FORMS: [FormSemantics; 40] = [
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
+        name: "S_MIN_I32",
+        family: EncodingFamily::Sop2,
+        opcode: 6,
+        operation: Operation::Minimum,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::SelectedSrc0,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }, SpecRef { document: Document::Guide, section: "5.4", page: 34 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_MIN_U32",
+        family: EncodingFamily::Sop2,
+        opcode: 7,
+        operation: Operation::Minimum,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::SelectedSrc0,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }, SpecRef { document: Document::Guide, section: "5.4", page: 34 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_MAX_I32",
+        family: EncodingFamily::Sop2,
+        opcode: 8,
+        operation: Operation::Maximum,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::SelectedSrc0,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 102 }, SpecRef { document: Document::Guide, section: "5.4", page: 34 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_MAX_U32",
+        family: EncodingFamily::Sop2,
+        opcode: 9,
+        operation: Operation::Maximum,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::SelectedSrc0,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 103 }, SpecRef { document: Document::Guide, section: "5.4", page: 34 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_CSELECT_B32",
+        family: EncodingFamily::Sop2,
+        opcode: 10,
+        operation: Operation::Select,
+        signedness: Signedness::Bitwise,
+        carry_in: CarryIn::Scc,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 103 }, SpecRef { document: Document::Guide, section: "5.5", page: 34 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_BFM_B32",
+        family: EncodingFamily::Sop2,
+        opcode: 36,
+        operation: Operation::BitfieldMask,
+        signedness: Signedness::Bitwise,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 104 }, SpecRef { document: Document::Guide, section: "5.7", page: 36 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_MUL_I32",
+        family: EncodingFamily::Sop2,
+        opcode: 38,
+        operation: Operation::Multiply,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 105 }, SpecRef { document: Document::Guide, section: "5.4", page: 34 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_BFE_U32",
+        family: EncodingFamily::Sop2,
+        opcode: 39,
+        operation: Operation::BitfieldExtract,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Nonzero,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 105 }, SpecRef { document: Document::Guide, section: "5.7", page: 36 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_BFE_I32",
+        family: EncodingFamily::Sop2,
+        opcode: 40,
+        operation: Operation::BitfieldExtract,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Nonzero,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 105 }, SpecRef { document: Document::Guide, section: "5.7", page: 36 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_ABSDIFF_I32",
+        family: EncodingFamily::Sop2,
+        opcode: 44,
+        operation: Operation::AbsoluteDifference,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Nonzero,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 105 }, SpecRef { document: Document::Guide, section: "5.4", page: 34 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_LSHL1_ADD_U32",
+        family: EncodingFamily::Sop2,
+        opcode: 46,
+        operation: Operation::ShiftLeftAdd,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 1,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::CarryOut,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 105 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_LSHL2_ADD_U32",
+        family: EncodingFamily::Sop2,
+        opcode: 47,
+        operation: Operation::ShiftLeftAdd,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 2,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::CarryOut,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 105 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_LSHL3_ADD_U32",
+        family: EncodingFamily::Sop2,
+        opcode: 48,
+        operation: Operation::ShiftLeftAdd,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 3,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::CarryOut,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 106 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_LSHL4_ADD_U32",
+        family: EncodingFamily::Sop2,
+        opcode: 49,
+        operation: Operation::ShiftLeftAdd,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 4,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::CarryOut,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 106 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_MUL_HI_U32",
+        family: EncodingFamily::Sop2,
+        opcode: 53,
+        operation: Operation::MultiplyHigh,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 106 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_MUL_HI_I32",
+        family: EncodingFamily::Sop2,
+        opcode: 54,
+        operation: Operation::MultiplyHigh,
+        signedness: Signedness::Signed,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop2Sgpr,
+        spec: &[SpecRef { document: Document::Guide, section: "12.1", page: 106 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
         name: "S_CMP_EQ_I32",
         family: EncodingFamily::Sopc,
         opcode: 0,
@@ -1340,6 +1929,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::Equal),
         scc: SccEffect::Relation,
@@ -1359,6 +1949,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::NotEqual),
         scc: SccEffect::Relation,
@@ -1378,6 +1969,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::Greater),
         scc: SccEffect::Relation,
@@ -1397,6 +1989,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::GreaterOrEqual),
         scc: SccEffect::Relation,
@@ -1416,6 +2009,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::Less),
         scc: SccEffect::Relation,
@@ -1435,6 +2029,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::LessOrEqual),
         scc: SccEffect::Relation,
@@ -1454,6 +2049,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::Equal),
         scc: SccEffect::Relation,
@@ -1473,6 +2069,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::NotEqual),
         scc: SccEffect::Relation,
@@ -1492,6 +2089,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::Greater),
         scc: SccEffect::Relation,
@@ -1511,6 +2109,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::GreaterOrEqual),
         scc: SccEffect::Relation,
@@ -1530,6 +2129,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::Less),
         scc: SccEffect::Relation,
@@ -1549,6 +2149,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: Some(CompareRelation::LessOrEqual),
         scc: SccEffect::Relation,
@@ -1568,6 +2169,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1587,6 +2189,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Unchanged,
@@ -1606,6 +2209,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1625,6 +2229,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,
@@ -1644,6 +2249,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Unchanged,
@@ -1663,6 +2269,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Unchanged,
@@ -1682,6 +2289,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Unchanged,
@@ -1701,6 +2309,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Unchanged,
@@ -1720,6 +2329,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 8,
         relation: None,
         scc: SccEffect::Unchanged,
@@ -1739,6 +2349,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 16,
         relation: None,
         scc: SccEffect::Unchanged,
@@ -1758,6 +2369,7 @@ pub static FORMS: [FormSemantics; 40] = [
         carry_in: CarryIn::None,
         width: 32,
         shift_count_bits: 0,
+        shift_amount: 0,
         source_bits: 32,
         relation: None,
         scc: SccEffect::Nonzero,

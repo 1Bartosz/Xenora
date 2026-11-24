@@ -86,6 +86,127 @@ final class FrameModel: ObservableObject {
     }
 }
 
+/// Persistent guest rendering model (Gate 3, #266).
+@MainActor
+final class FrameLoopModel: ObservableObject {
+    @Published var state: UInt32 = UInt32(XENORA_LOOP_NONE)
+    @Published var completed: UInt32 = 0
+    @Published var frameId: UInt32 = XENORA_NO_FRAME
+    @Published var image: CGImage?
+    @Published var errorMessage: String?
+
+    private var session: xenora_session = 0
+    private var pollTask: Task<Void, Never>?
+
+    deinit {
+        pollTask?.cancel()
+        if session != 0 {
+            _ = xenora_session_destroy(session)
+        }
+    }
+
+    var isRunning: Bool { state == UInt32(XENORA_LOOP_RUNNING) }
+    var isPaused: Bool { state == UInt32(XENORA_LOOP_PAUSED) }
+    var canStart: Bool {
+        session == 0 || state == UInt32(XENORA_LOOP_NONE) || state == UInt32(XENORA_LOOP_FINISHED)
+            || state == UInt32(XENORA_LOOP_STOPPED) || state == UInt32(XENORA_LOOP_FAILED)
+    }
+
+    var stateDescription: String {
+        switch state {
+        case UInt32(XENORA_LOOP_NONE): return "Idle"
+        case UInt32(XENORA_LOOP_RUNNING): return "Running"
+        case UInt32(XENORA_LOOP_PAUSED): return "Paused"
+        case UInt32(XENORA_LOOP_FINISHED): return "Finished"
+        case UInt32(XENORA_LOOP_STOPPED): return "Stopped"
+        case UInt32(XENORA_LOOP_FAILED): return "Failed"
+        default: return "Unknown (\(state))"
+        }
+    }
+
+    func start(frameCount: UInt32 = 300) {
+        errorMessage = nil
+        if session != 0 {
+            _ = xenora_session_destroy(session)
+            session = 0
+        }
+        var newSession: xenora_session = 0
+        let createStatus = xenora_session_create(XENORA_ABI_VERSION, &newSession)
+        guard createStatus == XENORA_OK else {
+            errorMessage = "Failed to create session (status \(createStatus))"
+            return
+        }
+        session = newSession
+        let startStatus = xenora_session_start_frame_loop(session, frameCount)
+        guard startStatus == XENORA_OK else {
+            errorMessage = "Failed to start frame loop (status \(startStatus))"
+            _ = xenora_session_destroy(session)
+            session = 0
+            return
+        }
+        state = UInt32(XENORA_LOOP_RUNNING)
+        completed = 0
+        frameId = XENORA_NO_FRAME
+        image = nil
+        startPolling()
+    }
+
+    func pause() {
+        guard session != 0 else { return }
+        _ = xenora_session_pause_frame_loop(session)
+    }
+
+    func resume() {
+        guard session != 0 else { return }
+        _ = xenora_session_resume_frame_loop(session)
+    }
+
+    func stop() {
+        guard session != 0 else { return }
+        _ = xenora_session_stop_frame_loop(session)
+    }
+
+    private func startPolling() {
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 16_000_000)
+                guard let self = self, self.session != 0 else { break }
+                var st: UInt32 = 0
+                var comp: UInt32 = 0
+                var fId: UInt32 = 0
+                var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
+                let code = rgba.withUnsafeMutableBufferPointer { buffer in
+                    xenora_session_frame_loop_status(
+                        self.session, &st, &comp, &fId, buffer.baseAddress, UInt64(buffer.count))
+                }
+                guard code == XENORA_OK else { break }
+                self.state = st
+                self.completed = comp
+                self.frameId = fId
+                if fId != XENORA_NO_FRAME, let provider = CGDataProvider(data: Data(rgba) as CFData) {
+                    self.image = CGImage(
+                        width: Int(XENORA_FIXTURE_FRAME_WIDTH),
+                        height: Int(XENORA_FIXTURE_FRAME_HEIGHT),
+                        bitsPerComponent: 8,
+                        bitsPerPixel: 32,
+                        bytesPerRow: Int(XENORA_FIXTURE_FRAME_WIDTH) * 4,
+                        space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                        provider: provider,
+                        decode: nil,
+                        shouldInterpolate: false,
+                        intent: .defaultIntent
+                    )
+                }
+                if st != UInt32(XENORA_LOOP_RUNNING) && st != UInt32(XENORA_LOOP_PAUSED) {
+                    break
+                }
+            }
+        }
+    }
+}
+
 /// Read-only compatibility inspection of a user-chosen file. Nothing in it is executed.
 @MainActor
 final class InspectionModel: ObservableObject {
@@ -170,6 +291,7 @@ struct InspectorView: View {
 struct ContentView: View {
     let probe = RuntimeProbe.run()
     @ObservedObject var model: FrameModel
+    @ObservedObject var loop: FrameLoopModel
     @ObservedObject var inspection = InspectionModel.shared
     private var frame: GuestFrame? { model.frame }
     private var running: Bool { model.running }
@@ -195,11 +317,40 @@ struct ContentView: View {
                 Button(running ? "Running…" : "Run trusted fixture") { model.run() }
                 .disabled(running || !probe.connected)
             }
+            Section("Persistent frame loop") {
+                if let image = loop.image {
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .interpolation(.none)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 240)
+                        .accessibilityLabel("Guest frame #\(loop.frameId)")
+                    Text("Frame #\(loop.frameId) (\(loop.completed) completed) • \(loop.stateDescription)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else if let error = loop.errorMessage {
+                    Text(error).foregroundStyle(.red)
+                } else if loop.state != UInt32(XENORA_LOOP_NONE) {
+                    Text("State: \(loop.stateDescription) • \(loop.completed) completed")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("Start 300 frames") { loop.start(frameCount: 300) }
+                        .disabled(!loop.canStart || !probe.connected)
+                    Button("Pause") { loop.pause() }
+                        .disabled(!loop.isRunning)
+                    Button("Resume") { loop.resume() }
+                        .disabled(!loop.isPaused)
+                    Button("Stop") { loop.stop() }
+                        .disabled(!loop.isRunning && !loop.isPaused)
+                }
+            }
             LabeledContent("Runtime", value: probe.connected ? "Connected" : "Unavailable (status \(probe.status))")
             LabeledContent("Interface version", value: "\(probe.abiVersion)")
             LabeledContent("Trusted fixture sections", value: "\(probe.sections)")
             LabeledContent("Trusted fixture entry RVA", value: String(format: "0x%X", probe.entryRVA))
-            Text("Only the bundled trusted fixture can run. Live presentation, persistent sessions and input are not available yet.")
+            Text("Only the bundled trusted fixture and frame-loop guest can run. Presentation uses read-back Metal frames. Arbitrary executables and input are not available yet.")
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
@@ -211,16 +362,17 @@ struct ContentView: View {
             inspection.inspect(url)
             return true
         }
-        .frame(minWidth: 520, minHeight: 560)
+        .frame(minWidth: 520, minHeight: 680)
     }
 }
 
 struct XenoraApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     let model = FrameModel()
+    let loop = FrameLoopModel()
 
     var body: some Scene {
-        WindowGroup("Xenora") { ContentView(model: model) }
+        WindowGroup("Xenora") { ContentView(model: model, loop: loop) }
     }
 }
 
@@ -230,6 +382,37 @@ if let flag = CommandLine.arguments.firstIndex(of: "--inspect"), flag + 1 < Comm
     print(report.hasSuffix("\n") ? report : report + "\n", terminator: "")
     print("status=\(status)")
     exit(status == Int32(XENORA_OK) ? 0 : 1)
+}
+
+// `--smoke-loop` runs 300 frames on the Metal device and exits; it needs a GPU.
+if CommandLine.arguments.contains("--smoke-loop") {
+    var session: xenora_session = 0
+    guard xenora_session_create(XENORA_ABI_VERSION, &session) == XENORA_OK else {
+        print("failed to create session")
+        exit(1)
+    }
+    defer { _ = xenora_session_destroy(session) }
+    guard xenora_session_start_frame_loop(session, 300) == XENORA_OK else {
+        print("failed to start frame loop")
+        exit(1)
+    }
+    var state: UInt32 = 0
+    var completed: UInt32 = 0
+    var frameId: UInt32 = 0
+    var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
+    while true {
+        let code = rgba.withUnsafeMutableBufferPointer { buf in
+            xenora_session_frame_loop_status(session, &state, &completed, &frameId, buf.baseAddress, UInt64(buf.count))
+        }
+        if code != XENORA_OK {
+            print("frame_loop_status failed: \(code)")
+            exit(1)
+        }
+        if state != UInt32(XENORA_LOOP_RUNNING) { break }
+        Thread.sleep(forTimeInterval: 0.005)
+    }
+    print("state=\(state) completed=\(completed) frame_id=\(frameId)")
+    exit(state == UInt32(XENORA_LOOP_FINISHED) && completed == 300 ? 0 : 1)
 }
 
 // `--smoke-frame` runs the trusted fixture on the Metal device and exits; it needs a GPU.

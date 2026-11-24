@@ -51,14 +51,15 @@ error.
 | `family` | Encoding family; must match the XML base encoding | e.g. `SOP2` |
 | `opcode` | Opcode; must match the XML | non-negative integer |
 | `variant` | Rust enum variant of the typed operation | CamelCase, e.g. `AddU32` |
-| `operation` | The primitive the form uses | `add`, `sub`, `and`, `or`, `xor`, `andn2`, `orn2`, `nand`, `nor`, `xnor`, `lshl`, `lshr`, `ashr` |
-| `signedness` | How operands are read | `unsigned`, `signed`, `bitwise` (always `bitwise` for the logical operations, never for `add` and `sub`; shifts take their primitive's signedness) |
-| `carry_in` | Whether the form reads SCC as carry-in or borrow-in | `none`, `scc` (`scc` only for unsigned `add` and `sub`) |
+| `operation` | The primitive the form uses | `add`, `sub`, `and`, `or`, `xor`, `andn2`, `orn2`, `nand`, `nor`, `xnor`, `lshl`, `lshr`, `ashr`, `min`, `max`, `cselect`, `bfm`, `mul`, `mul_hi`, `bfe`, `absdiff`, `lshl_add`, `compare` and the SOP1 unaries |
+| `signedness` | How operands are read | `unsigned`, `signed`, `bitwise` (always `bitwise` for the logical operations, `cselect` and `bfm`; never for the arithmetic ones, `add`, `sub`, `min`, `max`, `mul`, `mul_hi`, `bfe`, `absdiff` and `lshl_add`; shifts take their primitive's signedness) |
+| `carry_in` | Whether the form reads SCC: carry-in, borrow-in or the select condition | `none`, `scc` (`scc` only for unsigned `add` and `sub`, and required for `cselect`) |
 | `width` | Operand and result width in bits | `32` |
 | `source_bits` | Sign extension only: the low bits of S0 that are read. The XML must list S0 with that size and format (`FMT_NUM_I8` or `FMT_NUM_I16`) | `8`, `16`; required for `sext`, rejected elsewhere |
 | `relation` | Compares only: the relation tested with S0 on the left | `eq`, `lg` (not equal), `gt`, `ge`, `lt`, `le`; required for `compare`, rejected elsewhere |
+| `shift_amount` | `lshl_add` only: the fixed left shift of S0 before the add | `1` to `4`; required for `lshl_add`, rejected elsewhere |
 | `shift_count_bits` | Shifts only: the low bits of S1 used as the count. The generator masks S1 with it, and the XML must list S1 as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
-| `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `relation` (compares only), `unchanged` |
+| `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `relation` (compares only), `selected_src0` (min and max: S0 won the strict compare, so a tie gives 0), `unchanged` |
 | `vcc`, `exec` | Effect on VCC and EXEC, stated rather than implied | `unchanged` |
 | `wave` | Wave sizes the form is valid in | `any` (`wave32` is in the vocabulary but rejected until the decoder can enforce it) |
 | `operands` | Name of an `[operand_rules]` entry for the same family | e.g. `sop2_sgpr` |
@@ -82,6 +83,14 @@ fixes the `scc` value:
 | `brev`, `ff0`, `ff1`, `flbit` / `bitwise` | `unchanged` | `brev_b32`, `ff0_b32`, `ff1_b32`, `flbit_b32` | no |
 | `flbit`, `sext` / `signed` | `unchanged` | `flbit_i32`, `sext_i32` | no |
 | `abs` / `signed` | `nonzero` | `abs_nonzero_i32` | no |
+| `min`, `max` / `signed` or `unsigned` | `selected_src0` | `min_i32`/`min_u32`, `max_i32`/`max_u32` | no |
+| `cselect` / `bitwise` | `unchanged` | `cselect_b32` | required |
+| `bfm` / `bitwise` | `unchanged` | `bfm_b32` | no |
+| `mul` / `signed` | `unchanged` | `mul_lo_i32` | no |
+| `mul_hi` / `unsigned` or `signed` | `unchanged` | `mul_hi_u32`, `mul_hi_i32` | no |
+| `bfe` / `unsigned` or `signed` | `nonzero` | `bfe_nonzero_u32`, `bfe_nonzero_i32` | no |
+| `absdiff` / `signed` | `nonzero` | `absdiff_nonzero_i32` | no |
+| `lshl_add` / `unsigned` | `carry_out` | `lshl_add_carry_u32` (with `shift_amount`) | no |
 | `compare` / `signed` or `unsigned` | `relation` | `eq_b32`, `ne_b32` (for both signednesses), `gt_i32`/`gt_u32`, `ge_*`, `lt_*`, `le_*` | no |
 
 A compare must use an operand rule of the compare kind (`sopc_scalar`: two
@@ -103,7 +112,8 @@ vocabularies above, it rejects:
 - XML disagreements: a family with no XML encoding, a form with no default XML
   variant, a different opcode, an SCC input or output the XML does not show (or
   that the declaration omits), an operand width other than `width`, a signed
-  declaration on unsigned XML formats or the reverse, an operand direction that
+  declaration on unsigned XML formats or the reverse (a shift count or the `bfe`
+  field descriptor in S1 must be `FMT_NUM_U32` whatever the signedness), an operand direction that
   differs, and XML operands the operand rule does not cover;
 - references: a spec citing an undeclared document, a bad section or page, or
   no guide page at all;
