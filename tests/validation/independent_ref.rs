@@ -1088,7 +1088,7 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         let allowed = match (bits, src0) {
             (16 | 64, CmpSrc::Imm(_)) if len == 8 => false,
             (64, CmpSrc::Vcc) => false,
-            (64, CmpSrc::Sgpr(reg)) => reg % 2 == 0,
+            (64, CmpSrc::Sgpr(reg)) => reg % 2 == 0 && src1 != 255,
             (64, CmpSrc::Vgpr(reg)) => reg != 255 && src1 != 255,
             (64, _) => src1 != 255,
             _ => true,

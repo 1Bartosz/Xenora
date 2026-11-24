@@ -256,9 +256,9 @@ const REJECTIONS16: usize = 4 + 2 + 2 + 9 + 9 + 1 + 4 + 1 + 1 + 1;
 /// 64-bit per form: 7 uninitialized pair halves, 2 pending loads on a high
 /// half, vcc (known and under empty EXEC), a literal with and without its
 /// dword, 2 odd SGPR bases and one under empty EXEC, v255 as either base and
-/// under empty EXEC, then as for 16-bit: 9 float, 9 special, a float under
+/// under empty EXEC, v255 as VSRC1 after an SGPR pair (also under empty EXEC), then as for 16-bit: 9 float, 9 special, a float under
 /// empty EXEC, SDWA/DPP 4, `_e64`, `v_cmpx`, vccz over a scalar instruction.
-const REJECTIONS64: usize = 7 + 2 + 2 + 2 + 3 + 3 + 9 + 9 + 1 + 4 + 1 + 1 + 1;
+const REJECTIONS64: usize = 7 + 2 + 2 + 2 + 3 + 3 + 2 + 9 + 9 + 1 + 4 + 1 + 1 + 1;
 
 const LITERAL: u32 = 255;
 const VCC_LO: u32 = 106;
@@ -321,8 +321,11 @@ const LT_U32_V1_V3: u32 = 0x7d82_0701;
 const VCCZ_OVER_ONE: u32 = 0xbf86_0001;
 /// `v_xor_b32 v2, v1, v2`.
 const XOR_V2_V1: u32 = 29 << 25 | 2 << 17 | 2 << 9 | (256 + 1);
-/// `s_mov_b32 s8, 0`.
+/// `s_mov_b32 s8, 0` and `s_mov_b32 s8, 1`.
 const SMOV_S8_0: u32 = 0xbe88_0380;
+const SMOV_S8_1: u32 = 0xbe88_0381;
+/// `v_mov_b32 v2, s8`.
+const V2_FROM_S8: u32 = 0x7e04_0208;
 
 const PREFIX: [u32; 3] = [0xe030_2000, 0x8000_0100, 0xbf8c_3f70];
 const STORE_V2: [u32; 4] = [0xe070_2000, 0x8001_0200, 0xbbfd_0000, 0xbf81_0000];
@@ -588,7 +591,8 @@ fn cases64(form: Form, cases: &mut Vec<Case>) {
         );
     }
     // Aliasing: the same pair twice, and the overlapping pairs v[4:5], v[5:6].
-    let (high, c) = (0x8000_0000, 0x7fff_ffff);
+    // v[5:6] has the same high dword as v[4:5], so the low dwords decide.
+    let (high, c) = (0x8000_0000, 0x8000_0000);
     let mut setup = lane_pair(high);
     setup.extend(vmov(6, c));
     setup.extend(vmov(7, 0x8000_0000));
@@ -648,17 +652,18 @@ fn cases64(form: Form, cases: &mut Vec<Case>) {
             );
         }
     }
-    // v[254:255], the highest pair.
-    let b = 0x8000_0000_0000_0005;
-    let mut setup = lane_pair(0);
+    // v[254:255], the highest pair; its high dword equals the lane pair's,
+    // so v254 decides, and reading v255 as anything but 1 changes the result.
+    let b = join(0x8000_0000, 1);
+    let mut setup = lane_pair(1);
     setup.extend(vmov64(254, b));
     for (src0, vsrc1, label) in [
-        (254, 4, "v[254:255], (v1, 0)"),
-        (4, 254, "(v1, 0), v[254:255]"),
+        (254, 4, "v[254:255], (v1, 1)"),
+        (4, 254, "(v1, 1), v[254:255]"),
         (254, 254, "v[254:255], v[254:255]"),
     ] {
         let f = full(form, move |n| {
-            let pick = |top: bool| if top { b } else { v1(n) };
+            let pick = |top: bool| if top { b } else { join(LANES[n % 32], 1) };
             (pick(src0 == 254), pick(vsrc1 == 254))
         });
         push(
@@ -715,7 +720,12 @@ fn common_tail(
     let op = form.op;
     let family =
         |name: &str| -> &'static str { Box::leak(format!("{width} {name}").into_boxed_str()) };
-    let long: Vec<u32> = LANES.iter().chain(&LANES[..13]).copied().collect();
+    // The second wave holds different values from the first one's lanes 0-12.
+    let long: Vec<u32> = LANES
+        .iter()
+        .chain(LANES.iter().rev().take(13))
+        .copied()
+        .collect();
     let short = LANES[..7].to_vec();
     for (exec, input, label) in [
         (u32::MAX, short, "7 lanes"),
@@ -758,9 +768,10 @@ fn common_tail(
         setup,
         Some(0),
         &[vopc(op, src0, vsrc1)],
-        &[VCCZ_OVER_ONE, SMOV_S8_0],
+        &[SMOV_S8_0, VCCZ_OVER_ONE, SMOV_S8_1, V2_FROM_S8],
     );
-    let label = "exec 0, then s_cbranch_vccz over s_mov".into();
+    // Taken: s8 stays 0 and v2 = s8 = 0; falling through would give 1.
+    let label = "exec 0, then s_cbranch_vccz over s_mov, v2 = s8".into();
     cases.push(case(
         form,
         family("vccz branch"),
@@ -937,6 +948,15 @@ fn rejections() -> Vec<(String, Vec<u8>, usize)> {
             reject(
                 "v255 as a base under empty exec".into(),
                 program(&top, Some(0), &[vopc(op, vgpr(255), other)], &[]),
+            );
+            let pair = with(&smov64(8, 1));
+            reject(
+                "s[8:9], v255 as VSRC1 base".into(),
+                program(&pair, None, &[vopc(op, 8, 255)], &[]),
+            );
+            reject(
+                "s[8:9], v255 as VSRC1 base under empty exec".into(),
+                program(&pair, Some(0), &[vopc(op, 8, 255)], &[]),
             );
         }
         for src0 in (240..=248).chain([107, 124, 125, 126, 127, 251, 252, 253, 254]) {
