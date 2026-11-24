@@ -9,16 +9,27 @@ pub mod arm64;
 pub mod cpu;
 pub mod dbt;
 pub mod graphics;
+pub mod import_table;
 pub mod imports;
 pub mod jit;
 pub mod memory;
 pub mod pe;
 pub mod probe;
 pub mod reloc;
+pub mod runtime;
+#[rustfmt::skip]
+pub mod runtime_table;
 pub mod services;
+pub mod softfloat;
 pub mod startup;
 pub mod tls;
 pub mod triage;
+pub mod x86_decode;
+pub mod x86_exec;
+pub mod x86_float;
+pub mod x86_simd;
+#[rustfmt::skip]
+pub mod x86_table;
 
 pub use arm64::Arm64Assembler;
 pub use cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, RFlags, Register};

@@ -183,6 +183,11 @@ impl Arm64Assembler {
         self.emit(0x93401c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
     }
 
+    /// SXTH (64-bit/sign-extended): SXTH Xd, Wn (SBFM Xd, Xn, #0, #15)
+    pub fn sxth_64(&mut self, xd: u8, wn: u8) {
+        self.emit(0x93403c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
+    }
+
     /// SXTB (32-bit/sign-extended): SXTB Wd, Wn (SBFM Wd, Wn, #0, #7)
     ///
     /// Writing the 32-bit destination form clears bits 63:32 of the
@@ -191,17 +196,188 @@ impl Arm64Assembler {
         self.emit(0x13001c00 | ((wn as u32 & 0x1f) << 5) | (wd as u32 & 0x1f));
     }
 
-    /// SXTH (64-bit/sign-extended): SXTH Xd, Wn (SBFM Xd, Xn, #0, #15)
-    pub fn sxth_64(&mut self, xd: u8, wn: u8) {
-        self.emit(0x93403c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
-    }
-
     /// SXTH (32-bit/sign-extended): SXTH Wd, Wn (SBFM Wd, Wn, #0, #15)
     ///
     /// Writing the 32-bit destination form clears bits 63:32 of the
     /// destination register, which is what a 32-bit x86 destination requires.
     pub fn sxth_32(&mut self, wd: u8, wn: u8) {
         self.emit(0x13003c00 | ((wn as u32 & 0x1f) << 5) | (wd as u32 & 0x1f));
+    }
+
+    /// LSR (immediate, 64-bit): LSR Xd, Xn, #shift (UBFM Xd, Xn, #shift, #63)
+    pub fn lsr_imm_64(&mut self, xd: u8, xn: u8, shift: u8) {
+        self.emit(
+            0xd340fc00
+                | ((u32::from(shift) & 0x3f) << 16)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(xd) & 0x1f),
+        );
+    }
+
+    /// CSET Wd, cond (CSINC Wd, WZR, WZR, inverted cond)
+    pub fn cset_32(&mut self, wd: u8, cond: Condition) {
+        self.emit(0x1a9f_07e0 | (((cond as u32) ^ 1) << 12) | (u32::from(wd) & 0x1f));
+    }
+
+    /// CSEL Xd, Xn, Xm, cond
+    pub fn csel_64(&mut self, xd: u8, xn: u8, xm: u8, cond: Condition) {
+        self.emit(
+            0x9a80_0000
+                | ((u32::from(xm) & 0x1f) << 16)
+                | ((cond as u32) << 12)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(xd) & 0x1f),
+        );
+    }
+
+    /// STRB Wt, [Xn, #offset]
+    pub fn strb_uoff(&mut self, wt: u8, xn: u8, offset: u32) {
+        self.emit(
+            0x3900_0000
+                | ((offset & 0xfff) << 10)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(wt) & 0x1f),
+        );
+    }
+
+    /// LDRB Wt, [Xn, #offset]
+    pub fn ldrb_uoff(&mut self, wt: u8, xn: u8, offset: u32) {
+        self.emit(
+            0x3940_0000
+                | ((offset & 0xfff) << 10)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(wt) & 0x1f),
+        );
+    }
+
+    /// EOR Wd, Wn, Wm, LSR #shift
+    pub fn eor_lsr_32(&mut self, wd: u8, wn: u8, wm: u8, shift: u8) {
+        self.emit(
+            0x4a40_0000
+                | ((u32::from(wm) & 0x1f) << 16)
+                | ((u32::from(shift) & 0x1f) << 10)
+                | ((u32::from(wn) & 0x1f) << 5)
+                | (u32::from(wd) & 0x1f),
+        );
+    }
+
+    /// ORR Wd, Wn, Wm
+    pub fn orr_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
+        self.emit(
+            0x2a00_0000
+                | ((u32::from(wm) & 0x1f) << 16)
+                | ((u32::from(wn) & 0x1f) << 5)
+                | (u32::from(wd) & 0x1f),
+        );
+    }
+
+    /// BIC Wd, Wn, Wm (Wn & !Wm)
+    pub fn bic_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
+        self.emit(
+            0x0a20_0000
+                | ((u32::from(wm) & 0x1f) << 16)
+                | ((u32::from(wn) & 0x1f) << 5)
+                | (u32::from(wd) & 0x1f),
+        );
+    }
+
+    /// MVN Xd, Xm (ORN Xd, XZR, Xm)
+    pub fn mvn_64(&mut self, xd: u8, xm: u8) {
+        self.emit(0xaa20_03e0 | ((u32::from(xm) & 0x1f) << 16) | (u32::from(xd) & 0x1f));
+    }
+
+    /// UBFX Wd, Wn, #bit, #1
+    pub fn ubfx_bit_32(&mut self, wd: u8, wn: u8, bit: u8) {
+        self.emit(
+            0x5300_0000
+                | ((u32::from(bit) & 0x1f) << 16)
+                | ((u32::from(bit) & 0x1f) << 10)
+                | ((u32::from(wn) & 0x1f) << 5)
+                | (u32::from(wd) & 0x1f),
+        );
+    }
+
+    /// REV Xd, Xn, or REV Wd, Wn when not `wide`
+    pub fn rev(&mut self, d: u8, n: u8, wide: bool) {
+        self.emit(
+            (if wide { 0xdac0_0c00 } else { 0x5ac0_0800 })
+                | ((u32::from(n) & 0x1f) << 5)
+                | (u32::from(d) & 0x1f),
+        );
+    }
+
+    /// LDR Qt, [Xn, #offset] (offset a multiple of 16)
+    pub fn ldr_q_uoff(&mut self, qt: u8, xn: u8, offset: u32) {
+        self.emit(
+            0x3dc0_0000
+                | (((offset / 16) & 0xfff) << 10)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(qt) & 0x1f),
+        );
+    }
+
+    /// STR Qt, [Xn, #offset] (offset a multiple of 16)
+    pub fn str_q_uoff(&mut self, qt: u8, xn: u8, offset: u32) {
+        self.emit(
+            0x3d80_0000
+                | (((offset / 16) & 0xfff) << 10)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(qt) & 0x1f),
+        );
+    }
+
+    /// FMOV Dd, Xn (clears the upper half of Vd)
+    pub fn fmov_d_from_x(&mut self, vd: u8, xn: u8) {
+        self.emit(0x9e67_0000 | ((u32::from(xn) & 0x1f) << 5) | (u32::from(vd) & 0x1f));
+    }
+
+    /// MOV Vd.D[1], Xn
+    pub fn ins_d1_from_x(&mut self, vd: u8, xn: u8) {
+        self.emit(0x4e18_1c00 | ((u32::from(xn) & 0x1f) << 5) | (u32::from(vd) & 0x1f));
+    }
+
+    /// Three-register vector instruction from its base word
+    pub fn neon3(&mut self, base: u32, vd: u8, vn: u8, vm: u8) {
+        self.emit(
+            base | ((u32::from(vm) & 0x1f) << 16)
+                | ((u32::from(vn) & 0x1f) << 5)
+                | (u32::from(vd) & 0x1f),
+        );
+    }
+
+    /// SHL Vd, Vn, #shift for 0 <= shift < lane
+    pub fn shl_vector(&mut self, vd: u8, vn: u8, lane: u32, shift: u32) {
+        self.emit(
+            0x4f00_5400
+                | ((lane + shift) << 16)
+                | ((u32::from(vn) & 0x1f) << 5)
+                | (u32::from(vd) & 0x1f),
+        );
+    }
+
+    /// USHR Vd, Vn, #shift for 1 <= shift <= lane
+    pub fn ushr_vector(&mut self, vd: u8, vn: u8, lane: u32, shift: u32) {
+        self.emit(
+            0x6f00_0400
+                | ((2 * lane - shift) << 16)
+                | ((u32::from(vn) & 0x1f) << 5)
+                | (u32::from(vd) & 0x1f),
+        );
+    }
+
+    /// SSHR Vd, Vn, #shift for 1 <= shift <= lane
+    pub fn sshr_vector(&mut self, vd: u8, vn: u8, lane: u32, shift: u32) {
+        self.emit(
+            0x4f00_0400
+                | ((2 * lane - shift) << 16)
+                | ((u32::from(vn) & 0x1f) << 5)
+                | (u32::from(vd) & 0x1f),
+        );
+    }
+
+    /// SXTW (64-bit/sign-extended): SXTW Xd, Wn (SBFM Xd, Xn, #0, #31)
+    pub fn sxtw_64(&mut self, xd: u8, wn: u8) {
+        self.emit(0x93407c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
     }
 
     /// ADD (extended/shifted register, 32-bit): ADD Wd, Wn, Wm

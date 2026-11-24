@@ -31,6 +31,8 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 ## Guest CPU and runtime experiments
 
 - [Guest experiment guide](../experiments/x1/README.md) — Bounded x86-64 execution, executable loading, experimental services, native compute, and offscreen rendering.
+- [x86-64 instruction registry](cpu/instruction-registry.md) — Shared decoder, generated tables, semantics, native lowering and how to add a verified instruction form.
+- [Runtime service registry](runtime/registry.md) and [generated coverage](runtime/services.md) — Import resolution, typed Win64 adapters and how to add a tested service.
 - [Guest CPU research](research/cpu-boundary.md) — Public specifications and unresolved console requirements.
 - [Synthetic import fixtures](../tests/compat_fixtures/README.md) — Reproducible PE32+ builds and expected service behavior.
 
@@ -54,6 +56,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Legal scope](legal.md), [dependency licensing](licenses.md), and [third-party notices](../THIRD_PARTY_NOTICES.md) — Input policy, attribution, and redistribution findings.
 - [Contribution guidelines](../CONTRIBUTING.md) — Original authorship, Developer Certificate of Origin sign-off, and evidence requirements.
 - [Agent task queue](coordination/agent-tasks.md) — Areas, claiming, leases, upstream sync, verification and the security model for parallel contributors and coding agents.
+- [CPU/runtime expansion campaign ledger](coordination/cpu-campaign-ledger.md) — Progress ledger for the Xenora native CPU and runtime compatibility campaign: starting/current commits, completed batches, new forms, verification evidence and the next implementation target.
 - [Infrastructure QA ownership](coordination/infrastructure-qa-ownership.md) — Non-overlapping paths for infrastructure and QA tooling.
 - [Agent queue smoke evidence](coordination/agent-queue-smoke.md) — Live Actions results from the disposable smoke repository.
 - [Infrastructure QA tooling](testing/infrastructure/README.md) — Advisory orchestration, PR validation, benchmark analysis and release checks.

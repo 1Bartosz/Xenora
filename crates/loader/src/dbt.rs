@@ -6,11 +6,15 @@
 //! executes them in a W^X code cache, and manages host-service dispatch and fallbacks.
 
 use crate::arm64::{
-    Arm64Assembler, Condition, SP, X0, X1, X2, X4, X5, X6, X9, X10, X19, X20, X21, X29, X30, XZR,
+    Arm64Assembler, Condition, SP, X0, X1, X2, X3, X4, X5, X6, X9, X10, X11, X12, X13, X14, X15,
+    X19, X20, X21, X29, X30, XZR,
 };
-use crate::cpu::{CpuState, ExecutionResult, ExitReason, Register};
+use crate::cpu::{CpuState, ExecutionResult, ExitReason, RFlags, Register};
 use crate::jit::{JitError, JitMemory};
 use crate::memory::GuestMemory;
+use crate::x86_decode::{Encoding, Insn, MemOperand, RegOperand, RmOperand, Segment, decode};
+use crate::x86_exec;
+use crate::x86_table::{FORMS, Op};
 use std::collections::HashMap;
 
 const MAX_BLOCK_INSTRUCTIONS: usize = 16;
@@ -28,6 +32,7 @@ pub struct DbtMetrics {
     pub native_bytes_emitted: usize,
     pub dbt_dispatches: usize,
     pub instructions_executed: usize,
+    /// Instructions run by the shared Rust semantics instead of ARM64 code.
     pub interpreter_fallbacks: usize,
     pub service_calls: usize,
 }
@@ -38,6 +43,8 @@ pub struct DbtEngine {
     block_cache: HashMap<u64, *const u8>,
     limited_block_cache: HashMap<(u64, usize), *const u8>,
     assembler: Arm64Assembler,
+    /// Decoded instructions that emitted helper calls point into.
+    decoded_blocks: Vec<Box<[Insn]>>,
     services: HashMap<u64, HostServiceFn>,
     pub import_registry: Option<crate::imports::ImportRegistry>,
     pub metrics: DbtMetrics,
@@ -51,6 +58,7 @@ impl DbtEngine {
             block_cache: HashMap::new(),
             limited_block_cache: HashMap::new(),
             assembler: Arm64Assembler::new(),
+            decoded_blocks: Vec::new(),
             services: HashMap::new(),
             import_registry: None,
             metrics: DbtMetrics::default(),
@@ -145,6 +153,7 @@ impl DbtEngine {
                 memory_ptr: memory as *mut GuestMemory,
                 faulted: 0,
                 exit_reason: None,
+                helper_instructions: 0,
             };
 
             self.metrics.dbt_dispatches += 1;
@@ -152,6 +161,7 @@ impl DbtEngine {
             let insns_in_block = unsafe { block_fn(cpu_raw_ptr, &mut ctx) };
             instructions_count += insns_in_block as usize;
             self.metrics.instructions_executed += insns_in_block as usize;
+            self.metrics.interpreter_fallbacks += ctx.helper_instructions as usize;
 
             if let Some(exit) = ctx.exit_reason {
                 return ExecutionResult {
@@ -204,13 +214,29 @@ impl DbtEngine {
         memory: &GuestMemory,
         block_limit: usize,
     ) -> Result<*const u8, ExitReason> {
+        // Decode the whole block first: lowering needs to know whether a later
+        // instruction observes the flags an earlier one produces.
+        let mut decoded = Vec::with_capacity(block_limit);
+        let mut rip = start_rip;
+        while decoded.len() < block_limit {
+            let insn = decode(rip, |address| memory.fetch_instruction_byte(address))
+                .map_err(ExitReason::from)?;
+            if !is_translatable(&insn) {
+                return Err(ExitReason::IllegalInstruction(0x05));
+            }
+            rip = insn.next_rip();
+            decoded.push(insn);
+            if insn.op.is_terminator() {
+                break;
+            }
+        }
+        // Emitted code holds pointers to these instructions for helper calls,
+        // so the allocation lives as long as the engine's code cache.
+        let insns = decoded.into_boxed_slice();
+
         // Reuse the emission buffer across cold block translations.
         let asm = &mut self.assembler;
         asm.clear();
-        let mut cur_rip = start_rip;
-        let mut insn_count = 0;
-        // Branch instructions to patch once the shared epilogue offset is known.
-        let mut fault_guards: Vec<usize> = Vec::new();
 
         // Function Prologue:
         // Inputs: X0 = &mut CpuState.gpr[0], X1 = &mut BlockContext
@@ -225,1135 +251,28 @@ impl DbtEngine {
         // Keep BlockContext pointer in callee-saved X20
         asm.mov_reg_64(X20, X1);
 
-        // Stop at the instruction quota or a control-flow boundary.
-        loop {
-            let insn_rip = cur_rip;
-            let mut seg_gs = false;
-            let mut seg_fs = false;
-
-            let mut b0 = memory
-                .fetch_instruction_byte(cur_rip)
-                .map_err(ExitReason::MemoryFault)?;
-            cur_rip += 1;
-
-            // Handle legacy prefixes: 0x65 (GS), 0x64 (FS)
-            while b0 == 0x65 || b0 == 0x64 {
-                if b0 == 0x65 {
-                    seg_gs = true;
-                } else {
-                    seg_fs = true;
-                }
-                b0 = memory
-                    .fetch_instruction_byte(cur_rip)
-                    .map_err(ExitReason::MemoryFault)?;
-                cur_rip += 1;
+        let mut emitter = Emitter {
+            asm,
+            fault_guards: Vec::new(),
+        };
+        for (index, insn) in insns.iter().enumerate() {
+            let flags = flags_live_after(&insns, index);
+            if is_native(insn) {
+                emitter.lower(insn, index, flags);
+            } else {
+                emitter.call_semantics(insn, index);
             }
-
-            let mut rex_w = false;
-            let mut rex_r = false;
-            let mut rex_x = false;
-            let mut rex_b = false;
-            let mut op = b0;
-
-            if (op & 0xf0) == 0x40 {
-                rex_w = (op & 0x08) != 0;
-                rex_r = (op & 0x04) != 0;
-                rex_x = (op & 0x02) != 0;
-                rex_b = (op & 0x01) != 0;
-                op = memory
-                    .fetch_instruction_byte(cur_rip)
-                    .map_err(ExitReason::MemoryFault)?;
-                cur_rip += 1;
-            }
-
-            match op {
-                // MOV r/m, imm32 (0xC7 /0)
-                0xC7 => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let sub_op = (modrm >> 3) & 7;
-                    let mode = (modrm >> 6) & 3;
-                    if sub_op != 0 {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-
-                    if mode == 3 {
-                        let reg_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                        let mut imm_bytes = [0u8; 4];
-                        for b in &mut imm_bytes {
-                            *b = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                        }
-                        let imm32 = i32::from_le_bytes(imm_bytes) as i64;
-                        let imm_val = if rex_w {
-                            imm32 as u64
-                        } else {
-                            (imm32 as u32) as u64
-                        };
-                        asm.load_imm_64(X9, imm_val);
-                        asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                    } else if mode == 0 {
-                        // [reg] without displacement or [RIP + disp32]
-                        if (modrm & 7) == 5 {
-                            // [RIP + disp32]
-                            let mut disp_bytes = [0u8; 4];
-                            for b in &mut disp_bytes {
-                                *b = memory
-                                    .fetch_instruction_byte(cur_rip)
-                                    .map_err(ExitReason::MemoryFault)?;
-                                cur_rip += 1;
-                            }
-                            let disp32 = i32::from_le_bytes(disp_bytes) as i64;
-                            let mut imm_bytes = [0u8; 4];
-                            for b in &mut imm_bytes {
-                                *b = memory
-                                    .fetch_instruction_byte(cur_rip)
-                                    .map_err(ExitReason::MemoryFault)?;
-                                cur_rip += 1;
-                            }
-                            let target_ea = cur_rip.wrapping_add_signed(disp32);
-                            let imm32 = i32::from_le_bytes(imm_bytes) as i64;
-                            let imm_val = if rex_w {
-                                imm32 as u64
-                            } else {
-                                (imm32 as u32) as u64
-                            };
-
-                            asm.mov_reg_64(X0, X20);
-                            asm.load_imm_64(X1, target_ea);
-                            asm.load_imm_64(X2, imm_val);
-                            let helper_fn = write_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                        } else if (modrm & 7) != 4 {
-                            // [reg]
-                            let reg_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                            let mut imm_bytes = [0u8; 4];
-                            for b in &mut imm_bytes {
-                                *b = memory
-                                    .fetch_instruction_byte(cur_rip)
-                                    .map_err(ExitReason::MemoryFault)?;
-                                cur_rip += 1;
-                            }
-                            let imm32 = i32::from_le_bytes(imm_bytes) as i64;
-                            let imm_val = if rex_w {
-                                imm32 as u64
-                            } else {
-                                (imm32 as u32) as u64
-                            };
-
-                            asm.ldr_uoff_64(X1, X19, (reg_idx as u32) * 8); // target EA in X1
-                            asm.mov_reg_64(X0, X20);
-                            asm.load_imm_64(X2, imm_val);
-                            let helper_fn = write_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                        } else {
-                            return Err(ExitReason::IllegalInstruction(op));
-                        }
-                    } else {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-                }
-
-                // HLT (0xF4): Terminate block with ExitReason::Halt
-                0xF4 => {
-                    insn_count += 1;
-                    Self::emit_set_exit_reason(asm, 1, cur_rip); // 1 = Halt
-                    break;
-                }
-
-                // MOV r32, imm32 (0xB8 + reg) or MOV r64, imm64 (with REX.W)
-                0xB8..=0xBF => {
-                    insn_count += 1;
-                    let reg_idx = (op - 0xB8) + if rex_b { 8 } else { 0 };
-                    let imm = if rex_w {
-                        let mut buf = [0u8; 8];
-                        for b in &mut buf {
-                            *b = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                        }
-                        u64::from_le_bytes(buf)
-                    } else {
-                        let mut buf = [0u8; 4];
-                        for b in &mut buf {
-                            *b = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                        }
-                        u32::from_le_bytes(buf) as u64
-                    };
-
-                    asm.load_imm_64(X9, imm);
-                    asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                }
-
-                // ADD r/m, reg (0x01) or ADD reg, r/m (0x03)
-                0x01 | 0x03 => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let mode = (modrm >> 6) & 3;
-                    if mode != 3 {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                    let (src, dst) = if op == 0x01 {
-                        (reg_idx, rm_idx)
-                    } else {
-                        (rm_idx, reg_idx)
-                    };
-
-                    asm.ldr_uoff_64(X9, X19, (dst as u32) * 8);
-                    asm.ldr_uoff_64(X10, X19, (src as u32) * 8);
-                    if rex_w {
-                        asm.add_reg_64(X9, X9, X10);
-                    } else {
-                        asm.add_reg_32(X9, X9, X10); // W9 = W9 + W10 (automatically zero-extended to X9 in AArch64)
-                    }
-                    asm.str_uoff_64(X9, X19, (dst as u32) * 8);
-                }
-
-                // SUB r/m, reg (0x29) or SUB reg, r/m (0x2B)
-                0x29 | 0x2B => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let mode = (modrm >> 6) & 3;
-                    if mode != 3 {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                    let (src, dst) = if op == 0x29 {
-                        (reg_idx, rm_idx)
-                    } else {
-                        (rm_idx, reg_idx)
-                    };
-
-                    asm.ldr_uoff_64(X9, X19, (dst as u32) * 8);
-                    asm.ldr_uoff_64(X10, X19, (src as u32) * 8);
-                    if rex_w {
-                        asm.sub_reg_64(X9, X9, X10);
-                    } else {
-                        asm.sub_reg_32(X9, X9, X10);
-                    }
-                    asm.str_uoff_64(X9, X19, (dst as u32) * 8);
-                }
-
-                // XOR r/m, reg (0x31) or XOR reg, r/m (0x33)
-                0x31 | 0x33 => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let mode = (modrm >> 6) & 3;
-                    if mode != 3 {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                    let (src, dst) = if op == 0x31 {
-                        (reg_idx, rm_idx)
-                    } else {
-                        (rm_idx, reg_idx)
-                    };
-
-                    asm.ldr_uoff_64(X9, X19, (dst as u32) * 8);
-                    asm.ldr_uoff_64(X10, X19, (src as u32) * 8);
-                    asm.eor_reg_64(X9, X9, X10);
-                    if !rex_w {
-                        asm.mov_reg_32(X9, X9); // zero extend
-                    }
-                    asm.str_uoff_64(X9, X19, (dst as u32) * 8);
-                }
-
-                // Imm8 group (0x83): ADD/SUB reg, imm8
-                0x83 => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let mode = (modrm >> 6) & 3;
-                    if mode != 3 {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-                    let sub_op = (modrm >> 3) & 7;
-                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                    let imm8 = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)? as i8;
-                    cur_rip += 1;
-
-                    if !matches!(sub_op, 0 | 5 | 7) {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-                    let reg_offset = u32::from(rm_idx) * 8;
-                    let subtract = sub_op == 5 || sub_op == 7;
-                    asm.ldr_uoff_64(X9, X19, reg_offset);
-                    if rex_w {
-                        asm.load_imm_64(X10, (imm8 as i64) as u64);
-                        if sub_op == 7 {
-                            asm.cmp_reg_64(X9, X10);
-                        } else if subtract {
-                            asm.subs_reg_64(X9, X9, X10);
-                        } else {
-                            asm.adds_reg_64(X9, X9, X10);
-                        }
-                    } else {
-                        asm.load_imm_64(X10, (imm8 as i64) as u64);
-                        if sub_op == 7 {
-                            asm.cmp_reg_32(X9, X10);
-                        } else if subtract {
-                            asm.subs_reg_32(X9, X9, X10);
-                        } else {
-                            asm.adds_reg_32(X9, X9, X10);
-                        }
-                    }
-                    if sub_op != 7 {
-                        asm.str_uoff_64(X9, X19, reg_offset);
-                    }
-                }
-
-                // PUSH reg (0x50..=0x57)
-                0x50..=0x57 => {
-                    insn_count += 1;
-                    let reg_idx = (op - 0x50) + if rex_b { 8 } else { 0 };
-                    // 1. Load reg value into X9
-                    asm.ldr_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                    // 2. Load RSP (index 4) into X10, subtract 8
-                    asm.ldr_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                    asm.sub_imm_64(X10, X10, 8);
-                    // 3. Call helper to write memory: write_u64_helper(ctx: X0, addr: X1, val: X2)
-                    asm.mov_reg_64(X0, X20);
-                    asm.mov_reg_64(X1, X10);
-                    asm.mov_reg_64(X2, X9);
-                    let helper_fn = write_u64_helper as *const () as u64;
-                    asm.load_imm_64(X4, helper_fn);
-                    asm.blr(X4);
-                    emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                    // 4. Commit RSP only after the store succeeded. Re-read the
-                    // guest RSP because the helper may clobber caller-saved X10.
-                    asm.ldr_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                    asm.sub_imm_64(X10, X10, 8);
-                    asm.str_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                }
-
-                // POP reg (0x58..=0x5F)
-                0x58..=0x5F => {
-                    insn_count += 1;
-                    let reg_idx = (op - 0x58) + if rex_b { 8 } else { 0 };
-                    // 1. Load RSP into X1
-                    asm.ldr_uoff_64(X1, X19, (Register::Rsp as u32) * 8);
-                    // 2. Read memory: read_u64_helper(ctx: X0, addr: X1) -> X0
-                    asm.mov_reg_64(X0, X20);
-                    let helper_fn = read_u64_helper as *const () as u64;
-                    asm.load_imm_64(X4, helper_fn);
-                    asm.blr(X4);
-                    emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                    // 3. Result in X0 -> store to reg_idx
-                    asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                    // 4. Update RSP += 8
-                    asm.ldr_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                    asm.add_imm_64(X10, X10, 8);
-                    asm.str_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                }
-
-                // CALL rel32 (0xE8)
-                0xE8 => {
-                    insn_count += 1;
-                    let mut rel_bytes = [0u8; 4];
-                    for b in &mut rel_bytes {
-                        *b = memory
-                            .fetch_instruction_byte(cur_rip)
-                            .map_err(ExitReason::MemoryFault)?;
-                        cur_rip += 1;
-                    }
-                    let rel32 = i32::from_le_bytes(rel_bytes) as i64;
-                    let target_rip = (cur_rip as i64 + rel32) as u64;
-                    let ret_addr = cur_rip;
-
-                    // Push ret_addr to guest stack
-                    asm.load_imm_64(X9, ret_addr);
-                    asm.ldr_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                    asm.sub_imm_64(X10, X10, 8);
-                    asm.mov_reg_64(X0, X20);
-                    asm.mov_reg_64(X1, X10);
-                    asm.mov_reg_64(X2, X9);
-                    let helper_fn = write_u64_helper as *const () as u64;
-                    asm.load_imm_64(X4, helper_fn);
-                    asm.blr(X4);
-                    emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                    // Commit RSP only after the return address was written. The
-                    // helper may clobber caller-saved registers, so recompute it.
-                    asm.ldr_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                    asm.sub_imm_64(X10, X10, 8);
-                    asm.str_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-
-                    // Update RIP to target_rip and finish block
-                    asm.load_imm_64(X9, target_rip);
-                    asm.str_uoff_64(X9, X19, 16 * 8); // RIP is offset 16 * 8
-                    break;
-                }
-
-                // RET (0xC3)
-                0xC3 => {
-                    insn_count += 1;
-                    // Read return address from [RSP]
-                    asm.ldr_uoff_64(X1, X19, (Register::Rsp as u32) * 8);
-                    asm.mov_reg_64(X0, X20);
-                    let helper_fn = read_u64_helper as *const () as u64;
-                    asm.load_imm_64(X4, helper_fn);
-                    asm.blr(X4);
-                    emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                    // Update RIP = return address
-                    asm.str_uoff_64(X0, X19, 16 * 8);
-                    // RSP += 8
-                    asm.ldr_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                    asm.add_imm_64(X10, X10, 8);
-                    asm.str_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                    break;
-                }
-
-                // JMP rel32 (0xE9)
-                0xE9 => {
-                    insn_count += 1;
-                    let mut rel_bytes = [0u8; 4];
-                    for b in &mut rel_bytes {
-                        *b = memory
-                            .fetch_instruction_byte(cur_rip)
-                            .map_err(ExitReason::MemoryFault)?;
-                        cur_rip += 1;
-                    }
-                    let rel32 = i32::from_le_bytes(rel_bytes) as i64;
-                    let target_rip = (cur_rip as i64 + rel32) as u64;
-                    asm.load_imm_64(X9, target_rip);
-                    asm.str_uoff_64(X9, X19, 16 * 8);
-                    break;
-                }
-
-                // JMP rel8 (0xEB)
-                0xEB => {
-                    insn_count += 1;
-                    let rel8 = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)? as i8;
-                    cur_rip += 1;
-                    let target_rip = (cur_rip as i64 + rel8 as i64) as u64;
-                    asm.load_imm_64(X9, target_rip);
-                    asm.str_uoff_64(X9, X19, 16 * 8);
-                    break;
-                }
-
-                // MOV r/m8, reg8 (0x88) or MOV reg8, r/m8 (0x8A)
-                0x88 | 0x8A => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let mode = (modrm >> 6) & 3;
-                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                    if mode == 3 {
-                        let (src, dst) = if op == 0x88 {
-                            (reg_idx, rm_idx)
-                        } else {
-                            (rm_idx, reg_idx)
-                        };
-                        asm.ldr_uoff_64(X9, X19, (src as u32) * 8);
-                        asm.uxtb_32(X9, X9);
-                        // Read dest, clear low 8 bits, or in low 8 bits
-                        asm.ldr_uoff_64(X10, X19, (dst as u32) * 8);
-                        asm.load_imm_64(X2, !0xFFu64);
-                        asm.and_reg_64(X10, X10, X2);
-                        asm.orr_reg_64(X10, X10, X9);
-                        asm.str_uoff_64(X10, X19, (dst as u32) * 8);
-                    } else {
-                        Self::emit_effective_address(
-                            asm,
-                            memory,
-                            &mut cur_rip,
-                            modrm,
-                            mode,
-                            rm_idx,
-                            rex_x,
-                            rex_b,
-                            seg_gs,
-                            seg_fs,
-                        )?;
-
-                        if op == 0x88 {
-                            // MOV [EA], reg8
-                            asm.ldr_uoff_64(X2, X19, (reg_idx as u32) * 8);
-                            asm.mov_reg_64(X0, X20);
-                            let helper_fn = write_u8_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                        } else {
-                            // MOV reg8, [EA]
-                            asm.mov_reg_64(X0, X20);
-                            let helper_fn = read_u8_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                            asm.uxtb_32(X9, X0);
-                            asm.ldr_uoff_64(X10, X19, (reg_idx as u32) * 8);
-                            asm.load_imm_64(X2, !0xFFu64);
-                            asm.and_reg_64(X10, X10, X2);
-                            asm.orr_reg_64(X10, X10, X9);
-                            asm.str_uoff_64(X10, X19, (reg_idx as u32) * 8);
-                        }
-                    }
-                }
-
-                // MOV r/m, reg (0x89) or MOV reg, r/m (0x8B)
-                0x89 | 0x8B => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let mode = (modrm >> 6) & 3;
-                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                    if mode == 3 {
-                        // Register-to-register move
-                        let (src, dst) = if op == 0x89 {
-                            (reg_idx, rm_idx)
-                        } else {
-                            (rm_idx, reg_idx)
-                        };
-                        asm.ldr_uoff_64(X9, X19, (src as u32) * 8);
-                        if !rex_w {
-                            asm.mov_reg_32(X9, X9); // zero-extend to 64-bit
-                        }
-                        asm.str_uoff_64(X9, X19, (dst as u32) * 8);
-                    } else if mode == 0 && (modrm & 7) == 5 {
-                        // RIP-relative: [RIP + disp32]
-                        let mut disp_bytes = [0u8; 4];
-                        for b in &mut disp_bytes {
-                            *b = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                        }
-                        let disp32 = i32::from_le_bytes(disp_bytes) as i64;
-                        let target_ea = ((cur_rip as i64) + disp32) as u64;
-
-                        if op == 0x8B {
-                            // MOV reg, [RIP + disp32]
-                            asm.mov_reg_64(X0, X20);
-                            asm.load_imm_64(X1, target_ea);
-                            Self::emit_segment_base(asm, seg_gs, seg_fs);
-                            let helper_fn = read_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                            if !rex_w {
-                                asm.mov_reg_32(X0, X0);
-                            }
-                            asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                        } else {
-                            // MOV [RIP + disp32], reg
-                            asm.ldr_uoff_64(X2, X19, (reg_idx as u32) * 8);
-                            asm.mov_reg_64(X0, X20);
-                            asm.load_imm_64(X1, target_ea);
-                            Self::emit_segment_base(asm, seg_gs, seg_fs);
-                            let helper_fn = write_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                        }
-                    } else {
-                        // Memory operand with complete SIB addressing, RIP-relative or displacement
-                        Self::emit_effective_address(
-                            asm,
-                            memory,
-                            &mut cur_rip,
-                            modrm,
-                            mode,
-                            rm_idx,
-                            rex_x,
-                            rex_b,
-                            seg_gs,
-                            seg_fs,
-                        )?;
-
-                        if op == 0x89 {
-                            // MOV [EA], reg: load reg into X2 and call write_u64_helper(ctx: X0, addr: X1, val: X2)
-                            asm.ldr_uoff_64(X2, X19, (reg_idx as u32) * 8);
-                            asm.mov_reg_64(X0, X20);
-                            let helper_fn = write_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                        } else {
-                            // MOV reg, [EA]: call read_u64_helper(ctx: X0, addr: X1) -> X0
-                            asm.mov_reg_64(X0, X20);
-                            let helper_fn = read_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                            if !rex_w {
-                                asm.mov_reg_32(X0, X0);
-                            }
-                            asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                        }
-                    }
-                }
-
-                // LEA reg, [EA] (0x8D)
-                0x8D => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let mode = (modrm >> 6) & 3;
-                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                    if mode == 3 {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-
-                    if mode == 0 && (modrm & 7) == 5 {
-                        // RIP-relative LEA: [RIP + disp32]
-                        let mut disp_bytes = [0u8; 4];
-                        for b in &mut disp_bytes {
-                            *b = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                        }
-                        let disp32 = i32::from_le_bytes(disp_bytes) as i64;
-                        let target_ea = ((cur_rip as i64) + disp32) as u64;
-                        asm.load_imm_64(X9, target_ea);
-                        if !rex_w {
-                            asm.mov_reg_32(X9, X9);
-                        }
-                        asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                    } else {
-                        Self::emit_effective_address(
-                            asm,
-                            memory,
-                            &mut cur_rip,
-                            modrm,
-                            mode,
-                            rm_idx,
-                            rex_x,
-                            rex_b,
-                            seg_gs,
-                            seg_fs,
-                        )?;
-                        asm.mov_reg_64(X9, X1);
-                        if !rex_w {
-                            asm.mov_reg_32(X9, X9);
-                        }
-                        asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                    }
-                }
-
-                // Group 5: CALL/JMP indirect (0xFF)
-                0xFF => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let sub_op = (modrm >> 3) & 7;
-                    let mode = (modrm >> 6) & 3;
-
-                    if sub_op <= 1 {
-                        // Only the 64-bit register forms are supported.
-                        if mode != 3 || !rex_w {
-                            return Err(ExitReason::IllegalInstruction(op));
-                        }
-                        let reg_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                        asm.ldr_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                        if sub_op == 0 {
-                            asm.add_imm_64(X9, X9, 1);
-                        } else {
-                            asm.sub_imm_64(X9, X9, 1);
-                        }
-                        asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                    } else if sub_op == 2 {
-                        // CALL near indirect (call *[EA] or call *reg)
-                        let _ret_addr = cur_rip + if mode == 0 && (modrm & 7) == 5 { 4 } else { 0 };
-
-                        if mode == 0 && (modrm & 7) == 5 {
-                            // call qword ptr [rip + disp32] (standard IAT call form)
-                            let mut disp_bytes = [0u8; 4];
-                            for b in &mut disp_bytes {
-                                *b = memory
-                                    .fetch_instruction_byte(cur_rip)
-                                    .map_err(ExitReason::MemoryFault)?;
-                                cur_rip += 1;
-                            }
-                            let disp32 = i32::from_le_bytes(disp_bytes) as i64;
-                            let target_ea = ((cur_rip as i64) + disp32) as u64;
-
-                            // x86 reads the indirect target before pushing the
-                            // return address, so a faulting IAT read must leave
-                            // the guest stack untouched.
-                            asm.mov_reg_64(X0, X20);
-                            asm.load_imm_64(X1, target_ea);
-                            let helper_fn = read_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                            // Keep the target in a callee-saved register because
-                            // the stack-write helper may clobber caller-saved X9.
-                            asm.mov_reg_64(X21, X0);
-
-                            // Push return address to guest stack
-                            asm.load_imm_64(X10, cur_rip);
-                            asm.ldr_uoff_64(X1, X19, (Register::Rsp as u32) * 8);
-                            asm.sub_imm_64(X1, X1, 8);
-                            asm.mov_reg_64(X0, X20);
-                            asm.mov_reg_64(X2, X10);
-                            let write_fn = write_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, write_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                            // Commit RSP only after the return address was
-                            // written; the helper clobbers caller-saved X1.
-                            asm.ldr_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                            asm.sub_imm_64(X10, X10, 8);
-                            asm.str_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-
-                            // Set RIP = target and end the block.
-                            asm.str_uoff_64(X21, X19, 16 * 8);
-                            break;
-                        } else if mode == 3 {
-                            // call *reg
-                            let reg_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                            asm.ldr_uoff_64(X21, X19, (reg_idx as u32) * 8); // target
-
-                            // Push return address to stack
-                            asm.load_imm_64(X10, cur_rip);
-                            asm.ldr_uoff_64(X1, X19, (Register::Rsp as u32) * 8);
-                            asm.sub_imm_64(X1, X1, 8);
-                            asm.mov_reg_64(X0, X20);
-                            asm.mov_reg_64(X2, X10);
-                            let write_fn = write_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, write_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                            // Commit RSP only after the return address was
-                            // written; the helper clobbers caller-saved X1.
-                            asm.ldr_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-                            asm.sub_imm_64(X10, X10, 8);
-                            asm.str_uoff_64(X10, X19, (Register::Rsp as u32) * 8);
-
-                            // Set RIP = target
-                            asm.str_uoff_64(X21, X19, 16 * 8);
-                            break;
-                        } else {
-                            return Err(ExitReason::IllegalInstruction(op));
-                        }
-                    } else if sub_op == 4 {
-                        // JMP near indirect (jmp *[EA] or jmp *reg)
-                        if mode == 3 {
-                            let reg_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                            asm.ldr_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                            asm.str_uoff_64(X9, X19, 16 * 8);
-                            break;
-                        } else if mode == 0 && (modrm & 7) == 5 {
-                            let mut disp_bytes = [0u8; 4];
-                            for b in &mut disp_bytes {
-                                *b = memory
-                                    .fetch_instruction_byte(cur_rip)
-                                    .map_err(ExitReason::MemoryFault)?;
-                                cur_rip += 1;
-                            }
-                            let disp32 = i32::from_le_bytes(disp_bytes) as i64;
-                            let target_ea = ((cur_rip as i64) + disp32) as u64;
-
-                            asm.mov_reg_64(X0, X20);
-                            asm.load_imm_64(X1, target_ea);
-                            let helper_fn = read_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-
-                            asm.str_uoff_64(X0, X19, 16 * 8);
-                            break;
-                        } else {
-                            return Err(ExitReason::IllegalInstruction(op));
-                        }
-                    } else {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-                }
-
-                // TEST r/m, reg (0x85)
-                0x85 => {
-                    insn_count += 1;
-                    let modrm = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-                    let mode = (modrm >> 6) & 3;
-                    if mode != 3 {
-                        return Err(ExitReason::IllegalInstruction(op));
-                    }
-                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                    asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
-                    asm.ldr_uoff_64(X10, X19, (reg_idx as u32) * 8);
-                    if rex_w {
-                        asm.tst_reg_64(X9, X10);
-                    } else {
-                        asm.tst_reg_32(X9, X10);
-                    }
-                }
-
-                // Jcc rel8 (0x70..=0x7F)
-                0x70..=0x7F => {
-                    insn_count += 1;
-                    let rel8 = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)? as i8;
-                    cur_rip += 1;
-                    let target_rip = (cur_rip as i64 + rel8 as i64) as u64;
-                    let fallthrough_rip = cur_rip;
-
-                    let cond = match op {
-                        0x70 => Condition::Vs, // JO
-                        0x71 => Condition::Vc, // JNO
-                        0x72 => Condition::Cs, // JB / JC / JNAE
-                        0x73 => Condition::Cc, // JAE / JNB / JNC
-                        0x74 => Condition::Eq, // JE / JZ
-                        0x75 => Condition::Ne, // JNE / JNZ
-                        0x76 => Condition::Ls, // JBE / JNA
-                        0x77 => Condition::Hi, // JA / JNBE
-                        0x78 => Condition::Mi, // JS
-                        0x79 => Condition::Pl, // JNS
-                        0x7C => Condition::Lt, // JL / JNGE
-                        0x7D => Condition::Ge, // JGE / JNL
-                        0x7E => Condition::Le, // JLE / JNG
-                        0x7F => Condition::Gt, // JG / JNLE
-                        _ => return Err(ExitReason::IllegalInstruction(op)),
-                    };
-
-                    // Branch if condition true to taken block
-                    let branch_idx = asm.current_offset();
-                    asm.b_cond(cond, 0); // patch target below
-
-                    // Not taken path: RIP = fallthrough_rip, then jump to epilogue
-                    asm.load_imm_64(X9, fallthrough_rip);
-                    asm.str_uoff_64(X9, X19, 16 * 8);
-                    let exit_not_taken = asm.current_offset();
-                    asm.b(0);
-
-                    // Taken path: RIP = target_rip, then fall through to epilogue
-                    let taken_offset = asm.current_offset();
-                    asm.patch_b_cond(
-                        branch_idx,
-                        cond,
-                        (taken_offset as i32) - (branch_idx as i32),
-                    );
-                    asm.load_imm_64(X9, target_rip);
-                    asm.str_uoff_64(X9, X19, 16 * 8);
-
-                    let taken_end = asm.current_offset();
-                    asm.patch_b(exit_not_taken, (taken_end as i32) - (exit_not_taken as i32));
-                    break;
-                }
-
-                // Two-byte opcode escape (0x0F)
-                0x0F => {
-                    let op2 = memory
-                        .fetch_instruction_byte(cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    cur_rip += 1;
-
-                    match op2 {
-                        // BSWAP r32/r64: the register is encoded in the opcode.
-                        0xC8..=0xCF => {
-                            insn_count += 1;
-                            let reg = (op2 & 7) | (u8::from(rex_b) << 3);
-                            let offset = u32::from(reg) * 8;
-                            asm.ldr_uoff_64(X9, X19, offset);
-                            // REV X9, X9 or REV W9, W9. A W write clears the upper half.
-                            asm.emit(if rex_w { 0xdac0_0d29 } else { 0x5ac0_0929 });
-                            asm.str_uoff_64(X9, X19, offset);
-                        }
-                        // Jcc rel32 (0x0F 0x80..=0x8F)
-                        0x80..=0x8F => {
-                            insn_count += 1;
-                            let mut rel_bytes = [0u8; 4];
-                            for b in &mut rel_bytes {
-                                *b = memory
-                                    .fetch_instruction_byte(cur_rip)
-                                    .map_err(ExitReason::MemoryFault)?;
-                                cur_rip += 1;
-                            }
-                            let rel32 = i32::from_le_bytes(rel_bytes) as i64;
-                            let target_rip = (cur_rip as i64 + rel32) as u64;
-                            let fallthrough_rip = cur_rip;
-
-                            let cond = match op2 {
-                                0x80 => Condition::Vs, // JO
-                                0x81 => Condition::Vc, // JNO
-                                0x82 => Condition::Cs, // JB / JC
-                                0x83 => Condition::Cc, // JAE / JNC
-                                0x84 => Condition::Eq, // JE / JZ
-                                0x85 => Condition::Ne, // JNE / JNZ
-                                0x86 => Condition::Ls, // JBE
-                                0x87 => Condition::Hi, // JA
-                                0x88 => Condition::Mi, // JS
-                                0x89 => Condition::Pl, // JNS
-                                0x8C => Condition::Lt, // JL
-                                0x8D => Condition::Ge, // JGE
-                                0x8E => Condition::Le, // JLE
-                                0x8F => Condition::Gt, // JG
-                                _ => return Err(ExitReason::IllegalInstruction(op2)),
-                            };
-
-                            let branch_idx = asm.current_offset();
-                            asm.b_cond(cond, 0);
-
-                            asm.load_imm_64(X9, fallthrough_rip);
-                            asm.str_uoff_64(X9, X19, 16 * 8);
-                            let exit_not_taken = asm.current_offset();
-                            asm.b(0);
-
-                            let taken_offset = asm.current_offset();
-                            asm.patch_b_cond(
-                                branch_idx,
-                                cond,
-                                (taken_offset as i32) - (branch_idx as i32),
-                            );
-                            asm.load_imm_64(X9, target_rip);
-                            asm.str_uoff_64(X9, X19, 16 * 8);
-
-                            let taken_end = asm.current_offset();
-                            asm.patch_b(
-                                exit_not_taken,
-                                (taken_end as i32) - (exit_not_taken as i32),
-                            );
-                            break;
-                        }
-
-                        // MOVZX r32/r64, r/m8 (0x0F 0xB6)
-                        0xB6 => {
-                            insn_count += 1;
-                            let modrm = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            let mode = (modrm >> 6) & 3;
-                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                            if mode == 3 {
-                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
-                                asm.uxtb_32(X9, X9);
-                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                            } else {
-                                Self::emit_effective_address(
-                                    asm,
-                                    memory,
-                                    &mut cur_rip,
-                                    modrm,
-                                    mode,
-                                    rm_idx,
-                                    rex_x,
-                                    rex_b,
-                                    seg_gs,
-                                    seg_fs,
-                                )?;
-                                asm.mov_reg_64(X0, X20);
-                                let helper_fn = read_u8_helper as *const () as u64;
-                                asm.load_imm_64(X4, helper_fn);
-                                asm.blr(X4);
-                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                                asm.uxtb_32(X0, X0);
-                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                            }
-                        }
-
-                        // MOVZX r32/r64, r/m16 (0x0F 0xB7)
-                        0xB7 => {
-                            insn_count += 1;
-                            let modrm = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            let mode = (modrm >> 6) & 3;
-                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                            if mode == 3 {
-                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
-                                asm.uxth_32(X9, X9);
-                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                            } else {
-                                Self::emit_effective_address(
-                                    asm,
-                                    memory,
-                                    &mut cur_rip,
-                                    modrm,
-                                    mode,
-                                    rm_idx,
-                                    rex_x,
-                                    rex_b,
-                                    seg_gs,
-                                    seg_fs,
-                                )?;
-                                asm.mov_reg_64(X0, X20);
-                                let helper_fn = read_u16_helper as *const () as u64;
-                                asm.load_imm_64(X4, helper_fn);
-                                asm.blr(X4);
-                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                                asm.uxth_32(X0, X0);
-                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                            }
-                        }
-
-                        // MOVSX r64, r/m8 (0x0F 0xBE)
-                        0xBE => {
-                            insn_count += 1;
-                            let modrm = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            let mode = (modrm >> 6) & 3;
-                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                            if mode == 3 {
-                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
-                                if rex_w {
-                                    asm.sxtb_64(X9, X9);
-                                } else {
-                                    // A 32-bit destination holds a 32-bit
-                                    // result, so the upper half is cleared.
-                                    asm.sxtb_32(X9, X9);
-                                }
-                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                            } else {
-                                Self::emit_effective_address(
-                                    asm,
-                                    memory,
-                                    &mut cur_rip,
-                                    modrm,
-                                    mode,
-                                    rm_idx,
-                                    rex_x,
-                                    rex_b,
-                                    seg_gs,
-                                    seg_fs,
-                                )?;
-                                asm.mov_reg_64(X0, X20);
-                                let helper_fn = read_u8_helper as *const () as u64;
-                                asm.load_imm_64(X4, helper_fn);
-                                asm.blr(X4);
-                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                                if rex_w {
-                                    asm.sxtb_64(X0, X0);
-                                } else {
-                                    // A 32-bit destination holds a 32-bit
-                                    // result, so the upper half is cleared.
-                                    asm.sxtb_32(X0, X0);
-                                }
-                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                            }
-                        }
-
-                        // MOVSX r64, r/m16 (0x0F 0xBF)
-                        0xBF => {
-                            insn_count += 1;
-                            let modrm = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            let mode = (modrm >> 6) & 3;
-                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                            if mode == 3 {
-                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
-                                if rex_w {
-                                    asm.sxth_64(X9, X9);
-                                } else {
-                                    // A 32-bit destination holds a 32-bit
-                                    // result, so the upper half is cleared.
-                                    asm.sxth_32(X9, X9);
-                                }
-                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                            } else {
-                                Self::emit_effective_address(
-                                    asm,
-                                    memory,
-                                    &mut cur_rip,
-                                    modrm,
-                                    mode,
-                                    rm_idx,
-                                    rex_x,
-                                    rex_b,
-                                    seg_gs,
-                                    seg_fs,
-                                )?;
-                                asm.mov_reg_64(X0, X20);
-                                let helper_fn = read_u16_helper as *const () as u64;
-                                asm.load_imm_64(X4, helper_fn);
-                                asm.blr(X4);
-                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                                if rex_w {
-                                    asm.sxth_64(X0, X0);
-                                } else {
-                                    // A 32-bit destination holds a 32-bit
-                                    // result, so the upper half is cleared.
-                                    asm.sxth_32(X0, X0);
-                                }
-                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                            }
-                        }
-
-                        _ => return Err(ExitReason::IllegalInstruction(op2)),
-                    }
-                }
-
-                _ => {
-                    let _ = insn_rip;
-                    return Err(ExitReason::IllegalInstruction(op));
-                }
-            }
-
-            if insn_count >= block_limit {
-                // End of basic block quota, update RIP and break
-                asm.load_imm_64(X9, cur_rip);
-                asm.str_uoff_64(X9, X19, 16 * 8);
-                break;
-            }
+        }
+        let Emitter { asm, fault_guards } = emitter;
+
+        if !insns.last().is_some_and(|insn| insn.op.is_terminator()) {
+            // End of basic block quota, update RIP.
+            asm.load_imm_64(X9, rip);
+            asm.str_uoff_64(X9, X19, RIP_OFFSET);
         }
 
         // Return number of guest instructions executed in this block in X0
-        asm.load_imm_64(X0, insn_count as u64);
+        asm.load_imm_64(X0, insns.len() as u64);
 
         // Epilogue: faulting paths jump here with X0 already set to the number
         // of instructions that completed before the fault.
@@ -1373,154 +292,801 @@ impl DbtEngine {
             .map_err(|_| ExitReason::JitCacheExhausted)?;
         self.metrics.blocks_compiled += 1;
         self.metrics.native_bytes_emitted += asm.instructions().len() * 4;
+        self.decoded_blocks.push(insns);
         Ok(emitted)
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    fn emit_effective_address(
-        asm: &mut Arm64Assembler,
-        memory: &GuestMemory,
-        cur_rip: &mut u64,
-        modrm: u8,
-        mode: u8,
-        rm_idx: u8,
-        rex_x: bool,
-        rex_b: bool,
-        seg_gs: bool,
-        seg_fs: bool,
-    ) -> Result<(), ExitReason> {
-        let (base_reg, index_scale) = if (modrm & 7) == 4 {
-            let sib = memory
-                .fetch_instruction_byte(*cur_rip)
-                .map_err(ExitReason::MemoryFault)?;
-            *cur_rip += 1;
-            let scale = (sib >> 6) & 3;
-            let raw_index = (sib >> 3) & 7;
-            let raw_base = sib & 7;
+const RIP_OFFSET: u32 = std::mem::offset_of!(CpuState, rip) as u32;
+const FS_BASE_OFFSET: u32 = std::mem::offset_of!(CpuState, fs_base) as u32;
+const GS_BASE_OFFSET: u32 = std::mem::offset_of!(CpuState, gs_base) as u32;
+const FLAGS_OFFSET: u32 = std::mem::offset_of!(CpuState, flags) as u32;
+const CF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, cf) as u32;
+const ZF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, zf) as u32;
+const SF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, sf) as u32;
+const OF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, of) as u32;
+const PF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, pf) as u32;
+const AF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, af) as u32;
+const ALL_FLAGS: u8 = 0x3F;
 
-            let index_opt = if raw_index != 4 {
-                Some((raw_index + if rex_x { 8 } else { 0 }, scale))
-            } else if rex_x {
-                Some((12, scale)) // raw_index 4 with rex_x is R12
-            } else {
-                None
-            };
+const NEON_EOR: u32 = 0x6e20_1c00; // EOR Vd.16B, Vn.16B, Vm.16B
 
-            let base_opt = if mode == 0 && raw_base == 5 {
-                None // disp32 only
-            } else {
-                Some(raw_base + if rex_b { 8 } else { 0 })
-            };
+fn xmm_offset(index: u8) -> u32 {
+    std::mem::offset_of!(CpuState, xmm) as u32 + u32::from(index) * 16
+}
 
-            (base_opt, index_opt)
-        } else {
-            (Some(rm_idx), None)
-        };
+fn reg_offset(index: u8) -> u32 {
+    u32::from(index) * 8
+}
 
-        let disp: i64 = match mode {
-            0 => {
-                if (modrm & 7) == 4 && (base_reg.is_none()) {
-                    let mut d_bytes = [0u8; 4];
-                    for b in &mut d_bytes {
-                        *b = memory
-                            .fetch_instruction_byte(*cur_rip)
-                            .map_err(ExitReason::MemoryFault)?;
-                        *cur_rip += 1;
-                    }
-                    i32::from_le_bytes(d_bytes) as i64
-                } else {
-                    0
-                }
-            }
-            1 => {
-                let d = memory
-                    .fetch_instruction_byte(*cur_rip)
-                    .map_err(ExitReason::MemoryFault)? as i8;
-                *cur_rip += 1;
-                d as i64
+/// Whether the DBT runs an instruction at all. It dispatches guest services only
+/// through registered imports, so a raw SYSCALL is refused.
+pub fn is_translatable(insn: &Insn) -> bool {
+    insn.op != Op::Syscall
+}
+
+/// Whether an instruction is lowered to ARM64. Every other decoded instruction
+/// calls the shared semantics and is counted in
+/// [`DbtMetrics::interpreter_fallbacks`].
+pub fn is_native(insn: &Insn) -> bool {
+    let wide = matches!(insn.size, 4 | 8);
+    match insn.op {
+        Op::Add | Op::Sub | Op::Cmp | Op::And | Op::Or | Op::Xor | Op::Test => wide,
+        Op::Inc | Op::Dec | Op::Neg | Op::Not => wide,
+        Op::Cmov => wide,
+        Op::Pop => insn.encoding == Encoding::OpReg,
+        Op::Mov
+        | Op::Movzx
+        | Op::Movsx
+        | Op::Movsxd
+        | Op::Lea
+        | Op::Bswap
+        | Op::Setcc
+        | Op::Push
+        | Op::Call
+        | Op::Jmp
+        | Op::Jcc
+        | Op::Ret
+        | Op::Nop
+        | Op::Hlt => true,
+        Op::Movaps
+        | Op::Movups
+        | Op::Movdqa
+        | Op::Movdqu
+        | Op::Movntdq
+        | Op::Movntps
+        | Op::Movd
+        | Op::Movq
+        | Op::Movss
+        | Op::Movsd
+        | Op::Movlps
+        | Op::Movhps => true,
+        op if insn.encoding == Encoding::XmmRm => neon_operation(op).is_some(),
+        Op::Psllw
+        | Op::Pslld
+        | Op::Psllq
+        | Op::Psrlw
+        | Op::Psrld
+        | Op::Psrlq
+        | Op::Psraw
+        | Op::Psrad => insn.encoding == Encoding::RmImmXmm,
+        _ => false,
+    }
+}
+
+/// NEON base word for a packed operation with identical lane semantics, and
+/// whether its sources are swapped (BIC is `Vn & !Vm`, PANDN is `!dst & src`).
+#[rustfmt::skip]
+fn neon_operation(op: Op) -> Option<(u32, bool)> {
+    Some(match op {
+        Op::Pand => (0x4e20_1c00, false), // and.16b
+        Op::Por => (0x4ea0_1c00, false), // orr.16b
+        Op::Pxor => (0x6e20_1c00, false), // eor.16b
+        Op::Pandn => (0x4e60_1c00, true), // bic.16b
+        Op::Paddb => (0x4e20_8400, false), // add.16b
+        Op::Paddw => (0x4e60_8400, false), // add.8h
+        Op::Paddd => (0x4ea0_8400, false), // add.4s
+        Op::Paddq => (0x4ee0_8400, false), // add.2d
+        Op::Psubb => (0x6e20_8400, false), // sub.16b
+        Op::Psubw => (0x6e60_8400, false), // sub.8h
+        Op::Psubd => (0x6ea0_8400, false), // sub.4s
+        Op::Psubq => (0x6ee0_8400, false), // sub.2d
+        Op::Paddsb => (0x4e20_0c00, false), // sqadd.16b
+        Op::Paddsw => (0x4e60_0c00, false), // sqadd.8h
+        Op::Psubsb => (0x4e20_2c00, false), // sqsub.16b
+        Op::Psubsw => (0x4e60_2c00, false), // sqsub.8h
+        Op::Paddusb => (0x6e20_0c00, false), // uqadd.16b
+        Op::Paddusw => (0x6e60_0c00, false), // uqadd.8h
+        Op::Psubusb => (0x6e20_2c00, false), // uqsub.16b
+        Op::Psubusw => (0x6e60_2c00, false), // uqsub.8h
+        Op::Pcmpeqb => (0x6e20_8c00, false), // cmeq.16b
+        Op::Pcmpeqw => (0x6e60_8c00, false), // cmeq.8h
+        Op::Pcmpeqd => (0x6ea0_8c00, false), // cmeq.4s
+        Op::Pcmpgtb => (0x4e20_3400, false), // cmgt.16b
+        Op::Pcmpgtw => (0x4e60_3400, false), // cmgt.8h
+        Op::Pcmpgtd => (0x4ea0_3400, false), // cmgt.4s
+        Op::Pminub => (0x6e20_6c00, false), // umin.16b
+        Op::Pmaxub => (0x6e20_6400, false), // umax.16b
+        Op::Pminsw => (0x4e60_6c00, false), // smin.8h
+        Op::Pmaxsw => (0x4e60_6400, false), // smax.8h
+        Op::Pavgb => (0x6e20_1400, false), // urhadd.16b
+        Op::Pavgw => (0x6e60_1400, false), // urhadd.8h
+        Op::Pmullw => (0x4e60_9c00, false), // mul.8h
+        Op::Punpcklbw => (0x4e00_3800, false), // zip1.16b
+        Op::Punpcklwd => (0x4e40_3800, false), // zip1.8h
+        Op::Punpckldq => (0x4e80_3800, false), // zip1.4s
+        Op::Punpcklqdq => (0x4ec0_3800, false), // zip1.2d
+        Op::Punpckhbw => (0x4e00_7800, false), // zip2.16b
+        Op::Punpckhwd => (0x4e40_7800, false), // zip2.8h
+        Op::Punpckhdq => (0x4e80_7800, false), // zip2.4s
+        Op::Punpckhqdq => (0x4ec0_7800, false), // zip2.2d
+        _ => return None,
+    })
+}
+
+/// Whether the flags produced by `insns[index]` can be observed. They cannot if
+/// a later instruction in the block overwrites all of them before anything reads
+/// them or could leave the block.
+fn flags_live_after(insns: &[Insn], index: usize) -> bool {
+    for insn in &insns[index + 1..] {
+        let can_exit = insn.op.is_terminator()
+            || insn.memory().is_some()
+            || matches!(insn.op, Op::Push | Op::Pop | Op::Leave)
+            || insn.op.can_fault();
+        if can_exit || insn.op.flags_read() != 0 {
+            return true;
+        }
+        if insn.op.flags_written() == ALL_FLAGS {
+            return false;
+        }
+    }
+    true
+}
+
+/// Emits one block. X19 holds the CPU state and X20 the block context; X21 is
+/// the only guest value kept across helper calls.
+struct Emitter<'a> {
+    asm: &'a mut Arm64Assembler,
+    fault_guards: Vec<usize>,
+}
+
+impl Emitter<'_> {
+    fn call_helper(&mut self, helper: u64) {
+        self.asm.mov_reg_64(X0, X20);
+        self.asm.load_imm_64(X4, helper);
+        self.asm.blr(X4);
+    }
+
+    fn guard(&mut self, insn: &Insn, completed: usize) {
+        emit_fault_guard(self.asm, &mut self.fault_guards, completed, insn.rip);
+    }
+
+    /// Execute through the shared semantics.
+    fn call_semantics(&mut self, insn: &Insn, completed: usize) {
+        self.asm.mov_reg_64(X1, X19);
+        self.asm
+            .load_imm_64(X2, std::ptr::from_ref(insn) as usize as u64);
+        self.call_helper(execute_helper as *const () as u64);
+        self.guard(insn, completed);
+    }
+
+    /// Load a register operand into `xd`, with AH/CH/DH/BH in bits 7:0. Bits
+    /// above the operand width are not cleared.
+    fn load_reg(&mut self, xd: u8, reg: RegOperand) {
+        self.asm.ldr_uoff_64(xd, X19, reg_offset(reg.index));
+        if reg.high {
+            self.asm.lsr_imm_64(xd, xd, 8);
+        }
+    }
+
+    /// Store `xs` (not X13 or X14) with x86 partial-register rules.
+    fn store_reg(&mut self, reg: RegOperand, size: u8, xs: u8) {
+        let offset = reg_offset(reg.index);
+        match size {
+            8 => self.asm.str_uoff_64(xs, X19, offset),
+            4 => {
+                self.asm.mov_reg_32(X13, xs);
+                self.asm.str_uoff_64(X13, X19, offset);
             }
             2 => {
-                let mut d_bytes = [0u8; 4];
-                for b in &mut d_bytes {
-                    *b = memory
-                        .fetch_instruction_byte(*cur_rip)
-                        .map_err(ExitReason::MemoryFault)?;
-                    *cur_rip += 1;
-                }
-                i32::from_le_bytes(d_bytes) as i64
+                self.asm.uxth_32(X13, xs);
+                self.asm.ldr_uoff_64(X14, X19, offset);
+                self.asm.load_imm_64(X15, !0xFFFF);
+                self.asm.and_reg_64(X14, X14, X15);
+                self.asm.orr_reg_64(X13, X13, X14);
+                self.asm.str_uoff_64(X13, X19, offset);
             }
-            _ => 0i64,
-        };
-
-        // Emit computation of base + index*scale + disp into X1
-        if let Some(base) = base_reg {
-            asm.ldr_uoff_64(X1, X19, (base as u32) * 8);
-        } else {
-            asm.mov_reg_64(X1, XZR);
+            _ => self.asm.strb_uoff(xs, X19, offset + u32::from(reg.high)),
         }
+    }
 
-        if let Some((idx, scale)) = index_scale {
-            asm.ldr_uoff_64(X9, X19, (idx as u32) * 8);
+    /// Effective address into X1, clobbering X9.
+    fn effective_address(&mut self, operand: &MemOperand, with_segment: bool) {
+        let asm = &mut *self.asm;
+        match operand.base {
+            Some(base) => {
+                asm.ldr_uoff_64(X1, X19, reg_offset(base));
+                let disp = operand.disp;
+                if (1..=4095).contains(&disp) {
+                    asm.add_imm_64(X1, X1, disp as u16);
+                } else if (-4095..=-1).contains(&disp) {
+                    asm.sub_imm_64(X1, X1, -disp as u16);
+                } else if disp != 0 {
+                    asm.load_imm_64(X9, disp as u64);
+                    asm.add_reg_64(X1, X1, X9);
+                }
+            }
+            None => asm.load_imm_64(X1, operand.disp as u64),
+        }
+        if let Some((index, scale)) = operand.index {
+            asm.ldr_uoff_64(X9, X19, reg_offset(index));
             if scale > 0 {
                 asm.add_reg_shifted_64(X1, X1, X9, scale);
             } else {
                 asm.add_reg_64(X1, X1, X9);
             }
         }
+        if with_segment && let Some(segment) = operand.segment {
+            let offset = match segment {
+                Segment::Fs => FS_BASE_OFFSET,
+                Segment::Gs => GS_BASE_OFFSET,
+            };
+            asm.ldr_uoff_64(X9, X19, offset);
+            asm.add_reg_64(X1, X1, X9);
+        }
+    }
 
-        if disp != 0 {
-            if disp > 0 && disp <= 4095 {
-                asm.add_imm_64(X1, X1, disp as u16);
-            } else if disp < 0 && (-disp) <= 4095 {
-                asm.sub_imm_64(X1, X1, (-disp) as u16);
+    /// Load the ModRM operand into `xd`. A register is loaded whole; a memory
+    /// operand is zero-extended.
+    fn load_rm(&mut self, xd: u8, insn: &Insn, completed: usize) {
+        match insn.rm {
+            Some(RmOperand::Reg(reg)) => self.load_reg(xd, reg),
+            Some(RmOperand::Mem(operand)) => {
+                self.effective_address(&operand, true);
+                self.call_helper(load_helper(insn.rm_size));
+                self.guard(insn, completed);
+                self.asm.mov_reg_64(xd, X0);
+            }
+            None => {}
+        }
+    }
+
+    /// Store `xs` to the ModRM operand. A memory store leaves no other effect
+    /// behind if it faults, so callers commit registers and flags afterwards.
+    fn store_rm(&mut self, insn: &Insn, xs: u8, completed: usize) {
+        match insn.rm {
+            Some(RmOperand::Reg(reg)) => self.store_reg(reg, insn.rm_size, xs),
+            Some(RmOperand::Mem(operand)) => {
+                self.asm.mov_reg_64(X2, xs);
+                self.effective_address(&operand, true);
+                self.call_helper(store_helper(insn.rm_size));
+                self.guard(insn, completed);
+            }
+            None => {}
+        }
+    }
+
+    /// X11 = X9 op X10, setting host NZCV only for the arithmetic operations.
+    fn compute(&mut self, op: Op, wide: bool) {
+        let asm = &mut *self.asm;
+        match (op, wide) {
+            (Op::Add | Op::Inc, true) => asm.adds_reg_64(X11, X9, X10),
+            (Op::Add | Op::Inc, false) => asm.adds_reg_32(X11, X9, X10),
+            (Op::And | Op::Test, true) => asm.ands_reg_64(X11, X9, X10),
+            (Op::And | Op::Test, false) => asm.ands_reg_32(X11, X9, X10),
+            (Op::Or, true) => asm.orr_reg_64(X11, X9, X10),
+            (Op::Or, false) => asm.orr_reg_32(X11, X9, X10),
+            (Op::Xor, _) => {
+                asm.eor_reg_64(X11, X9, X10);
+                if !wide {
+                    asm.mov_reg_32(X11, X11);
+                }
+            }
+            (_, true) => asm.subs_reg_64(X11, X9, X10),
+            (_, false) => asm.subs_reg_32(X11, X9, X10),
+        }
+    }
+
+    /// Store the guest flags of `X11 = X9 op X10` after [`Self::compute`].
+    fn store_flags(&mut self, op: Op, wide: bool) {
+        let asm = &mut *self.asm;
+        let logical = matches!(op, Op::And | Op::Or | Op::Xor | Op::Test);
+        if logical {
+            if wide {
+                asm.tst_reg_64(X11, X11);
             } else {
-                asm.load_imm_64(X9, disp as u64);
-                asm.add_reg_64(X1, X1, X9);
+                asm.tst_reg_32(X11, X11);
+            }
+            asm.strb_uoff(XZR, X19, CF);
+            asm.strb_uoff(XZR, X19, OF);
+        } else {
+            match op {
+                // INC and DEC leave CF unchanged.
+                Op::Inc | Op::Dec => {}
+                Op::Add => {
+                    asm.cset_32(X12, Condition::Cs);
+                    asm.strb_uoff(X12, X19, CF);
+                }
+                // ARM C is set when a subtraction does not borrow; x86 CF is
+                // the borrow itself.
+                _ => {
+                    asm.cset_32(X12, Condition::Cc);
+                    asm.strb_uoff(X12, X19, CF);
+                }
+            }
+            asm.cset_32(X12, Condition::Vs);
+            asm.strb_uoff(X12, X19, OF);
+        }
+        asm.cset_32(X12, Condition::Eq);
+        asm.strb_uoff(X12, X19, ZF);
+        asm.cset_32(X12, Condition::Mi);
+        asm.strb_uoff(X12, X19, SF);
+        if !logical {
+            // AF is the carry into bit 4: bit 4 of a ^ b ^ result.
+            asm.eor_lsr_32(X12, X9, X10, 0);
+            asm.eor_lsr_32(X12, X12, X11, 0);
+            asm.ubfx_bit_32(X12, X12, 4);
+            asm.strb_uoff(X12, X19, AF);
+        }
+        // PF is set when the low result byte has an even number of ones.
+        asm.eor_lsr_32(X12, X11, X11, 4);
+        asm.eor_lsr_32(X12, X12, X12, 2);
+        asm.eor_lsr_32(X12, X12, X12, 1);
+        asm.load_imm_64(X13, 1);
+        asm.bic_reg_32(X12, X13, X12);
+        asm.strb_uoff(X12, X19, PF);
+    }
+
+    /// W12 = 1 if the guest condition holds, else 0. Clobbers X13 and X14.
+    fn load_condition(&mut self, code: u8) {
+        let asm = &mut *self.asm;
+        match code >> 1 {
+            0 => asm.ldrb_uoff(X12, X19, OF),
+            1 => asm.ldrb_uoff(X12, X19, CF),
+            2 => asm.ldrb_uoff(X12, X19, ZF),
+            3 => {
+                asm.ldrb_uoff(X12, X19, CF);
+                asm.ldrb_uoff(X13, X19, ZF);
+                asm.orr_reg_32(X12, X12, X13);
+            }
+            4 => asm.ldrb_uoff(X12, X19, SF),
+            5 => asm.ldrb_uoff(X12, X19, PF),
+            other => {
+                asm.ldrb_uoff(X12, X19, SF);
+                asm.ldrb_uoff(X13, X19, OF);
+                asm.eor_lsr_32(X12, X12, X13, 0);
+                if other == 7 {
+                    asm.ldrb_uoff(X13, X19, ZF);
+                    asm.orr_reg_32(X12, X12, X13);
+                }
             }
         }
-
-        Self::emit_segment_base(asm, seg_gs, seg_fs);
-
-        Ok(())
-    }
-
-    /// Add the FS or GS segment base to the effective address held in X1.
-    ///
-    /// In 64-bit mode an FS or GS segment override adds the segment base to
-    /// the effective address, so the linear address is
-    /// `(FS or GS).base + base + (scale * index) + displacement`
-    /// (Intel SDM Volume 3A, section 3.4.4; AMD64 Architecture Programmer's
-    /// Manual Volume 1, section 2.2.3.3).
-    ///
-    /// The base is a runtime guest value, so it is read from the guest CPU
-    /// state rather than folded into the translated address.
-    ///
-    /// When both FS and GS overrides are present the encoding is
-    /// architecturally undefined (Intel SDM Volume 2: "The effect of redundant
-    /// prefixes ... is undefined"), so this uses a fixed local rule of
-    /// preferring GS. The interpreter applies the same rule.
-    fn emit_segment_base(asm: &mut Arm64Assembler, seg_gs: bool, seg_fs: bool) {
-        if seg_gs {
-            // CpuState.gs_base (offset 16*8 + 8 + 8 = 144) to X1
-            asm.ldr_uoff_64(X9, X19, 144);
-            asm.add_reg_64(X1, X1, X9);
-        } else if seg_fs {
-            // CpuState.fs_base (offset 16*8 + 8 + 8 + 8 = 152) to X1
-            asm.ldr_uoff_64(X9, X19, 152);
-            asm.add_reg_64(X1, X1, X9);
+        if code & 1 != 0 {
+            asm.load_imm_64(X13, 1);
+            asm.eor_lsr_32(X12, X12, X13, 0);
         }
     }
 
-    fn emit_set_exit_reason(asm: &mut Arm64Assembler, code: u32, next_rip: u64) {
-        asm.load_imm_64(X9, next_rip);
-        asm.str_uoff_64(X9, X19, 16 * 8); // Update RIP
+    /// Push `X2` on the guest stack, committing RSP only after the store.
+    fn push(&mut self, insn: &Insn, completed: usize) {
+        self.asm
+            .ldr_uoff_64(X1, X19, reg_offset(Register::Rsp as u8));
+        self.call_helper(push_helper as *const () as u64);
+        self.guard(insn, completed);
+        self.asm
+            .str_uoff_64(X0, X19, reg_offset(Register::Rsp as u8));
+    }
 
-        // Call helper to set exit reason
-        asm.mov_reg_64(X0, X20); // X0 = BlockContext
-        asm.load_imm_64(X1, code as u64); // X1 = code (1 = Halt)
-        let set_exit_fn = set_exit_reason_helper as *const () as u64;
-        asm.load_imm_64(X4, set_exit_fn);
-        asm.blr(X4);
+    /// Read the guest stack top into X0.
+    fn read_stack(&mut self, insn: &Insn, completed: usize) {
+        self.asm
+            .ldr_uoff_64(X1, X19, reg_offset(Register::Rsp as u8));
+        self.call_helper(load_helper(8));
+        self.guard(insn, completed);
+    }
+
+    fn release_stack(&mut self, bytes: u64) {
+        let offset = reg_offset(Register::Rsp as u8);
+        self.asm.ldr_uoff_64(X10, X19, offset);
+        self.asm.load_imm_64(X9, bytes);
+        self.asm.add_reg_64(X10, X10, X9);
+        self.asm.str_uoff_64(X10, X19, offset);
+    }
+
+    /// Branch target into `xd`.
+    fn load_target(&mut self, xd: u8, insn: &Insn, completed: usize) {
+        if insn.encoding == Encoding::Rel {
+            self.asm.load_imm_64(xd, insn.imm);
+        } else {
+            self.load_rm(xd, insn, completed);
+        }
+    }
+
+    /// Source operand of a two-operand ALU form into X10; memory sources of
+    /// `reg, r/m` forms are loaded by the caller.
+    fn load_source(&mut self, insn: &Insn) {
+        match insn.encoding {
+            Encoding::RmReg => self.load_reg(X10, insn.reg),
+            _ => {
+                let imm = match insn.op {
+                    Op::Inc | Op::Dec => 1,
+                    _ => insn.imm,
+                };
+                self.asm.load_imm_64(X10, imm);
+            }
+        }
+    }
+
+    fn alu(&mut self, insn: &Insn, completed: usize, flags: bool) {
+        let wide = insn.size == 8;
+        let writes = !matches!(insn.op, Op::Cmp | Op::Test);
+        match insn.encoding {
+            Encoding::RegRm => {
+                self.load_rm(X10, insn, completed);
+                self.load_reg(X9, insn.reg);
+                self.compute(insn.op, wide);
+                if flags {
+                    self.store_flags(insn.op, wide);
+                }
+                if writes {
+                    self.store_reg(insn.reg, insn.size, X11);
+                }
+            }
+            Encoding::AccImm => {
+                self.load_reg(X9, insn.reg);
+                self.load_source(insn);
+                self.compute(insn.op, wide);
+                if flags {
+                    self.store_flags(insn.op, wide);
+                }
+                if writes {
+                    self.store_reg(insn.reg, insn.size, X11);
+                }
+            }
+            _ => {
+                self.load_rm(X9, insn, completed);
+                self.load_source(insn);
+                if insn.memory().is_some() && writes {
+                    // Keep the old value across the store, then recompute the
+                    // flags so a faulting store leaves them unchanged.
+                    self.asm.mov_reg_64(X21, X9);
+                    self.compute(insn.op, wide);
+                    self.store_rm(insn, X11, completed);
+                    if flags {
+                        self.asm.mov_reg_64(X9, X21);
+                        self.load_source(insn);
+                        self.compute(insn.op, wide);
+                        self.store_flags(insn.op, wide);
+                    }
+                    return;
+                }
+                self.compute(insn.op, wide);
+                if flags {
+                    self.store_flags(insn.op, wide);
+                }
+                if writes {
+                    self.store_rm(insn, X11, completed);
+                }
+            }
+        }
+    }
+
+    /// Load a 16-byte memory operand into X0 (low) and X1 (high).
+    fn load_wide(&mut self, insn: &Insn, operand: &MemOperand, completed: usize) {
+        self.effective_address(operand, true);
+        let helper = if FORMS[usize::from(insn.form)].unaligned {
+            read_u128_helper as *const ()
+        } else {
+            read_aligned_u128_helper as *const ()
+        };
+        self.call_helper(helper as u64);
+        self.guard(insn, completed);
+    }
+
+    /// Store both halves of a guest XMM register.
+    fn store_halves(&mut self, index: u8, low: u8, high: u8) {
+        self.asm.str_uoff_64(low, X19, xmm_offset(index));
+        self.asm.str_uoff_64(high, X19, xmm_offset(index) + 8);
+    }
+
+    fn vector(&mut self, insn: &Insn, completed: usize) {
+        let reg = insn.reg.index;
+        match (insn.op, insn.encoding) {
+            (Op::Movd, Encoding::XmmGpr) => {
+                self.load_rm(X9, insn, completed);
+                if insn.size == 4 {
+                    self.asm.mov_reg_32(X9, X9);
+                }
+                self.store_halves(reg, X9, XZR);
+            }
+            (Op::Movd, _) => {
+                self.asm.ldr_uoff_64(X10, X19, xmm_offset(reg));
+                self.store_rm(insn, X10, completed);
+            }
+            (_, Encoding::RmXmm) => self.vector_store(insn, completed),
+            (
+                Op::Movaps
+                | Op::Movups
+                | Op::Movdqa
+                | Op::Movdqu
+                | Op::Movq
+                | Op::Movss
+                | Op::Movsd
+                | Op::Movlps
+                | Op::Movhps,
+                _,
+            ) => self.vector_load(insn, completed),
+            (op, Encoding::RmImmXmm) => {
+                let Some(RmOperand::Reg(target)) = insn.rm else {
+                    return;
+                };
+                let offset = xmm_offset(target.index);
+                let lane = match op {
+                    Op::Psllw | Op::Psrlw | Op::Psraw => 16,
+                    Op::Pslld | Op::Psrld | Op::Psrad => 32,
+                    _ => 64,
+                };
+                let count = insn.imm.min(u64::from(lane)) as u32;
+                if count == 0 {
+                    return;
+                }
+                let asm = &mut *self.asm;
+                asm.ldr_q_uoff(0, X19, offset);
+                match op {
+                    Op::Psllw | Op::Pslld | Op::Psllq if count == lane => {
+                        asm.neon3(NEON_EOR, 0, 0, 0);
+                    }
+                    Op::Psllw | Op::Pslld | Op::Psllq => asm.shl_vector(0, 0, lane, count),
+                    Op::Psraw | Op::Psrad => asm.sshr_vector(0, 0, lane, count),
+                    _ => asm.ushr_vector(0, 0, lane, count),
+                }
+                asm.str_q_uoff(0, X19, offset);
+            }
+            (op, _) => {
+                let Some((base, swapped)) = neon_operation(op) else {
+                    return;
+                };
+                match insn.rm {
+                    Some(RmOperand::Mem(operand)) => {
+                        self.load_wide(insn, &operand, completed);
+                        self.asm.fmov_d_from_x(1, X0);
+                        self.asm.ins_d1_from_x(1, X1);
+                    }
+                    Some(RmOperand::Reg(source)) => {
+                        self.asm.ldr_q_uoff(1, X19, xmm_offset(source.index));
+                    }
+                    None => return,
+                }
+                let asm = &mut *self.asm;
+                asm.ldr_q_uoff(0, X19, xmm_offset(reg));
+                if swapped {
+                    asm.neon3(base, 0, 1, 0);
+                } else {
+                    asm.neon3(base, 0, 0, 1);
+                }
+                asm.str_q_uoff(0, X19, xmm_offset(reg));
+            }
+        }
+    }
+
+    fn vector_load(&mut self, insn: &Insn, completed: usize) {
+        let reg = insn.reg.index;
+        let target = xmm_offset(reg);
+        match insn.rm {
+            Some(RmOperand::Mem(operand)) if insn.rm_size == 16 => {
+                self.load_wide(insn, &operand, completed);
+                self.store_halves(reg, X0, X1);
+            }
+            Some(RmOperand::Mem(_)) => {
+                self.load_rm(X9, insn, completed);
+                match insn.op {
+                    Op::Movlps => self.asm.str_uoff_64(X9, X19, target),
+                    Op::Movhps => self.asm.str_uoff_64(X9, X19, target + 8),
+                    _ => self.store_halves(reg, X9, XZR),
+                }
+            }
+            Some(RmOperand::Reg(source)) => {
+                let from = xmm_offset(source.index);
+                let asm = &mut *self.asm;
+                match insn.op {
+                    Op::Movss => {
+                        asm.ldr_uoff_32(X9, X19, from);
+                        asm.str_uoff_32(X9, X19, target);
+                    }
+                    Op::Movsd => {
+                        asm.ldr_uoff_64(X9, X19, from);
+                        asm.str_uoff_64(X9, X19, target);
+                    }
+                    Op::Movq => {
+                        asm.ldr_uoff_64(X9, X19, from);
+                        self.store_halves(reg, X9, XZR);
+                    }
+                    // MOVHLPS and MOVLHPS.
+                    Op::Movlps => {
+                        asm.ldr_uoff_64(X9, X19, from + 8);
+                        asm.str_uoff_64(X9, X19, target);
+                    }
+                    Op::Movhps => {
+                        asm.ldr_uoff_64(X9, X19, from);
+                        asm.str_uoff_64(X9, X19, target + 8);
+                    }
+                    _ => {
+                        asm.ldr_q_uoff(0, X19, from);
+                        asm.str_q_uoff(0, X19, target);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn vector_store(&mut self, insn: &Insn, completed: usize) {
+        let from = xmm_offset(insn.reg.index);
+        match insn.rm {
+            Some(RmOperand::Mem(operand)) if insn.rm_size == 16 => {
+                self.asm.ldr_uoff_64(X2, X19, from);
+                self.asm.ldr_uoff_64(X3, X19, from + 8);
+                self.effective_address(&operand, true);
+                let helper = if FORMS[usize::from(insn.form)].unaligned {
+                    write_u128_helper as *const ()
+                } else {
+                    write_aligned_u128_helper as *const ()
+                };
+                self.call_helper(helper as u64);
+                self.guard(insn, completed);
+            }
+            Some(RmOperand::Mem(_)) => {
+                let half = if insn.op == Op::Movhps { 8 } else { 0 };
+                self.asm.ldr_uoff_64(X10, X19, from + half);
+                self.store_rm(insn, X10, completed);
+            }
+            Some(RmOperand::Reg(target)) => {
+                let to = xmm_offset(target.index);
+                match insn.op {
+                    Op::Movss => {
+                        self.asm.ldr_uoff_32(X9, X19, from);
+                        self.asm.str_uoff_32(X9, X19, to);
+                    }
+                    Op::Movsd => {
+                        self.asm.ldr_uoff_64(X9, X19, from);
+                        self.asm.str_uoff_64(X9, X19, to);
+                    }
+                    Op::Movq => {
+                        self.asm.ldr_uoff_64(X9, X19, from);
+                        self.store_halves(target.index, X9, XZR);
+                    }
+                    _ => {
+                        self.asm.ldr_q_uoff(0, X19, from);
+                        self.asm.str_q_uoff(0, X19, to);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Lower an instruction accepted by [`is_native`].
+    fn lower(&mut self, insn: &Insn, completed: usize, flags: bool) {
+        match insn.op {
+            Op::Nop => {}
+            _ if insn.op.is_vector() => self.vector(insn, completed),
+            Op::Neg => {
+                self.load_rm(X10, insn, completed);
+                self.asm.mov_reg_64(X21, X10);
+                self.asm.mov_reg_64(X9, XZR);
+                self.compute(Op::Sub, insn.size == 8);
+                self.store_rm(insn, X11, completed);
+                if flags {
+                    self.asm.mov_reg_64(X10, X21);
+                    self.asm.mov_reg_64(X9, XZR);
+                    self.compute(Op::Sub, insn.size == 8);
+                    self.store_flags(Op::Sub, insn.size == 8);
+                }
+            }
+            Op::Not => {
+                self.load_rm(X9, insn, completed);
+                self.asm.mvn_64(X11, X9);
+                self.store_rm(insn, X11, completed);
+            }
+            Op::Mov => match insn.encoding {
+                Encoding::RmReg => {
+                    self.load_reg(X10, insn.reg);
+                    self.store_rm(insn, X10, completed);
+                }
+                Encoding::RegRm => {
+                    self.load_rm(X10, insn, completed);
+                    self.store_reg(insn.reg, insn.size, X10);
+                }
+                Encoding::OpRegImm => {
+                    self.asm.load_imm_64(X10, insn.imm);
+                    self.store_reg(insn.reg, insn.size, X10);
+                }
+                _ => {
+                    self.asm.load_imm_64(X10, insn.imm);
+                    self.store_rm(insn, X10, completed);
+                }
+            },
+            Op::Movzx | Op::Movsx | Op::Movsxd => {
+                self.load_rm(X9, insn, completed);
+                match (insn.op, insn.rm_size) {
+                    (Op::Movzx, 1) => self.asm.uxtb_32(X10, X9),
+                    (Op::Movzx, _) => self.asm.uxth_32(X10, X9),
+                    (_, 1) => self.asm.sxtb_64(X10, X9),
+                    (_, 2) => self.asm.sxth_64(X10, X9),
+                    _ => self.asm.sxtw_64(X10, X9),
+                }
+                self.store_reg(insn.reg, insn.size, X10);
+            }
+            Op::Lea => {
+                if let Some(operand) = insn.memory() {
+                    self.effective_address(&operand, false);
+                    self.store_reg(insn.reg, insn.size, X1);
+                }
+            }
+            Op::Bswap => {
+                self.load_reg(X9, insn.reg);
+                self.asm.rev(X10, X9, insn.size == 8);
+                self.store_reg(insn.reg, insn.size, X10);
+            }
+            Op::Setcc => {
+                self.load_condition(insn.condition);
+                self.store_rm(insn, X12, completed);
+            }
+            Op::Cmov => {
+                self.load_rm(X10, insn, completed);
+                self.load_reg(X9, insn.reg);
+                self.load_condition(insn.condition);
+                self.asm.tst_reg_32(X12, X12);
+                self.asm.csel_64(X11, X10, X9, Condition::Ne);
+                self.store_reg(insn.reg, insn.size, X11);
+            }
+            Op::Push => {
+                match insn.encoding {
+                    Encoding::OpReg => self.load_reg(X2, insn.reg),
+                    Encoding::Imm => self.asm.load_imm_64(X2, insn.imm),
+                    _ => self.load_rm(X2, insn, completed),
+                }
+                self.push(insn, completed);
+            }
+            Op::Pop => {
+                self.read_stack(insn, completed);
+                // POP RSP keeps the popped value, so it is written last.
+                self.asm.mov_reg_64(X21, X0);
+                self.release_stack(8);
+                self.store_reg(insn.reg, 8, X21);
+            }
+            Op::Call => {
+                // The target is read before the return address is pushed.
+                self.load_target(X21, insn, completed);
+                self.asm.load_imm_64(X2, insn.next_rip());
+                self.push(insn, completed);
+                self.asm.str_uoff_64(X21, X19, RIP_OFFSET);
+            }
+            Op::Jmp => {
+                self.load_target(X9, insn, completed);
+                self.asm.str_uoff_64(X9, X19, RIP_OFFSET);
+            }
+            Op::Jcc => {
+                self.load_condition(insn.condition);
+                self.asm.load_imm_64(X9, insn.next_rip());
+                self.asm.load_imm_64(X10, insn.imm);
+                self.asm.tst_reg_32(X12, X12);
+                self.asm.csel_64(X9, X10, X9, Condition::Ne);
+                self.asm.str_uoff_64(X9, X19, RIP_OFFSET);
+            }
+            Op::Ret => {
+                self.read_stack(insn, completed);
+                self.asm.str_uoff_64(X0, X19, RIP_OFFSET);
+                self.release_stack(8u64.wrapping_add(insn.imm));
+            }
+            Op::Hlt => {
+                self.asm.load_imm_64(X9, insn.next_rip());
+                self.asm.str_uoff_64(X9, X19, RIP_OFFSET);
+                self.asm.load_imm_64(X1, 1); // 1 = Halt
+                self.call_helper(set_exit_reason_helper as *const () as u64);
+            }
+            _ => self.alu(insn, completed, flags),
+        }
     }
 }
 
@@ -1556,6 +1122,8 @@ struct BlockContext {
     /// tests this word before committing any further architectural effect.
     faulted: u64,
     exit_reason: Option<ExitReason>,
+    /// Instructions executed through [`execute_helper`].
+    helper_instructions: u64,
 }
 
 const BLOCK_CTX_FAULTED_OFFSET: u32 = 8;
@@ -1582,6 +1150,140 @@ extern "C" fn read_u64_helper(ctx: *mut BlockContext, addr: u64) -> u64 {
         let mem = &*(*ctx).memory_ptr;
         match mem.read_u64(addr) {
             Ok(v) => v,
+            Err(e) => {
+                (*ctx).faulted = 1;
+                (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
+                0
+            }
+        }
+    }
+}
+
+/// Host address of the store helper for an operand of `size` bytes.
+fn store_helper(size: u8) -> u64 {
+    let helper = match size {
+        1 => write_u8_helper as *const (),
+        2 => write_u16_helper as *const (),
+        4 => write_u32_helper as *const (),
+        _ => write_u64_helper as *const (),
+    };
+    helper as u64
+}
+
+/// Host address of the zero-extending load helper for `size` bytes.
+fn load_helper(size: u8) -> u64 {
+    let helper = match size {
+        1 => read_u8_helper as *const (),
+        2 => read_u16_helper as *const (),
+        4 => read_u32_helper as *const (),
+        _ => read_u64_helper as *const (),
+    };
+    helper as u64
+}
+
+fn fault(ctx: *mut BlockContext, reason: ExitReason) {
+    unsafe {
+        (*ctx).faulted = 1;
+        (*ctx).exit_reason = Some(reason);
+    }
+}
+
+/// Read 16 bytes at any alignment; returned in X0 (low) and X1 (high).
+extern "C" fn read_u128_helper(ctx: *mut BlockContext, addr: u64) -> u128 {
+    let memory = unsafe { &*(*ctx).memory_ptr };
+    let mut bytes = [0; 16];
+    if let Err(error) = memory.read_bytes(addr, &mut bytes) {
+        fault(ctx, ExitReason::MemoryFault(error));
+    }
+    u128::from_le_bytes(bytes)
+}
+
+extern "C" fn read_aligned_u128_helper(ctx: *mut BlockContext, addr: u64) -> u128 {
+    if !addr.is_multiple_of(16) {
+        fault(ctx, ExitReason::GeneralProtection);
+        return 0;
+    }
+    read_u128_helper(ctx, addr)
+}
+
+/// Write 16 bytes at any alignment; `value` arrives in X2 (low) and X3 (high).
+extern "C" fn write_u128_helper(ctx: *mut BlockContext, addr: u64, value: u128) {
+    let memory = unsafe { &mut *(*ctx).memory_ptr };
+    if let Err(error) = memory.write_bytes(addr, &value.to_le_bytes()) {
+        fault(ctx, ExitReason::MemoryFault(error));
+    }
+}
+
+extern "C" fn write_aligned_u128_helper(ctx: *mut BlockContext, addr: u64, value: u128) {
+    if !addr.is_multiple_of(16) {
+        fault(ctx, ExitReason::GeneralProtection);
+        return;
+    }
+    write_u128_helper(ctx, addr, value);
+}
+
+/// Execute one decoded instruction through the shared semantics.
+extern "C" fn execute_helper(ctx: *mut BlockContext, cpu: *mut CpuState, insn: *const Insn) {
+    unsafe {
+        (*ctx).helper_instructions += 1;
+        match x86_exec::execute(&mut *cpu, &mut *(*ctx).memory_ptr, &*insn) {
+            Ok(None) => {}
+            Ok(Some(reason)) => (*ctx).exit_reason = Some(reason),
+            Err(reason) => {
+                (*ctx).faulted = 1;
+                (*ctx).exit_reason = Some(reason);
+            }
+        }
+    }
+}
+
+/// Push `value` below `sp` and return the new stack pointer.
+extern "C" fn push_helper(ctx: *mut BlockContext, sp: u64, value: u64) -> u64 {
+    unsafe {
+        let Some(address) = sp.checked_sub(8) else {
+            (*ctx).faulted = 1;
+            (*ctx).exit_reason = Some(ExitReason::StackUnderflow);
+            return sp;
+        };
+        write_u64_helper(ctx, address, value);
+        address
+    }
+}
+
+extern "C" fn write_u16_helper(ctx: *mut BlockContext, addr: u64, val: u64) {
+    unsafe {
+        if (*ctx).exit_reason.is_some() {
+            return;
+        }
+        let mem = &mut *(*ctx).memory_ptr;
+        if let Err(e) = mem.write_u16(addr, val as u16) {
+            (*ctx).faulted = 1;
+            (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
+        }
+    }
+}
+
+extern "C" fn write_u32_helper(ctx: *mut BlockContext, addr: u64, val: u64) {
+    unsafe {
+        if (*ctx).exit_reason.is_some() {
+            return;
+        }
+        let mem = &mut *(*ctx).memory_ptr;
+        if let Err(e) = mem.write_u32(addr, val as u32) {
+            (*ctx).faulted = 1;
+            (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
+        }
+    }
+}
+
+extern "C" fn read_u32_helper(ctx: *mut BlockContext, addr: u64) -> u64 {
+    unsafe {
+        if (*ctx).exit_reason.is_some() {
+            return 0;
+        }
+        let mem = &*(*ctx).memory_ptr;
+        match mem.read_u32(addr) {
+            Ok(v) => u64::from(v),
             Err(e) => {
                 (*ctx).faulted = 1;
                 (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));

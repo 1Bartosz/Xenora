@@ -130,7 +130,7 @@ fn gen_crt_native_registration(module: &str, symbol: &str, libc_sym: &str, note:
     registry.register_with_status(
         "{module}", "{symbol}",
         ServiceStatus::Partial,  // upgraded to Implemented when conformance test passes
-        |args: &Win64Args, _cpu: &mut CpuState, mem: &mut GuestMemory| -> Result<u64, ExitReason> {{
+        |args: &Win64Args, cpu: &mut CpuState, mem: &mut GuestMemory| -> Result<u64, ExitReason> {{
             {dispatch}
         }},
     );
@@ -151,9 +151,8 @@ fn gen_crt_wrapper_registration(module: &str, symbol: &str, _libc_sym: &str, not
         "{module}", "{symbol}",
         ServiceStatus::Stub,
         |args: &Win64Args, _cpu: &mut CpuState, mem: &mut GuestMemory| -> Result<u64, ExitReason> {{
-            // Safe-CRT wrapper: delegates to underlying function, ignores size argument.
-            // Guest memory is already bounds-checked by the caller's service dispatch.
-            Ok(0) // success
+            // Not implemented: fails explicitly instead of reporting success.
+            Err(ExitReason::IllegalInstruction(0xFE)) // 0xFE = Unsupported Host Service Call
         }},
     );
 "#,
@@ -162,15 +161,8 @@ fn gen_crt_wrapper_registration(module: &str, symbol: &str, _libc_sym: &str, not
 
 /// Generate a registration for a runtime helper (EH frame handlers, etc.).
 fn gen_runtime_helper_registration(module: &str, symbol: &str, note: &str) -> String {
-    // Most runtime helpers either call abort or return 0
-    let body = if symbol.contains("Throw")
-        || symbol.contains("terminate")
-        || symbol.contains("purecall")
-    {
-        "// C++ exception/terminate: halt guest execution.\n            Err(ExitReason::Halted)"
-    } else {
-        "Ok(0)"
-    };
+    // Not implemented: fails explicitly instead of reporting success.
+    let body = "Err(ExitReason::IllegalInstruction(0xFE)) // 0xFE = Unsupported Host Service Call";
     format!(
         r#"
     // {note}
@@ -194,7 +186,7 @@ fn gen_stubs(manifest: &Manifest) -> String {
     out.push_str(
         r#"
 //! Auto-generated Win32 service stubs.
-//! Each stub logs its call site (module + symbol) and returns a safe default value.
+//! Each stub stops the guest with an explicit unsupported-service exit.
 //! Do not edit manually — regenerate with `xenora imports generate`.
 
 use crate::cpu::{CpuState, ExitReason};
@@ -350,10 +342,11 @@ fn crt_dispatch_expr(symbol: &str, libc_sym: &str) -> String {
         "acos" | "asin" | "atan" | "cos" | "sin" | "tan" | "exp" | "log" | "log10" | "log2"
         | "sqrt" | "fabs" | "floor" | "ceil" | "round" | "trunc" | "exp2" => {
             format!(
-                r#"let x = f64::from_bits(args.rcx);
+                r#"let x = f64::from_bits(cpu.xmm[0] as u64);
             extern "C" {{ fn {libc_sym}(x: f64) -> f64; }}
             let r = unsafe {{ {libc_sym}(x) }};
-            Ok(r.to_bits())"#,
+            cpu.xmm[0] = u128::from(r.to_bits());
+            Ok(0)"#,
                 libc_sym = libc_sym,
             )
         }
@@ -362,49 +355,54 @@ fn crt_dispatch_expr(symbol: &str, libc_sym: &str) -> String {
         | "log2f" | "sqrtf" | "fabsf" | "floorf" | "ceilf" | "roundf" | "truncf" | "cbrtf"
         | "erff" | "exp2f" => {
             format!(
-                r#"let x = f32::from_bits(args.rcx as u32);
+                r#"let x = f32::from_bits(cpu.xmm[0] as u32);
             extern "C" {{ fn {libc_sym}(x: f32) -> f32; }}
             let r = unsafe {{ {libc_sym}(x) }};
-            Ok(r.to_bits() as u64)"#,
+            cpu.xmm[0] = u128::from(r.to_bits());
+            Ok(0)"#,
                 libc_sym = libc_sym,
             )
         }
         // Math f64 × f64 → f64, two args
         "atan2" | "pow" | "fmod" | "hypot" | "fmax" | "fmin" | "copysign" => {
             format!(
-                r#"let x = f64::from_bits(args.rcx);
-            let y = f64::from_bits(args.rdx);
+                r#"let x = f64::from_bits(cpu.xmm[0] as u64);
+            let y = f64::from_bits(cpu.xmm[1] as u64);
             extern "C" {{ fn {libc_sym}(x: f64, y: f64) -> f64; }}
             let r = unsafe {{ {libc_sym}(x, y) }};
-            Ok(r.to_bits())"#,
+            cpu.xmm[0] = u128::from(r.to_bits());
+            Ok(0)"#,
                 libc_sym = libc_sym,
             )
         }
         // Math f32 × f32 → f32
         "atan2f" | "powf" | "fmodf" | "hypotf" | "fmaxf" | "fminf" | "copysignf" => {
             format!(
-                r#"let x = f32::from_bits(args.rcx as u32);
-            let y = f32::from_bits(args.rdx as u32);
+                r#"let x = f32::from_bits(cpu.xmm[0] as u32);
+            let y = f32::from_bits(cpu.xmm[1] as u32);
             extern "C" {{ fn {libc_sym}(x: f32, y: f32) -> f32; }}
             let r = unsafe {{ {libc_sym}(x, y) }};
-            Ok(r.to_bits() as u64)"#,
+            cpu.xmm[0] = u128::from(r.to_bits());
+            Ok(0)"#,
                 libc_sym = libc_sym,
             )
         }
         // Math f64 × f64 × f64 → f64 (fma)
-        "fma" => r#"let x = f64::from_bits(args.rcx);
-            let y = f64::from_bits(args.rdx);
-            let z = f64::from_bits(args.r8);
+        "fma" => r#"let x = f64::from_bits(cpu.xmm[0] as u64);
+            let y = f64::from_bits(cpu.xmm[1] as u64);
+            let z = f64::from_bits(cpu.xmm[2] as u64);
             extern "C" { fn fma(x: f64, y: f64, z: f64) -> f64; }
             let r = unsafe { fma(x, y, z) };
-            Ok(r.to_bits())"#
+            cpu.xmm[0] = u128::from(r.to_bits());
+            Ok(0)"#
             .to_string(),
-        "fmaf" => r#"let x = f32::from_bits(args.rcx as u32);
-            let y = f32::from_bits(args.rdx as u32);
-            let z = f32::from_bits(args.r8 as u32);
+        "fmaf" => r#"let x = f32::from_bits(cpu.xmm[0] as u32);
+            let y = f32::from_bits(cpu.xmm[1] as u32);
+            let z = f32::from_bits(cpu.xmm[2] as u32);
             extern "C" { fn fmaf(x: f32, y: f32, z: f32) -> f32; }
             let r = unsafe { fmaf(x, y, z) };
-            Ok(r.to_bits() as u64)"#
+            cpu.xmm[0] = u128::from(r.to_bits());
+            Ok(0)"#
             .to_string(),
         // strlen(ptr) -> size_t
         "strlen" => r#"// strlen: RCX = guest pointer to null-terminated string

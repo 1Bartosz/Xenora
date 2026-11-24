@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Bounded parser for the PE32+ import directory (Microsoft PE format,
+//! "The .idata Section"). Binding and static inspection both use it, so they
+//! agree on which imports an image has and how they are named.
+
+use std::fmt;
+
+/// Most import descriptors accepted in one image.
+pub const MAX_DESCRIPTORS: usize = 1024;
+/// Most imported symbols accepted in one image.
+pub const MAX_IMPORTS: usize = 65_536;
+/// Longest module or symbol name accepted, in bytes.
+pub const MAX_NAME_LEN: usize = 4096;
+
+const DESCRIPTOR_LEN: u32 = 20;
+const ORDINAL_FLAG: u64 = 1 << 63;
+
+/// How an import names its target. A symbol that happens to be spelled like an
+/// ordinal is still a name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ImportName {
+    Name(String),
+    Ordinal(u16),
+}
+
+impl fmt::Display for ImportName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Name(name) => f.write_str(name),
+            Self::Ordinal(ordinal) => write!(f, "Ordinal#{ordinal}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportEntry {
+    /// Module name as spelled in the image.
+    pub module: String,
+    pub name: ImportName,
+    /// RVA of the import address table slot.
+    pub iat_rva: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportTableError {
+    /// A structure at this RVA is not fully backed by section data.
+    OutOfBounds {
+        rva: u32,
+    },
+    /// A name is empty, unterminated, too long or not printable ASCII.
+    MalformedName {
+        rva: u32,
+    },
+    /// A lookup entry at this RVA sets reserved bits.
+    ReservedBits {
+        rva: u32,
+    },
+    TooManyDescriptors,
+    TooManyImports,
+}
+
+impl fmt::Display for ImportTableError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutOfBounds { rva } => write!(f, "import data at RVA 0x{rva:08x} is truncated"),
+            Self::MalformedName { rva } => write!(f, "malformed import name at RVA 0x{rva:08x}"),
+            Self::ReservedBits { rva } => {
+                write!(
+                    f,
+                    "reserved bits set in the import lookup at RVA 0x{rva:08x}"
+                )
+            }
+            Self::TooManyDescriptors => write!(f, "more than {MAX_DESCRIPTORS} import descriptors"),
+            Self::TooManyImports => write!(f, "more than {MAX_IMPORTS} imported symbols"),
+        }
+    }
+}
+
+impl std::error::Error for ImportTableError {}
+
+/// Reads image bytes by RVA, requiring every byte to be backed by the file.
+struct Reader<'a, F> {
+    bytes: &'a [u8],
+    rva_to_offset: F,
+}
+
+impl<F: Fn(u32) -> Option<usize>> Reader<'_, F> {
+    fn byte(&self, rva: u32) -> Option<u8> {
+        self.bytes.get((self.rva_to_offset)(rva)?).copied()
+    }
+
+    fn array<const N: usize>(&self, rva: u32) -> Result<[u8; N], ImportTableError> {
+        let mut out = [0; N];
+        for (index, byte) in out.iter_mut().enumerate() {
+            *byte = rva
+                .checked_add(index as u32)
+                .and_then(|rva| self.byte(rva))
+                .ok_or(ImportTableError::OutOfBounds { rva })?;
+        }
+        Ok(out)
+    }
+
+    fn u32(&self, rva: u32) -> Result<u32, ImportTableError> {
+        self.array(rva).map(u32::from_le_bytes)
+    }
+
+    fn name(&self, rva: u32) -> Result<String, ImportTableError> {
+        let malformed = ImportTableError::MalformedName { rva };
+        let mut name = String::new();
+        for index in 0..=MAX_NAME_LEN as u32 {
+            let byte = rva
+                .checked_add(index)
+                .and_then(|rva| self.byte(rva))
+                .ok_or(malformed)?;
+            match byte {
+                0 if name.is_empty() => return Err(malformed),
+                0 => return Ok(name),
+                0x21..=0x7E => name.push(char::from(byte)),
+                _ => return Err(malformed),
+            }
+        }
+        Err(malformed)
+    }
+}
+
+/// Parse the import directory at `directory_rva`.
+///
+/// Returns every import before the first problem, and the problem. Callers that
+/// execute an image must refuse it if there is one; inspection may report both.
+pub fn parse_imports(
+    bytes: &[u8],
+    directory_rva: u32,
+    rva_to_offset: impl Fn(u32) -> Option<usize>,
+) -> (Vec<ImportEntry>, Option<ImportTableError>) {
+    let reader = Reader {
+        bytes,
+        rva_to_offset,
+    };
+    let mut entries = Vec::new();
+    let error = collect(&reader, directory_rva, &mut entries).err();
+    (entries, error)
+}
+
+fn collect<F: Fn(u32) -> Option<usize>>(
+    reader: &Reader<'_, F>,
+    directory_rva: u32,
+    entries: &mut Vec<ImportEntry>,
+) -> Result<(), ImportTableError> {
+    let mut descriptor = directory_rva;
+    for _ in 0..MAX_DESCRIPTORS {
+        // Reading the whole descriptor also proves its field RVAs do not overflow.
+        reader.array::<{ DESCRIPTOR_LEN as usize }>(descriptor)?;
+        let lookup_rva = reader.u32(descriptor)?;
+        let name_rva = reader.u32(descriptor + 12)?;
+        let address_rva = reader.u32(descriptor + 16)?;
+        // The table ends with an empty descriptor.
+        if lookup_rva == 0 && name_rva == 0 && address_rva == 0 {
+            return Ok(());
+        }
+        let module = reader.name(name_rva)?;
+        collect_symbols(reader, &module, lookup_rva, address_rva, entries)?;
+        descriptor = descriptor
+            .checked_add(DESCRIPTOR_LEN)
+            .ok_or(ImportTableError::OutOfBounds { rva: descriptor })?;
+    }
+    Err(ImportTableError::TooManyDescriptors)
+}
+
+fn collect_symbols<F: Fn(u32) -> Option<usize>>(
+    reader: &Reader<'_, F>,
+    module: &str,
+    lookup_rva: u32,
+    address_rva: u32,
+    entries: &mut Vec<ImportEntry>,
+) -> Result<(), ImportTableError> {
+    // Without a lookup table the address table holds the same entries on disk.
+    let start = if lookup_rva != 0 {
+        lookup_rva
+    } else {
+        address_rva
+    };
+    for index in 0.. {
+        let at = |base: u32| {
+            base.checked_add(index * 8)
+                .ok_or(ImportTableError::OutOfBounds { rva: base })
+        };
+        let lookup = at(start)?;
+        let value = u64::from_le_bytes(reader.array(lookup)?);
+        if value == 0 {
+            return Ok(());
+        }
+        if entries.len() == MAX_IMPORTS {
+            return Err(ImportTableError::TooManyImports);
+        }
+        let iat_rva = at(address_rva)?;
+        let name = if value & ORDINAL_FLAG != 0 {
+            let ordinal = value & !ORDINAL_FLAG;
+            ImportName::Ordinal(
+                u16::try_from(ordinal)
+                    .map_err(|_| ImportTableError::ReservedBits { rva: lookup })?,
+            )
+        } else {
+            let hint = u32::try_from(value)
+                .ok()
+                .filter(|rva| rva >> 31 == 0)
+                .ok_or(ImportTableError::ReservedBits { rva: lookup })?;
+            // The name follows a two-byte export-table hint.
+            ImportName::Name(reader.name(hint + 2)?)
+        };
+        entries.push(ImportEntry {
+            module: module.to_owned(),
+            name,
+            iat_rva,
+        });
+    }
+    Ok(())
+}
