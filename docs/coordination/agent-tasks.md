@@ -51,7 +51,7 @@ done
    Claims are decided one at a time across the whole repository, so two overlapping claims cannot both win.
    GitHub keeps at most one waiting run in a concurrency group and cancels it when a newer one
    queues, so each run decides every command of the last `lease_hours` that has no bot reply yet,
-   oldest first. A command whose own run was cancelled is answered by the run that replaced it, or at
+   oldest first; a comment listed twice is decided once. A command whose own run was cancelled is answered by the run that replaced it, or at
    the latest by the hourly audit. Each reply carries a marker naming the comment it answers.
 4. `scripts/agent-queue.sh start <n>` creates branch `task/<n>-<slug>` from `upstream/main` in a
    separate worktree `../xenora-task-<n>` (`--here` uses the current clean checkout instead).
@@ -89,8 +89,9 @@ machine-readable summary (counts and lists per area, priority and state).
 `agent-pr-checks` fails a pull request when: it has no `Closes #N` for a claimed task; the task is held
 by someone else; it changes files outside the task's patterns; it changes a file that another open
 pull request also changes; the claim has lapsed without a push; or no eligible `/verified <current
-head sha>` exists. After a `/verified` comment the check is re-run automatically; other pull request
-comments do not re-run it.
+head sha>` exists. After an accepted `/verified` (an eligible verifier, the current head) the check is re-run
+automatically. Refused, stale, malformed or unauthorized `/verified` comments get a reply and
+nothing else, and other pull request comments start no run.
 
 The check is advisory for now: a failure is shown as a warning and in the run summary, and the job
 still succeeds. It becomes blocking (fail on problems, then a required check) only after a live smoke

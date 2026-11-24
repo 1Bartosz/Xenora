@@ -38,6 +38,7 @@ def main(argv):
     s.add_argument("--recent-commands", action="store_true", help="include comments from the last lease_hours for replay")
     s = sub.add_parser("replay"); s.add_argument("--state", required=True)
     s = sub.add_parser("decide"); s.add_argument("--event", required=True); s.add_argument("--state", required=True)
+    s = sub.add_parser("should-rerun"); s.add_argument("--actions", required=True)
     s = sub.add_parser("apply"); s.add_argument("--repo", required=True); s.add_argument("--actions", required=True)
     s = sub.add_parser("audit"); s.add_argument("--state", required=True)
     s = sub.add_parser("summary"); s.add_argument("--state", required=True); s.add_argument("--text", action="store_true")
@@ -79,6 +80,9 @@ def main(argv):
         _out(decide(_load(a.event), _load(a.state), cfg))
     elif a.cmd == "replay":
         _out(replay.replay(_load(a.state), cfg, _now(a.now)))
+    elif a.cmd == "should-rerun":
+        # exit 0 only for an accepted /verified of the current head
+        return 0 if decide_mod.rerun_check(_load(a.actions)) else 1
     elif a.cmd == "apply":
         ghio.apply_actions(a.repo, _load(a.actions))
     elif a.cmd == "audit":

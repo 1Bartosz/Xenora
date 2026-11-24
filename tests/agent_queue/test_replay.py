@@ -93,6 +93,30 @@ class Replay(unittest.TestCase):
         self.assertIn("file overlap with claimed task #1", actions[1]["comment"])
         self.assertIn(R.done_marker(8), actions[1]["comment"])
 
+    def test_out_of_order_listing_is_decided_in_comment_order(self):
+        # Listed newest first: the earlier claim on the shared file still wins.
+        actions = self.run_replay([cmd(9, "maint", "/claim", 2, "2026-01-10T11:00:09Z"),
+                                   cmd(5, "gpuer", "/claim", 1, "2026-01-10T11:00:01Z")])
+        self.assertEqual(granted(actions), [(1, "gpuer")])
+        self.assertEqual([a["issue"] for a in actions], [1, 2])
+
+    def test_duplicate_events_are_decided_once(self):
+        c = cmd(5, "gpuer", "/claim", 1)
+        actions = self.run_replay([c, dict(c), cmd(6, "maint", "/claim", 2, "2026-01-10T11:00:02Z")])
+        self.assertEqual(granted(actions), [(1, "gpuer")])
+        self.assertEqual(sum(R.done_marker(5) in a["comment"] for a in actions), 1)
+
+    def test_no_burst_order_grants_overlapping_claims(self):
+        # Every arrival order of a burst of claims on #1 and #2 (shared file) grants exactly one of them.
+        import itertools
+        burst = [cmd(1, "gpuer", "/claim", 1), cmd(2, "maint", "/claim", 2), cmd(3, "maint", "/claim", 1),
+                 cmd(4, "gpuer", "/claim", 2), cmd(5, "maint", "/claim", 3)]
+        for order in itertools.permutations(range(5)):
+            comments = [dict(burst[i], created_at="2026-01-10T11:00:%02dZ" % k) for k, i in enumerate(order)]
+            g = granted(self.run_replay(comments))
+            self.assertEqual(len([x for x in g if x[0] in (1, 2)]), 1, (order, g))
+            self.assertIn((3, "maint"), g)
+
     def test_answered_commands_are_not_decided_again(self):
         first = self.run_replay([cmd(1, "gpuer", "/claim", 1)])
         st = queue_state([cmd(1, "gpuer", "/claim", 1),

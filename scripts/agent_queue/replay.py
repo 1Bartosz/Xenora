@@ -45,6 +45,7 @@ def replay(state, cfg, now, bots=L.BOT):
         if (c.get("pull_request") or c["id"] in done or c["user"] in bots
                 or parse_time(c["created_at"]) < since):
             continue
+        done.add(c["id"])  # a comment listed twice is decided once
         actions = decide({"kind": "issue", "number": c["issue"], "actor": c["user"], "body": c["body"]}, state, cfg)
         if not actions:
             continue

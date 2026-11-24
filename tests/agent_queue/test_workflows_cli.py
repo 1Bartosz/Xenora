@@ -87,6 +87,20 @@ class Workflows(unittest.TestCase):
             self.assertIn("--recent-commands", text, job)
         self.assertNotIn("agent_queue decide", self.job("agent-claims.yml", "command"))
 
+    def test_rerun_needs_an_accepted_verification(self):
+        text = self.job("agent-pr-checks.yml", "verify")
+        gate = text.index("agent_queue should-rerun")
+        self.assertLess(gate, text.index("gh run rerun"))
+        self.assertIn('if ! python3 -m agent_queue should-rerun --actions "$RUNNER_TEMP/actions.json"; then exit 0; fi', text)
+
+    def test_should_rerun_exit_codes(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "a.json")
+            for actions, code in (([], 1), ([{"issue": 4, "add_labels": [], "remove_labels": [], "comment": "refused"}], 1),
+                                  ([{"issue": 4, "add_labels": [], "remove_labels": [], "comment": "ok", "rerun_check": True}], 0)):
+                dump(actions, p)
+                self.assertEqual(Cli.run_cli(self, "should-rerun", "--actions", p).returncode, code, actions)
+
     def test_verify_runs_one_at_a_time_per_pull_request(self):
         text = self.job("agent-pr-checks.yml", "verify")
         self.assertRegex(text, r"group: agent-verify-\$\{\{ github\.event\.issue\.number \}\}\n\s+cancel-in-progress: false")

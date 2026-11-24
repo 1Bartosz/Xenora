@@ -83,6 +83,9 @@ jobs:
           python3 -m agent_queue gather --repo "$GH_REPO" --pr "$number" > "$RUNNER_TEMP/state.json"
           python3 -m agent_queue decide --event "$RUNNER_TEMP/event.json" --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
           python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/actions.json"
+          # Re-run only after an accepted verification of the current head: refused, stale,
+          # malformed or unauthorized /verified comments get a reply and nothing else.
+          if ! python3 -m agent_queue should-rerun --actions "$RUNNER_TEMP/actions.json"; then exit 0; fi
           sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pr"]["head_sha"])' "$RUNNER_TEMP/state.json")
           run=$(gh run list --workflow agent-pr-checks.yml --commit "$sha" --event pull_request_target --limit 1 --json databaseId -q '.[0].databaseId // empty')
           if [ -n "$run" ]; then gh run rerun "$run" || true; fi

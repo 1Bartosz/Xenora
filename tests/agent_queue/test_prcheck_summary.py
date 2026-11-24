@@ -4,7 +4,7 @@ import unittest
 
 from helpers import CFG, NOW, issue, state
 from agent_queue import lease as L
-from agent_queue.decide import decide
+from agent_queue.decide import decide, rerun_check
 from agent_queue.prcheck import check_pr
 from agent_queue.queue import summary
 
@@ -102,6 +102,44 @@ class VerifiedCommand(unittest.TestCase):
         self.assertIn("holds the linked task", self.go("gpuer", author="maint"))
         self.assertIn("may not verify", self.go("rt"))
         self.assertIn("not the current head", self.go("qaer", sha="1234567"))
+
+
+class VerifiedRerun(unittest.TestCase):
+    """Only an accepted /verified of the current head may re-run the pull request check (#210)."""
+
+    def rerun(self, actor, text, author="gpuer"):
+        st = state(issue(1, labels=HELD))
+        st["pr"] = pr(author=author)
+        return rerun_check(decide({"kind": "pr", "number": 10, "actor": actor, "body": text}, st, CFG))
+
+    def test_accepted_current_head_reruns(self):
+        self.assertTrue(self.rerun("qaer", "/verified " + SHA[:12]))
+        self.assertTrue(self.rerun("maint", "/verified " + SHA + "\nran the acceptance command"))
+
+    def test_ordinary_comments_do_not_rerun(self):
+        for text in ("looks good", "LGTM /verified " + SHA, "", "thanks\n/verified " + SHA[:12]):
+            self.assertFalse(self.rerun("qaer", text), text)
+
+    def test_malformed_do_not_rerun(self):
+        for text in ("/verified", "/verified abc", "/verifiedaaaaaaa", "/verified " + SHA[:6], "/Verified " + SHA[:12]):
+            self.assertFalse(self.rerun("qaer", text), text)
+
+    def test_stale_and_unknown_heads_do_not_rerun(self):
+        self.assertFalse(self.rerun("qaer", "/verified " + "b" * 12))
+        self.assertFalse(self.rerun("qaer", "/verified " + SHA[:11] + "b"))
+
+    def test_unauthorized_do_not_rerun(self):
+        self.assertFalse(self.rerun("gpuer", "/verified " + SHA[:12]))                 # author
+        self.assertFalse(self.rerun("gpuer", "/verified " + SHA[:12], author="maint"))  # task holder
+        self.assertFalse(self.rerun("rt", "/verified " + SHA[:12]))                    # not a verifier
+        self.assertFalse(self.rerun("stranger", "/verified " + SHA[:12]))
+
+    def test_rerun_agrees_with_the_check(self):
+        # Whatever re-runs the check must also be counted by it, and the other way round.
+        for actor in ("qaer", "maint", "gpuer", "rt"):
+            for sha in (SHA[:12], SHA[:6], "b" * 12):
+                counted = actor in run(pr(), [vc(actor, sha)])["verified_by"]
+                self.assertEqual(self.rerun(actor, "/verified " + sha), counted, (actor, sha))
 
 
 class Summary(unittest.TestCase):

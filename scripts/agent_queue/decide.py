@@ -150,4 +150,10 @@ def _verified(event, state, cfg, arg):
         return _reply(n, "%s may not verify: only maintainers and qa contributors can." % actor)
     if len(sha) < 7 or not head.startswith(sha):
         return _reply(n, "Verification refused: `%s` is not the current head %s." % (sha or "(none)", head[:12]))
-    return _reply(n, "Verification of %s recorded for %s." % (head[:12], actor))
+    # Only an accepted verification of the current head re-runs the pull request check.
+    return [dict(_act(n, comment="Verification of %s recorded for %s." % (head[:12], actor)), rerun_check=True)]
+
+
+def rerun_check(actions):
+    """True when the decided actions record an accepted verification of the current head."""
+    return any(a.get("rerun_check") for a in actions)
