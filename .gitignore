@@ -37,3 +37,6 @@ __pycache__/
 *.pyc
 /diagnostics/gta6-candidate-*/
 /diagnostics/gta6-check/
+
+# Native application build output
+/app/.build/

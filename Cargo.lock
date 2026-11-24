@@ -180,6 +180,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenora-ffi"
+version = "0.1.0"
+dependencies = [
+ "xenora-loader",
+]
+
+[[package]]
 name = "xenora-import-gen"
 version = "0.1.0"
 
