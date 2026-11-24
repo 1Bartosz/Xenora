@@ -261,7 +261,7 @@ in the decoder's fixture inventory. The native Metal gate runs both
 `vopc16_match_the_guide_on_native_metal` and
 `vopc64_match_the_guide_on_native_metal`. On a local Apple M5 with API and
 shader validation, all 4,640 64-bit cases (3,818 programs) agree with the
-oracle. The 16-bit Metal run and independent acceptance are pending. Deliberately broken copies of both
+oracle. On a local Apple M5 under API and shader validation, all 1,572 16-bit cases (1,420 programs) agree; independent acceptance is pending. Deliberately broken copies of both
 interpreters (16-bit reads of 32 bits, swapped pair halves, zero-extended
 inline integers, flipped signedness, reads under empty EXEC and others) each
 fail it.
