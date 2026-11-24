@@ -37,8 +37,8 @@ The latest verified milestone includes **translated gfx1030 vertex and pixel sha
 | X11 — Graphics pipeline | Multiple draw calls, vertex buffers, index buffers, depth/stencil testing, blending and render targets | Planned |
 | X12 — Wave execution | Expand Wave32/Wave64 semantics, divergent control flow, cross-lane operations, LDS and barriers | Planned |
 | X13 — Advanced shaders | Mesh, geometry and additional compute shader capabilities with verified Metal execution | Planned |
-| X14 — CPU recompilation | Introduce an ARM64 dynamic recompiler (JIT) for supported x86-64 instructions, with interpreter fallback | Planned |
-| X15 — Executable compatibility | PE relocations, TLS, DLL loading, exception handling, imports and executable initialization | Planned |
+| X14 — CPU recompilation | Native ARM64 dynamic recompilation of supported x86-64 instructions in synthetic fixtures | Implemented subset |
+| X15 — Executable compatibility | Static PE inspection reports sections, relocations, thread-local storage (TLS) callbacks, imports and entry-point instructions | Static probe implemented |
 | X16 — Guest memory and threading | Virtual memory mapping, thread scheduling, synchronization primitives and atomic operations | Planned |
 | X17 — System services | Implement a tested subset of Xbox-compatible runtime APIs, memory services, filesystem access and application lifecycle | Planned |
 | X18 — Graphics API translation | Translate supported Xbox graphics commands, resource descriptors, command queues, barriers and fences into Metal operations | Planned |

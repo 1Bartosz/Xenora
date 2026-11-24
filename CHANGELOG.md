@@ -11,6 +11,7 @@ remains unsupported.
 
 ### Added
 
+- Added a static PE compatibility probe that exports section, relocation, thread-local storage, import and bounded x86-64 entry-point analysis. Synthetic tests cover inspection and report export.
 - Added native Apple Silicon ARM64 Dynamic Binary Translation (DBT) engine (`DbtEngine`) with basic block decoding, native ARM64 code lowering, and W^X-compliant JIT code cache (`JitMemory`) utilizing macOS `MAP_JIT` and `pthread_jit_write_protect_np`.
 - Added an ARM64 machine instruction assembler (`Arm64Assembler`) supporting register/immediate arithmetic, logical operations, memory loads/stores, branch/call/ret control flow, and calling convention preservation.
 - Added synthetic guest graphics service dispatch connecting guest x86-64 execution through native ARM64 translated blocks directly to Xenora's Metal graphics pipeline (`NativeCompute::render_rgba8`), producing and independently checking the first guest-rendered frame.
