@@ -14,6 +14,8 @@ remains unsupported.
 
 ### Added
 
+- The experimental CLI can run the embedded runtime-services fixture, which round-trips the guest last-error value through two kernel32 imports before drawing a verified Metal frame.
+
 - Import manifests now report emitted adapters, stubs, and existing runtime bindings separately from catalog classifications.
 
 - Generated import conformance tests now execute emitted service handlers and verify unsupported stubs.
