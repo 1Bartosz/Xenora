@@ -20,7 +20,7 @@ pub use rdna2::{
 };
 pub use semantics_gen::{
     ScalarAluOp, ScalarCompareOp, ScalarImmediateCompareOp, ScalarImmediateOp, ScalarUnaryOp,
-    VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorSwapOp, VectorUnaryOp,
+    SoppControlOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorSwapOp, VectorUnaryOp,
 };
 
 impl VectorAluOp {
