@@ -208,8 +208,10 @@ access, and setting or resetting requires modify-state access.
 `WaitForMultipleObjects` supports immediate waits on up to 64 events.
 Wait-any selects the first signaled handle. Wait-all consumes auto-reset
 signals only when every event is ready. Repeated handles and wait-all
-aliases to the same event are rejected. Waits that would block remain
-unsupported.
+aliases to the same event are rejected. The extended single- and multiple-
+object wait APIs support the same immediate behavior when alerting is
+disabled. Alertable calls and waits that would block return an unsupported
+error.
 
 See Microsoft's [event object documentation](https://learn.microsoft.com/windows/win32/sync/event-objects).
 

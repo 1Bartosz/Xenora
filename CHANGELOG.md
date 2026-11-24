@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added non-alertable extended event waits through both Win64 wait APIs.
+
 - Added immediate wait-any and wait-all for guest event handles.
 
 - Added guest CRT signed and unsigned 64-bit conversions for narrow and wide strings.

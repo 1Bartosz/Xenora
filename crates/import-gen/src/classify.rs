@@ -777,17 +777,13 @@ impl SymbolDb {
                 "SetEvent",
                 "ResetEvent",
                 "WaitForSingleObject",
+                "WaitForSingleObjectEx",
                 "WaitForMultipleObjects",
+                "WaitForMultipleObjectsEx",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
         }
-        self.win32_stub(
-            m,
-            "WaitForSingleObjectEx",
-            false,
-            "WaitForSingleObjectEx — stub",
-        );
         self.win32_stub(m, "CreateMutexA", true, "CreateMutex — stub");
         self.win32_stub(m, "CreateMutexW", true, "CreateMutex wide — stub");
         self.win32_stub(m, "ReleaseMutex", false, "ReleaseMutex — stub");
@@ -861,12 +857,6 @@ impl SymbolDb {
             m2,
             "WaitForMultipleObjects",
             Classification::StandardService,
-        );
-        self.win32_stub(
-            m2,
-            "WaitForMultipleObjectsEx",
-            false,
-            "WaitForMultipleObjectsEx — stub",
         );
         self.win32_stub(
             m2,

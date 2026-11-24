@@ -1131,7 +1131,7 @@ fn test_guest_waits_for_multiple_events_through_iat() {
             .final_state
             .get(Register::Rax)
     };
-    let wait = |handles: [u64; 2], all: bool| {
+    let wait = |handles: [u64; 2], all: bool, alertable: Option<bool>| {
         let mut code = vec![0x48, 0x83, 0xec, 0x28];
         for (register, value) in [
             ([0x48, 0xb9], 2u64),
@@ -1142,6 +1142,12 @@ fn test_guest_waits_for_multiple_events_through_iat() {
             code.extend_from_slice(&register);
             code.extend_from_slice(&value.to_le_bytes());
         }
+        if let Some(alertable) = alertable {
+            // Fifth argument, at the first stack slot past the home area.
+            code.extend_from_slice(&[0x48, 0xb8]);
+            code.extend_from_slice(&u64::from(alertable).to_le_bytes());
+            code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x20]);
+        }
         append_import_call(&mut code, 0x2060);
         code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
         code.resize(0x80, 0);
@@ -1149,7 +1155,14 @@ fn test_guest_waits_for_multiple_events_through_iat() {
             code.extend_from_slice(&handle.to_le_bytes());
         }
         let bytes = TestPeBuilder::new(IMAGE, 0x1000)
-            .add_import("api-ms-win-core-synch-l1-2-1.dll", "WaitForMultipleObjects")
+            .add_import(
+                "api-ms-win-core-synch-l1-2-1.dll",
+                if alertable.is_some() {
+                    "WaitForMultipleObjectsEx"
+                } else {
+                    "WaitForMultipleObjects"
+                },
+            )
             .code(&code)
             .build();
         let mut imports = ImportRegistry::new();
@@ -1172,23 +1185,37 @@ fn test_guest_waits_for_multiple_events_through_iat() {
 
     let first = call("CreateEventW", &[0, 0, 1, 0]);
     let second = call("CreateEventW", &[0, 0, 0, 0]);
-    assert_eq!(wait([first, second], true), 258);
-    assert_eq!(wait([second, first], false), 1);
-    assert_eq!(wait([first, second], false), 258);
+    assert_eq!(wait([first, second], true, None), 258);
+    assert_eq!(wait([second, first], false, None), 1);
+    assert_eq!(wait([first, second], false, None), 258);
 
     assert_eq!(call("SetEvent", &[first]), 1);
     assert_eq!(call("SetEvent", &[second]), 1);
-    assert_eq!(wait([first, second], false), 0);
+    assert_eq!(wait([first, second], false, None), 0);
     assert_eq!(call("SetEvent", &[first]), 1);
-    assert_eq!(wait([first, second], true), 0);
-    assert_eq!(wait([first, second], false), 258);
+    assert_eq!(wait([first, second], true, None), 0);
+    assert_eq!(wait([first, second], false, None), 258);
 
     assert_eq!(call("SetEvent", &[first]), 1);
-    assert_eq!(wait([first, first], true), u64::from(u32::MAX));
+    assert_eq!(wait([first, first], true, None), u64::from(u32::MAX));
     assert_eq!(call("GetLastError", &[]), 87);
-    assert_eq!(wait([first, 0], false), u64::from(u32::MAX));
+    assert_eq!(wait([first, 0], false, None), u64::from(u32::MAX));
     assert_eq!(call("GetLastError", &[]), 6);
-    assert_eq!(wait([second, first], false), 1);
+    assert_eq!(wait([second, first], false, None), 1);
+    assert_eq!(call("SetEvent", &[first]), 1);
+    assert_eq!(
+        wait([first, second], false, Some(true)),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call("GetLastError", &[]), 50);
+    assert_eq!(wait([first, second], false, Some(false)), 0);
+
+    assert_eq!(call("SetEvent", &[second]), 1);
+    assert_eq!(
+        call("WaitForSingleObjectEx", &[second, 0, 1]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call("WaitForSingleObjectEx", &[second, 0, 0]), 0);
 }
 
 #[test]

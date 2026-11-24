@@ -73,32 +73,47 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
-    let single = Arc::clone(state);
-    registry.register(KERNEL32, "WaitForSingleObject", move |args, _, mem| {
-        let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        let timeout = args.get(1, mem).map_err(ExitReason::MemoryFault)? as u32;
-        wait_for_events(&single, &[handle], false, timeout)
-    });
-
-    let multiple = Arc::clone(state);
-    registry.register(KERNEL32, "WaitForMultipleObjects", move |args, _, mem| {
-        let count = args.get(0, mem).map_err(ExitReason::MemoryFault)? as u32;
-        let address = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
-        let all = args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32 != 0;
-        let timeout = args.get(3, mem).map_err(ExitReason::MemoryFault)? as u32;
-        if !(1..=64).contains(&count) || address == 0 {
-            return multiple.fail(ERROR_INVALID_PARAMETER, WAIT_FAILED);
-        }
-        let mut handles = [0; 64];
-        let handles = &mut handles[..count as usize];
-        for (index, handle) in handles.iter_mut().enumerate() {
-            let slot = address
-                .checked_add(index as u64 * 8)
-                .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
-            *handle = mem.read_u64(slot).map_err(ExitReason::MemoryFault)?;
-        }
-        wait_for_events(&multiple, handles, all, timeout)
-    });
+    for (symbol, extended) in [
+        ("WaitForSingleObject", false),
+        ("WaitForSingleObjectEx", true),
+    ] {
+        let single = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, _, mem| {
+            let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+            let timeout = args.get(1, mem).map_err(ExitReason::MemoryFault)? as u32;
+            if extended && args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32 != 0 {
+                return single.fail(ERROR_NOT_SUPPORTED, WAIT_FAILED);
+            }
+            wait_for_events(&single, &[handle], false, timeout)
+        });
+    }
+    for (symbol, extended) in [
+        ("WaitForMultipleObjects", false),
+        ("WaitForMultipleObjectsEx", true),
+    ] {
+        let multiple = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, _, mem| {
+            let count = args.get(0, mem).map_err(ExitReason::MemoryFault)? as u32;
+            let address = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
+            let all = args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32 != 0;
+            let timeout = args.get(3, mem).map_err(ExitReason::MemoryFault)? as u32;
+            if extended && args.get(4, mem).map_err(ExitReason::MemoryFault)? as u32 != 0 {
+                return multiple.fail(ERROR_NOT_SUPPORTED, WAIT_FAILED);
+            }
+            if !(1..=64).contains(&count) || address == 0 {
+                return multiple.fail(ERROR_INVALID_PARAMETER, WAIT_FAILED);
+            }
+            let mut handles = [0; 64];
+            let handles = &mut handles[..count as usize];
+            for (index, handle) in handles.iter_mut().enumerate() {
+                let slot = address
+                    .checked_add(index as u64 * 8)
+                    .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
+                *handle = mem.read_u64(slot).map_err(ExitReason::MemoryFault)?;
+            }
+            wait_for_events(&multiple, handles, all, timeout)
+        });
+    }
 
     for symbol in [
         "CreateEventA",
@@ -106,16 +121,16 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "SetEvent",
         "ResetEvent",
         "WaitForSingleObject",
+        "WaitForSingleObjectEx",
         "WaitForMultipleObjects",
+        "WaitForMultipleObjectsEx",
     ] {
         registry.alias(SYNCH_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
-    registry.alias(
-        "api-ms-win-core-synch-l1-2-1.dll",
-        KERNEL32,
-        "WaitForMultipleObjects",
-    );
+    for symbol in ["WaitForMultipleObjects", "WaitForMultipleObjectsEx"] {
+        registry.alias("api-ms-win-core-synch-l1-2-1.dll", KERNEL32, symbol);
+    }
 }
 
 fn wait_for_events(
