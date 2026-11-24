@@ -170,7 +170,10 @@ impl ParsedPe {
         }
 
         let mut sections = Vec::with_capacity(usize::from(number_of_sections));
-        for sec_bytes in bytes[section_table_offset..table_end].chunks_exact(SECTION_HEADER_SIZE) {
+        for sec_bytes in bytes[section_table_offset..table_end]
+            .as_chunks::<SECTION_HEADER_SIZE>()
+            .0
+        {
             // Section name (up to 8 bytes UTF-8 or null-padded ASCII)
             let name_raw = &sec_bytes[0..8];
             let name_len = name_raw.iter().position(|&b| b == 0).unwrap_or(8);
