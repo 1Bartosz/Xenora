@@ -247,6 +247,7 @@ xenora_status xenora_session_audio_init(
 
 /*
  * Submit PCM audio bytes into the session audio queue.
+ * byte_count must contain a whole number of interleaved sample frames.
  */
 xenora_status xenora_session_audio_submit(
     xenora_session session,
@@ -256,6 +257,7 @@ xenora_status xenora_session_audio_submit(
 
 /*
  * Read PCM audio bytes from the session audio queue.
+ * Only whole frames are returned. Any remaining output bytes are untouched.
  */
 xenora_status xenora_session_audio_read(
     xenora_session session,

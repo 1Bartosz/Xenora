@@ -98,29 +98,47 @@ impl Default for AudioSubsystem {
 }
 
 impl AudioSubsystem {
+    fn frame_bytes(&self) -> usize {
+        let sample_bytes = if self.format == XENORA_AUDIO_FORMAT_PCM_F32LE {
+            4
+        } else {
+            2
+        };
+        sample_bytes * self.channels as usize
+    }
+
     pub fn submit(&mut self, bytes: &[u8]) {
         self.total_submitted_bytes = self
             .total_submitted_bytes
             .saturating_add(bytes.len() as u64);
-        let processed_bytes: Vec<u8> =
-            if self.format == XENORA_AUDIO_FORMAT_PCM_S16LE && bytes.len().is_multiple_of(2) {
-                let mut out = bytes.to_vec();
-                for chunk in out.as_chunks_mut::<2>().0 {
-                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                    let attenuated = if self.muted {
-                        0i16
-                    } else {
-                        let scaled = (sample as f32) * self.volume;
-                        scaled.clamp(-32768.0, 32767.0) as i16
-                    };
-                    let res_bytes = attenuated.to_le_bytes();
-                    chunk[0] = res_bytes[0];
-                    chunk[1] = res_bytes[1];
-                }
-                out
-            } else {
-                bytes.to_vec()
-            };
+        let processed_bytes: Vec<u8> = if self.format == XENORA_AUDIO_FORMAT_PCM_S16LE {
+            let mut out = bytes.to_vec();
+            for chunk in out.as_chunks_mut::<2>().0 {
+                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                let attenuated = if self.muted {
+                    0i16
+                } else {
+                    let scaled = (sample as f32) * self.volume;
+                    scaled.clamp(-32768.0, 32767.0) as i16
+                };
+                let res_bytes = attenuated.to_le_bytes();
+                chunk[0] = res_bytes[0];
+                chunk[1] = res_bytes[1];
+            }
+            out
+        } else {
+            let mut out = bytes.to_vec();
+            for chunk in out.as_chunks_mut::<4>().0 {
+                let sample = f32::from_le_bytes(*chunk);
+                let scaled = if self.muted || !sample.is_finite() {
+                    0.0
+                } else {
+                    (sample * self.volume).clamp(-1.0, 1.0)
+                };
+                *chunk = scaled.to_le_bytes();
+            }
+            out
+        };
 
         for b in processed_bytes {
             if self.queue.len() >= self.max_capacity_bytes {
@@ -132,7 +150,8 @@ impl AudioSubsystem {
     }
 
     pub fn read(&mut self, out: &mut [u8]) -> usize {
-        let count = out.len().min(self.queue.len());
+        let usable = out.len().min(self.queue.len());
+        let count = usable - usable % self.frame_bytes();
         for b in out.iter_mut().take(count) {
             *b = self.queue.pop_front().unwrap_or(0);
         }
@@ -1337,6 +1356,9 @@ pub unsafe extern "C" fn xenora_session_audio_submit(
             return XENORA_INVALID_HANDLE;
         }
         let slot = &mut slots[split(session).0];
+        if !(byte_count as usize).is_multiple_of(slot.audio.frame_bytes()) {
+            return XENORA_INVALID_ARGUMENT;
+        }
         // SAFETY: checked non-null and bounded above.
         let bytes = unsafe { std::slice::from_raw_parts(pcm_bytes, byte_count as usize) };
         slot.audio.submit(bytes);
@@ -1355,7 +1377,7 @@ pub unsafe extern "C" fn xenora_session_audio_read(
     out_bytes_read: *mut u64,
 ) -> i32 {
     guarded(|| {
-        if out_pcm.is_null() || out_bytes_read.is_null() {
+        if out_pcm.is_null() || out_bytes_read.is_null() || capacity > isize::MAX as u64 {
             return XENORA_INVALID_ARGUMENT;
         }
         let Ok(mut slots) = SESSIONS.lock() else {
@@ -2514,6 +2536,42 @@ mod tests {
         assert_eq!(split(res).0, split(res_reused).0);
         assert!(split(res_reused).1 > split(res).1);
 
+        xenora_session_destroy(session);
+    }
+
+    #[test]
+    fn float_pcm_applies_gain_and_preserves_stereo_frame_boundaries() {
+        let _guard = serial();
+        let session = create();
+        assert_eq!(
+            xenora_session_audio_init(session, 48000, 2, XENORA_AUDIO_FORMAT_PCM_F32LE),
+            XENORA_OK
+        );
+        assert_eq!(xenora_session_audio_set_volume(session, 0.5, 0), XENORA_OK);
+        let input: Vec<u8> = [1.0_f32, -0.5, f32::NAN, 4.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        assert_eq!(
+            unsafe { xenora_session_audio_submit(session, input.as_ptr(), 4) },
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { xenora_session_audio_submit(session, input.as_ptr(), 16) },
+            XENORA_OK
+        );
+        let mut output = [0xaa; 9];
+        let mut count = 0;
+        for expected in [[0.5_f32, -0.25], [0.0, 1.0]] {
+            assert_eq!(
+                unsafe { xenora_session_audio_read(session, output.as_mut_ptr(), 9, &mut count) },
+                XENORA_OK
+            );
+            assert_eq!(count, 8);
+            assert_eq!(&output[..4], &expected[0].to_le_bytes());
+            assert_eq!(&output[4..8], &expected[1].to_le_bytes());
+            assert_eq!(output[8], 0xaa);
+        }
         xenora_session_destroy(session);
     }
 
