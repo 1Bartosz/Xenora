@@ -766,4 +766,262 @@ mod review {
             verify(&code, &[1], expected.as_ref().map(|words| words.as_slice()));
         }
     }
+
+    const SCALAR_ALU_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-alu.bin");
+    // SOP2 opcodes of the supported subset (RDNA 2 XML opcode table).
+    const SOP2_OPCODES: [u32; 7] = [0, 1, 4, 5, 14, 16, 18];
+    const SCALAR_VALUES: [u32; 10] = [
+        0,
+        1,
+        2,
+        0x7fff_ffff,
+        0x8000_0000,
+        0x8000_0001,
+        0xffff_fffe,
+        u32::MAX,
+        0x1234_5678,
+        0xedcb_a988,
+    ];
+
+    /// ENCODING 0b10 in bits 30-31, OP 23-29, SDST 16-22, SSRC1 8-15, SSRC0 0-7.
+    fn sop2(opcode: u32, dst: u32, src0: u32, src1: u32) -> u32 {
+        0x8000_0000 | opcode << 23 | dst << 16 | src1 << 8 | src0
+    }
+
+    /// D and SCC from the operation's definition, with exact integers: additions
+    /// carry out of bit 31, subtractions borrow, bitwise results set SCC iff nonzero.
+    fn sop2_expected(opcode: u32, a: u32, b: u32, carry: bool) -> (u32, bool) {
+        let (a, b) = (u64::from(a), u64::from(b));
+        let c = u64::from(carry && matches!(opcode, 4 | 5));
+        let (exact, scc) = match opcode {
+            0 | 4 => (a + b + c, a + b + c >= 1 << 32),
+            1 | 5 => (((1 << 32) + a - b - c) % (1 << 32), b + c > a),
+            14 => (a & b, a & b != 0),
+            16 => (a | b, a | b != 0),
+            _ => (a ^ b, a ^ b != 0),
+        };
+        ((exact % (1 << 32)) as u32, scc)
+    }
+
+    /// s8 = a, s9 = b, SCC = `carry` (if set), then `alu` (with an optional literal),
+    /// then v2 = s<result>; lanes are XORed with their input only when SCC is set.
+    fn sop2_program(alu: &[u32], result: u32, a: u32, b: u32, carry: Option<bool>) -> Vec<u8> {
+        let mut words = vec![0xe030_2000, 0x8000_0100, 0xbf8c_3f70];
+        words.extend([0xbe88_03ff, a, 0xbe89_03ff, b]);
+        if let Some(carry) = carry {
+            // s_cmp_eq_u32 0, 0 sets SCC; s_cmp_eq_u32 0, 1 clears it.
+            words.push(if carry { 0xbf06_8080 } else { 0xbf06_8180 });
+        }
+        words.extend(alu);
+        words.extend([0x7e04_0200 | result, 0xbf84_0001, 0x3a04_0501]);
+        words.extend([0xe070_2000, 0x8001_0200, 0xbbfd_0000, 0xbf81_0000]);
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    fn lanes(value: u32, scc: bool) -> [u32; 2] {
+        [value, if scc { !value } else { value }]
+    }
+
+    /// Every supported opcode over boundary operands, with SCC both clear and set
+    /// before the carry-consuming forms.
+    fn sop2_vectors() -> Vec<(Vec<u8>, [u32; 2])> {
+        let mut vectors = Vec::new();
+        for opcode in SOP2_OPCODES {
+            for a in SCALAR_VALUES {
+                for b in SCALAR_VALUES {
+                    for carry in [false, true] {
+                        let (value, scc) = sop2_expected(opcode, a, b, carry);
+                        let code = sop2_program(&[sop2(opcode, 10, 8, 9)], 10, a, b, Some(carry));
+                        vectors.push((code, lanes(value, scc)));
+                    }
+                }
+            }
+        }
+        vectors
+    }
+
+    #[test]
+    fn scalar_alu_fixture_chains_carry_borrow_and_bitwise_scc() {
+        let input = [0, 1, u32::MAX, 0x8000_000e, 0x1234_5678];
+        let expected: Vec<_> = input.iter().map(|word| word ^ 0x8000_000e).collect();
+        verify(SCALAR_ALU_FIXTURE, &input, Some(&expected));
+        let compiled = compile(Architecture::Gfx1030, SCALAR_ALU_FIXTURE).unwrap();
+        // The scalar results reach the kernel as constants; the branch is resolved.
+        assert!(compiled.disassembly.contains("s_subb_u32 s11, s9, s8"));
+        assert!(compiled.ir.contains("const.u32"), "{}", compiled.ir);
+        // Clearing the final AND's SCC-zero edge (s15 = s14 & 15 = 0) is observable:
+        // with 31 instead of 15 the result is 0x10, SCC = 1, and v2 = 0.
+        let mut nonzero = SCALAR_ALU_FIXTURE.to_vec();
+        assert_eq!(nonzero[0x31], 0x8f);
+        nonzero[0x31] = 0x9f;
+        verify(&nonzero, &input, Some(&[0; 5]));
+    }
+
+    /// The translator's own folding: v2 = D as a constant, and the SCC-zero edge
+    /// is taken exactly when SCC is clear.
+    fn assert_translated(code: &[u8], expected: &[u32; 2]) {
+        let ir = compile(Architecture::Gfx1030, code).unwrap().ir;
+        assert!(
+            ir.contains(&format!("const.u32 0x{:08x}", expected[0])),
+            "{ir}"
+        );
+        let taken = expected[0] == expected[1];
+        assert!(ir.contains(&format!("taken={taken}")), "{ir}");
+    }
+
+    /// Aliased destinations, literals in either source and inline integers.
+    fn sop2_operand_cases() -> Vec<(Vec<u8>, [u32; 2])> {
+        let (a, b) = (0xffff_fff0, 0x0000_0011);
+        let mut cases = Vec::new();
+        for opcode in SOP2_OPCODES {
+            for (dst, src0, src1) in [(8, 8, 9), (9, 8, 9), (8, 8, 8), (9, 9, 9)] {
+                let x = if src0 == 9 { b } else { a };
+                let y = if src1 == 8 { a } else { b };
+                let (value, scc) = sop2_expected(opcode, x, y, true);
+                let code = sop2_program(&[sop2(opcode, dst, src0, src1)], dst, a, b, Some(true));
+                cases.push((code, lanes(value, scc)));
+            }
+            let (value, scc) = sop2_expected(opcode, a, b, true);
+            cases.push((
+                sop2_program(&[sop2(opcode, 10, 8, 255), b], 10, a, 7, Some(true)),
+                lanes(value, scc),
+            ));
+            let (value, scc) = sop2_expected(opcode, b, a, true);
+            cases.push((
+                sop2_program(&[sop2(opcode, 10, 255, 8), b], 10, a, 7, Some(true)),
+                lanes(value, scc),
+            ));
+            for (selector, inline) in [(0x80, 0), (0xc0, 64), (0xc1, u32::MAX), (0xd0, 0xffff_fff0)]
+            {
+                let (value, scc) = sop2_expected(opcode, a, inline, true);
+                let code = sop2_program(&[sop2(opcode, 10, 8, selector)], 10, a, b, Some(true));
+                cases.push((code, lanes(value, scc)));
+            }
+        }
+        cases
+    }
+
+    #[test]
+    fn scalar_alu_matches_definitions_on_boundary_operands() {
+        let vectors = sop2_vectors();
+        assert_eq!(vectors.len(), 7 * 10 * 10 * 2);
+        for (code, expected) in &vectors {
+            verify(code, &[0, u32::MAX], Some(expected));
+            assert_translated(code, expected);
+        }
+    }
+
+    #[test]
+    fn scalar_alu_aliasing_inline_and_literal_operands() {
+        let cases = sop2_operand_cases();
+        assert_eq!(cases.len(), 7 * 10);
+        for (code, expected) in &cases {
+            verify(code, &[0, u32::MAX], Some(expected));
+            assert_translated(code, expected);
+        }
+    }
+
+    /// All three implementations reject `code`, and at byte `offset`.
+    fn rejected_at(code: &[u8], offset: usize) {
+        rejected_at_with(code, offset, &[0, 1]);
+    }
+
+    fn rejected_at_with(code: &[u8], offset: usize, input: &[u32]) {
+        let error = compile(Architecture::Gfx1030, code).unwrap_err();
+        let at = match error {
+            xenora_shader::CompileError::Verify { offset, .. } => offset,
+            xenora_shader::CompileError::Decode(ref decode) => decode.offset,
+            ref other => panic!("{other:?}"),
+        };
+        assert_eq!(at, offset, "{error:?}");
+        assert_eq!(xenora_ref::execute(code, input).unwrap_err().offset, offset);
+        let independent = independent_ref::execute(code, input).unwrap_err();
+        assert!(
+            independent.starts_with(&format!("{offset:#x}:")),
+            "{independent}"
+        );
+    }
+
+    #[test]
+    fn scalar_alu_rejects_forms_outside_the_subset() {
+        // load 8, wait 4, two literal moves 8 each, s_cmp 4: the SOP2 word is at 0x20.
+        for opcode in [2, 3, 15, 17, 19] {
+            // s_add_i32 and s_sub_i32 (SCC rule not confirmed), 64-bit bitwise forms.
+            rejected_at(
+                &sop2_program(&[sop2(opcode, 10, 8, 9)], 10, 1, 2, Some(false)),
+                0x20,
+            );
+        }
+        for opcode in [4, 5] {
+            // Without the s_cmp, the carry-in reads SCC before anything set it.
+            rejected_at(
+                &sop2_program(&[sop2(opcode, 10, 8, 9)], 10, 1, 2, None),
+                0x1c,
+            );
+        }
+        for (alu, result) in [
+            (&[sop2(0, 4, 8, 9)][..], 9),    // Resource descriptor destination.
+            (&[sop2(0, 106, 8, 9)][..], 9),  // VCC_LO destination.
+            (&[sop2(0, 10, 8, 11)][..], 9),  // Uninitialized s11.
+            (&[sop2(0, 10, 106, 9)][..], 9), // VCC_LO source.
+            (&[sop2(0, 10, 255, 255), 0x1234_5678][..], 9), // Two literal sources.
+        ] {
+            // v2 reads s9, which is valid, so only the SOP2 word can fail.
+            rejected_at(&sop2_program(alu, result, 1, 2, Some(false)), 0x20);
+        }
+        // v_mov_b32 from VCC_LO stays outside the subset.
+        let mut code = sop2_program(&[sop2(0, 10, 8, 9)], 10, 1, 2, Some(false));
+        assert_eq!(code[0x24..0x28], 0x7e04_020a_u32.to_le_bytes());
+        code[0x24] = 106;
+        rejected_at(&code, 0x24);
+    }
+
+    #[test]
+    fn sgpr_moves_need_known_values_even_for_inactive_lanes() {
+        let words: [u32; 11] = [
+            0xe030_2000,
+            0x8000_0100,
+            0xbf8c_3f70, // load v1, wait
+            0x7e04_0280, // v_mov_b32 v2, 0
+            0xbefe_0382, // s_mov_b32 exec_lo, 2
+            0x7e04_0208, // v_mov_b32 v2, s8 (s8 never written)
+            0xbefe_03c1, // s_mov_b32 exec_lo, -1
+            0xe070_2000,
+            0x8001_0200,
+            0xbbfd_0000,
+            0xbf81_0000,
+        ];
+        let code: Vec<u8> = words[..11]
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        // One lane, inactive under EXEC_LO = 2: the interpreters must not skip the check.
+        rejected_at_with(&code, 0x14, &[0]);
+    }
+
+    #[test]
+    #[ignore = "requires a native Metal device with API and shader validation"]
+    fn scalar_alu_native_metal_known_answers() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
+        let metal = xenora_metal::NativeCompute::new().unwrap();
+        let run = |code: &[u8], input: &[u32]| {
+            let compiled = compile(Architecture::Gfx1030, code).unwrap();
+            metal
+                .run_words(&compiled.msl, xenora_shader::ENTRY_POINT, input)
+                .unwrap()
+        };
+        let input: Vec<u32> = (0..64).map(|lane| lane * 0x0101_0101).collect();
+        let expected: Vec<_> = input.iter().map(|word| word ^ 0x8000_000e).collect();
+        assert_eq!(run(SCALAR_ALU_FIXTURE, &input), expected);
+        let mut vectors = sop2_vectors();
+        vectors.extend(sop2_operand_cases());
+        for (code, expected) in &vectors {
+            assert_eq!(&run(code, &[0, u32::MAX]), expected);
+        }
+        eprintln!(
+            "{} SOP2 programs matched on native Metal",
+            vectors.len() + 1
+        );
+    }
 }

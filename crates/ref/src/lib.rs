@@ -48,6 +48,10 @@ pub enum Op {
     Move(u8, Source),
     Add(u8, u8, u8),
     ScalarMove(u8, Source),
+    /// VOP1 move of a normal SGPR into a VGPR.
+    MoveScalar(u8, u8),
+    /// SOP2 operation writing an SGPR and SCC.
+    Scalar(ScalarAlu, u8, Source, Source),
     CompareEqual(Source, Source),
     Branch {
         target: usize,
@@ -68,6 +72,22 @@ pub enum BranchCondition {
     VccZero,
     /// Take the branch when the low half of EXEC is clear.
     ExecZero,
+}
+
+/// SOP2 operations decoded by the reference interpreter.
+///
+/// AMD RDNA 2 XML descriptions: additions store the carry-out in SCC,
+/// subtractions the borrow; ADDC/SUBB add or subtract SCC; bitwise
+/// operations set SCC iff the result is nonzero.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScalarAlu {
+    Add,
+    Subtract,
+    AddWithCarry,
+    SubtractWithBorrow,
+    And,
+    Or,
+    Xor,
 }
 
 /// VOP2 operations decoded by the reference interpreter.
@@ -206,6 +226,33 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 let (right, right_length) = decode_scalar(*right, tail, offset)?;
                 (Op::CompareEqual(left, right), left_length.max(right_length))
             }
+            // SOP2: OP in bits 23-29, SDST in bits 16-22, SSRC1, SSRC0.
+            [
+                left,
+                right,
+                low,
+                high @ (0x80 | 0x82 | 0x87 | 0x88 | 0x89),
+                tail @ ..,
+            ] if (*left, *right) != (255, 255)
+                && low & 0x7f <= 105
+                && (low & 0x80 == 0 || matches!(high, 0x80 | 0x82)) =>
+            {
+                let kind = match (high, low >> 7) {
+                    (0x80, 0) => ScalarAlu::Add,
+                    (0x80, _) => ScalarAlu::Subtract,
+                    (0x82, 0) => ScalarAlu::AddWithCarry,
+                    (0x82, _) => ScalarAlu::SubtractWithBorrow,
+                    (0x87, _) => ScalarAlu::And,
+                    (0x88, _) => ScalarAlu::Or,
+                    _ => ScalarAlu::Xor,
+                };
+                let (left, left_length) = decode_scalar(*left, tail, offset)?;
+                let (right, right_length) = decode_scalar(*right, tail, offset)?;
+                (
+                    Op::Scalar(kind, low & 0x7f, left, right),
+                    left_length.max(right_length),
+                )
+            }
             [lo, hi, opcode @ (0x82 | 0x84 | 0x86 | 0x88), 0xbf, ..] => {
                 let words = i16::from_le_bytes([*lo, *hi]);
                 let words = usize::try_from(words).map_err(|_| error(offset, "backward branch"))?;
@@ -251,6 +298,16 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
             {
                 let dst = (upper >> 1) | ((tag & 1) << 7);
                 let selector = u16::from(*lo) | (u16::from(packed & 1) << 8);
+                if selector <= 105 {
+                    // VOP1 SRC0 0-105 selects a normal SGPR.
+                    program.push(DecodedInstruction {
+                        offset,
+                        byte_len: 4,
+                        op: Op::MoveScalar(dst, *lo),
+                    });
+                    offset += 4;
+                    continue;
+                }
                 let (src, length) = match selector {
                     128..=192 => (Source::Immediate(u32::from(selector - 128)), 4),
                     193..=208 => (
@@ -400,9 +457,18 @@ fn execute_lane(
         };
         if exec != u32::MAX {
             match op {
-                Op::Move(dst, _) | Op::Add(dst, ..) | Op::Vector(_, dst, ..) => {
+                Op::Move(dst, _)
+                | Op::MoveScalar(dst, _)
+                | Op::Add(dst, ..)
+                | Op::Vector(_, dst, ..) => {
                     if exec != 0 && registers[usize::from(dst)].is_none() {
                         return Err(error(offset, "partial EXEC requires an initialized VGPR"));
+                    }
+                    // As in translation, an SGPR source must be known even for an inactive lane.
+                    if let Op::MoveScalar(_, src) = op
+                        && exec != 0
+                    {
+                        read_scalar(Source::Register(src))?;
                     }
                     if exec & (1 << lane) == 0 {
                         continue;
@@ -456,6 +522,42 @@ fn execute_lane(
             }
             Op::CompareEqual(lhs, rhs) => {
                 scc = Some(read_scalar(lhs)? == read_scalar(rhs)?);
+                None
+            }
+            Op::MoveScalar(dst, src) => Some((dst, read_scalar(Source::Register(src))?)),
+            Op::Scalar(kind, dst, lhs, rhs) => {
+                if dst < 8 {
+                    return Err(error(offset, "write to a reserved resource SGPR"));
+                }
+                let (lhs, rhs) = (i64::from(read_scalar(lhs)?), i64::from(read_scalar(rhs)?));
+                let carry = match kind {
+                    ScalarAlu::AddWithCarry | ScalarAlu::SubtractWithBorrow => i64::from(
+                        scc.ok_or_else(|| error(offset, "carry-in from uninitialized SCC"))?,
+                    ),
+                    _ => 0,
+                };
+                // Exact integer arithmetic, then reduction modulo 2^32.
+                let (exact, flag) = match kind {
+                    ScalarAlu::Add | ScalarAlu::AddWithCarry => {
+                        let sum = lhs + rhs + carry;
+                        (sum, sum >= 1 << 32)
+                    }
+                    ScalarAlu::Subtract | ScalarAlu::SubtractWithBorrow => {
+                        let difference = lhs - rhs - carry;
+                        (difference, difference < 0)
+                    }
+                    ScalarAlu::And | ScalarAlu::Or | ScalarAlu::Xor => {
+                        let bits = match kind {
+                            ScalarAlu::And => lhs & rhs,
+                            ScalarAlu::Or => lhs | rhs,
+                            _ => lhs ^ rhs,
+                        };
+                        (bits, bits != 0)
+                    }
+                };
+                let value = exact.rem_euclid(1 << 32) as u32;
+                scalars[usize::from(dst)] = Some(value);
+                scc = Some(flag);
                 None
             }
             Op::Branch {

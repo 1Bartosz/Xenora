@@ -474,6 +474,14 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 dst,
                 src: VectorSource::Immediate(value),
             } => (Some(dst), Op::Constant(value)),
+            // SGPR values are wave-uniform and known during translation.
+            Instruction::MoveB32 {
+                dst,
+                src: VectorSource::Scalar(register),
+            } => (
+                Some(dst),
+                Op::Constant(read_scalar(ScalarSource::Register(register))?),
+            ),
             Instruction::AddNoCarryU32 { dst, src0, src1 } => {
                 (Some(dst), Op::Binary(Binary::Add, read(src0)?, read(src1)?))
             }
@@ -510,6 +518,29 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = Some(value);
+                continue;
+            }
+            Instruction::ScalarAlu {
+                op,
+                dst,
+                src0,
+                src1,
+            } => {
+                let (src0, src1) = (read_scalar(src0)?, read_scalar(src1)?);
+                let carry_in = if op.reads_scc() {
+                    scc.ok_or_else(|| error("carry-in or borrow-in reads uninitialized SCC"))?
+                } else {
+                    false
+                };
+                if dst < 8 {
+                    return Err(error("scalar ALU would modify a resource descriptor"));
+                }
+                let (value, flag) = op.evaluate(src0, src1, carry_in);
+                let slot = scalars
+                    .get_mut(usize::from(dst))
+                    .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
+                *slot = Some(value);
+                scc = Some(flag);
                 continue;
             }
             Instruction::ScalarCompareEqU32 { src0, src1 } => {

@@ -265,3 +265,17 @@ fn checks_fixture_layout_and_bindings_even_in_skipped_code() {
     assert!(compiled.msl.contains("uint t1 = input[index];"));
     assert!(compiled.msl.contains("output[index] = t3;"));
 }
+
+#[test]
+fn scalar_alu_results_reach_the_kernel_as_constants() {
+    let code = include_bytes!("../../../fixtures/rdna2/scalar-alu.bin");
+    let compiled = compile(Architecture::Gfx1030, code).unwrap();
+    assert_eq!(
+        compiled.ir,
+        include_str!("../../../fixtures/golden/scalar-alu.ir")
+    );
+    assert_eq!(
+        compiled.msl,
+        include_str!("../../../fixtures/golden/scalar-alu.metal")
+    );
+}

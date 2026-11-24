@@ -15,13 +15,20 @@ The wider LLVM operand matrix exercises decoding only. ABI means application bin
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `buffer_load_dword` | MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags | 8 B | yes | yes | three-way passed | MSL load | implemented | fixture verified | fixture verified |
 | `s_waitcnt vmcnt(0)` | SOPP, exact immediate `0x3f70`; other counters disabled by their maximum values | 4 B | yes | yes | three-way passed | verified load wait | implemented | fixture verified | fixture verified |
-| `v_mov_b32_e32` | VOP1, VGPR destination, VGPR or inline integer or literal source, plus the inline bit pattern for +1.0f | 4 or 8 B | yes | yes | three-way passed | constant or register value | implemented | fixture verified | fixture verified |
+| `v_mov_b32_e32` | VOP1, VGPR destination, VGPR, normal SGPR (wave-uniform, known during translation) or inline integer or literal source, plus the inline bit pattern for +1.0f | 4 or 8 B | yes | yes | three-way passed | constant or register value | implemented | fixture verified | fixture verified |
 | `v_add_nc_u32_e64` | VOP3, VGPR destination and two VGPR inputs, modifier fields clear, third source field encoded as inline zero | 8 B | yes | yes | three-way passed | MSL unsigned add | implemented | fixture verified | fixture verified |
 | `buffer_store_dword` | MUBUF, VGPR data/index, four normal SGPRs, `idxen`, zero offsets and remaining flags | 8 B | yes | yes | three-way passed | MSL store | implemented | fixture verified | fixture verified |
 | `s_waitcnt_vscnt null, 0` | SOPK, exact null source and zero immediate | 4 B | yes | yes | three-way passed | verified store wait | implemented | fixture verified | fixture verified |
 | `s_endpgm` | SOPP, zero immediate | 4 B | yes | yes | three-way passed | verified termination | implemented | fixture verified | fixture verified |
 | `s_mov_b32` | Normal SGPR or EXEC/VCC half destination and normal SGPR, inline integer or literal source | `BE880387` | yes | yes | three-way passed | resolved scalar state | implemented | fixture verified | fixture verified |
 | `s_cmp_eq_u32` | Normal SGPR or integer operands, with at most one source selecting a literal | `BF068708` | yes | yes | three-way passed | resolved SCC | implemented | fixture verified | fixture verified |
+| `s_add_u32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = carry-out | `80088308` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_sub_u32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = borrow | `808A8180` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_addc_u32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; adds SCC; SCC = carry-out | `820980FF 7FFFFFFF` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_subb_u32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; subtracts SCC; SCC = borrow | `828B0809` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_and_b32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = result != 0 | `870D090C` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_or_b32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = result != 0 | `880ED00D` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_xor_b32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = result != 0 | `890C0A0B` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
 | `s_cbranch_scc0` | Nonnegative signed dword displacement | `BF840002` | yes | yes | three-way passed | resolved conditional branch | implemented | fixture verified | fixture verified |
 | `s_branch` | Nonnegative signed dword displacement | `BF820001` | yes | yes | three-way passed | resolved branch | implemented | fixture verified | fixture verified |
 | `v_and_b32_e32` | Two VGPR sources and one VGPR destination | `36020702` | yes | yes | three-way passed | MSL bitwise AND | implemented | fixture verified | fixture verified |
@@ -39,20 +46,20 @@ The wider LLVM operand matrix exercises decoding only. ABI means application bin
 ## Automated three-way comparison
 
 LLVM 23.1.6, the production decoder and the independent reference decoder
-matched 338 instructions across eight streams: the six synthetic fixtures,
-a high-register sequence and a 272-instruction matrix assembled by LLVM.
+matched 452 instructions across nine streams: the seven synthetic fixtures,
+a high-register sequence and an operand matrix assembled by LLVM.
 The harness checks byte offsets, widths, encoded bytes from LLVM, mnemonic
 and operands, and the typed reference operation against the production
-operation. It covers all 21 forms in this document.
+operation. It covers all 28 forms in this document.
 
-The matrix checks the 81 inline integer selectors in VOP1, SOP1 and SOPC,
-forced literals that could otherwise be inline, literal selection in either
-SOPC operand, high SGPR and VGPR indices, MUBUF descriptor and index
+The matrix checks the 81 inline integer selectors in VOP1, SOP1, SOPC and
+SOP2, forced literals that could otherwise be inline, literal selection in
+either SOPC or SOP2 operand, every supported SOP2 form, VOP1 SGPR sources, high SGPR and VGPR indices, MUBUF descriptor and index
 operands, and zero and nonzero forward branch displacements. The decoder
 trace exposes MUBUF operands independently of the synthetic execution ABI,
 which still requires the original index and resource bindings.
 
-Five malformed LLVM probes produced diagnostics, and 19 valid encodings
+Five malformed LLVM probes produced diagnostics, and 27 valid encodings
 or disassemblable branch sequences were deliberately rejected by both Xenora
 decoders. Both Xenora decoders also reject all 37 interior truncation offsets
 in the add fixture and every case in the unsupported-encoding list.

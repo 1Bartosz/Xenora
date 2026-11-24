@@ -7,10 +7,11 @@ mod rdna2;
 #[rustfmt::skip]
 mod rdna2_meta;
 pub use rdna2::{
-    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
-    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT,
-    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32,
-    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_U32, S_ADDC_U32, S_AND_B32,
+    S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32,
+    S_OR_B32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32, V_ADD_F32,
+    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
+    V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 
 /// Selects the instruction encoding independently of the container and execution ABI.
@@ -45,6 +46,8 @@ impl Opcode {
 pub enum VectorSource {
     /// VGPR index.
     Register(u8),
+    /// Normal SGPR index (s0-s105), read as a wave-uniform value.
+    Scalar(u8),
     /// Inline integer or literal word, represented by its bits.
     Immediate(u32),
 }
@@ -53,6 +56,7 @@ impl fmt::Display for VectorSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Register(register) => write!(formatter, "v{register}"),
+            Self::Scalar(register) => write!(formatter, "s{register}"),
             Self::Immediate(value) => write!(formatter, "0x{value:x}"),
         }
     }
@@ -76,6 +80,71 @@ impl fmt::Display for ScalarSource {
                 _ => write!(formatter, "0x{value:x}"),
             },
         }
+    }
+}
+
+/// SOP2 32-bit integer operations in the supported scalar subset.
+///
+/// SCC behaviour follows the pinned AMD RDNA 2 XML descriptions: additions
+/// store the carry-out, subtractions the borrow, ADDC and SUBB also consume
+/// SCC as carry-in or borrow-in, and bitwise operations set SCC iff the result
+/// is nonzero. See docs/shaders/scalar-alu.md for the sources.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScalarAluOp {
+    /// `s_add_u32`: D = S0 + S1, SCC = carry-out.
+    AddU32,
+    /// `s_sub_u32`: D = S0 - S1, SCC = borrow (S1 > S0).
+    SubU32,
+    /// `s_addc_u32`: D = S0 + S1 + SCC, SCC = carry-out.
+    AddcU32,
+    /// `s_subb_u32`: D = S0 - S1 - SCC, SCC = borrow.
+    SubbU32,
+    /// `s_and_b32`: D = S0 & S1, SCC = D != 0.
+    AndB32,
+    /// `s_or_b32`: D = S0 | S1, SCC = D != 0.
+    OrB32,
+    /// `s_xor_b32`: D = S0 ^ S1, SCC = D != 0.
+    XorB32,
+}
+
+impl ScalarAluOp {
+    /// Lower-case mnemonic.
+    pub fn mnemonic(self) -> &'static str {
+        match self {
+            Self::AddU32 => "s_add_u32",
+            Self::SubU32 => "s_sub_u32",
+            Self::AddcU32 => "s_addc_u32",
+            Self::SubbU32 => "s_subb_u32",
+            Self::AndB32 => "s_and_b32",
+            Self::OrB32 => "s_or_b32",
+            Self::XorB32 => "s_xor_b32",
+        }
+    }
+
+    /// The 32-bit result and the new SCC, with `carry_in` the SCC read by
+    /// ADDC and SUBB (ignored by the other operations).
+    pub fn evaluate(self, src0: u32, src1: u32, carry_in: bool) -> (u32, bool) {
+        let carry = u32::from(carry_in && self.reads_scc());
+        match self {
+            Self::AddU32 | Self::AddcU32 => {
+                let (partial, first) = src0.overflowing_add(src1);
+                let (value, second) = partial.overflowing_add(carry);
+                (value, first || second)
+            }
+            Self::SubU32 | Self::SubbU32 => {
+                let (partial, first) = src0.overflowing_sub(src1);
+                let (value, second) = partial.overflowing_sub(carry);
+                (value, first || second)
+            }
+            Self::AndB32 => (src0 & src1, src0 & src1 != 0),
+            Self::OrB32 => (src0 | src1, src0 | src1 != 0),
+            Self::XorB32 => (src0 ^ src1, src0 ^ src1 != 0),
+        }
+    }
+
+    /// Whether the operation reads SCC as a carry-in or borrow-in.
+    pub fn reads_scc(self) -> bool {
+        matches!(self, Self::AddcU32 | Self::SubbU32)
     }
 }
 
@@ -120,6 +189,13 @@ pub enum Instruction {
     AddNoCarryU32 { dst: u8, src0: u8, src1: u8 },
     /// SOP1 32-bit move to a normal SGPR or an EXEC/VCC half.
     ScalarMoveB32 { dst: u8, src: ScalarSource },
+    /// SOP2 32-bit integer operation writing a normal SGPR (s0-s105) and SCC.
+    ScalarAlu {
+        op: ScalarAluOp,
+        dst: u8,
+        src0: ScalarSource,
+        src1: ScalarSource,
+    },
     /// SOPC 32-bit equality comparison writing SCC.
     ScalarCompareEqU32 {
         src0: ScalarSource,
@@ -177,6 +253,21 @@ pub enum Instruction {
     EndProgram,
 }
 
+/// Formats an SGPR destination with LLVM's names for the EXEC and VCC halves.
+struct ScalarDestination(u8);
+
+impl fmt::Display for ScalarDestination {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            106 => formatter.write_str("vcc_lo"),
+            107 => formatter.write_str("vcc_hi"),
+            126 => formatter.write_str("exec_lo"),
+            127 => formatter.write_str("exec_hi"),
+            register => write!(formatter, "s{register}"),
+        }
+    }
+}
+
 impl Instruction {
     /// Returns the mnemonic for the exact encoding family represented.
     pub fn mnemonic(self) -> &'static str {
@@ -188,6 +279,7 @@ impl Instruction {
             Self::MoveB32 { .. } => "v_mov_b32_e32",
             Self::AddNoCarryU32 { .. } => "v_add_nc_u32_e64",
             Self::ScalarMoveB32 { .. } => "s_mov_b32",
+            Self::ScalarAlu { op, .. } => op.mnemonic(),
             Self::ScalarCompareEqU32 { .. } => "s_cmp_eq_u32",
             Self::BranchSccZero { .. } => "s_cbranch_scc0",
             Self::BranchExecZero { .. } => "s_cbranch_execz",
@@ -250,13 +342,12 @@ impl fmt::Display for Instruction {
             | Self::VectorMulF32 { dst, src0, src1 } => {
                 write!(formatter, " v{dst}, v{src0}, v{src1}")
             }
-            Self::ScalarMoveB32 { dst, src } => match dst {
-                106 => write!(formatter, " vcc_lo, {src}"),
-                107 => write!(formatter, " vcc_hi, {src}"),
-                126 => write!(formatter, " exec_lo, {src}"),
-                127 => write!(formatter, " exec_hi, {src}"),
-                _ => write!(formatter, " s{dst}, {src}"),
-            },
+            Self::ScalarMoveB32 { dst, src } => {
+                write!(formatter, " {}, {src}", ScalarDestination(dst))
+            }
+            Self::ScalarAlu {
+                dst, src0, src1, ..
+            } => write!(formatter, " {}, {src0}, {src1}", ScalarDestination(dst)),
             Self::ScalarCompareEqU32 { src0, src1 } => write!(formatter, " {src0}, {src1}"),
             Self::Branch { target }
             | Self::BranchSccZero { target }

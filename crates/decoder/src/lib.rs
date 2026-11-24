@@ -3,13 +3,15 @@
 use std::fmt;
 
 pub use xenora_isa::{
-    Architecture, ExportTarget, Instruction, InterpolationPhase, ScalarSource, VectorSource,
+    Architecture, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp, ScalarSource,
+    VectorSource,
 };
 use xenora_isa::{
-    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
-    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT,
-    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32,
-    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_U32, S_ADDC_U32, S_AND_B32,
+    S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32,
+    S_OR_B32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32, V_ADD_F32,
+    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
+    V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 
 use xenora_isa::meta::EncodingFamily;
@@ -17,11 +19,14 @@ use xenora_isa::meta::EncodingFamily;
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
 /// operand combination. Operand restrictions are listed in docs/status.toml;
 /// every other form in [`xenora_isa::meta::FORMS`] is rejected as unsupported.
-pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 25] = [
+pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 32] = [
     ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
     ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
     ("EXP", EncodingFamily::Exp),
     ("IMAGE_SAMPLE_LZ", EncodingFamily::Mimg),
+    ("S_ADD_U32", EncodingFamily::Sop2),
+    ("S_ADDC_U32", EncodingFamily::Sop2),
+    ("S_AND_B32", EncodingFamily::Sop2),
     ("S_BRANCH", EncodingFamily::Sopp),
     ("S_CBRANCH_EXECZ", EncodingFamily::Sopp),
     ("S_CBRANCH_SCC0", EncodingFamily::Sopp),
@@ -29,8 +34,12 @@ pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 25] = [
     ("S_CMP_EQ_U32", EncodingFamily::Sopc),
     ("S_ENDPGM", EncodingFamily::Sopp),
     ("S_MOV_B32", EncodingFamily::Sop1),
+    ("S_OR_B32", EncodingFamily::Sop2),
+    ("S_SUB_U32", EncodingFamily::Sop2),
+    ("S_SUBB_U32", EncodingFamily::Sop2),
     ("S_WAITCNT", EncodingFamily::Sopp),
     ("S_WAITCNT_VSCNT", EncodingFamily::Sopk),
+    ("S_XOR_B32", EncodingFamily::Sop2),
     ("V_ADD_F32", EncodingFamily::Vop2),
     ("V_ADD_NC_U32", EncodingFamily::Vop3),
     ("V_AND_B32", EncodingFamily::Vop2),
@@ -338,6 +347,19 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         let target = branch_target(first, offset, "s_branch")?;
         return Ok((Instruction::Branch { target }, S_BRANCH.byte_len()));
     }
+    for (opcode, op) in [
+        (S_ADD_U32, ScalarAluOp::AddU32),
+        (S_SUB_U32, ScalarAluOp::SubU32),
+        (S_ADDC_U32, ScalarAluOp::AddcU32),
+        (S_SUBB_U32, ScalarAluOp::SubbU32),
+        (S_AND_B32, ScalarAluOp::AndB32),
+        (S_OR_B32, ScalarAluOp::OrB32),
+        (S_XOR_B32, ScalarAluOp::XorB32),
+    ] {
+        if opcode.matches(first) {
+            return scalar_alu(op, first, bytes);
+        }
+    }
     if S_CBRANCH_SCC0.matches(first) {
         let target = branch_target(first, offset, "s_cbranch_scc0")?;
         return Ok((
@@ -444,6 +466,40 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     }
 
     Err(DecodeErrorKind::UnsupportedOpcode { word: first })
+}
+
+/// SOP2: SSRC0 in bits 0-7, SSRC1 in bits 8-15, SDST in bits 16-22.
+/// Other SOP2 opcodes, including S_ADD_I32 and S_SUB_I32 whose SCC rule is
+/// not pinned by the sources in docs/shaders/scalar-alu.md, stay unsupported.
+fn scalar_alu(
+    op: ScalarAluOp,
+    first: u32,
+    bytes: &[u8],
+) -> Result<(Instruction, u8), DecodeErrorKind> {
+    let mnemonic = op.mnemonic();
+    let dst = ((first >> 16) & 0x7f) as u8;
+    if dst > 105 {
+        return Err(unsupported(mnemonic, "expected a normal SGPR destination"));
+    }
+    let src0_bits = first as u8;
+    let src1_bits = (first >> 8) as u8;
+    if src0_bits == 255 && src1_bits == 255 {
+        return Err(unsupported(
+            mnemonic,
+            "only one source may select a literal",
+        ));
+    }
+    let (src0, len0) = scalar_source(src0_bits, bytes, mnemonic)?;
+    let (src1, len1) = scalar_source(src1_bits, bytes, mnemonic)?;
+    Ok((
+        Instruction::ScalarAlu {
+            op,
+            dst,
+            src0,
+            src1,
+        },
+        len0.max(len1),
+    ))
 }
 
 fn scalar_source(
@@ -592,6 +648,7 @@ fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKi
     let source = first & 0x1ff;
     let base_len = V_MOV_B32.byte_len();
     let (src, len) = match source {
+        0..=105 => (VectorSource::Scalar(source as u8), base_len),
         128..=192 => (VectorSource::Immediate(source - 128), base_len),
         193..=208 => (
             VectorSource::Immediate(192u32.wrapping_sub(source)),
@@ -607,7 +664,7 @@ fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKi
         _ => {
             return Err(unsupported(
                 "v_mov_b32_e32",
-                "expected a VGPR, inline integer, inline +1.0f or literal",
+                "expected a VGPR, normal SGPR, inline integer, inline +1.0f or literal",
             ));
         }
     };

@@ -8,12 +8,15 @@
 //! field layout and executes them with an explicit program-counter machine, so
 //! a defect in the production decoder or reference cannot cancel out here.
 //!
-//! Scope matches the demo fixtures: scalar move/compare/branch, VOP1 move,
+//! Scope matches the demo fixtures: scalar move/compare/branch, SOP2 add,
+//! subtract, add-with-carry, subtract-with-borrow, AND, OR and XOR, VOP1 move
+//! (including from an SGPR),
 //! VOP2 bitwise, shift, arithmetic-shift and float, VOP3 add-no-carry, MUBUF
 //! load/store and the two waits plus `s_endpgm`. Anything else is a controlled
 //! error. The arithmetic shift is evaluated as a floor division by a power of
 //! two rather than with a host signed shift, so the oracle does not share the
-//! production operator.
+//! production operator. SOP2 arithmetic runs through a bit-serial ripple
+//! adder (subtraction as addition of the complement), not host integer ops.
 
 const MAX_CODE_BYTES: usize = 1024;
 const MAX_INPUT_WORDS: usize = 4096;
@@ -27,11 +30,17 @@ enum Src {
 #[derive(Clone, Copy, Debug)]
 enum Insn {
     SMov(u8, Src),
+    /// SOP2 opcode 0, 1, 4, 5, 14, 16 or 18.
+    SAlu(u32, u8, Src, Src),
     SCmpEq(Src, Src),
     BranchScc0(usize),
-    BranchMaskZero { target: usize, register: usize },
+    BranchMaskZero {
+        target: usize,
+        register: usize,
+    },
     Branch(usize),
     VMov(u8, Src),
+    VMovFromSgpr(u8, u8),
     VAddNc(u8, u8, u8),
     VAnd(u8, u8, u8),
     VOr(u8, u8, u8),
@@ -103,6 +112,7 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32, lane: usize) -> Result<u
                     ));
                 }
                 Insn::VMov(dst, _)
+                | Insn::VMovFromSgpr(dst, _)
                 | Insn::VAddNc(dst, ..)
                 | Insn::VAnd(dst, ..)
                 | Insn::VOr(dst, ..)
@@ -114,6 +124,9 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32, lane: usize) -> Result<u
                 | Insn::VMulF(dst, ..) => {
                     if execution_mask != 0 && vgpr[usize::from(dst)].is_none() {
                         return Err(format!("{offset:#x}: partial EXEC on uninitialized VGPR"));
+                    }
+                    if let (Insn::VMovFromSgpr(_, src), true) = (insn, execution_mask != 0) {
+                        read_s(Src::Reg(src))?;
                     }
                     if (execution_mask.rotate_right(lane as u32) & 1) == 0 {
                         pc += 1;
@@ -153,6 +166,11 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32, lane: usize) -> Result<u
                     Src::Imm(value) => value,
                     Src::Reg(reg) => read_v(reg)?,
                 };
+                check_destination(dst, pending_read, offset)?;
+                vgpr[dst as usize] = Some(value);
+            }
+            Insn::VMovFromSgpr(dst, src) => {
+                let value = read_s(Src::Reg(src))?;
                 check_destination(dst, pending_read, offset)?;
                 vgpr[dst as usize] = Some(value);
             }
@@ -215,6 +233,38 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32, lane: usize) -> Result<u
             Insn::SCmpEq(a, b) => {
                 scc = Some(read_s(a)? == read_s(b)?);
             }
+            Insn::SAlu(opcode, dst, a, b) => {
+                if dst < 8 {
+                    return Err(format!("{offset:#x}: write to a resource SGPR"));
+                }
+                let (a, b) = (read_s(a)?, read_s(b)?);
+                let carry_in = || scc.ok_or_else(|| format!("{offset:#x}: uninitialized SCC"));
+                let (value, flag) = match opcode {
+                    0 => ripple(a, b, false),
+                    4 => ripple(a, b, carry_in()?),
+                    // a - b - borrow = a + !b + (1 - borrow); borrow-out = !carry-out.
+                    1 | 5 => {
+                        let borrow = opcode == 5 && carry_in()?;
+                        let (value, carry) = ripple(a, !b, !borrow);
+                        (value, !carry)
+                    }
+                    _ => {
+                        let mut value = 0;
+                        for bit in 0..32 {
+                            let (x, y) = ((a >> bit) & 1 == 1, (b >> bit) & 1 == 1);
+                            let set = match opcode {
+                                14 => x && y,
+                                16 => x || y,
+                                _ => x != y,
+                            };
+                            value |= u32::from(set) << bit;
+                        }
+                        (value, value != 0)
+                    }
+                };
+                sgpr[dst as usize] = Some(value);
+                scc = Some(flag);
+            }
             Insn::BranchScc0(target) => {
                 let condition = scc.ok_or_else(|| format!("{offset:#x}: uninitialized SCC"))?;
                 if !condition {
@@ -242,6 +292,18 @@ fn run_lane(program: &[(usize, Insn)], lane_input: u32, lane: usize) -> Result<u
         pc += 1;
     }
     Err("stream ended without s_endpgm".to_string())
+}
+
+/// Bit-serial addition with carry-in; returns the sum and the carry-out.
+fn ripple(a: u32, b: u32, carry_in: bool) -> (u32, bool) {
+    let mut carry = carry_in;
+    let mut sum = 0;
+    for bit in 0..32 {
+        let (x, y) = ((a >> bit) & 1 == 1, (b >> bit) & 1 == 1);
+        sum |= u32::from(x ^ y ^ carry) << bit;
+        carry = (x && y) || (carry && (x ^ y));
+    }
+    (sum, carry)
 }
 
 fn check_destination(dst: u8, load: Option<u8>, offset: usize) -> Result<(), String> {
@@ -346,6 +408,9 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
     if first & 0xfe01_fe00 == 0x7e00_0200 {
         let dst = (first >> 17) as u8;
         let selector = first & 0x1ff;
+        if selector <= 105 {
+            return Ok((Insn::VMovFromSgpr(dst, selector as u8), 4));
+        }
         let (src, len) = if selector == 255 {
             (Src::Imm(word(code, offset + 4)?), 8)
         } else {
@@ -372,6 +437,20 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         }
         let (src, len) = scalar_source(code, offset, first as u8)?;
         return Ok((Insn::SMov(dst, src), len));
+    }
+    // SOP2: ENCODING 0b10 in bits 30-31, OP in bits 23-29, SDST in 16-22.
+    if first >> 30 == 0b10 && matches!((first >> 23) & 0x7f, 0 | 1 | 4 | 5 | 14 | 16 | 18) {
+        let dst = ((first >> 16) & 0x7f) as u8;
+        if dst > 105 {
+            return Err(fail("unsupported SOP2 destination"));
+        }
+        let (a, b) = (first as u8, (first >> 8) as u8);
+        if a == 255 && b == 255 {
+            return Err(fail("two scalar literals"));
+        }
+        let (sa, la) = scalar_source(code, offset, a)?;
+        let (sb, lb) = scalar_source(code, offset, b)?;
+        return Ok((Insn::SAlu((first >> 23) & 0x7f, dst, sa, sb), la.max(lb)));
     }
     if first & 0xffff_0000 == 0xbf06_0000 {
         let a = first as u8;

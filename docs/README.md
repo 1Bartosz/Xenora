@@ -16,6 +16,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 ## RDNA 2 decoding and shader translation
 
 - [Instruction coverage](shaders/instruction-coverage.md) — Desktop gfx1030 instruction forms, operand limits, and CPU and GPU results.
+- [SOP2 scalar ALU](shaders/scalar-alu.md) — Supported scalar add, subtract and bitwise forms, their SCC rules and sources.
 - [Metal Shading Language generation](shaders/msl.md) and [independent CPU reference](shaders/reference-interpreter.md) — Translation rules and separate CPU execution models.
 
 ## Native Metal backend

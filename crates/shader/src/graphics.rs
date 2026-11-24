@@ -223,6 +223,9 @@ fn lift(
                     VectorSource::Immediate(_) => {
                         return Err(error("graphics move requires finite FP32 bits"));
                     }
+                    VectorSource::Scalar(_) => {
+                        return Err(error("graphics move from an SGPR is unsupported"));
+                    }
                 };
                 registers[usize::from(dst)] = Some(value);
             }
