@@ -791,15 +791,40 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         });
     }
 
+    // Map an RVA to a file offset.
+    //
+    // The offset is derived from the section header, so on a truncated file it
+    // can point past the end of the buffer. Such an offset is not readable, so
+    // it is reported as unmapped rather than returned and sliced later.
     let rva_to_offset = |rva: u32| -> Option<usize> {
         for sec in &sections {
             let max_span = std::cmp::max(sec.virtual_size, sec.raw_data_size);
             if rva >= sec.virtual_address && rva < sec.virtual_address.saturating_add(max_span) {
                 let off_in_sec = (rva - sec.virtual_address) as usize;
-                return Some(sec.raw_data_ptr as usize + off_in_sec);
+                let off = sec.raw_data_ptr as usize + off_in_sec;
+                if off >= bytes.len() {
+                    return None;
+                }
+                return Some(off);
             }
         }
         None
+    };
+
+    // Read a NUL-terminated string that starts at `start`.
+    //
+    // Returns `None` when the string starts outside the buffer or is not
+    // terminated, so a truncated file yields an unreadable name instead of a
+    // slice that panics.
+    let read_c_string = |start: usize| -> Option<String> {
+        if start >= bytes.len() {
+            return None;
+        }
+        let mut end = start;
+        while end < bytes.len() && bytes[end] != 0 {
+            end += 1;
+        }
+        Some(String::from_utf8_lossy(&bytes[start..end]).into_owned())
     };
 
     // 1. Relocations Census
@@ -895,14 +920,11 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
             }
             desc_off += 20;
 
-            let dll_name = if let Some(no) = rva_to_offset(name_rva) {
-                let mut end = no;
-                while end < bytes.len() && bytes[end] != 0 {
-                    end += 1;
-                }
-                String::from_utf8_lossy(&bytes[no..end]).into_owned()
-            } else {
-                "UNKNOWN.dll".to_string()
+            let dll_name = match rva_to_offset(name_rva).and_then(read_c_string) {
+                Some(name) => name,
+                // The name is outside the file or is not NUL-terminated
+                // within it, which a truncated file can cause.
+                None => "UNKNOWN.dll".to_string(),
             };
 
             let category = ProbeReport::categorize_dll(&dll_name);
@@ -925,15 +947,13 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
                         format!("Ordinal#{}", val & 0xFFFF)
                     } else {
                         let hint_rva = (val & 0x7FFF_FFFF) as u32;
-                        if let Some(ho) = rva_to_offset(hint_rva) {
-                            let str_start = ho + 2;
-                            let mut str_end = str_start;
-                            while str_end < bytes.len() && bytes[str_end] != 0 {
-                                str_end += 1;
-                            }
-                            String::from_utf8_lossy(&bytes[str_start..str_end]).into_owned()
-                        } else {
-                            "UNKNOWN_SYM".to_string()
+                        // The hint is two bytes, so the name starts after it.
+                        match rva_to_offset(hint_rva)
+                            .and_then(|ho| ho.checked_add(2))
+                            .and_then(read_c_string)
+                        {
+                            Some(name) => name,
+                            None => "UNKNOWN_SYM".to_string(),
                         }
                     };
 
