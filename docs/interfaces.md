@@ -155,8 +155,8 @@ They share the 1 MiB scan budget. `wcslen`, `wcsnlen`, `wcscmp`, and
 Counts and bounds for the wide variants are in code units.
 
 The same modules expose `memset`, `memcpy`, `memmove`, and `memcmp` for spans
-up to 1 MiB. Each nonempty span must fit in one mapped guest region with the
-required permissions. Writes validate the full destination before changing
+up to 1 MiB. Each nonempty span must be fully mapped with the required permissions.
+A span may cross adjacent guest regions. Writes validate the full destination before changing
 bytes, and moves preserve the original source bytes when ranges overlap.
 
 ### Guest heaps
@@ -325,3 +325,24 @@ multiply forms. The graphics ABI also supports register and finite
 literal moves. Unsupported stage instructions or export combinations
 fail explicitly. The Xbox graphics ABI, hardware-specific floating-point
 modes, image instructions, and additional varyings remain unsupported.
+
+## Graphics draw and blend contracts
+
+`NativeCompute::render_indexed` issues one real `drawIndexedPrimitives` call
+per draw (up to 16) on a 16- or 32-bit index buffer with a start index and a
+signed base vertex, into an offscreen RGBA8 target. A draw can sample an
+original BC1 texture uploaded natively. Before encoding anything it rejects
+malformed draws; execution checks each draw in turn.
+
+`NativeCompute::render_blend` draws up to 16 flat-coloured triangles in order
+into an offscreen RGBA8 target. Each draw has its own colour write mask and
+either blending disabled or separate RGB and alpha blend factors and
+operations. Colours are compared per channel against expectations derived
+independently from the public Metal blend equations.
+
+`NativeCompute::render_depth` draws up to 16 triangles in order with an
+optional `Depth32Float` attachment, a chosen clear depth and a per-draw depth
+compare function. Colour and the stored depth are both read back.
+
+These passes are checked on the GPU with Metal validation against expectations
+derived independently from the public semantics; synthetic fixtures only.

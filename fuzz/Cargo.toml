@@ -11,10 +11,17 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "=0.4.13"
 xenora-decoder = { path = "../crates/decoder" }
+xenora-loader = { path = "../crates/loader" }
 xenora-ref = { path = "../crates/ref" }
 xenora-shader = { path = "../crates/shader" }
 
 [workspace]
+
+[[bin]]
+name = "cpu_decode"
+path = "fuzz_targets/cpu_decode.rs"
+test = false
+doc = false
 
 [[bin]]
 name = "instruction_stream"
@@ -25,6 +32,12 @@ doc = false
 [[bin]]
 name = "fixture"
 path = "fuzz_targets/fixture.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pe_parse"
+path = "fuzz_targets/pe_parse.rs"
 test = false
 doc = false
 

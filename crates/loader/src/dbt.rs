@@ -112,7 +112,19 @@ impl DbtEngine {
 
             // Look up or translate block at cpu.rip
             let block_limit = (max_instructions - instructions_count).min(MAX_BLOCK_INSTRUCTIONS);
-            let block_fn_ptr = match self.get_or_compile_block(cpu.rip, memory, block_limit) {
+            let mut block = self.get_or_compile_block(cpu.rip, memory, block_limit);
+            // A decode failure can belong to a later instruction in the block.
+            // Execute the current instruction alone so earlier effects retire
+            // and an earlier data fault takes precedence over speculative fetch.
+            if block_limit > 1
+                && matches!(
+                    block,
+                    Err(ExitReason::IllegalInstruction(_) | ExitReason::MemoryFault(_))
+                )
+            {
+                block = self.get_or_compile_block(cpu.rip, memory, 1);
+            }
+            let block_fn_ptr = match block {
                 Ok(ptr) => ptr,
                 Err(reason) => {
                     return ExecutionResult {
@@ -1077,6 +1089,16 @@ impl DbtEngine {
                     cur_rip += 1;
 
                     match op2 {
+                        // BSWAP r32/r64: the register is encoded in the opcode.
+                        0xC8..=0xCF => {
+                            insn_count += 1;
+                            let reg = (op2 & 7) | (u8::from(rex_b) << 3);
+                            let offset = u32::from(reg) * 8;
+                            asm.ldr_uoff_64(X9, X19, offset);
+                            // REV X9, X9 or REV W9, W9. A W write clears the upper half.
+                            asm.emit(if rex_w { 0xdac0_0d29 } else { 0x5ac0_0929 });
+                            asm.str_uoff_64(X9, X19, offset);
+                        }
                         // Jcc rel32 (0x0F 0x80..=0x8F)
                         0x80..=0x8F => {
                             insn_count += 1;
@@ -1649,6 +1671,58 @@ mod tests {
             ExitReason::IllegalInstruction(0xCC)
         );
         assert_eq!(unsupported.instructions_executed, 0);
+    }
+
+    #[test]
+    fn completed_store_survives_the_next_fault_or_budget_boundary() {
+        for native in [false, true] {
+            for (tail, fault) in [
+                (&[0xcc][..], ExitReason::IllegalInstruction(0xcc)),
+                (
+                    &[0xb8, 1][..],
+                    ExitReason::MemoryFault(MemoryError::UnmappedAddress(ENTRY + 5)),
+                ),
+                (
+                    &[0x48, 0x8b, 0x02, 0xf4][..],
+                    ExitReason::MemoryFault(MemoryError::UnmappedAddress(0x4000)),
+                ),
+            ] {
+                for budget in [0, 1, 16] {
+                    // mov [rcx], rax; then an illegal, truncated or faulting instruction.
+                    let code = [&[0x48, 0x89, 0x01][..], tail].concat();
+                    let (mut engine, mut cpu, mut memory) = fixture(&code);
+                    memory
+                        .map_region(0x3000, 8, MemoryPermissions::READ_WRITE)
+                        .unwrap();
+                    cpu.set(Register::Rax, 0x1234);
+                    cpu.set(Register::Rcx, 0x3000);
+                    cpu.set(Register::Rdx, 0x4000);
+                    let mut expected = cpu.clone();
+                    if budget > 0 {
+                        expected.rip += 3;
+                    }
+                    let result = if native {
+                        engine.run(&mut cpu, &mut memory, budget)
+                    } else {
+                        crate::cpu::Interpreter::new(cpu, &mut memory, budget).run()
+                    };
+                    assert_eq!(result.instructions_executed, budget.min(1));
+                    assert_eq!(
+                        result.exit_reason,
+                        if budget <= 1 {
+                            ExitReason::StepLimitExceeded
+                        } else {
+                            fault
+                        }
+                    );
+                    assert_eq!(result.final_state, expected);
+                    assert_eq!(
+                        memory.read_u64(0x3000).unwrap(),
+                        if budget == 0 { 0 } else { 0x1234 }
+                    );
+                }
+            }
+        }
     }
 
     #[test]

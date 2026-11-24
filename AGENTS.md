@@ -47,16 +47,16 @@ Read docs/interfaces.md and docs/progress.md before implementation.
 
 ## Claiming work before you start
 
-Several people and coding agents work on this repository at the same time. An issue with no visible claim is the only signal that a task is free, so claim before you edit anything.
+Several people and coding agents work on this repository at the same time. Claim an issue before you edit anything, and never take work someone else has claimed.
 
-1. **Check.** Read the issue's comments, assignees and labels, its linked pull requests, and open pull requests that touch the same files. If someone holds a live claim, pick another task. Do not start parallel work on a claimed task.
-2. **Claim.** Comment `/claim` on the issue (or run `scripts/agent-queue.sh claim <n>`). Where the claim workflow is enabled, wait for its grant comment and the `claimed-by:<login>` label; a refusal names the reason. Where it is not enabled yet, your comment is the claim and the earliest valid claim comment wins. One issue per claim; claim follow-up tasks separately.
-3. **Respect file ownership.** Two claimed tasks never edit the same files at the same time. If the issue lists files, edit only those; ask the maintainer before widening the list.
-4. **Keep it alive.** A claim lapses 24 hours after the latest grant, `/progress <what changed>` comment, or push to the linked pull request. Post `/progress` at least once a day while you work. Lapsed tasks return to the queue and may be claimed by anyone.
-5. **Release.** If you stop, comment `/release` so the task returns to the queue. Use `/blocked <reason>` instead if you are waiting on another task.
-6. **Link.** Open the pull request from a branch named `task/<n>-<slug>` with `Closes #<n>` in its description.
+1. **Check.** Read every comment on the issue and look for open pull requests that link it. A claim is any comment in which someone says they are taking the issue, in any words (for example "I'll take this" or `/claim`). If a claim exists and is not stale (step 4), pick another issue.
+2. **Claim.** Reply on the issue in plain words, for example: "I'm taking this. Plan: …". No command, label or bot step is needed. The earliest claim wins. Claim one issue per comment.
+3. **Stay in scope.** If the issue lists files, edit only those, and ask on the issue before widening the list. Do not start work that edits the same files as another claimed issue.
+4. **Stale claims.** A claim is stale when the claimer has not opened a pull request for the issue within about one week (7 days) of the claim. Only then may someone else take it, by replying on the issue, for example: "Taking this over: @name's claim from <date> has no pull request after 7 days." A claim with an open pull request is never stale; ask the claimer or the maintainer instead.
+5. **Release.** If you stop working on an issue, say so on the issue so others can take it.
+6. **Link.** Put `Closes #<n>` in the pull request description.
 
-An agent acting for a contributor claims in that contributor's name and must not claim work for areas that contributor may not claim (`.github/agent-queue.json`). Never remove, overwrite or ignore another person's claim; ask the maintainer to `/reassign` instead. See `docs/coordination/agent-tasks.md` when present.
+A coding agent claims in the name of the person it works for and follows the same rules. It must read the comments before claiming, and must never claim over, remove or ignore another person's claim. The optional task-queue commands in `docs/coordination/agent-tasks.md` do not replace these rules: a plain-reply claim counts even though the bot does not track it.
 
 ## Changelog maintenance
 

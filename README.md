@@ -2,13 +2,17 @@
 
 **Experimental Xbox Series X|S emulation research for Apple Silicon Macs.**
 
-Xenora is an open-source project written primarily in Rust, exploring native Xbox Series X|S compatibility on ARM64 macOS.
-
-The project combines a bounded x86-64 guest execution environment, Portable Executable (PE32+) loading, AMD RDNA 2 shader translation, and a native Apple Metal graphics backend.
+Xenora is an open-source project written primarily in Rust that builds and verifies a native, bounded execution environment on Apple Silicon: an independent x86-64 guest path, original PE32+ loading, AMD RDNA 2 shader translation, and a native Apple Metal graphics backend.
 
 **No Wine. No CrossOver. No Rosetta. No Vulkan runtime.**
 
-Xenora is still experimental. It currently executes independently authored synthetic guest programs and shaders. **Commercial Xbox games, including Grand Theft Auto VI, do not boot.** Authentic Xbox executable loading and system-service compatibility remain unsupported.
+Xenora is still experimental. Verified work is restricted to independently authored synthetic programs and shaders; authentic Xbox executable loading, system-service compatibility and commercial game execution remain unsupported. See the [current limitations](#current-limitations).
+
+### At a glance
+
+- **Native graphics:** translated gfx1030 vertex and pixel stages and native passes (indexed draws, blend, depth) run on Apple Silicon GPUs — verified, see [Blend pass](#blend-pass) and [Verified Apple M5 results](#verified-apple-m5-results).
+- **Guest execution:** bounded x86-64 execution, original PE32+ loading, synthetic services and guest-driven GPU dispatch — verified milestones X1–X9.
+- **Not supported:** authentic Xbox executable loading and commercial game execution; see the [milestone table](#development-milestones).
 
 [![Native Rust checks](https://github.com/ranveersoni98/Xenora/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ranveersoni98/Xenora/actions/workflows/ci.yml)
 
@@ -18,7 +22,7 @@ Xenora is still experimental. It currently executes independently authored synth
 
 Xenora has progressed from executing individual x86-64 instructions to running original PE32+ guest programs that interact with translated GPU workloads on Apple Silicon.
 
-The latest verified milestone includes **translated gfx1030 vertex and pixel shaders executing through native Apple Metal**, with rendered pixels compared against independently calculated reference results.
+The latest verified milestones include **translated gfx1030 vertex and pixel shaders executing through native Apple Metal**, the native Metal **blend pass** (`NativeCompute::render_blend`) and **indexed triangle draws** (`NativeCompute::render_indexed`) into offscreen targets, with rendered pixels compared against independently calculated reference results.
 
 ### Development milestones
 
@@ -33,14 +37,14 @@ The latest verified milestone includes **translated gfx1030 vertex and pixel sha
 | X7 — Imported services | Named imports, guest-to-host service dispatch and result validation | Verified |
 | X8 — Translated compute | Original gfx1030 compute shaders executing on Metal, partial Wave32 handling and BC1 readback | Verified subset |
 | X9 — Translated graphics | Persistent resource handles, translated vertex/pixel stages and offscreen Metal rendering | Verified subset |
-| X10 — Texture sampling | Translate RDNA2 image instructions, implement samplers, mipmapping and guest-backed texture bindings | Planned |
-| X11 — Graphics pipeline | Multiple draw calls, vertex buffers, index buffers, depth/stencil testing, blending and render targets | Planned |
+| X10 — Texture sampling | Translated image instructions are still planned; upload, readback and decode of BC compressed formats is implemented (see [Texture support](#texture-support)) | Planned |
+| X11 — Graphics pipeline | Bounded multi-draw passes into offscreen RGBA8 targets: translated vertex and pixel stages, indexed triangle draws, colour write masks and blend state | Implemented |
 | X12 — Wave execution | Expand Wave32/Wave64 semantics, divergent control flow, cross-lane operations, LDS and barriers | Planned |
 | X13 — Advanced shaders | Mesh, geometry and additional compute shader capabilities with verified Metal execution | Planned |
 | X14 — CPU recompilation | Native ARM64 dynamic recompilation of supported x86-64 instructions in synthetic fixtures | Implemented subset |
 | X15 — Executable compatibility | Static PE inspection reports sections, relocations, thread-local storage (TLS) callbacks, imports and entry-point instructions | Static probe implemented |
 | X16 — Guest memory and threading | Virtual memory mapping, thread scheduling, synchronization primitives and atomic operations | Implemented subset |
-| X17 — System services | Implement a tested subset of Xbox-compatible runtime APIs, memory services, filesystem access and application lifecycle | Implemented subet |
+| X17 — System services | Implement a tested subset of Xbox-compatible runtime APIs, memory services, filesystem access and application lifecycle | Implemented subset |
 | X18 — Graphics API translation | Translate supported Xbox graphics commands, resource descriptors, command queues, barriers and fences into Metal operations | Planned |
 | X19 — Advanced GPU features | Indirect rendering, asynchronous compute, additional texture formats and ray-tracing compatibility research | Planned |
 | X20 — Integrated guest runtime | Connect CPU recompilation, executable loading, system services and graphics translation into one persistent runtime | Planned |
@@ -97,14 +101,35 @@ The current graphics subset supports:
 - Offscreen RGBA8 render targets.
 - Native GPU readback and pixel-by-pixel validation.
 - Explicit rejection of unsupported shader forms.
+- Flat-coloured triangle draws with colour write masks and blending (see [Blend pass](#blend-pass)).
+- Indexed triangle draws (see [Indexed draws](#indexed-draws)).
+- Depth testing with an optional `Depth32Float` attachment (see [Depth pass](#depth-pass)).
 
 These are genuine translated shader stages, not merely demonstrations using handwritten Metal vertex and fragment programs.
 
 The current rendering tests are deliberately narrow: original fixtures, a single triangle per draw, and controlled shader inputs and outputs.
 
+### Blend pass
+
+`NativeCompute::render_blend` draws up to 16 flat-coloured triangles in order into an offscreen RGBA8 target. Each draw has its own colour write mask (any subset of R, G, B, A) and either blending disabled or separate RGB and alpha blend factors (Zero, One, source and destination colour and alpha, and their one-minus forms) and operations (Add, Subtract, ReverseSubtract, and Min and Max). Colours are compared per channel against images derived independently (in exact fractions) from the public Metal blend equations.
+
+GPU verification (Metal API and shader validation enabled): 39 Metal-validated passes over two original overlapping triangles — a clear-only pass; blending disabled; each source factor with the destination term zeroed and each destination factor with the source term zeroed; every operation; additive clamping; separate alpha factors; a separate alpha operation; eight write masks; and a pass whose first draw is itself blended and masked. On an Apple M5 Pro every rounded channel matched round-to-nearest exactly.
+
+### Indexed draws
+
+`NativeCompute::render_indexed` issues one real `drawIndexedPrimitives` call per draw (up to 16) on a 16- or 32-bit index buffer with a start index and a signed base vertex, into an offscreen RGBA8 target. A draw can sample an original BC1 texture uploaded natively.
+
+GPU verification (Metal API and shader validation enabled): 16 Metal-validated passes (both index sizes, 32-bit indices above 16 bits, odd 16-bit start, positive and negative base vertex, reversed winding, flat and textured two-triangle draws, draw order, BC1-textured draws), compared per pixel against images derived independently from the geometry, the public D3D12 and Metal index semantics and the public BC1 rules.
+
+### Depth pass
+
+`NativeCompute::render_depth` draws up to 16 triangles in order into an offscreen RGBA8 target with an optional `Depth32Float` attachment, a chosen clear depth, a per-draw depth compare function (all eight) and depth write enable. Colour and the stored depth are both read back.
+
+GPU verification (Metal API and shader validation enabled): 30 Metal-validated passes of original overlapping triangles: clear, every compare function at three depths, write enabled and disabled, depth test disabled with an attachment and no attachment at all, and a BC1-textured draw.
+
 ### Verified Apple M5 results
 
-The X9 native Metal acceptance run reported **20 passing tests, zero failures and zero ignored tests**, with Metal API and GPU validation enabled.
+The X9 native Metal acceptance run reported **20 passing tests, zero failures and zero ignored tests**, with Metal API and GPU validation enabled. The newer passes below are separate Metal-validated campaigns, also with Metal API and shader validation enabled.
 
 Representative checks include:
 
@@ -115,6 +140,9 @@ Representative checks include:
 | Perspective interpolation | Exact checks of 16 pixels and another 16 after swapping vertex color channels |
 | BC1 texture handling | 33 texels across selected mip levels and array layers |
 | Guest rendering | PE32+ guest receives and checks the translated render output |
+| Blend pass | 39 Metal-validated passes over two overlapping triangles |
+| Indexed draws | 16 Metal-validated passes (both index sizes, signed base vertices, draw order) |
+| Depth pass | 30 Metal-validated passes (all eight compare functions, no-attachment case) |
 
 The expected results were calculated independently of the production shader translation path.
 
@@ -141,20 +169,20 @@ The resource system remains experimental. Native GPU work already in flight duri
 
 ## Texture support
 
-Xenora includes an original BC1 texture-processing path.
+Xenora includes original texture upload, readback and block-compression paths.
 
 Implemented and tested functionality includes:
 
 - Validated mip levels and array layers.
 - Pitched texture uploads.
-- Block-compressed texture handling.
+- Block-compressed texture handling, including BC4/BC5 upload and readback and a CPU BC7 decoder for the eight modes.
 - Native Metal texture readback.
 - Edge-block and transparency tests.
 - Invalid descriptor and bounds rejection.
 
 **Translated texture-sampling instructions are not yet implemented.**
 
-The existing texture readback path uses an authored Metal kernel. It should not be confused with executing arbitrary RDNA2 texture-fetch instructions.
+The existing texture readback path uses authored Metal kernels. It should not be confused with executing arbitrary RDNA2 texture-fetch instructions.
 
 Xbox-specific texture layouts and additional compression formats require further research and validation.
 
@@ -209,6 +237,8 @@ flowchart TD
 
 Xenora's host execution environment is native ARM64. The guest architecture being interpreted is x86-64.
 
+The native graphics pipeline runs translated vertex and pixel stages, the indexed-draw and blend passes and the depth pass into offscreen Metal targets, with GPU readback compared against independent CPU references.
+
 The project does not currently provide a general-purpose x86-64 dynamic recompiler or a complete Xbox operating-system implementation.
 
 See [Interface Contracts](docs/interfaces.md) for the documented execution and resource boundaries.
@@ -227,8 +257,8 @@ The following remain unsupported or incomplete:
 | Executable loader | General relocations, TLS, DLL initialization and authentic Xbox startup |
 | Xbox runtime | Console-specific services, system APIs, filesystem and application lifecycle |
 | RDNA2 shaders | General control flow, broader instructions, Wave64, cross-lane operations and mesh stages |
-| Graphics | Translated texture sampling, broader resource binding, synchronization and general draw workloads |
-| Textures | Authentic Xbox memory layouts and broader compressed-format support |
+| Graphics | Translated texture sampling and broader resource binding |
+| Textures | Authentic Xbox memory layouts and translated sampling |
 | Performance | Production-scale workloads, CPU/GPU profiling and optimized execution |
 | Game compatibility | No demonstrated execution of commercial Xbox titles |
 
@@ -271,6 +301,10 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 ```
+
+The format, lint and test trio is the standard check set. The native Metal
+passes use Metal API and shader validation; `scripts/audit/status.py --check`
+verifies the generated status tables.
 
 ### Run native Metal tests
 
@@ -320,12 +354,19 @@ Testing distinguishes between:
 
 Compiling a shader is not equivalent to proving its GPU output is correct.
 
+### Where the work is heading
+
+See the [roadmap table](#development-milestones) for proposed milestones, and the [changelog](CHANGELOG.md) for the current unreleased additions, such as the native blend pass, indexed draws and the depth pass. The remaining research steps are the outstanding items in [current limitations](#current-limitations).
 
 ---
 
 **The goal is to build a trustworthy native Apple Silicon compatibility framework, one verifiable subsystem at a time.**
 
 ---
+
+### Contributors
+
+[![Contributors](https://contrib.rocks/image?repo=ranveersoni98/Xenora)](https://github.com/ranveersoni98/Xenora/graphs/contributors)
 
 ## License
 

@@ -24,3 +24,23 @@ timeout 30s cargo test --locked -p xenora-loader --features gpu-tests --test run
 cargo test --locked -p xenora-loader --features gpu-tests --test graphics_d3d12 --no-run
 timeout 30s cargo test --locked -p xenora-loader --features gpu-tests --test graphics_d3d12 -- \
     --nocapture --test-threads=1
+
+# The native app interface runs the trusted fixture's guest draw on Metal.
+cargo test --locked -p xenora-ffi --features gpu-tests --test native_frame --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test native_frame -- \
+    --nocapture --test-threads=1
+
+# The persistent frame loop runs the guest on its own thread and renders on Metal.
+cargo test --locked -p xenora-ffi --features gpu-tests --test frame_loop --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test frame_loop -- \
+    --nocapture --test-threads=1
+
+# Interactive guest execution with dynamic input handling and rendering (Gate 4, #276).
+cargo test --locked -p xenora-ffi --features gpu-tests --test interactive --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test interactive -- \
+    --nocapture --test-threads=1
+
+# Native Metal known answers of the independent semantic review, including SOP2 scalar ALU
+# and VOPC compares.
+cargo test --locked -p xenora-semantic-review --no-run
+timeout 60s cargo test --locked -p xenora-semantic-review -- --ignored --nocapture --test-threads=1

@@ -2,13 +2,26 @@
 
 use std::fmt;
 
+pub mod meta;
+pub mod primitive;
 mod rdna2;
+pub mod semantics;
+#[rustfmt::skip]
+mod rdna2_meta;
+#[rustfmt::skip]
+mod semantics_gen;
 pub use rdna2::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
-    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT,
-    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32,
-    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32,
+    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_CMP_EQ_I32, V_CMP_EQ_U32, V_CMP_GE_I32, V_CMP_GE_U32,
+    V_CMP_GT_I32, V_CMP_GT_U32, V_CMP_LE_I32, V_CMP_LE_U32, V_CMP_LT_I32, V_CMP_LT_U32,
+    V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32, V_LSHRREV_B32,
+    V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
+pub use semantics_gen::{ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp};
+
+/// SGPR index of `vcc_lo`, the Wave32 vector condition code.
+pub const VCC_LO: u8 = 106;
 
 /// Selects the instruction encoding independently of the container and execution ABI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +55,8 @@ impl Opcode {
 pub enum VectorSource {
     /// VGPR index.
     Register(u8),
+    /// Normal SGPR index (s0-s105) or `vcc_lo` (106), read as a wave-uniform value.
+    Scalar(u8),
     /// Inline integer or literal word, represented by its bits.
     Immediate(u32),
 }
@@ -50,6 +65,8 @@ impl fmt::Display for VectorSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Register(register) => write!(formatter, "v{register}"),
+            Self::Scalar(VCC_LO) => formatter.write_str("vcc_lo"),
+            Self::Scalar(register) => write!(formatter, "s{register}"),
             Self::Immediate(value) => write!(formatter, "0x{value:x}"),
         }
     }
@@ -72,6 +89,81 @@ impl fmt::Display for ScalarSource {
                 integer @ -16..=64 => write!(formatter, "{integer}"),
                 _ => write!(formatter, "0x{value:x}"),
             },
+        }
+    }
+}
+
+/// Relation tested by a VOPC integer compare; S0 is SRC0 and S1 is VSRC1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompareRelation {
+    /// S0 < S1 (opcode offset 1).
+    Less,
+    /// S0 == S1 (offset 2).
+    Equal,
+    /// S0 <= S1 (offset 3).
+    LessOrEqual,
+    /// S0 > S1 (offset 4).
+    Greater,
+    /// S0 != S1 (offset 5).
+    NotEqual,
+    /// S0 >= S1 (offset 6).
+    GreaterOrEqual,
+}
+
+/// A 32-bit VOPC integer compare: one relation over signed or unsigned operands.
+///
+/// The per-lane test follows the RDNA 2 ISA guide, section 12.9 (Table 59) and
+/// the pinned XML descriptions. VCC and EXEC rules are in
+/// docs/shaders/vector-compare.md.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VectorCompareOp {
+    /// The tested relation.
+    pub relation: CompareRelation,
+    /// `_i32` (two's complement) when true, `_u32` when false.
+    pub signed: bool,
+}
+
+impl VectorCompareOp {
+    /// Lower-case mnemonic of the 32-bit VOPC encoding.
+    pub fn mnemonic(self) -> &'static str {
+        const SIGNED: [&str; 6] = [
+            "v_cmp_lt_i32_e32",
+            "v_cmp_eq_i32_e32",
+            "v_cmp_le_i32_e32",
+            "v_cmp_gt_i32_e32",
+            "v_cmp_ne_i32_e32",
+            "v_cmp_ge_i32_e32",
+        ];
+        const UNSIGNED: [&str; 6] = [
+            "v_cmp_lt_u32_e32",
+            "v_cmp_eq_u32_e32",
+            "v_cmp_le_u32_e32",
+            "v_cmp_gt_u32_e32",
+            "v_cmp_ne_u32_e32",
+            "v_cmp_ge_u32_e32",
+        ];
+        let index = self.relation as usize;
+        if self.signed {
+            SIGNED[index]
+        } else {
+            UNSIGNED[index]
+        }
+    }
+
+    /// The per-lane test result for operand bits S0 and S1.
+    pub fn test(self, src0: u32, src1: u32) -> bool {
+        let ordering = if self.signed {
+            (src0 as i32).cmp(&(src1 as i32))
+        } else {
+            src0.cmp(&src1)
+        };
+        match self.relation {
+            CompareRelation::Less => ordering.is_lt(),
+            CompareRelation::Equal => ordering.is_eq(),
+            CompareRelation::LessOrEqual => ordering.is_le(),
+            CompareRelation::Greater => ordering.is_gt(),
+            CompareRelation::NotEqual => ordering.is_ne(),
+            CompareRelation::GreaterOrEqual => ordering.is_ge(),
         }
     }
 }
@@ -117,10 +209,42 @@ pub enum Instruction {
     AddNoCarryU32 { dst: u8, src0: u8, src1: u8 },
     /// SOP1 32-bit move to a normal SGPR or an EXEC/VCC half.
     ScalarMoveB32 { dst: u8, src: ScalarSource },
-    /// SOPC 32-bit equality comparison writing SCC.
-    ScalarCompareEqU32 {
+    /// SOP1 32-bit unary integer operation writing a normal SGPR (s0-s105) and,
+    /// for some operations, SCC.
+    ScalarUnary {
+        op: ScalarUnaryOp,
+        dst: u8,
+        src: ScalarSource,
+    },
+    /// SOP2 32-bit integer operation writing a normal SGPR (s0-s105) and, for
+    /// most operations, SCC; `s_cselect_b32` also reads SCC.
+    ScalarAlu {
+        op: ScalarAluOp,
+        dst: u8,
         src0: ScalarSource,
         src1: ScalarSource,
+    },
+    /// SOPC 32-bit integer compare writing only SCC.
+    ScalarCompare {
+        op: ScalarCompareOp,
+        src0: ScalarSource,
+        src1: ScalarSource,
+    },
+    /// VOPC 32-bit integer compare writing a Wave32 mask to `vcc_lo`.
+    /// `src0` is a VGPR, `s0-s105`, `vcc_lo`, an inline integer or a literal.
+    VectorCompare {
+        op: VectorCompareOp,
+        src0: VectorSource,
+        src1: u8,
+    },
+    /// VOP2 32-bit per-lane integer operation from the semantic registry.
+    /// `src0` is a VGPR, `s0-s105`, `vcc_lo`, an inline integer or a literal;
+    /// `src1` is a VGPR. Inactive lanes keep `dst`.
+    VectorAlu {
+        op: VectorAluOp,
+        dst: u8,
+        src0: VectorSource,
+        src1: u8,
     },
     /// SOPP jump to a stream byte offset when SCC is clear.
     BranchSccZero { target: usize },
@@ -174,6 +298,21 @@ pub enum Instruction {
     EndProgram,
 }
 
+/// Formats an SGPR destination with LLVM's names for the EXEC and VCC halves.
+struct ScalarDestination(u8);
+
+impl fmt::Display for ScalarDestination {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            106 => formatter.write_str("vcc_lo"),
+            107 => formatter.write_str("vcc_hi"),
+            126 => formatter.write_str("exec_lo"),
+            127 => formatter.write_str("exec_hi"),
+            register => write!(formatter, "s{register}"),
+        }
+    }
+}
+
 impl Instruction {
     /// Returns the mnemonic for the exact encoding family represented.
     pub fn mnemonic(self) -> &'static str {
@@ -185,7 +324,11 @@ impl Instruction {
             Self::MoveB32 { .. } => "v_mov_b32_e32",
             Self::AddNoCarryU32 { .. } => "v_add_nc_u32_e64",
             Self::ScalarMoveB32 { .. } => "s_mov_b32",
-            Self::ScalarCompareEqU32 { .. } => "s_cmp_eq_u32",
+            Self::ScalarUnary { op, .. } => op.mnemonic(),
+            Self::ScalarAlu { op, .. } => op.mnemonic(),
+            Self::ScalarCompare { op, .. } => op.mnemonic(),
+            Self::VectorCompare { op, .. } => op.mnemonic(),
+            Self::VectorAlu { op, .. } => op.assembly_name(),
             Self::BranchSccZero { .. } => "s_cbranch_scc0",
             Self::BranchExecZero { .. } => "s_cbranch_execz",
             Self::BranchVccZero { .. } => "s_cbranch_vccz",
@@ -247,14 +390,21 @@ impl fmt::Display for Instruction {
             | Self::VectorMulF32 { dst, src0, src1 } => {
                 write!(formatter, " v{dst}, v{src0}, v{src1}")
             }
-            Self::ScalarMoveB32 { dst, src } => match dst {
-                106 => write!(formatter, " vcc_lo, {src}"),
-                107 => write!(formatter, " vcc_hi, {src}"),
-                126 => write!(formatter, " exec_lo, {src}"),
-                127 => write!(formatter, " exec_hi, {src}"),
-                _ => write!(formatter, " s{dst}, {src}"),
-            },
-            Self::ScalarCompareEqU32 { src0, src1 } => write!(formatter, " {src0}, {src1}"),
+            Self::ScalarMoveB32 { dst, src } | Self::ScalarUnary { dst, src, .. } => {
+                write!(formatter, " {}, {src}", ScalarDestination(dst))
+            }
+            Self::ScalarAlu {
+                dst, src0, src1, ..
+            } => write!(formatter, " {}, {src0}, {src1}", ScalarDestination(dst)),
+            Self::ScalarCompare { src0, src1, .. } => write!(formatter, " {src0}, {src1}"),
+            Self::VectorCompare { src0, src1, .. } => {
+                write!(formatter, " vcc_lo, {src0}, v{src1}")
+            }
+            Self::VectorAlu {
+                dst, src0, src1, ..
+            } => {
+                write!(formatter, " v{dst}, {src0}, v{src1}")
+            }
             Self::Branch { target }
             | Self::BranchSccZero { target }
             | Self::BranchExecZero { target }

@@ -6,7 +6,7 @@ Xenora is an experimental Xbox Series X|S recompilation framework for Apple Sili
 
 - Read `README.md` and, when present, `AGENTS.md`, `docs/interfaces.md`, `docs/status.toml` and the relevant architecture decisions.
 - Discuss substantial changes in an issue before implementing them; small fixes do not require prior approval.
-- Claim an issue before working on it by commenting `/claim`, and check that nobody else holds a live claim first. Claims lapse after 24 hours without a `/progress` comment or a push; comment `/release` if you stop. Coding agents follow the same rules; see "Claiming work before you start" in `AGENTS.md`.
+- Claim an issue before working on it by replying on it in plain words, after checking its comments for an existing claim. Never claim over someone else. A claim with no pull request after about one week may be taken over with a reply saying so. Coding agents follow the same rules; see "Claiming work before you start" in `AGENTS.md`.
 - Use a native ARM64 macOS environment with Rust and the appropriate Xcode/Metal tools. LLVM AMDGPU tools are needed for ISA fixture generation; extra tooling depends on the subsystem.
 - Keep changes focused and preserve existing public interfaces unless a change is justified and documented.
 
@@ -44,6 +44,7 @@ Before incorporating third-party code, verify per-file license compatibility wit
 ## Pull requests
 
 - Branch from the current main branch, keep commits focused, and link relevant issues.
+- Fill in every section of the pull request template, keep `Closes #<number>` (or write `No linked issue: <reason>`), and tick the claimed-first and DCO checkboxes. The *PR template* check fails until the description does, and runs again each time you edit it.
 - Include a clear explanation, tests and any documentation/status updates. Separate unverified work from supported behavior.
 - Disclose material AI assistance and personally review generated changes. AI output is not an authoritative source, test oracle or substitute for independent review.
 - Never include secrets, personal paths, credentials or private data in patches or logs.

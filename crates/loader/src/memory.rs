@@ -389,71 +389,105 @@ impl GuestMemory {
     }
 
     pub(crate) fn check_write(&self, address: u64, size: usize) -> Result<(), MemoryError> {
-        let region = self
-            .regions
-            .iter()
-            .find(|region| region.contains(address, size))
-            .ok_or(MemoryError::UnmappedAddress(address))?;
-        if !region.permissions.write {
-            return Err(MemoryError::PermissionViolation {
-                address,
-                required: "write",
-            });
+        self.resolve(address, size, Some("write")).map(|_| ())
+    }
+
+    /// Resolve `[address, address + len)` to `(region index, offset, length)` pieces.
+    ///
+    /// An access may span adjacent regions, as it would span adjacent pages, but every
+    /// byte must be mapped and every region must grant `required` (`None` bypasses
+    /// permission checks for the loader). The whole range is checked before any byte
+    /// is copied, so a failed access never partially reads or writes.
+    fn resolve(
+        &self,
+        address: u64,
+        len: usize,
+        required: Option<&'static str>,
+    ) -> Result<Vec<(usize, usize, usize)>, MemoryError> {
+        let end = address
+            .checked_add(len as u64)
+            .ok_or(MemoryError::Overflow)?;
+        if len == 0 {
+            return if self.regions.iter().any(|r| r.contains(address, 0)) {
+                Ok(Vec::new())
+            } else {
+                Err(MemoryError::UnmappedAddress(address))
+            };
+        }
+        let mut pieces = Vec::new();
+        let mut cursor = address;
+        for (index, region) in self.regions.iter().enumerate() {
+            let region_end = region.base + region.data.len() as u64;
+            if region_end <= cursor {
+                continue;
+            }
+            if region.base > cursor {
+                break;
+            }
+            let permitted = match required {
+                None => true,
+                Some("read") => region.permissions.read,
+                Some("write") => region.permissions.write,
+                Some(_) => region.permissions.execute,
+            };
+            if let (false, Some(required)) = (permitted, required) {
+                return Err(MemoryError::PermissionViolation { address, required });
+            }
+            let take = (end.min(region_end) - cursor) as usize;
+            pieces.push((index, (cursor - region.base) as usize, take));
+            cursor += take as u64;
+            if cursor == end {
+                return Ok(pieces);
+            }
+        }
+        Err(MemoryError::UnmappedAddress(address))
+    }
+
+    fn read_checked(
+        &self,
+        address: u64,
+        dst: &mut [u8],
+        required: Option<&'static str>,
+    ) -> Result<(), MemoryError> {
+        let mut done = 0;
+        for (index, offset, take) in self.resolve(address, dst.len(), required)? {
+            dst[done..done + take]
+                .copy_from_slice(&self.regions[index].data[offset..offset + take]);
+            done += take;
+        }
+        Ok(())
+    }
+
+    fn write_checked(
+        &mut self,
+        address: u64,
+        src: &[u8],
+        required: Option<&'static str>,
+    ) -> Result<(), MemoryError> {
+        let mut done = 0;
+        for (index, offset, take) in self.resolve(address, src.len(), required)? {
+            self.regions[index].data[offset..offset + take]
+                .copy_from_slice(&src[done..done + take]);
+            done += take;
         }
         Ok(())
     }
 
     /// Write raw bytes into guest memory at the specified address, checking permissions.
     pub fn write_bytes(&mut self, address: u64, src: &[u8]) -> Result<(), MemoryError> {
-        for region in &mut self.regions {
-            if region.contains(address, src.len()) {
-                if !region.permissions.write {
-                    return Err(MemoryError::PermissionViolation {
-                        address,
-                        required: "write",
-                    });
-                }
-                let offset = (address - region.base) as usize;
-                region.data[offset..offset + src.len()].copy_from_slice(src);
-                return Ok(());
-            }
-        }
-        Err(MemoryError::UnmappedAddress(address))
+        self.write_checked(address, src, Some("write"))
     }
 
     /// Read raw bytes from guest memory at the specified address, checking permissions.
     pub fn read_bytes(&self, address: u64, dst: &mut [u8]) -> Result<(), MemoryError> {
-        for region in &self.regions {
-            if region.contains(address, dst.len()) {
-                if !region.permissions.read {
-                    return Err(MemoryError::PermissionViolation {
-                        address,
-                        required: "read",
-                    });
-                }
-                let offset = (address - region.base) as usize;
-                dst.copy_from_slice(&region.data[offset..offset + dst.len()]);
-                return Ok(());
-            }
-        }
-        Err(MemoryError::UnmappedAddress(address))
+        self.read_checked(address, dst, Some("read"))
     }
 
     /// Read an instruction byte from guest memory, verifying execute permission.
     pub fn fetch_instruction_byte(&self, address: u64) -> Result<u8, MemoryError> {
-        for region in &self.regions {
-            if region.contains(address, 1) {
-                if !region.permissions.execute {
-                    return Err(MemoryError::PermissionViolation {
-                        address,
-                        required: "execute",
-                    });
-                }
-                let offset = (address - region.base) as usize;
-                return Ok(region.data[offset]);
-            }
-        }
-        Err(MemoryError::UnmappedAddress(address))
+        let mut buf = [0u8; 1];
+        self.read_checked(address, &mut buf, Some("execute"))?;
+        Ok(buf[0])
     }
 
     /// Read a 64-bit integer (little endian) from guest memory.
@@ -465,14 +499,9 @@ impl GuestMemory {
 
     /// Read a 64-bit integer ignoring region read permissions (e.g. loader/relocation phase).
     pub fn read_u64_bypass(&self, address: u64) -> Result<u64, MemoryError> {
-        for region in &self.regions {
-            if region.contains(address, 8) {
-                let offset = (address - region.base) as usize;
-                let buf: [u8; 8] = region.data[offset..offset + 8].try_into().unwrap();
-                return Ok(u64::from_le_bytes(buf));
-            }
-        }
-        Err(MemoryError::UnmappedAddress(address))
+        let mut buf = [0u8; 8];
+        self.read_checked(address, &mut buf, None)?;
+        Ok(u64::from_le_bytes(buf))
     }
 
     /// Write a 64-bit integer (little endian) to guest memory.
@@ -482,15 +511,7 @@ impl GuestMemory {
 
     /// Write a 64-bit integer ignoring region write permissions (e.g. loader/relocation phase).
     pub fn write_u64_bypass(&mut self, address: u64, value: u64) -> Result<(), MemoryError> {
-        let bytes = value.to_le_bytes();
-        for region in &mut self.regions {
-            if region.contains(address, 8) {
-                let offset = (address - region.base) as usize;
-                region.data[offset..offset + 8].copy_from_slice(&bytes);
-                return Ok(());
-            }
-        }
-        Err(MemoryError::UnmappedAddress(address))
+        self.write_checked(address, &value.to_le_bytes(), None)
     }
 
     /// Read a 32-bit integer (little endian) from guest memory.
@@ -507,15 +528,7 @@ impl GuestMemory {
 
     /// Write a 32-bit integer ignoring region write permissions (e.g. loader/relocation phase).
     pub fn write_u32_bypass(&mut self, address: u64, value: u32) -> Result<(), MemoryError> {
-        let bytes = value.to_le_bytes();
-        for region in &mut self.regions {
-            if region.contains(address, 4) {
-                let offset = (address - region.base) as usize;
-                region.data[offset..offset + 4].copy_from_slice(&bytes);
-                return Ok(());
-            }
-        }
-        Err(MemoryError::UnmappedAddress(address))
+        self.write_checked(address, &value.to_le_bytes(), None)
     }
 
     /// Read a single byte from guest memory.

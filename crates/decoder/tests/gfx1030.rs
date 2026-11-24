@@ -3,10 +3,14 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use xenora_decoder::{
-    Architecture, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction, ScalarSource,
-    VectorSource, decode,
+    Architecture, CompareRelation, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction,
+    ScalarAluOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorSource, decode, decode_at,
 };
-use xenora_ref::{BranchCondition, Op, Source, VectorAlu};
+use xenora_isa::semantics::Signedness;
+use xenora_ref::{
+    BranchCondition, CompareSource, Comparison, Op, ScalarAlu, ScalarUnary, Source, VectorAlu,
+    VectorInteger,
+};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
 const BITWISE_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/bitwise-branch.bin");
@@ -97,7 +101,12 @@ fn rejects_other_opcodes_and_noncanonical_operands() {
         (&[0xe070_2000, 0x801b_0100], "buffer_store_dword"),
         (&[0xbf8c_3f71], "s_waitcnt"),
         (&[0xbbfd_0001], "s_waitcnt_vscnt"),
-        (&[0x7e04_0200], "v_mov_b32_e32"),
+        (&[0x7e04_026b], "v_mov_b32_e32"), // VCC_HI is outside the source subset.
+        (&[0x7d02_046b], "v_cmp_lt_i32_e32"), // VCC_HI source.
+        (&[0x7d02_047e], "v_cmp_lt_i32_e32"), // EXEC_LO source.
+        (&[0x7d02_04f0], "v_cmp_lt_i32_e32"), // Inline 0.5 source.
+        (&[0x7d84_04f9, 0x0606_0601], "v_cmp_eq_u32_e32"), // SDWA.
+        (&[0x7d84_04fa, 0], "v_cmp_eq_u32_e32"), // DPP16.
         (&[0x7e04_02fa, 0], "v_mov_b32_e32"),
         (&[0xd525_8001, 0x0202_0501], "v_add_nc_u32_e64"),
         (&[0xd525_0001, 0x0202_0480], "v_add_nc_u32_e64"),
@@ -281,6 +290,7 @@ fn reference_source(vector: VectorSource) -> Source {
     match vector {
         VectorSource::Register(reg) => Source::Register(reg),
         VectorSource::Immediate(bits) => Source::Immediate(bits),
+        VectorSource::Scalar(_) => unreachable!("mapped to Op::MoveScalar"),
     }
 }
 
@@ -313,11 +323,90 @@ fn reference_op(instruction: Instruction) -> Op {
         },
         Instruction::WaitLoad => Op::WaitRead,
         Instruction::WaitStore => Op::WaitWrite,
+        Instruction::MoveB32 {
+            dst,
+            src: VectorSource::Scalar(src),
+        } => Op::MoveScalar(dst, src),
         Instruction::MoveB32 { dst, src } => Op::Move(dst, reference_source(src)),
+        Instruction::ScalarAlu {
+            op,
+            dst,
+            src0,
+            src1,
+        } => Op::Scalar(
+            match op {
+                ScalarAluOp::AddU32 => ScalarAlu::Add,
+                ScalarAluOp::SubU32 => ScalarAlu::Subtract,
+                ScalarAluOp::AddI32 => ScalarAlu::AddSigned,
+                ScalarAluOp::SubI32 => ScalarAlu::SubtractSigned,
+                ScalarAluOp::AddcU32 => ScalarAlu::AddWithCarry,
+                ScalarAluOp::SubbU32 => ScalarAlu::SubtractWithBorrow,
+                ScalarAluOp::AndB32 => ScalarAlu::And,
+                ScalarAluOp::OrB32 => ScalarAlu::Or,
+                ScalarAluOp::XorB32 => ScalarAlu::Xor,
+                ScalarAluOp::Andn2B32 => ScalarAlu::AndNot,
+                ScalarAluOp::Orn2B32 => ScalarAlu::OrNot,
+                ScalarAluOp::NandB32 => ScalarAlu::Nand,
+                ScalarAluOp::NorB32 => ScalarAlu::Nor,
+                ScalarAluOp::XnorB32 => ScalarAlu::Xnor,
+                ScalarAluOp::LshlB32 => ScalarAlu::ShiftLeft,
+                ScalarAluOp::LshrB32 => ScalarAlu::ShiftRight,
+                ScalarAluOp::AshrI32 => ScalarAlu::ArithmeticShiftRight,
+                ScalarAluOp::MinI32 => ScalarAlu::Minimum { signed: true },
+                ScalarAluOp::MinU32 => ScalarAlu::Minimum { signed: false },
+                ScalarAluOp::MaxI32 => ScalarAlu::Maximum { signed: true },
+                ScalarAluOp::MaxU32 => ScalarAlu::Maximum { signed: false },
+                ScalarAluOp::CselectB32 => ScalarAlu::Select,
+                ScalarAluOp::BfmB32 => ScalarAlu::BitfieldMask,
+                ScalarAluOp::MulI32 => ScalarAlu::Multiply,
+                ScalarAluOp::BfeU32 => ScalarAlu::BitfieldExtract { signed: false },
+                ScalarAluOp::BfeI32 => ScalarAlu::BitfieldExtract { signed: true },
+                ScalarAluOp::AbsdiffI32 => ScalarAlu::AbsoluteDifference,
+                ScalarAluOp::Lshl1AddU32 => ScalarAlu::ShiftLeftAdd(1),
+                ScalarAluOp::Lshl2AddU32 => ScalarAlu::ShiftLeftAdd(2),
+                ScalarAluOp::Lshl3AddU32 => ScalarAlu::ShiftLeftAdd(3),
+                ScalarAluOp::Lshl4AddU32 => ScalarAlu::ShiftLeftAdd(4),
+                ScalarAluOp::MulHiU32 => ScalarAlu::MultiplyHigh { signed: false },
+                ScalarAluOp::MulHiI32 => ScalarAlu::MultiplyHigh { signed: true },
+            },
+            dst,
+            reference_scalar(src0),
+            reference_scalar(src1),
+        ),
         Instruction::AddNoCarryU32 { dst, src0, src1 } => Op::Add(dst, src0, src1),
         Instruction::ScalarMoveB32 { dst, src } => Op::ScalarMove(dst, reference_scalar(src)),
-        Instruction::ScalarCompareEqU32 { src0, src1 } => {
-            Op::CompareEqual(reference_scalar(src0), reference_scalar(src1))
+        Instruction::ScalarUnary { op, dst, src } => Op::ScalarUnary(
+            match op {
+                ScalarUnaryOp::NotB32 => ScalarUnary::Not,
+                ScalarUnaryOp::BrevB32 => ScalarUnary::ReverseBits,
+                ScalarUnaryOp::Bcnt0I32B32 => ScalarUnary::CountZeros,
+                ScalarUnaryOp::Bcnt1I32B32 => ScalarUnary::CountOnes,
+                ScalarUnaryOp::Ff0I32B32 => ScalarUnary::FindFirstZero,
+                ScalarUnaryOp::Ff1I32B32 => ScalarUnary::FindFirstOne,
+                ScalarUnaryOp::FlbitI32B32 => ScalarUnary::FindLastBit,
+                ScalarUnaryOp::FlbitI32 => ScalarUnary::FindLastSignBit,
+                ScalarUnaryOp::SextI32I8 => ScalarUnary::SignExtendByte,
+                ScalarUnaryOp::SextI32I16 => ScalarUnary::SignExtendShort,
+                ScalarUnaryOp::AbsI32 => ScalarUnary::Absolute,
+            },
+            dst,
+            reference_scalar(src),
+        ),
+        Instruction::ScalarCompare { op, src0, src1 } => {
+            let (src0, src1) = (reference_scalar(src0), reference_scalar(src1));
+            // The reference keeps CompareEqual for EQ and uses its VOPC relation
+            // offsets (LT 1, EQ 2, LE 3, GT 4, NE 5, GE 6) for the rest.
+            match op.relation() {
+                CompareRelation::Equal => Op::CompareEqual(src0, src1),
+                relation => Op::ScalarCompare(
+                    Comparison {
+                        offset: relation as u8 + 1,
+                        signed: op.semantics().signedness == Signedness::Signed,
+                    },
+                    src0,
+                    src1,
+                ),
+            }
         }
         Instruction::BranchSccZero { target } => Op::Branch {
             target,
@@ -363,6 +452,53 @@ fn reference_op(instruction: Instruction) -> Op {
             panic!("compute reference matrix received a graphics/image instruction")
         }
 
+        Instruction::VectorCompare { op, src0, src1 } => Op::Compare(
+            Comparison {
+                offset: match op.relation {
+                    CompareRelation::Less => 1,
+                    CompareRelation::Equal => 2,
+                    CompareRelation::LessOrEqual => 3,
+                    CompareRelation::Greater => 4,
+                    CompareRelation::NotEqual => 5,
+                    CompareRelation::GreaterOrEqual => 6,
+                },
+                signed: op.signed,
+            },
+            match src0 {
+                VectorSource::Register(reg) => CompareSource::Vector(reg),
+                VectorSource::Scalar(reg) => CompareSource::Scalar(reg),
+                VectorSource::Immediate(bits) => CompareSource::Immediate(bits),
+            },
+            src1,
+        ),
+        Instruction::VectorAlu {
+            op,
+            dst,
+            src0,
+            src1,
+        } => Op::VectorInteger(
+            match op {
+                VectorAluOp::MulI32I24 => VectorInteger::Multiply24 { signed: true },
+                VectorAluOp::MulHiI32I24 => VectorInteger::MultiplyHigh24 { signed: true },
+                VectorAluOp::MulU32U24 => VectorInteger::Multiply24 { signed: false },
+                VectorAluOp::MulHiU32U24 => VectorInteger::MultiplyHigh24 { signed: false },
+                VectorAluOp::MinI32 => VectorInteger::Minimum { signed: true },
+                VectorAluOp::MaxI32 => VectorInteger::Maximum { signed: true },
+                VectorAluOp::MinU32 => VectorInteger::Minimum { signed: false },
+                VectorAluOp::MaxU32 => VectorInteger::Maximum { signed: false },
+                VectorAluOp::XnorB32 => VectorInteger::Xnor,
+                VectorAluOp::AddNcU32 => VectorInteger::Add,
+                VectorAluOp::SubNcU32 => VectorInteger::Subtract,
+                VectorAluOp::SubrevNcU32 => VectorInteger::SubtractReverse,
+            },
+            dst,
+            match src0 {
+                VectorSource::Register(reg) => CompareSource::Vector(reg),
+                VectorSource::Scalar(reg) => CompareSource::Scalar(reg),
+                VectorSource::Immediate(bits) => CompareSource::Immediate(bits),
+            },
+            src1,
+        ),
         Instruction::EndProgram => Op::End,
     }
 }
@@ -383,12 +519,19 @@ fn compares_fixture_instructions_against_llvm() {
         OR_FIXTURE,
         SHIFT_FIXTURE,
         include_bytes!("../../../fixtures/rdna2/ashr.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-alu.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-logic.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-compare.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-unary.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-arith.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-integer.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 21, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 100, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -396,6 +539,7 @@ fn compares_fixture_instructions_against_llvm() {
 }
 
 fn assemble_matrix() -> Vec<u8> {
+    use std::fmt::Write as _;
     // Cover register banks and extrema, immediate classes in both scalar
     // compare positions, zero displacement and branches over literal words.
     let mut assembly = String::from(
@@ -433,13 +577,48 @@ fn assemble_matrix() -> Vec<u8> {
         v_mov_b32_e32 v255, lit(0x1)
         s_mov_b32 s105, lit(0x1)
         s_cmp_eq_u32 s105, lit(0x1)
+        s_add_u32 s105, s104, 0xdeadbeef
+        s_add_u32 s8, -16, 64
+        s_sub_u32 s105, s1, s2
+        s_sub_u32 s9, 0xdeadbeef, -16
+        s_addc_u32 s104, 0xdeadbeef, s105
+        s_subb_u32 s0, s0, s0
+        s_add_i32 s101, 0x7fffffff, s100
+        s_sub_i32 s100, -16, 0x80000000
+        s_and_b32 s1, -1, s2
+        s_or_b32 s103, s3, 0x80000000
+        s_xor_b32 s102, s104, -16
+        s_xor_b32 s7, s7, lit(0x1)
+        v_mov_b32_e32 v255, s105
+        v_mov_b32_e32 v0, s0
+        v_mov_b32_e32 v128, vcc_lo
     ",
     );
-    use std::fmt::Write as _;
+    // Every supported VOPC form with each source class: VGPR, SGPR, vcc_lo,
+    // inline integers at both ends, inline zero and a literal.
+    for relation in ["lt", "eq", "le", "gt", "ne", "ge"] {
+        for kind in ["i32", "u32"] {
+            for src0 in [
+                "v255",
+                "v0",
+                "s0",
+                "s105",
+                "vcc_lo",
+                "-16",
+                "64",
+                "0",
+                "0x80000000",
+            ] {
+                writeln!(assembly, "v_cmp_{relation}_{kind}_e32 vcc_lo, {src0}, v128").unwrap();
+            }
+            writeln!(assembly, "v_cmp_{relation}_{kind}_e32 vcc_lo, v1, v255").unwrap();
+        }
+    }
     for value in -16..=64 {
         writeln!(assembly, "v_mov_b32_e32 v255, {value}").unwrap();
         writeln!(assembly, "s_mov_b32 s105, {value}").unwrap();
         writeln!(assembly, "s_cmp_eq_u32 {value}, {value}").unwrap();
+        writeln!(assembly, "s_add_u32 s10, {value}, s11").unwrap();
     }
     assembly.push_str("s_endpgm\n");
     let output = llvm_mc(&[], assembly.as_bytes());
@@ -563,7 +742,17 @@ fn distinguishes_llvm_invalid_encodings_from_xenora_subset_rejections() {
         &[0xd516_0001],
     ];
     let outside_subset: &[&[u32]] = &[
-        &[0x7e04_0200],                                        // VOP1 SGPR source
+        &[0x7e04_026b],                                        // VOP1 VCC_HI source
+        &[0x7da2_0501],                                        // v_cmpx_eq_u32_e32
+        &[0x7d00_0501],                                        // v_cmp_f_i32_e32
+        &[0x7d0e_0501],                                        // v_cmp_t_i32_e32
+        &[0xd482_006a, 0x0002_0501],                           // v_cmp_lt_i32_e64
+        &[0x8788_0908],                                        // s_and_b64
+        &[0x8008_ffff, 0x1234_5678],                           // SOP2 with two literal sources
+        &[0x806c_0908],                                        // SOP2 TTMP destination
+        &[0x807e_0908],                                        // SOP2 EXEC_LO destination
+        &[0x806a_0908],                                        // SOP2 VCC_LO destination
+        &[0x8008_096a],                                        // SOP2 VCC_LO source
         &[0x3803_fe80],                                        // OR with an inline SRC0
         &[0x3803_fe08],                                        // OR with an SGPR SRC0
         &[0x3803_feff, 0xdead_beef],                           // OR with a literal SRC0
@@ -626,6 +815,23 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
             let target = next_offset + displacement * 4;
             format!("{mnemonic} -> 0x{target:04x}")
         }
+        // VOPC and the registry VOP2 forms print SRC0 (the second operand) as bits.
+        mnemonic
+            if mnemonic.starts_with("v_cmp_")
+                || VectorAluOp::ALL
+                    .iter()
+                    .any(|op| op.assembly_name() == mnemonic) =>
+        {
+            let mut parts: Vec<String> = operands.split(", ").map(str::to_owned).collect();
+            parts[1] = match literal_bits(&parts[1]) {
+                Some(bits) => format!("0x{bits:x}"),
+                None => parts[1].parse::<i32>().map_or_else(
+                    |_| parts[1].clone(),
+                    |value| format!("0x{:x}", value as u32),
+                ),
+            };
+            format!("{mnemonic} {}", parts.join(", "))
+        }
         "v_mov_b32_e32" => {
             let (destination, source) = operands.split_once(", ").unwrap();
             let normalized = match source {
@@ -650,6 +856,18 @@ fn normalize_llvm_assembly(assembly: &str, next_offset: usize) -> String {
                 None => operand.to_owned(),
             };
             format!("{mnemonic} {}, {}", scalar(left), scalar(right))
+        }
+        "s_add_u32" | "s_sub_u32" | "s_add_i32" | "s_sub_i32" | "s_addc_u32" | "s_subb_u32"
+        | "s_and_b32" | "s_or_b32" | "s_xor_b32" => {
+            let scalar = |operand: &str| match literal_bits(operand) {
+                Some(bits) => match bits as i32 {
+                    inline @ -16..=64 => inline.to_string(),
+                    _ => format!("0x{bits:x}"),
+                },
+                None => operand.to_owned(),
+            };
+            let operands: Vec<_> = operands.split(", ").map(scalar).collect();
+            format!("{mnemonic} {}", operands.join(", "))
         }
         _ => assembly.to_owned(),
     }
@@ -784,5 +1002,31 @@ fn accepts_scalar_destination_105_and_vgpr_zero_add_sources() {
             src0: 0,
             src1: 0
         }
+    );
+}
+
+#[test]
+fn decode_at_resolves_branch_targets_from_the_stream_offset() {
+    let decoded = decode_at(Architecture::Gfx1030, BITWISE_FIXTURE, 0x1c).unwrap();
+    assert_eq!(decoded.offset, 0x1c);
+    assert_eq!(decoded.byte_len, 4);
+    assert_eq!(decoded.branch_target(), Some(0x3c));
+    // Alone, the same branch still reports its stream target; only the whole
+    // stream can say whether that target is an instruction boundary.
+    let isolated = decode_at(Architecture::Gfx1030, &BITWISE_FIXTURE[..0x20], 0x1c).unwrap();
+    assert_eq!(isolated.branch_target(), Some(0x3c));
+    assert_eq!(
+        decode_at(
+            Architecture::Gfx1030,
+            BITWISE_FIXTURE,
+            BITWISE_FIXTURE.len()
+        ),
+        Err(DecodeError {
+            offset: BITWISE_FIXTURE.len(),
+            kind: DecodeErrorKind::Truncated {
+                needed: 4,
+                available: 0
+            },
+        })
     );
 }

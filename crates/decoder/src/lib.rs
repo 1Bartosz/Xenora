@@ -3,14 +3,83 @@
 use std::fmt;
 
 pub use xenora_isa::{
-    Architecture, ExportTarget, Instruction, InterpolationPhase, ScalarSource, VectorSource,
+    Architecture, CompareRelation, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp,
+    ScalarCompareOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorCompareOp, VectorSource,
 };
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
-    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT,
-    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32,
-    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32,
+    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_CMP_EQ_I32, V_CMP_EQ_U32, V_CMP_GE_I32, V_CMP_GE_U32,
+    V_CMP_GT_I32, V_CMP_GT_U32, V_CMP_LE_I32, V_CMP_LE_U32, V_CMP_LT_I32, V_CMP_LT_U32,
+    V_CMP_NE_I32, V_CMP_NE_U32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32, V_LSHRREV_B32,
+    V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32, VCC_LO,
 };
+
+use xenora_isa::meta::EncodingFamily;
+use xenora_isa::semantics::FORM_IDS;
+pub use xenora_isa::semantics::VectorBinary;
+
+/// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
+/// operand combination: the hand-written forms below followed by every form of
+/// the semantic registry ([`xenora_isa::semantics::FORM_IDS`]). Operand
+/// restrictions are listed in docs/status.toml; every other form in
+/// [`xenora_isa::meta::FORMS`] is rejected as unsupported.
+pub const SEMANTIC_FORMS: [(&str, EncodingFamily); HANDWRITTEN_FORMS.len() + FORM_IDS.len()] =
+    concat_forms();
+
+const fn concat_forms<const N: usize>() -> [(&'static str, EncodingFamily); N] {
+    let mut forms = [("", EncodingFamily::Sop2); N];
+    let mut index = 0;
+    while index < N {
+        forms[index] = if index < HANDWRITTEN_FORMS.len() {
+            HANDWRITTEN_FORMS[index]
+        } else {
+            FORM_IDS[index - HANDWRITTEN_FORMS.len()]
+        };
+        index += 1;
+    }
+    forms
+}
+
+/// Decoded forms not yet described by the semantic registry.
+const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 36] = [
+    ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
+    ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
+    ("EXP", EncodingFamily::Exp),
+    ("IMAGE_SAMPLE_LZ", EncodingFamily::Mimg),
+    ("S_BRANCH", EncodingFamily::Sopp),
+    ("S_CBRANCH_EXECZ", EncodingFamily::Sopp),
+    ("S_CBRANCH_SCC0", EncodingFamily::Sopp),
+    ("S_CBRANCH_VCCZ", EncodingFamily::Sopp),
+    ("S_ENDPGM", EncodingFamily::Sopp),
+    ("S_MOV_B32", EncodingFamily::Sop1),
+    ("S_WAITCNT", EncodingFamily::Sopp),
+    ("S_WAITCNT_VSCNT", EncodingFamily::Sopk),
+    ("V_ADD_F32", EncodingFamily::Vop2),
+    ("V_ADD_NC_U32", EncodingFamily::Vop3),
+    ("V_AND_B32", EncodingFamily::Vop2),
+    ("V_ASHRREV_I32", EncodingFamily::Vop2),
+    ("V_CMP_EQ_I32", EncodingFamily::Vopc),
+    ("V_CMP_EQ_U32", EncodingFamily::Vopc),
+    ("V_CMP_GE_I32", EncodingFamily::Vopc),
+    ("V_CMP_GE_U32", EncodingFamily::Vopc),
+    ("V_CMP_GT_I32", EncodingFamily::Vopc),
+    ("V_CMP_GT_U32", EncodingFamily::Vopc),
+    ("V_CMP_LE_I32", EncodingFamily::Vopc),
+    ("V_CMP_LE_U32", EncodingFamily::Vopc),
+    ("V_CMP_LT_I32", EncodingFamily::Vopc),
+    ("V_CMP_LT_U32", EncodingFamily::Vopc),
+    ("V_CMP_NE_I32", EncodingFamily::Vopc),
+    ("V_CMP_NE_U32", EncodingFamily::Vopc),
+    ("V_INTERP_P1_F32", EncodingFamily::Vintrp),
+    ("V_INTERP_P2_F32", EncodingFamily::Vintrp),
+    ("V_LSHLREV_B32", EncodingFamily::Vop2),
+    ("V_LSHRREV_B32", EncodingFamily::Vop2),
+    ("V_MOV_B32", EncodingFamily::Vop1),
+    ("V_MUL_F32", EncodingFamily::Vop2),
+    ("V_OR_B32", EncodingFamily::Vop2),
+    ("V_XOR_B32", EncodingFamily::Vop2),
+];
 
 /// A successfully decoded instruction and its location in the input stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,6 +90,20 @@ pub struct DecodedInstruction {
     pub byte_len: u8,
     /// The decoded instruction and operand fields.
     pub instruction: Instruction,
+}
+
+impl DecodedInstruction {
+    /// Destination byte offset of a branch, from the start of the stream.
+    #[must_use]
+    pub fn branch_target(&self) -> Option<usize> {
+        match self.instruction {
+            Instruction::Branch { target }
+            | Instruction::BranchSccZero { target }
+            | Instruction::BranchExecZero { target }
+            | Instruction::BranchVccZero { target } => Some(target),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for DecodedInstruction {
@@ -107,26 +190,15 @@ pub fn decode(
     architecture: Architecture,
     bytes: &[u8],
 ) -> Result<Vec<DecodedInstruction>, DecodeError> {
-    let decode_instruction = match architecture {
-        Architecture::Gfx1030 => decode_gfx1030,
-    };
     let mut result = Vec::new();
     let mut offset = 0;
     while offset < bytes.len() {
-        let (instruction, byte_len) = decode_instruction(&bytes[offset..], offset)
-            .map_err(|kind| DecodeError { offset, kind })?;
-        result.push(DecodedInstruction {
-            offset,
-            byte_len,
-            instruction,
-        });
-        offset += usize::from(byte_len);
+        let decoded = decode_at(architecture, bytes, offset)?;
+        offset += usize::from(decoded.byte_len);
+        result.push(decoded);
     }
     for decoded in &result {
-        if let Instruction::Branch { target }
-        | Instruction::BranchSccZero { target }
-        | Instruction::BranchExecZero { target }
-        | Instruction::BranchVccZero { target } = decoded.instruction
+        if let Some(target) = decoded.branch_target()
             && result
                 .binary_search_by_key(&target, |item| item.offset)
                 .is_err()
@@ -138,6 +210,32 @@ pub fn decode(
         }
     }
     Ok(result)
+}
+
+/// Decodes the one instruction that starts at `offset` in `bytes`. Branch
+/// targets are stream offsets, but whether they land on an instruction
+/// boundary is left to the caller, which knows the rest of the stream.
+///
+/// # Errors
+///
+/// Returns `offset` with a truncated instruction, unsupported opcode or
+/// unsupported form. An `offset` at or past the end is truncated.
+pub fn decode_at(
+    architecture: Architecture,
+    bytes: &[u8],
+    offset: usize,
+) -> Result<DecodedInstruction, DecodeError> {
+    let decode_instruction = match architecture {
+        Architecture::Gfx1030 => decode_gfx1030,
+    };
+    let rest = bytes.get(offset..).unwrap_or_default();
+    let (instruction, byte_len) =
+        decode_instruction(rest, offset).map_err(|kind| DecodeError { offset, kind })?;
+    Ok(DecodedInstruction {
+        offset,
+        byte_len,
+        instruction,
+    })
 }
 
 fn word(bytes: &[u8], end: u8) -> Result<u32, DecodeErrorKind> {
@@ -240,6 +338,27 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     if V_MOV_B32.matches(first) {
         return move_b32(first, bytes);
     }
+    {
+        use CompareRelation::{Equal, Greater, GreaterOrEqual, Less, LessOrEqual, NotEqual};
+        for (opcode, relation, signed) in [
+            (V_CMP_LT_I32, Less, true),
+            (V_CMP_EQ_I32, Equal, true),
+            (V_CMP_LE_I32, LessOrEqual, true),
+            (V_CMP_GT_I32, Greater, true),
+            (V_CMP_NE_I32, NotEqual, true),
+            (V_CMP_GE_I32, GreaterOrEqual, true),
+            (V_CMP_LT_U32, Less, false),
+            (V_CMP_EQ_U32, Equal, false),
+            (V_CMP_LE_U32, LessOrEqual, false),
+            (V_CMP_GT_U32, Greater, false),
+            (V_CMP_NE_U32, NotEqual, false),
+            (V_CMP_GE_U32, GreaterOrEqual, false),
+        ] {
+            if opcode.matches(first) {
+                return vector_compare(VectorCompareOp { relation, signed }, first, bytes);
+            }
+        }
+    }
     if V_ADD_NC_U32.matches(first) {
         let len = V_ADD_NC_U32.byte_len();
         let second = word(bytes, len)?;
@@ -256,25 +375,39 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         let (src, len) = scalar_source(first as u8, bytes, "s_mov_b32")?;
         return Ok((Instruction::ScalarMoveB32 { dst, src }, len));
     }
-    if S_CMP_EQ_U32.matches(first) {
+    if let Some(op) = ScalarUnaryOp::from_word(first) {
+        // SOP1: SSRC0 in bits 0-7, SDST in bits 16-22.
+        let mnemonic = op.mnemonic();
+        let dst = ((first >> 16) & 0x7f) as u8;
+        if dst > 105 {
+            return Err(unsupported(mnemonic, "expected a normal SGPR destination"));
+        }
+        let (src, len) = scalar_source(first as u8, bytes, mnemonic)?;
+        return Ok((Instruction::ScalarUnary { op, dst, src }, len));
+    }
+    if let Some(op) = ScalarCompareOp::from_word(first) {
+        let mnemonic = op.mnemonic();
         let src0_bits = first as u8;
         let src1_bits = (first >> 8) as u8;
         if src0_bits == 255 && src1_bits == 255 {
             return Err(unsupported(
-                "s_cmp_eq_u32",
+                mnemonic,
                 "only one source may select a literal",
             ));
         }
-        let (src0, len0) = scalar_source(src0_bits, bytes, "s_cmp_eq_u32")?;
-        let (src1, len1) = scalar_source(src1_bits, bytes, "s_cmp_eq_u32")?;
+        let (src0, len0) = scalar_source(src0_bits, bytes, mnemonic)?;
+        let (src1, len1) = scalar_source(src1_bits, bytes, mnemonic)?;
         return Ok((
-            Instruction::ScalarCompareEqU32 { src0, src1 },
+            Instruction::ScalarCompare { op, src0, src1 },
             len0.max(len1),
         ));
     }
     if S_BRANCH.matches(first) {
         let target = branch_target(first, offset, "s_branch")?;
         return Ok((Instruction::Branch { target }, S_BRANCH.byte_len()));
+    }
+    if let Some(op) = ScalarAluOp::from_word(first) {
+        return scalar_alu(op, first, bytes);
     }
     if S_CBRANCH_SCC0.matches(first) {
         let target = branch_target(first, offset, "s_cbranch_scc0")?;
@@ -295,6 +428,21 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         return Ok((
             Instruction::BranchVccZero { target },
             S_CBRANCH_VCCZ.byte_len(),
+        ));
+    }
+    if let Some(op) = VectorAluOp::from_word(first) {
+        // VOP2: SRC0 in bits 0-8, VSRC1 in bits 9-16, VDST in bits 17-24.
+        let dst = ((first >> 17) & 0xff) as u8;
+        let src1 = ((first >> 9) & 0xff) as u8;
+        let (src0, len) = vector_src0(first, bytes, op.assembly_name())?;
+        return Ok((
+            Instruction::VectorAlu {
+                op,
+                dst,
+                src0,
+                src1,
+            },
+            len,
         ));
     }
     if V_LSHLREV_B32.matches(first) {
@@ -382,6 +530,39 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     }
 
     Err(DecodeErrorKind::UnsupportedOpcode { word: first })
+}
+
+/// SOP2: SSRC0 in bits 0-7, SSRC1 in bits 8-15, SDST in bits 16-22.
+/// Other SOP2 opcodes stay unsupported.
+fn scalar_alu(
+    op: ScalarAluOp,
+    first: u32,
+    bytes: &[u8],
+) -> Result<(Instruction, u8), DecodeErrorKind> {
+    let mnemonic = op.mnemonic();
+    let dst = ((first >> 16) & 0x7f) as u8;
+    if dst > 105 {
+        return Err(unsupported(mnemonic, "expected a normal SGPR destination"));
+    }
+    let src0_bits = first as u8;
+    let src1_bits = (first >> 8) as u8;
+    if src0_bits == 255 && src1_bits == 255 {
+        return Err(unsupported(
+            mnemonic,
+            "only one source may select a literal",
+        ));
+    }
+    let (src0, len0) = scalar_source(src0_bits, bytes, mnemonic)?;
+    let (src1, len1) = scalar_source(src1_bits, bytes, mnemonic)?;
+    Ok((
+        Instruction::ScalarAlu {
+            op,
+            dst,
+            src0,
+            src1,
+        },
+        len0.max(len1),
+    ))
 }
 
 fn scalar_source(
@@ -525,11 +706,57 @@ fn buffer_operands(
     Ok((data, index, resource))
 }
 
+/// VOPC: SRC0 in bits 0-8, VSRC1 in bits 9-16 (RDNA 2 ISA section 12.9). The
+/// destination is implicitly `vcc_lo`. SRC0 excludes inline float constants,
+/// `vcc_hi`, EXEC, M0, TTMPs and the condition selectors (SDWA 249, DPP 250/233).
+fn vector_compare(
+    op: VectorCompareOp,
+    first: u32,
+    bytes: &[u8],
+) -> Result<(Instruction, u8), DecodeErrorKind> {
+    let src1 = ((first >> 9) & 0xff) as u8;
+    let (src0, len) = vector_src0(first, bytes, op.mnemonic())?;
+    Ok((Instruction::VectorCompare { op, src0, src1 }, len))
+}
+
+/// The 9-bit SRC0 of a VOPC or VOP2 word: a VGPR, `s0-s105`, `vcc_lo`, an
+/// inline integer -16..64 or a literal word; everything else is unsupported.
+fn vector_src0(
+    first: u32,
+    bytes: &[u8],
+    mnemonic: &'static str,
+) -> Result<(VectorSource, u8), DecodeErrorKind> {
+    let source = first & 0x1ff;
+    let base_len = 4;
+    Ok(match source {
+        0..=106 => (VectorSource::Scalar(source as u8), base_len),
+        128..=192 => (VectorSource::Immediate(source - 128), base_len),
+        193..=208 => (
+            VectorSource::Immediate(192u32.wrapping_sub(source)),
+            base_len,
+        ),
+        255 => {
+            let len = base_len + 4;
+            (VectorSource::Immediate(word(bytes, len)?), len)
+        }
+        256..=511 => (VectorSource::Register(source as u8), base_len),
+        _ => {
+            return Err(unsupported(
+                mnemonic,
+                "expected a VGPR, normal SGPR, vcc_lo, inline integer or literal",
+            ));
+        }
+    })
+}
+
 fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKind> {
     let dst = (first >> 17) as u8;
     let source = first & 0x1ff;
     let base_len = V_MOV_B32.byte_len();
     let (src, len) = match source {
+        0..=105 => (VectorSource::Scalar(source as u8), base_len),
+        // vcc_lo, which may hold a lane-derived compare mask (docs/shaders/vector-compare.md).
+        106 => (VectorSource::Scalar(VCC_LO), base_len),
         128..=192 => (VectorSource::Immediate(source - 128), base_len),
         193..=208 => (
             VectorSource::Immediate(192u32.wrapping_sub(source)),
@@ -545,7 +772,7 @@ fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKi
         _ => {
             return Err(unsupported(
                 "v_mov_b32_e32",
-                "expected a VGPR, inline integer, inline +1.0f or literal",
+                "expected a VGPR, normal SGPR, vcc_lo, inline integer, inline +1.0f or literal",
             ));
         }
     };

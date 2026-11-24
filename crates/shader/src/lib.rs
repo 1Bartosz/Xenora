@@ -8,7 +8,15 @@ mod graphics;
 pub use graphics::{PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 pub use xenora_decoder::Architecture;
-use xenora_decoder::{DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorSource};
+use xenora_decoder::{
+    DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorBinary, VectorCompareOp,
+    VectorSource,
+};
+
+/// SGPR index of `vcc_lo`.
+const VCC_LO: usize = 106;
+/// SGPR index of `vcc_hi`.
+const VCC_HI: usize = 107;
 
 /// Entry point of all kernels produced by this compiler.
 pub const ENTRY_POINT: &str = "xenora_compute";
@@ -94,6 +102,112 @@ enum Op {
         target: usize,
         taken: bool,
     },
+    /// Wave32 VOPC result: bit n is EXEC[n] & (lane n exists) & test(lane n).
+    /// The value is wave-uniform; every thread computes it for its own wave.
+    LaneMask {
+        op: VectorCompareOp,
+        src0: Value,
+        src1: Value,
+        exec: u32,
+    },
+    /// `s_cbranch_vccz` on a lane-derived VCC_LO (IR annotation only).
+    RuntimeBranch {
+        mask: Value,
+        target: usize,
+    },
+    /// Join after a runtime `s_cbranch_vccz`: the fall-through value when the
+    /// mask is nonzero (branch not taken), else the value from before the branch.
+    JoinVccz {
+        mask: Value,
+        fallthrough: Value,
+        taken: Value,
+    },
+}
+
+impl Op {
+    fn operands(self) -> Vec<Value> {
+        match self {
+            Self::Load | Self::Constant(_) | Self::ScalarBranch { .. } => Vec::new(),
+            Self::Binary(_, left, right) => vec![left, right],
+            Self::MergeLanes {
+                active, inactive, ..
+            } => vec![active, inactive],
+            Self::Store(value) => vec![value],
+            Self::LaneMask { src0, src1, .. } => vec![src0, src1],
+            Self::RuntimeBranch { mask, .. } => vec![mask],
+            Self::JoinVccz {
+                mask,
+                fallthrough,
+                taken,
+            } => vec![mask, fallthrough, taken],
+        }
+    }
+
+    /// The MSL expression of a per-thread value, with operand names, the
+    /// dispatch index and the lane given by the caller.
+    fn expression(self, name: &dyn Fn(Value) -> String, index: &str, lane: &str) -> String {
+        match self {
+            Self::Load => format!("input[{index}]"),
+            Self::Constant(value) => format!("0x{value:08x}u"),
+            Self::Binary(operator, left, right) => {
+                let (left, right) = (name(left), name(right));
+                let (_, symbol) = operator.operator();
+                match operator {
+                    Binary::FloatAdd | Binary::FloatMul => format!(
+                        "as_type<uint>(as_type<float>({left}) {symbol} as_type<float>({right}))"
+                    ),
+                    Binary::ArithmeticShiftRight => {
+                        format!("as_type<uint>(as_type<int>({left}) {symbol} ({right} & 31u))")
+                    }
+                    Binary::ShiftLeft | Binary::ShiftRight => {
+                        format!("{left} {symbol} ({right} & 31u)")
+                    }
+                    Binary::Vector(operation) => vector_expression(operation, &left, &right),
+                    _ => format!("{left} {symbol} {right}"),
+                }
+            }
+            Self::MergeLanes {
+                mask,
+                active,
+                inactive,
+            } => format!(
+                "((0x{mask:08x}u >> {lane}) & 1u) != 0u ? {} : {}",
+                name(active),
+                name(inactive)
+            ),
+            Self::JoinVccz {
+                mask,
+                fallthrough,
+                taken,
+            } => format!(
+                "{} != 0u ? {} : {}",
+                name(mask),
+                name(fallthrough),
+                name(taken)
+            ),
+            Self::Store(_)
+            | Self::ScalarBranch { .. }
+            | Self::LaneMask { .. }
+            | Self::RuntimeBranch { .. } => unreachable!("not a per-thread expression"),
+        }
+    }
+}
+
+fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
+    use xenora_decoder::CompareRelation;
+    let symbol = match op.relation {
+        CompareRelation::Less => "<",
+        CompareRelation::Equal => "==",
+        CompareRelation::LessOrEqual => "<=",
+        CompareRelation::Greater => ">",
+        CompareRelation::NotEqual => "!=",
+        CompareRelation::GreaterOrEqual => ">=",
+    };
+    if op.signed {
+        format!("as_type<int>({left}) {symbol} as_type<int>({right})")
+    } else {
+        format!("{left} {symbol} {right}")
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +221,8 @@ enum Binary {
     Xor,
     FloatAdd,
     FloatMul,
+    /// A registry VOP2 integer operation, lowered by its typed template.
+    Vector(VectorBinary),
 }
 
 impl Binary {
@@ -121,7 +237,53 @@ impl Binary {
             Self::Xor => ("xor.b32", "^"),
             Self::FloatAdd => ("add.f32", "+"),
             Self::FloatMul => ("mul.f32", "*"),
+            Self::Vector(operation) => (
+                match operation {
+                    VectorBinary::Add => "add.u32",
+                    VectorBinary::Sub => "sub.u32",
+                    VectorBinary::Xnor => "xnor.b32",
+                    VectorBinary::MinSigned => "min.i32",
+                    VectorBinary::MinUnsigned => "min.u32",
+                    VectorBinary::MaxSigned => "max.i32",
+                    VectorBinary::MaxUnsigned => "max.u32",
+                    VectorBinary::Mul24Signed => "mul24.i32",
+                    VectorBinary::Mul24Unsigned => "mul24.u32",
+                    VectorBinary::MulHi24Signed => "mulhi24.i32",
+                    VectorBinary::MulHi24Unsigned => "mulhi24.u32",
+                },
+                "",
+            ),
         }
+    }
+}
+
+/// The MSL template of each per-lane registry operation. Integer arithmetic is
+/// on `uint` (wrapping); signed forms reinterpret with `as_type`, and the
+/// 24-bit forms sign-extend bit 23 with a shift pair or mask to 24 bits first.
+fn vector_expression(operation: VectorBinary, left: &str, right: &str) -> String {
+    let int = |value: &str| format!("as_type<int>({value})");
+    let i24 = |value: &str| format!("(as_type<int>({value} << 8u) >> 8)");
+    let u24 = |value: &str| format!("({value} & 0x00ffffffu)");
+    match operation {
+        VectorBinary::Add => format!("{left} + {right}"),
+        VectorBinary::Sub => format!("{left} - {right}"),
+        VectorBinary::Xnor => format!("~({left} ^ {right})"),
+        VectorBinary::MinSigned => format!("as_type<uint>(min({}, {}))", int(left), int(right)),
+        VectorBinary::MinUnsigned => format!("min({left}, {right})"),
+        VectorBinary::MaxSigned => format!("as_type<uint>(max({}, {}))", int(left), int(right)),
+        VectorBinary::MaxUnsigned => format!("max({left}, {right})"),
+        // The low 32 bits of a product do not depend on signedness, so the
+        // sign-extended factors multiply as wrapping uint.
+        VectorBinary::Mul24Signed => format!(
+            "as_type<uint>({}) * as_type<uint>({})",
+            i24(left),
+            i24(right)
+        ),
+        VectorBinary::Mul24Unsigned => format!("{} * {}", u24(left), u24(right)),
+        VectorBinary::MulHi24Signed => {
+            format!("as_type<uint>(mulhi({}, {}))", i24(left), i24(right))
+        }
+        VectorBinary::MulHi24Unsigned => format!("mulhi({}, {})", u24(left), u24(right)),
     }
 }
 
@@ -239,8 +401,16 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
 
     let disassembly = decoded.iter().map(|line| format!("{line}\n")).collect();
     let mut ir = String::new();
+    let has_mask = operations
+        .iter()
+        .any(|(_, operation)| matches!(operation, Op::LaneMask { .. }));
+    let grid = if has_mask {
+        ",\n    uint grid [[threads_per_grid]]"
+    } else {
+        ""
+    };
     let mut msl = format!(
-        "#include <metal_stdlib>\nusing namespace metal;\nkernel void {ENTRY_POINT}(\n    device const uint* input [[buffer(0)]],\n    device uint* output [[buffer(1)]],\n    uint index [[thread_position_in_grid]]) {{\n"
+        "#include <metal_stdlib>\nusing namespace metal;\nkernel void {ENTRY_POINT}(\n    device const uint* input [[buffer(0)]],\n    device uint* output [[buffer(1)]],\n    uint index [[thread_position_in_grid]]{grid}) {{\n"
     );
     if operations.iter().any(|(_, operation)| {
         matches!(
@@ -250,41 +420,41 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
     }) {
         msl.push_str("    #pragma clang fp contract(off)\n    #pragma clang fp reassociate(off)\n");
     }
-    for (index, (offset, operation)) in operations.into_iter().enumerate() {
+    // Wave-uniform values: identical in every lane of an RDNA wave.
+    let mut uniform = Vec::with_capacity(operations.len());
+    for (index, &(offset, operation)) in operations.iter().enumerate() {
         let dest = Value(index);
+        uniform.push(match operation {
+            Op::Constant(_) | Op::LaneMask { .. } => true,
+            Op::Load | Op::MergeLanes { .. } => false,
+            _ => operation.operands().iter().all(|value| uniform[value.0]),
+        });
+        let thread = |value: Value| value.to_string();
         let (step, statement) = match operation {
             Op::Load => (
                 format!("{dest} = load.u32 input[index]"),
-                format!("uint {dest} = input[index];"),
+                format!(
+                    "uint {dest} = {};",
+                    operation.expression(&thread, "index", "")
+                ),
             ),
             Op::Constant(value) => (
                 format!("{dest} = const.u32 0x{value:08x}"),
-                format!("uint {dest} = 0x{value:08x}u;"),
+                format!("uint {dest} = {};", operation.expression(&thread, "", "")),
             ),
-            Op::Binary(operator, left, right) => {
-                let (mnemonic, symbol) = operator.operator();
-                let expression = match operator {
-                    Binary::FloatAdd | Binary::FloatMul => format!(
-                        "as_type<uint>(as_type<float>({left}) {symbol} as_type<float>({right}))"
-                    ),
-                    Binary::ArithmeticShiftRight => {
-                        format!("as_type<uint>(as_type<int>({left}) {symbol} ({right} & 31u))")
-                    }
-                    Binary::ShiftLeft | Binary::ShiftRight => {
-                        format!("{left} {symbol} ({right} & 31u)")
-                    }
-                    _ => format!("{left} {symbol} {right}"),
-                };
-                (
-                    format!("{dest} = {mnemonic} {left}, {right}"),
-                    format!("uint {dest} = {expression};"),
-                )
-            }
+            Op::Binary(operator, left, right) => (
+                format!("{dest} = {} {left}, {right}", operator.operator().0),
+                format!("uint {dest} = {};", operation.expression(&thread, "", "")),
+            ),
             Op::ScalarBranch { target, taken } => {
                 let _ = writeln!(
                     ir,
                     "{offset:04x}: branch.uniform 0x{target:04x} taken={taken}"
                 );
+                continue;
+            }
+            Op::RuntimeBranch { mask, target } => {
+                let _ = writeln!(ir, "{offset:04x}: branch.vccz {mask} -> 0x{target:04x}");
                 continue;
             }
             Op::MergeLanes {
@@ -294,9 +464,32 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
             } => (
                 format!("{dest} = merge.lanes mask=0x{mask:08x}, {active}, {inactive}"),
                 format!(
-                    "uint {dest} = ((0x{mask:08x}u >> (index & 31u)) & 1u) != 0u ? {active} : {inactive};"
+                    "uint {dest} = {};",
+                    operation.expression(&thread, "", "(index & 31u)")
                 ),
             ),
+            Op::JoinVccz {
+                mask,
+                fallthrough,
+                taken,
+            } => (
+                format!("{dest} = join.vccz {mask}, {fallthrough}, {taken}"),
+                format!("uint {dest} = {};", operation.expression(&thread, "", "")),
+            ),
+            Op::LaneMask {
+                op,
+                src0,
+                src1,
+                exec,
+            } => {
+                let _ = writeln!(
+                    ir,
+                    "{offset:04x}: {dest} = wave.mask {} {src0}, {src1} exec=0x{exec:08x}",
+                    op.mnemonic()
+                );
+                emit_lane_mask(&mut msl, &operations, &uniform, index, op, src0, src1, exec);
+                continue;
+            }
             Op::Store(value) => (
                 format!("store.u32 output[index], {value}"),
                 format!("output[index] = {value};"),
@@ -314,6 +507,59 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
     })
 }
 
+/// Emit a Wave32 compare mask without any cross-thread operation: the thread
+/// recomputes the lane-dependent operands of each lane of its own RDNA wave
+/// (dispatch indices `(index & ~31) + n`) from those lanes' input words.
+/// Absent lanes of a final partial wave contribute 0.
+#[allow(clippy::too_many_arguments)]
+fn emit_lane_mask(
+    msl: &mut String,
+    operations: &[(usize, Op)],
+    uniform: &[bool],
+    index: usize,
+    op: VectorCompareOp,
+    src0: Value,
+    src1: Value,
+    exec: u32,
+) {
+    let mut cone = vec![false; index];
+    let mut pending = vec![src0, src1];
+    while let Some(value) = pending.pop() {
+        if uniform[value.0] || cone[value.0] {
+            continue;
+        }
+        cone[value.0] = true;
+        pending.extend(operations[value.0].1.operands());
+    }
+    let name = |value: Value| {
+        if cone[value.0] {
+            format!("l{}", value.0)
+        } else {
+            value.to_string()
+        }
+    };
+    let dest = Value(index);
+    let _ = writeln!(msl, "    uint {dest} = 0u;");
+    let _ = writeln!(
+        msl,
+        "    for (uint lane = 0u; lane < 32u; ++lane) {{\n        uint lane_index = (index & ~31u) + lane;\n        if (lane_index >= grid) {{ break; }}"
+    );
+    for (position, &(_, operation)) in operations[..index].iter().enumerate() {
+        if cone[position] {
+            let _ = writeln!(
+                msl,
+                "        uint l{position} = {};",
+                operation.expression(&name, "lane_index", "lane")
+            );
+        }
+    }
+    let _ = writeln!(
+        msl,
+        "        uint pass = ({}) ? 1u : 0u;\n        {dest} |= ((0x{exec:08x}u >> lane) & pass) << lane;\n    }}",
+        compare_expression(op, &name(src0), &name(src1))
+    );
+}
+
 fn decode_fixture(
     architecture: Architecture,
     bytes: &[u8],
@@ -326,7 +572,7 @@ fn decode_fixture(
 
 fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, Op)>, CompileError> {
     let mut operations = Vec::new();
-    let mut registers = [None; 256];
+    let mut registers = [None::<Value>; 256];
     let mut facts = Vec::<KnownBits>::new();
     let mut pending_load = None;
     let mut stored = false;
@@ -336,6 +582,10 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
     scalars[126] = Some(exec);
     let mut scc = None;
     let mut skip_before = 0;
+    // Set while VCC_LO holds a lane-derived compare mask (scalars[VCC_LO] is then None).
+    let mut lane_vcc: Option<Value> = None;
+    // An open runtime `s_cbranch_vccz` region: its end, mask and the VGPRs at the branch.
+    let mut region: Option<(usize, Value, [Option<Value>; 256])> = None;
 
     // Every decoded instruction must satisfy the fixture layout and binding
     // contract, even when a known branch skips it.
@@ -378,6 +628,70 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
     for instruction in decoded {
         let offset = instruction.offset;
         let error = |reason| CompileError::Verify { offset, reason };
+        if let Some((end, mask, before)) = region
+            && offset >= end
+        {
+            region = None;
+            for slot in 0..registers.len() {
+                if let (Some(fallthrough), Some(taken)) = (registers[slot], before[slot])
+                    && fallthrough.0 != taken.0
+                {
+                    let next = Value(operations.len());
+                    operations.push((
+                        end,
+                        Op::JoinVccz {
+                            mask,
+                            fallthrough,
+                            taken,
+                        },
+                    ));
+                    let (left, right) = (facts[fallthrough.0], facts[taken.0]);
+                    // Keep up to two candidate values when both edges have them.
+                    let values = match (left.values, right.values) {
+                        (Some([a, b]), Some([c, d])) => {
+                            let mut union = vec![a, b, c, d];
+                            union.sort_unstable();
+                            union.dedup();
+                            match union.as_slice() {
+                                [only] => Some([*only; 2]),
+                                [first, second] => Some([*first, *second]),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    facts.push(KnownBits {
+                        zero: left.zero & right.zero,
+                        one: left.one & right.one,
+                        values,
+                    });
+                    registers[slot] = Some(next);
+                }
+            }
+        }
+        // docs/shaders/vector-compare.md section 6: checked whatever EXEC is.
+        if let Some((_, _, before)) = &region {
+            let dst = match instruction.instruction {
+                Instruction::MoveB32 { dst, .. }
+                | Instruction::AddNoCarryU32 { dst, .. }
+                | Instruction::VectorLshlrevB32 { dst, .. }
+                | Instruction::VectorLshrrevB32 { dst, .. }
+                | Instruction::VectorAshrrevI32 { dst, .. }
+                | Instruction::VectorAndB32 { dst, .. }
+                | Instruction::VectorOrB32 { dst, .. }
+                | Instruction::VectorXorB32 { dst, .. } => dst,
+                _ => {
+                    return Err(error(
+                        "code skipped by a runtime s_cbranch_vccz may contain only v_mov_b32, v_add_nc_u32_e64 and the hand-written integer VOP2 forms",
+                    ));
+                }
+            };
+            if before[usize::from(dst)].is_none() {
+                return Err(error(
+                    "a VGPR written under a runtime s_cbranch_vccz must be initialized before the branch",
+                ));
+            }
+        }
         let read = |register: u8| {
             registers[usize::from(register)].ok_or_else(|| {
                 error("source register is uninitialized, pending a load wait, or reserved for indexing")
@@ -406,7 +720,8 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 | Instruction::VectorOrB32 { .. }
                 | Instruction::VectorXorB32 { .. }
                 | Instruction::VectorAddF32 { .. }
-                | Instruction::VectorMulF32 { .. } => continue,
+                | Instruction::VectorMulF32 { .. }
+                | Instruction::VectorAlu { .. } => continue,
                 _ => {}
             }
         }
@@ -474,6 +789,36 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 dst,
                 src: VectorSource::Immediate(value),
             } => (Some(dst), Op::Constant(value)),
+            Instruction::MoveB32 {
+                dst,
+                src: VectorSource::Scalar(register),
+            } if usize::from(register) == VCC_LO
+                && let Some(mask) = lane_vcc =>
+            {
+                let slot = usize::from(dst);
+                if dst == 0 || pending_load.is_some_and(|(register, _)| register == slot) {
+                    return Err(error(
+                        "move writes the index register or replaces a pending load",
+                    ));
+                }
+                registers[slot] = Some(merge_lanes(
+                    &mut operations,
+                    &mut facts,
+                    offset,
+                    exec,
+                    mask,
+                    registers[slot],
+                )?);
+                continue;
+            }
+            // SGPR values are wave-uniform and known during translation.
+            Instruction::MoveB32 {
+                dst,
+                src: VectorSource::Scalar(register),
+            } => (
+                Some(dst),
+                Op::Constant(read_scalar(ScalarSource::Register(register))?),
+            ),
             Instruction::AddNoCarryU32 { dst, src0, src1 } => {
                 (Some(dst), Op::Binary(Binary::Add, read(src0)?, read(src1)?))
             }
@@ -506,15 +851,116 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 if dst == 126 {
                     exec = value;
                 }
+                if usize::from(dst) == VCC_LO {
+                    lane_vcc = None;
+                }
                 let slot = scalars
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = Some(value);
                 continue;
             }
-            Instruction::ScalarCompareEqU32 { src0, src1 } => {
-                scc = Some(read_scalar(src0)? == read_scalar(src1)?);
+            Instruction::ScalarUnary { op, dst, src } => {
+                let src = read_scalar(src)?;
+                if dst < 8 {
+                    return Err(error("scalar unary would modify a resource descriptor"));
+                }
+                let (value, flag) = op.evaluate(src);
+                let slot = scalars
+                    .get_mut(usize::from(dst))
+                    .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
+                *slot = Some(value);
+                if let Some(flag) = flag {
+                    scc = Some(flag);
+                }
                 continue;
+            }
+            Instruction::ScalarAlu {
+                op,
+                dst,
+                src0,
+                src1,
+            } => {
+                let (src0, src1) = (read_scalar(src0)?, read_scalar(src1)?);
+                let scc_in = if op.reads_scc() {
+                    scc.ok_or_else(|| error("SOP2 SCC input reads uninitialized SCC"))?
+                } else {
+                    false
+                };
+                if dst < 8 {
+                    return Err(error("scalar ALU would modify a resource descriptor"));
+                }
+                let (value, flag) = op.evaluate(src0, src1, scc_in);
+                let slot = scalars
+                    .get_mut(usize::from(dst))
+                    .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
+                *slot = Some(value);
+                if let Some(flag) = flag {
+                    scc = Some(flag);
+                }
+                continue;
+            }
+            Instruction::ScalarCompare { op, src0, src1 } => {
+                scc = Some(op.test(read_scalar(src0)?, read_scalar(src1)?));
+                continue;
+            }
+            // docs/shaders/vector-compare.md sections 3 and 5.
+            Instruction::VectorCompare { op, src0, src1 } => {
+                if exec == 0 {
+                    scalars[VCC_HI] = None;
+                    scalars[VCC_LO] = Some(0);
+                    lane_vcc = None;
+                    continue;
+                }
+                let constant =
+                    |operations: &mut Vec<(usize, Op)>, facts: &mut Vec<KnownBits>, bits: u32| {
+                        let value = Value(operations.len());
+                        operations.push((offset, Op::Constant(bits)));
+                        facts.push(KnownBits::constant(bits));
+                        value
+                    };
+                let src0 = match src0 {
+                    VectorSource::Register(register) => read(register)?,
+                    VectorSource::Scalar(register) if usize::from(register) == VCC_LO => {
+                        match (lane_vcc, scalars[VCC_LO]) {
+                            (Some(mask), _) => mask,
+                            (None, Some(bits)) => constant(&mut operations, &mut facts, bits),
+                            (None, None) => {
+                                return Err(error("compare reads uninitialized VCC_LO"));
+                            }
+                        }
+                    }
+                    VectorSource::Scalar(register) => {
+                        let bits = read_scalar(ScalarSource::Register(register))?;
+                        constant(&mut operations, &mut facts, bits)
+                    }
+                    VectorSource::Immediate(bits) => constant(&mut operations, &mut facts, bits),
+                };
+                let src1 = read(src1)?;
+                let mask = Value(operations.len());
+                operations.push((
+                    offset,
+                    Op::LaneMask {
+                        op,
+                        src0,
+                        src1,
+                        exec,
+                    },
+                ));
+                facts.push(KnownBits::UNKNOWN);
+                scalars[VCC_LO] = None;
+                scalars[VCC_HI] = None;
+                lane_vcc = Some(mask);
+                continue;
+            }
+            Instruction::BranchVccZero { target } if let Some(mask) = lane_vcc => {
+                if pending_load.is_some() {
+                    return Err(error(
+                        "a runtime s_cbranch_vccz requires no outstanding vector load",
+                    ));
+                }
+                region = Some((target, mask, registers));
+                (None, Op::RuntimeBranch { mask, target })
             }
             Instruction::BranchSccZero { target }
             | Instruction::BranchExecZero { target }
@@ -543,6 +989,44 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         target,
                         taken: true,
                     },
+                )
+            }
+            Instruction::VectorAlu {
+                op,
+                dst,
+                src0,
+                src1,
+            } => {
+                let src0 = match src0 {
+                    VectorSource::Register(register) => read(register)?,
+                    VectorSource::Scalar(register) if usize::from(register) == VCC_LO => {
+                        match (lane_vcc, scalars[VCC_LO]) {
+                            (Some(mask), _) => mask,
+                            (None, Some(bits)) => {
+                                constant(&mut operations, &mut facts, offset, bits)
+                            }
+                            (None, None) => {
+                                return Err(error("vector ALU reads uninitialized VCC_LO"));
+                            }
+                        }
+                    }
+                    VectorSource::Scalar(register) => {
+                        let bits = read_scalar(ScalarSource::Register(register))?;
+                        constant(&mut operations, &mut facts, offset, bits)
+                    }
+                    VectorSource::Immediate(bits) => {
+                        constant(&mut operations, &mut facts, offset, bits)
+                    }
+                };
+                let src1 = read(src1)?;
+                let (left, right) = if op.swaps_sources() {
+                    (src1, src0)
+                } else {
+                    (src0, src1)
+                };
+                (
+                    Some(dst),
+                    Op::Binary(Binary::Vector(op.lowering()), left, right),
                 )
             }
             Instruction::VectorAddF32 { dst, src0, src1 } => (
@@ -580,6 +1064,9 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             }
             _ => KnownBits::UNKNOWN,
         };
+        // Arms may push operand constants first, so the result is the next slot
+        // now rather than `next`.
+        let produced = Value(operations.len());
         facts.push(value_bits);
         operations.push((offset, operation));
         if let Some(dest) = dest {
@@ -594,7 +1081,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 &mut facts,
                 offset,
                 exec,
-                next,
+                produced,
                 registers[slot],
             )?);
         }
@@ -603,6 +1090,19 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         offset: code_len,
         reason: "missing program termination",
     })
+}
+
+/// A wave-uniform constant operand at `offset`.
+fn constant(
+    operations: &mut Vec<(usize, Op)>,
+    facts: &mut Vec<KnownBits>,
+    offset: usize,
+    bits: u32,
+) -> Value {
+    let value = Value(operations.len());
+    operations.push((offset, Op::Constant(bits)));
+    facts.push(KnownBits::constant(bits));
+    value
 }
 
 // Keeping a value for inactive lanes requires a previously initialized destination.

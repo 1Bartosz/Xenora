@@ -9,6 +9,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+xenora-decoder = { path = "../decoder" }
+xenora-isa = { path = "../isa" }
 xenora-metal = { path = "../metal" }
 xenora-ref = { path = "../ref" }
 xenora-shader = { path = "../shader" }
