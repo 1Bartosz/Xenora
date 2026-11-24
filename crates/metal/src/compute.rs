@@ -16,7 +16,7 @@ use objc2_metal::{
     MTLResourceOptions, MTLShaderValidation, MTLSize, MTLStorageMode, MTLTexture,
     MTLTextureDescriptor, MTLTextureUsage,
 };
-use xenora_texture::{Bc1Upload, TiledBc1};
+use xenora_texture::{Bc1Upload, BcAlphaFormat, BcAlphaUpload, TiledBc1};
 
 #[path = "render.rs"]
 mod render;
@@ -26,12 +26,12 @@ const MAX_GROUPS: usize = 64;
 const MAX_GRID_WORDS: usize = MAX_GROUPS * MAX_THREADS_PER_GROUP;
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 
-const BC1_READBACK: &str = r"
+const BC_READBACK: &str = r"
 #include <metal_stdlib>
 using namespace metal;
-kernel void read_bc1(texture2d<float, access::read> image [[texture(0)]],
-                     device uint *output [[buffer(1)]],
-                     uint index [[thread_position_in_grid]]) {
+kernel void read_bc(texture2d<float, access::read> image [[texture(0)]],
+                    device uint *output [[buffer(1)]],
+                    uint index [[thread_position_in_grid]]) {
     uint width = image.get_width();
     uint4 channels = uint4(round(image.read(uint2(index % width, index / width)) * 255.0f));
     output[index] = channels.r | (channels.g << 8u) | (channels.b << 16u) | (channels.a << 24u);
@@ -184,11 +184,18 @@ impl NativeCompute {
         let (width, height) = tiled
             .mip_extent(mip)
             .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
-        let pixels = self.validate_bc1_extent(width, height)?;
+        let pixels = self.validate_bc_extent(width, height, "BC1")?;
         let blocks = tiled
             .linearize(layer, mip)
             .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
-        self.read_bc1_blocks(&blocks, width.div_ceil(4) * 8, width, height, pixels)
+        self.read_bc_blocks(
+            MTLPixelFormat::BC1_RGBA,
+            &blocks,
+            width.div_ceil(4) * 8,
+            width,
+            height,
+            pixels,
+        )
     }
 
     /// Sample a native Metal RGBA8 texture using a native Metal sampler on Apple Silicon GPU.
@@ -269,8 +276,9 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         let level = upload
             .subresource(layer, mip)
             .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
-        let pixels = self.validate_bc1_extent(level.width, level.height)?;
-        self.read_bc1_blocks(
+        let pixels = self.validate_bc_extent(level.width, level.height, "BC1")?;
+        self.read_bc_blocks(
+            MTLPixelFormat::BC1_RGBA,
             level.bytes,
             level.row_pitch,
             level.width,
@@ -279,7 +287,45 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         )
     }
 
-    fn validate_bc1_extent(&self, width: usize, height: usize) -> Result<usize, MetalError> {
+    /// Read a selected subresource from a validated pitched BC2 or BC3 upload.
+    ///
+    /// The original 16-byte blocks go to a native `BC2_RGBA` or `BC3_RGBA`
+    /// texture, and the output has the layout of [`Self::read_bc1_upload`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid layer or mip, out-of-policy size,
+    /// unavailable BC compression, or Metal setup or execution failure.
+    pub fn read_bc_alpha_upload(
+        &self,
+        upload: &BcAlphaUpload<'_>,
+        layer: usize,
+        mip: u32,
+    ) -> Result<Vec<u32>, MetalError> {
+        let level = upload
+            .subresource(layer, mip)
+            .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
+        let (format, name) = match upload.format() {
+            BcAlphaFormat::Bc2 => (MTLPixelFormat::BC2_RGBA, "BC2"),
+            BcAlphaFormat::Bc3 => (MTLPixelFormat::BC3_RGBA, "BC3"),
+        };
+        let pixels = self.validate_bc_extent(level.width, level.height, name)?;
+        self.read_bc_blocks(
+            format,
+            level.bytes,
+            level.row_pitch,
+            level.width,
+            level.height,
+            pixels,
+        )
+    }
+
+    fn validate_bc_extent(
+        &self,
+        width: usize,
+        height: usize,
+        name: &str,
+    ) -> Result<usize, MetalError> {
         let pixels = width
             .checked_mul(height)
             .filter(|pixels| (1..=MAX_GRID_WORDS).contains(pixels))
@@ -287,14 +333,15 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         if !self.device.supportsBCTextureCompression() {
             return Err(MetalError::new(
                 "supportsBCTextureCompression",
-                "BC1 is unavailable",
+                format!("{name} is unavailable"),
             ));
         }
         Ok(pixels)
     }
 
-    fn read_bc1_blocks(
+    fn read_bc_blocks(
         &self,
+        format: MTLPixelFormat,
         blocks: &[u8],
         row_pitch: usize,
         width: usize,
@@ -302,14 +349,11 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         pixels: usize,
     ) -> Result<Vec<u32>, MetalError> {
         autoreleasepool(|_| {
-            // SAFETY: The positive bounded dimensions and supported BC1 format
+            // SAFETY: The positive bounded dimensions and supported BC format
             // describe a 2D texture with just its base level.
             let descriptor = unsafe {
                 MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                    MTLPixelFormat::BC1_RGBA,
-                    width,
-                    height,
-                    false,
+                    format, width, height, false,
                 )
             };
             descriptor.setStorageMode(MTLStorageMode::Shared);
@@ -318,7 +362,7 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
                 .device
                 .newTextureWithDescriptor(&descriptor)
                 .ok_or_else(|| {
-                    MetalError::new("newTextureWithDescriptor", "BC1 allocation failed")
+                    MetalError::new("newTextureWithDescriptor", "BC allocation failed")
                 })?;
             let region = MTLRegion {
                 origin: MTLOrigin { x: 0, y: 0, z: 0 },
@@ -332,7 +376,8 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             let bytes_per_row = if height <= 4 { 0 } else { row_pitch };
             // SAFETY: The region spans the whole level, including any partial
             // edge block. Both callers validate that the input holds all rows
-            // of complete BC1 blocks at the supplied, block-aligned stride.
+            // of complete blocks of this format at the supplied, block-aligned
+            // stride.
             unsafe {
                 texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
                     region,
@@ -342,8 +387,8 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
                 );
             }
             self.run(
-                BC1_READBACK,
-                "read_bc1",
+                BC_READBACK,
+                "read_bc",
                 ComputeInput::Texture(&texture, pixels),
             )
             .map(|profile| profile.output)

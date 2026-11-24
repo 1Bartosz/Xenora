@@ -15,6 +15,13 @@ remains unsupported.
 - Added `xenora_isa::meta::identify`, which finds any gfx1030 instruction's form and exact length, including literal, SDWA, DPP and NSA words, and rejects truncated, unassigned and disallowed-extension encodings. It agrees with every LLVM-assembled fixture and with LLVM 23.1.6 on a probe set covering each family and extension word. Identification does not make an instruction executable: 25 forms have semantic decoding.
 - Added `xenora shaders coverage [--json]` and `xenora shaders inspect <file>` for per-family coverage and stream listings that separate decoding failures from unsupported semantics. Each instruction is decoded at its stream offset and branch targets are checked against the whole stream's boundaries, so supported branches are no longer misreported as unsupported operands. `xenora_decoder::decode_at` decodes a single instruction for such callers.
 - Added explicit claim-before-work rules for contributors and coding agents to `AGENTS.md`, `CONTRIBUTING.md` and the pull request template: check for existing claims, claim with `/claim`, keep a 24-hour lease alive with `/progress`, `/release` when stopping, and link the claimed issue. Without the claim workflow, the earliest valid claim comment wins.
+- Added native Metal upload and readback of BC2 and BC3 textures: `xenora-texture` gains a
+  pitched `BcAlphaUpload` for 16-byte blocks, and `NativeCompute::read_bc_alpha_upload` sends
+  the original blocks to `BC2_RGBA` or `BC3_RGBA` textures when the device reports BC support.
+  GPU tests cover explicit and interpolated (six- and eight-value) alpha, both colour endpoint
+  orders, padded row and slice pitches, two layers and two mips against the CPU decoders and
+  hand-derived anchors. On an Apple M5 Pro the native decoder's interpolated values were within
+  1.14 codes of the exact values, so up to two codes from the truncating CPU reference.
 - Added CPU block decoders for BC2, BC3, BC4 and BC5 (UNORM and SNORM) in `xenora-texture`, with tests whose expected texels were derived by hand from the Microsoft and Khronos block-compression specifications. Interpolated values truncate toward zero, as the existing BC1 decoder does; GPU upload and sampling of these formats are not implemented yet.
 - Added `dbt::tests::sib_store_executes_through_the_native_dbt`, an independent DBT execution
   test that runs the SIB store form `mov [rsp + 0x20], rbx` through the native ARM64 DBT and
