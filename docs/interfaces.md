@@ -159,6 +159,15 @@ up to 1 MiB. Each nonempty span must fit in one mapped guest region with the
 required permissions. Writes validate the full destination before changing
 bytes, and moves preserve the original source bytes when ranges overlap.
 
+### Default process heap
+
+`GetProcessHeap`, `HeapAlloc`, `HeapSize`, and `HeapFree` expose a single
+synthetic heap. Allocations are at least 16-byte aligned and zero initialized.
+A zero-size request allocates one byte. The heap is bounded to 64 MiB and
+4096 live allocations. Heap and virtual allocations have distinct ownership.
+Private heaps, reallocation, and flags other than `HEAP_ZERO_MEMORY` on
+allocation remain unsupported. See the [Windows heap API reference](https://learn.microsoft.com/windows/win32/api/heapapi/).
+
 ### Event signaling
 
 The synthetic runtime supports unnamed manual-reset and auto-reset events

@@ -677,6 +677,11 @@ impl SymbolDb {
     // ---- Win32 kernel / process --------------------------------------------
 
     fn populate_win32_kernel(&mut self) {
+        for module in ["kernel32.dll", "api-ms-win-core-heap-l1-1-0.dll"] {
+            for symbol in ["GetProcessHeap", "HeapAlloc", "HeapSize", "HeapFree"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         let p1 = "api-ms-win-core-processthreads-l1-1-0.dll";
         let p2 = "api-ms-win-core-processthreads-l1-1-2.dll";
         for module in [p1, "kernel32.dll"] {

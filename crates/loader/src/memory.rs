@@ -85,12 +85,19 @@ impl fmt::Display for MemoryError {
 
 impl std::error::Error for MemoryError {}
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AllocationKind {
+    ImageOrStatic,
+    Virtual,
+    Heap,
+}
+
 #[derive(Clone)]
 struct MappedRegion {
     base: u64,
     data: Vec<u8>,
     permissions: MemoryPermissions,
-    virtual_allocation: bool,
+    allocation: AllocationKind,
 }
 
 impl MappedRegion {
@@ -136,7 +143,13 @@ impl GuestMemory {
         permissions: MemoryPermissions,
         initial_data: &[u8],
     ) -> Result<(), MemoryError> {
-        self.insert_region(base, size, permissions, initial_data, false)
+        self.insert_region(
+            base,
+            size,
+            permissions,
+            initial_data,
+            AllocationKind::ImageOrStatic,
+        )
     }
 
     fn insert_region(
@@ -145,7 +158,7 @@ impl GuestMemory {
         size: usize,
         permissions: MemoryPermissions,
         initial_data: &[u8],
-        virtual_allocation: bool,
+        allocation: AllocationKind,
     ) -> Result<(), MemoryError> {
         let size_u64 = size as u64;
         let end = base.checked_add(size_u64).ok_or(MemoryError::Overflow)?;
@@ -170,7 +183,7 @@ impl GuestMemory {
             base,
             data,
             permissions,
-            virtual_allocation,
+            allocation,
         });
         self.regions.sort_by_key(|r| r.base);
         Ok(())
@@ -182,15 +195,37 @@ impl GuestMemory {
         size: usize,
         permissions: MemoryPermissions,
     ) -> Result<u64, MemoryError> {
-        // Bound the host storage retained by the synthetic VirtualAlloc service.
+        self.map_dynamic_allocation(requested_base, size, permissions, AllocationKind::Virtual)
+    }
+
+    pub(crate) fn map_heap_allocation(&mut self, size: usize) -> Result<u64, MemoryError> {
+        self.map_dynamic_allocation(0, size, MemoryPermissions::READ_WRITE, AllocationKind::Heap)
+    }
+
+    fn map_dynamic_allocation(
+        &mut self,
+        requested_base: u64,
+        size: usize,
+        permissions: MemoryPermissions,
+        allocation: AllocationKind,
+    ) -> Result<u64, MemoryError> {
+        // Bound retained host storage independently for each allocation kind.
         const MAX_VIRTUAL_BYTES: usize = 64 * 1024 * 1024;
         let allocated: usize = self
             .regions
             .iter()
-            .filter(|region| region.virtual_allocation)
+            .filter(|region| region.allocation == allocation)
             .map(|region| region.data.len())
             .sum();
-        if size > MAX_VIRTUAL_BYTES - allocated {
+        if size > MAX_VIRTUAL_BYTES - allocated
+            || (allocation == AllocationKind::Heap
+                && self
+                    .regions
+                    .iter()
+                    .filter(|r| r.allocation == allocation)
+                    .count()
+                    >= 4096)
+        {
             return Err(MemoryError::AllocationFailed);
         }
 
@@ -210,15 +245,30 @@ impl GuestMemory {
                 }
             }
         }
-        self.insert_region(base, size, permissions, &[], true)?;
+        self.insert_region(base, size, permissions, &[], allocation)?;
         Ok(base)
     }
 
     pub(crate) fn release_virtual_allocation(&mut self, base: u64) -> bool {
+        self.release_dynamic_allocation(base, AllocationKind::Virtual)
+    }
+
+    pub(crate) fn release_heap_allocation(&mut self, base: u64) -> bool {
+        self.release_dynamic_allocation(base, AllocationKind::Heap)
+    }
+
+    pub(crate) fn heap_allocation_size(&self, base: u64) -> Option<usize> {
+        self.regions
+            .iter()
+            .find(|region| region.base == base && region.allocation == AllocationKind::Heap)
+            .map(|region| region.data.len())
+    }
+
+    fn release_dynamic_allocation(&mut self, base: u64, allocation: AllocationKind) -> bool {
         let Some(index) = self
             .regions
             .iter()
-            .position(|region| region.base == base && region.virtual_allocation)
+            .position(|region| region.base == base && region.allocation == allocation)
         else {
             return false;
         };

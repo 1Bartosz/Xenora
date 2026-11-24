@@ -1193,6 +1193,88 @@ fn test_guest_event_signaling_through_iat() {
 }
 
 #[test]
+fn test_guest_process_heap_through_iat() {
+    const IMAGE: u64 = 0x140000000;
+    const MODULE: &str = "api-ms-win-core-heap-l1-1-0.dll";
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let heap = call_service_fixture(&state, MODULE, "GetProcessHeap", &[])
+        .execution
+        .final_state
+        .get(Register::Rax);
+    assert_ne!(heap, 0);
+
+    let allocate = |size, followup| {
+        let mut code = vec![0x48, 0x83, 0xec, 0x28];
+        for (register, value) in [
+            ([0x48, 0xb9], heap),
+            ([0x48, 0xba], 8),
+            ([0x49, 0xb8], size),
+        ] {
+            code.extend_from_slice(&register);
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        append_import_call(&mut code, 0x2060);
+        // Preserve the address in RBX for inspection and pass it in R8.
+        code.extend_from_slice(&[0x48, 0x89, 0xc3, 0x49, 0x89, 0xc0]);
+        code.extend_from_slice(&[0x48, 0xb9]); // Reload the heap handle.
+        code.extend_from_slice(&heap.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xba]); // dwFlags = 0
+        code.extend_from_slice(&0u64.to_le_bytes());
+        append_import_call(&mut code, 0x21a0);
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
+
+        let bytes = TestPeBuilder::new(IMAGE, 0x1000)
+            .add_import(MODULE, "HeapAlloc")
+            .add_import(MODULE, followup)
+            .code(&code)
+            .build();
+        let mut imports = ImportRegistry::new();
+        register_standard_services(&mut imports, state.clone());
+        let result = run_synthetic_startup(
+            &bytes,
+            StartupLayout {
+                image_base: IMAGE,
+                stack_top: PROCESS_FIXTURE_STACK_TOP,
+                tls_base: 0x300000000,
+            },
+            imports,
+            100,
+        )
+        .unwrap();
+        assert_eq!(result.bound_imports, 2);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result
+    };
+
+    let allocated = allocate(19, "HeapSize");
+    let address = allocated.execution.final_state.get(Register::Rbx);
+    assert_ne!(address, 0);
+    assert_eq!(address % 16, 0);
+    assert_eq!(allocated.execution.final_state.get(Register::Rax), 19);
+    let mut bytes = [1; 19];
+    allocated
+        .image
+        .memory
+        .read_bytes(address, &mut bytes)
+        .unwrap();
+    assert_eq!(bytes, [0; 19]);
+
+    let freed = allocate(19, "HeapFree");
+    assert_eq!(freed.execution.final_state.get(Register::Rax), 1);
+    assert!(
+        freed
+            .image
+            .memory
+            .read_u8(freed.execution.final_state.get(Register::Rbx))
+            .is_err()
+    );
+
+    let oversized = allocate(64 * 1024 * 1024 + 1, "HeapSize");
+    assert_eq!(oversized.execution.final_state.get(Register::Rbx), 0);
+    assert_eq!(oversized.execution.final_state.get(Register::Rax), u64::MAX);
+}
+
+#[test]
 fn test_virtual_allocation_release_through_iat() {
     const IMAGE: u64 = 0x140000000;
     const HEAP: u64 = 0x8_0000_0000;

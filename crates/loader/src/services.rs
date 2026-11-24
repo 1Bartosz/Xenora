@@ -11,6 +11,7 @@
 
 mod crt;
 mod events;
+mod heap;
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -394,6 +395,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
 
     events::register(registry, &state);
     crt::register(registry);
+    heap::register(registry, &state);
 
     // 1. GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *mut FILETIME)
     let s = state.clone();
