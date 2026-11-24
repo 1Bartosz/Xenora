@@ -55,6 +55,165 @@ fn verify_words(body: &str, input: &[u32], expected: &[u32]) {
     assert_eq!(actual, expected);
 }
 
+const MAX_DISPATCH_GROUPS: usize = 64;
+
+fn mixing_fixture(rounds: u32) -> String {
+    fixture(&format!(
+        "
+        uint value = input[id] ^ (id * 0x9e3779b9u);
+        for (uint round = 0u; round < {rounds}u; ++round) {{
+            value ^= value << 13u;
+            value ^= value >> 17u;
+            value ^= value << 5u;
+            value = value * 0x85ebca6bu + round;
+        }}
+        output[id] = value;
+        "
+    ))
+}
+
+fn mixing_expectation(input: &[u32], rounds: u32) -> Vec<u32> {
+    (0_u32..)
+        .zip(input)
+        .map(|(id, &word)| {
+            let mut value = word ^ id.wrapping_mul(0x9e37_79b9);
+            for round in 0..rounds {
+                let left = value ^ (value << 13);
+                let right = left ^ (left >> 17);
+                let mixed = right ^ (right << 5);
+                value = mixed.wrapping_mul(0x85eb_ca6b).wrapping_add(round);
+            }
+            value
+        })
+        .collect()
+}
+
+fn mixing_input(words: u32) -> Vec<u32> {
+    (0..words)
+        .map(|id| id.wrapping_mul(0xc2b2_ae35) ^ 0xdead_beef)
+        .collect()
+}
+
+#[test]
+fn threadgroup_widths_give_identical_known_answers() {
+    const WIDTHS: [usize; 16] = [
+        1, 2, 3, 7, 31, 32, 33, 63, 64, 65, 96, 128, 255, 256, 512, 1024,
+    ];
+    const GRIDS: [u32; 7] = [1, 63, 64, 65, 1000, 4093, 4096];
+    const ROUNDS: u32 = 37;
+    let context = context();
+    let source = mixing_fixture(ROUNDS);
+    let limit = native(context.max_group_width(&source, "fixture"));
+    let mut checked = 0;
+    let mut skipped = 0;
+
+    for grid in GRIDS {
+        let input = mixing_input(grid);
+        let expected = mixing_expectation(&input, ROUNDS);
+        for width in WIDTHS {
+            if width > limit {
+                println!("skipped grid={grid} width={width}: device/pipeline limit is {limit}");
+                skipped += 1;
+                continue;
+            }
+            let groups = input.len().div_ceil(width);
+            if groups > MAX_DISPATCH_GROUPS {
+                println!(
+                    "skipped grid={grid} width={width}: {groups} groups exceed {MAX_DISPATCH_GROUPS}"
+                );
+                skipped += 1;
+                continue;
+            }
+            let profile =
+                native(context.run_words_with_group_width(&source, "fixture", &input, width));
+            assert_eq!(profile.output, expected, "grid={grid} width={width}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
+    println!("checked {checked} configurations, skipped {skipped}");
+}
+
+#[test]
+fn threadgroup_width_rejections() {
+    let context = context();
+    let source = fixture("output[id] = input[id];");
+    let limit = native(context.max_group_width(&source, "fixture"));
+    for width in [0, limit + 1] {
+        let error = context
+            .run_words_with_group_width(&source, "fixture", &[25], width)
+            .expect_err("invalid threadgroup width must fail");
+        assert_eq!(error.operation, "threadgroup width");
+    }
+    let error = context
+        .run_words_with_group_width(&source, "fixture", &[25; MAX_DISPATCH_GROUPS + 1], 1)
+        .expect_err("too many threadgroups must fail");
+    assert_eq!(error.operation, "dispatch bounds");
+}
+
+fn timing_summary(samples: &mut [f64]) -> String {
+    samples.sort_by(f64::total_cmp);
+    let count = samples.len();
+    let median = f64::midpoint(samples[(count - 1) / 2], samples[count / 2]);
+    let p95 = samples[(count * 95).div_ceil(100) - 1];
+    format!(
+        "median={:.3} min={:.3} max={:.3} p95={:.3}",
+        median * 1e6,
+        samples[0] * 1e6,
+        samples[count - 1] * 1e6,
+        p95 * 1e6,
+    )
+}
+
+#[test]
+#[ignore = "manual GPU timing run"]
+fn threadgroup_width_benchmark() {
+    const ROUNDS: u32 = 2000;
+    const WARMUPS: usize = 5;
+    const SAMPLES: usize = 30;
+    let context = context();
+    let device = context.device_name();
+    let source = mixing_fixture(ROUNDS);
+    let input = mixing_input(4096);
+    let expected = mixing_expectation(&input, ROUNDS);
+    let limit = native(context.max_group_width(&source, "fixture"));
+
+    let mut widths = vec![None];
+    for width in [32, 64, 128, 256, 512, 1024] {
+        if width > limit {
+            println!("device={device} skipped width={width}: device/pipeline limit is {limit}");
+        } else if input.len().div_ceil(width) > MAX_DISPATCH_GROUPS {
+            println!("device={device} skipped width={width}: exceeds {MAX_DISPATCH_GROUPS} groups");
+        } else {
+            widths.push(Some(width));
+        }
+    }
+    let mut timings = vec![([0.0; SAMPLES], [0.0; SAMPLES]); widths.len()];
+    for round in 0..WARMUPS + SAMPLES {
+        for (width, (gpu, host)) in widths.iter().zip(&mut timings) {
+            let profile = native(match width {
+                Some(width) => {
+                    context.run_words_with_group_width(&source, "fixture", &input, *width)
+                }
+                None => context.run_words_profiled(&source, "fixture", &input),
+            });
+            assert_eq!(profile.output, expected, "width={width:?} round={round}");
+            if round >= WARMUPS {
+                gpu[round - WARMUPS] = profile.gpu_seconds;
+                host[round - WARMUPS] = profile.host_seconds;
+            }
+        }
+    }
+    for (width, (gpu, host)) in widths.into_iter().zip(&mut timings) {
+        let width = width.map_or_else(|| "default".to_owned(), |width| width.to_string());
+        println!(
+            "device={device} width={width} gpu_us[{}] host_us[{}]",
+            timing_summary(gpu),
+            timing_summary(host),
+        );
+    }
+}
+
 #[test]
 fn integer_multiplication() {
     let context = context();
@@ -206,4 +365,39 @@ fn errors_propagate() {
         .run_words(&source, "fixture", &[0; 4097])
         .expect_err("excessive dispatch must fail");
     assert_eq!(error.operation, "dispatch bounds");
+}
+
+/// Identical outputs alone cannot show which width ran, so each thread also
+/// reports the requested group width, its own group's size and its in-group
+/// index (11, 11 and 10 bits).
+#[test]
+fn requested_threadgroup_width_is_dispatched() {
+    const SOURCE: &str = r"
+#include <metal_stdlib>
+using namespace metal;
+kernel void fixture(device const uint *input [[buffer(0)]],
+                    device uint *output [[buffer(1)]],
+                    uint id [[thread_position_in_grid]],
+                    uint local [[thread_index_in_threadgroup]],
+                    uint group_size [[threads_per_threadgroup]],
+                    uint requested [[dispatch_threads_per_threadgroup]]) {
+    output[id] = (requested << 21u) | (group_size << 10u) | local;
+}
+";
+    let context = context();
+    let limit = native(context.max_group_width(SOURCE, "fixture"));
+    for (grid, width) in [(1000_usize, 33_usize), (4093, 64), (4096, 256), (65, 1024)] {
+        if width > limit {
+            println!("skipped grid={grid} width={width}: device/pipeline limit is {limit}");
+            continue;
+        }
+        let profile =
+            native(context.run_words_with_group_width(SOURCE, "fixture", &vec![0; grid], width));
+        for (id, word) in profile.output.iter().enumerate() {
+            // dispatchThreads trims the last group to the grid's remainder.
+            let size = width.min(grid - id / width * width);
+            let expected = u32::try_from((width << 21) | (size << 10) | (id % width)).unwrap();
+            assert_eq!(*word, expected, "grid={grid} width={width} id={id}");
+        }
+    }
 }
