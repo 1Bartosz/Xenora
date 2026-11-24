@@ -43,7 +43,15 @@ OPERATIONS = {
     "andn2": "AndNot", "orn2": "OrNot", "nand": "Nand", "nor": "Nor", "xnor": "Xnor",
     "lshl": "ShiftLeft", "lshr": "LogicalShiftRight", "ashr": "ArithmeticShiftRight",
     "compare": "Compare",
+    "not": "Not", "brev": "ReverseBits", "bcnt0": "CountZeros", "bcnt1": "CountOnes",
+    "ff0": "FindFirstZero", "ff1": "FindFirstOne", "flbit": "FindLastBit",
+    "sext": "SignExtend", "abs": "Absolute",
 }
+# Unary operations read one source; they need an operand rule of the unary kind.
+UNARY = {"not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs"}
+# Sign extension reads only the low source_bits of S0 (required for sext only).
+SOURCE_BITS_KEY = "source_bits"
+SOURCE_BITS = {8, 16}
 # Compares take a relation (S0 on the left) and set SCC to whether it holds.
 RELATION_KEY = "relation"
 RELATIONS = {
@@ -62,7 +70,10 @@ COMPARE_PRIMITIVES = {
 }
 # Logical operations take untyped bits; arithmetic ones never do. Shifts take
 # the signedness their primitive names, and their S1 is an unsigned count.
-LOGICAL = {"and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor"}
+LOGICAL = {
+    "and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor",
+    "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1",
+}
 ARITHMETIC = {"add", "sub"}
 SHIFTS = {"lshl", "lshr", "ashr"}
 # XML number formats a source may have for each declared signedness.
@@ -128,6 +139,16 @@ PRIMITIVES = {
     ("lshl", "bitwise"): ("nonzero", "lshl_nonzero_b32", False),
     ("lshr", "unsigned"): ("nonzero", "lshr_nonzero_b32", False),
     ("ashr", "signed"): ("nonzero", "ashr_nonzero_i32", False),
+    ("not", "bitwise"): ("nonzero", "not_nonzero_b32", False),
+    ("brev", "bitwise"): ("unchanged", "brev_b32", False),
+    ("bcnt0", "bitwise"): ("nonzero", "bcnt0_nonzero_b32", False),
+    ("bcnt1", "bitwise"): ("nonzero", "bcnt1_nonzero_b32", False),
+    ("ff0", "bitwise"): ("unchanged", "ff0_b32", False),
+    ("ff1", "bitwise"): ("unchanged", "ff1_b32", False),
+    ("flbit", "bitwise"): ("unchanged", "flbit_b32", False),
+    ("flbit", "signed"): ("unchanged", "flbit_i32", False),
+    ("sext", "signed"): ("unchanged", "sext_i32", False),
+    ("abs", "signed"): ("nonzero", "abs_nonzero_i32", False),
 }
 
 # Operand rules the decoder implements, each exactly once. A registry rule must
@@ -167,6 +188,19 @@ OPERAND_RULES = {
         # SOPC has no destination field; the decoder rejects these sources.
         "unsupported": {combo for combo in UNSUPPORTED_COMBOS if not combo.startswith("dst_")},
         "kind": "compare",
+    },
+    "sop1_sgpr": {
+        "rust": "Sop1Sgpr",
+        "enum": "ScalarUnaryOp",
+        "shape": {
+            "family": "SOP1",
+            "dst": {"field": "SDST", "class": "sgpr", "min": 0, "max": 105},
+            "src": [{"field": "SSRC0", "class": "scalar_source"}],
+            "max_literals": 1,
+        },
+        # One source, so two literals cannot occur; the rest are rejected.
+        "unsupported": {combo for combo in UNSUPPORTED_COMBOS if combo != "two_literals"},
+        "kind": "unary",
     },
 }
 
@@ -275,8 +309,10 @@ def _check_xml(form, rule, snapshot, errors):
             errors.append(f"{label}: XML has no operand {field}")
             continue
         data_format, size, is_input, is_output = operands[field]
-        if size != form["width"]:
-            errors.append(f"{label}: {field} is {size} bits in the XML, declared {form['width']}")
+        bits = form.get(SOURCE_BITS_KEY) if is_source else None
+        expected = bits if type(bits) is int else form["width"]
+        if size != expected:
+            errors.append(f"{label}: {field} is {size} bits in the XML, declared {expected}")
         if (is_input, is_output) != (is_source, not is_source):
             errors.append(f"{label}: {field} direction disagrees with the XML")
         if field == count_field:
@@ -284,6 +320,9 @@ def _check_xml(form, rule, snapshot, errors):
                 errors.append(
                     f"{label}: shift count {field} has XML format {data_format}, not FMT_NUM_U32"
                 )
+        elif type(bits) is int:
+            if data_format != f"FMT_NUM_I{bits}":
+                errors.append(f"{label}: {field} has XML format {data_format}, not FMT_NUM_I{bits}")
         elif is_source and data_format not in SOURCE_FORMATS.get(form["signedness"], ()):
             errors.append(
                 f"{label}: signedness {form['signedness']} contradicts XML format {data_format}"
@@ -330,7 +369,7 @@ def validate(registry, snapshot):
     for index, form in enumerate(forms):
         label = form.get("name", f"form #{index}")
         missing = sorted(FORM_KEYS - set(form))
-        extra = sorted(set(form) - FORM_KEYS - {SHIFT_KEY, RELATION_KEY})
+        extra = sorted(set(form) - FORM_KEYS - {SHIFT_KEY, RELATION_KEY, SOURCE_BITS_KEY})
         if missing:
             errors.append(f"{label}: incomplete, missing {missing}")
         if extra:
@@ -377,6 +416,12 @@ def validate(registry, snapshot):
                 )
         elif SHIFT_KEY in form:
             errors.append(f"{label}: {SHIFT_KEY} on a non-shift operation")
+        if form["operation"] == "sext":
+            bits = form.get(SOURCE_BITS_KEY)
+            if type(bits) is not int or bits not in SOURCE_BITS:
+                errors.append(f"{label}: {SOURCE_BITS_KEY} must be one of {sorted(SOURCE_BITS)}, got {bits!r}")
+        elif SOURCE_BITS_KEY in form:
+            errors.append(f"{label}: {SOURCE_BITS_KEY} on a non-sext operation")
         if form["operation"] == "compare":
             relation = form.get(RELATION_KEY)
             if not isinstance(relation, str) or relation not in RELATIONS:
@@ -408,8 +453,9 @@ def validate(registry, snapshot):
             errors.append(f"{label}: unknown operand rule {form['operands']!r}")
         elif rule.get("family") != form["family"]:
             errors.append(f"{label}: operand rule {form['operands']} is for {rule.get('family')}")
-        elif form["operands"] in OPERAND_RULES and (
-            (OPERAND_RULES[form["operands"]]["kind"] == "compare") != (form["operation"] == "compare")
+        elif form["operands"] in OPERAND_RULES and OPERAND_RULES[form["operands"]]["kind"] != (
+            "compare" if form["operation"] == "compare"
+            else "unary" if form["operation"] in UNARY else "alu"
         ):
             errors.append(f"{label}: operation {form['operation']} does not fit rule {form['operands']}")
         _check_spec(label, form["spec"], documents, errors)
@@ -495,6 +541,7 @@ def render(registry, snapshot):
             f"        carry_in: CarryIn::{CARRY_IN[form['carry_in']]},",
             f"        width: {form['width']},",
             f"        shift_count_bits: {form.get(SHIFT_KEY, 0)},",
+            f"        source_bits: {form.get(SOURCE_BITS_KEY, form['width'])},",
             "        relation: "
             + (f"Some(CompareRelation::{RELATIONS[form[RELATION_KEY]]})," if RELATION_KEY in form else "None,"),
             f"        scc: SccEffect::{SCC[form['scc']]},",
@@ -535,7 +582,7 @@ def _render_enum(rule_name, forms, snapshot, positions):
     ]
     for form in forms:
         carry = " plus SCC" if form["carry_in"] == "scc" else ""
-        what = form["operation"] if kind == "alu" else f"compare {form[RELATION_KEY]}"
+        what = f"compare {form[RELATION_KEY]}" if kind == "compare" else form["operation"]
         out += [
             f"    /// `{form['name'].lower()}` ({family} opcode {form['opcode']}): "
             f"{form['signedness']} {what}{carry}, SCC = {form['scc']}.",
@@ -590,6 +637,43 @@ def _render_enum(rule_name, forms, snapshot, positions):
         "        }]",
         "    }",
     ]
+    if kind == "unary":
+        out += [
+            "",
+            "    /// Whether the operation writes SCC.",
+            "    pub const fn writes_scc(self) -> bool {",
+            "        match self {",
+        ]
+        out += [
+            f"            Self::{form['variant']} => {'false' if form['scc'] == 'unchanged' else 'true'},"
+            for form in forms
+        ]
+        out += [
+            "        }",
+            "    }",
+            "",
+            "    /// The result and, for forms that write it, the new SCC (`None` leaves SCC",
+            "    /// unchanged).",
+            "    pub const fn evaluate(self, src: u32) -> (u32, Option<bool>) {",
+            "        match self {",
+        ]
+        for form in forms:
+            _, function, _ = PRIMITIVES[(form["operation"], form["signedness"])]
+            if form["operation"] == "sext":
+                value = f"primitive::{function}(src, {form[SOURCE_BITS_KEY]})"
+            else:
+                value = f"primitive::{function}(src)"
+            if form["scc"] == "unchanged":
+                out.append(f"            Self::{form['variant']} => ({value}, None),")
+            else:
+                out += [
+                    f"            Self::{form['variant']} => {{",
+                    f"                let (value, scc) = {value};",
+                    "                (value, Some(scc))",
+                    "            }",
+                ]
+        out += ["        }", "    }", "}"]
+        return out
     if kind == "compare":
         out += [
             "",

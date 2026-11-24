@@ -809,6 +809,21 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 *slot = Some(value);
                 continue;
             }
+            Instruction::ScalarUnary { op, dst, src } => {
+                let src = read_scalar(src)?;
+                if dst < 8 {
+                    return Err(error("scalar unary would modify a resource descriptor"));
+                }
+                let (value, flag) = op.evaluate(src);
+                let slot = scalars
+                    .get_mut(usize::from(dst))
+                    .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
+                *slot = Some(value);
+                if let Some(flag) = flag {
+                    scc = Some(flag);
+                }
+                continue;
+            }
             Instruction::ScalarAlu {
                 op,
                 dst,

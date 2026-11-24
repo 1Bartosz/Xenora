@@ -4,7 +4,7 @@ use std::fmt;
 
 pub use xenora_isa::{
     Architecture, CompareRelation, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp,
-    ScalarCompareOp, ScalarSource, VectorCompareOp, VectorSource,
+    ScalarCompareOp, ScalarSource, ScalarUnaryOp, VectorCompareOp, VectorSource,
 };
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
@@ -373,6 +373,16 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         }
         let (src, len) = scalar_source(first as u8, bytes, "s_mov_b32")?;
         return Ok((Instruction::ScalarMoveB32 { dst, src }, len));
+    }
+    if let Some(op) = ScalarUnaryOp::from_word(first) {
+        // SOP1: SSRC0 in bits 0-7, SDST in bits 16-22.
+        let mnemonic = op.mnemonic();
+        let dst = ((first >> 16) & 0x7f) as u8;
+        if dst > 105 {
+            return Err(unsupported(mnemonic, "expected a normal SGPR destination"));
+        }
+        let (src, len) = scalar_source(first as u8, bytes, mnemonic)?;
+        return Ok((Instruction::ScalarUnary { op, dst, src }, len));
     }
     if let Some(op) = ScalarCompareOp::from_word(first) {
         let mnemonic = op.mnemonic();
