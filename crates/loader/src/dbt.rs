@@ -1763,4 +1763,423 @@ mod tests {
             ]
         );
     }
+
+    // FS/GS segment override regression tests from #280 (#72), restored after a
+    // merge-conflict resolution dropped them.
+    /// A segment-relative store and load through the FS base.
+    ///
+    /// The encodings are `mov [fs:0x8], rbx` (64 48 89 1C 25 08 00 00 00)
+    /// and `mov rdx, [fs:0x8]` (64 48 8B 14 25 08 00 00 00), as produced by
+    /// LLVM 23.1.6 `llvm-mc -show-encoding`. The SIB byte 0x25 selects "no
+    /// index" and "no base", so the address is the FS base plus the
+    /// displacement 8.
+    ///
+    /// Per Intel SDM Volume 3A section 3.4.4 the linear address is
+    /// `(FS or GS).base + index + displacement`, so the store must land at
+    /// `FS_BASE + 8`.
+    #[test]
+    fn fs_segment_override_adds_the_fs_base_to_the_address() {
+        let code = [
+            0x64, 0x48, 0x89, 0x1C, 0x25, 0x08, 0x00, 0x00, 0x00, // mov [fs:0x8], rbx
+            0x64, 0x48, 0x8B, 0x14, 0x25, 0x08, 0x00, 0x00, 0x00, // mov rdx, [fs:0x8]
+            0xF4, // hlt
+        ];
+        let (mut engine, mut cpu, mut memory) = fixture(&code);
+        const FS_BASE: u64 = 0x7000;
+        const GS_BASE: u64 = 0x8000;
+        const STORED_VALUE: u64 = 0x1122_3344_5566_7788;
+        cpu.fs_base = FS_BASE;
+        cpu.gs_base = GS_BASE;
+        cpu.set(Register::Rbx, STORED_VALUE);
+        memory
+            .map_region(FS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory
+            .map_region(GS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+
+        let result = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        // The store landed at the FS base plus the displacement, not at the
+        // bare displacement and not at the GS base. The bare displacement
+        // address 8 is not mapped at all, so reaching it would have faulted.
+        assert_eq!(memory.read_u64(FS_BASE + 8).unwrap(), STORED_VALUE);
+        assert_eq!(memory.read_u64(GS_BASE + 8).unwrap(), 0);
+        // The load read back the same location.
+        assert_eq!(result.final_state.get(Register::Rdx), STORED_VALUE);
+    }
+
+    /// A RIP-relative segment-relative store adds the segment base too.
+    ///
+    /// The encoding is `mov [fs:(%rip)], rbx` (64 48 89 1D 00 00 00 00), as
+    /// produced by LLVM 23.1.6 `llvm-mc -show-encoding`. The displacement is
+    /// zero, so the address is the address of the next instruction plus the
+    /// FS base.
+    ///
+    /// The segment base is added to the effective address for every addressing
+    /// form, so this must land at `FS_BASE + ENTRY + 8` and not at the bare
+    /// RIP-relative address.
+    #[test]
+    fn rip_relative_segment_override_adds_the_segment_base() {
+        let code = [
+            0x64, 0x48, 0x89, 0x1D, 0x00, 0x00, 0x00, 0x00, // mov [fs:(%rip)], rbx
+            0xF4, // hlt
+        ];
+        let (mut engine, mut cpu, mut memory) = fixture(&code);
+        const FS_BASE: u64 = 0x7000;
+        const STORED_VALUE: u64 = 0x1122_3344_5566_7788;
+        cpu.fs_base = FS_BASE;
+        cpu.set(Register::Rbx, STORED_VALUE);
+        // The segment-adjusted address is FS_BASE + ENTRY + 8, so the region
+        // has to reach that far.
+        memory
+            .map_region(FS_BASE, 0x2000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+
+        let result = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        // The instruction is 8 bytes long, so the next instruction is at
+        // ENTRY + 8 and the displacement of zero makes that the offset.
+        assert_eq!(memory.read_u64(FS_BASE + ENTRY + 8).unwrap(), STORED_VALUE);
+    }
+
+    /// The two execution paths must agree on segment-relative addressing.
+    ///
+    /// The native DBT translator and the software interpreter are separate
+    /// implementations of the same guest semantics, so a program that uses a
+    /// segment override must produce the same result and the same memory
+    /// writes under both.
+    ///
+    /// The encodings are `mov [fs:0x8], rbx` (64 48 89 1C 25 08 00 00 00),
+    /// `mov [gs:0x10], rbx` (65 48 89 1C 25 10 00 00 00),
+    /// `mov rdx, [fs:0x8]` (64 48 8B 14 25 08 00 00 00) and
+    /// `mov rsi, [gs:0x10]` (65 48 8B 34 25 10 00 00 00), as produced by
+    /// LLVM 23.1.6 `llvm-mc -show-encoding`.
+    #[test]
+    fn interpreter_and_native_dbt_agree_on_segment_relative_addressing() {
+        const CODE: [u8; 37] = [
+            0x64, 0x48, 0x89, 0x1C, 0x25, 0x08, 0x00, 0x00, 0x00, // mov [fs:0x8], rbx
+            0x65, 0x48, 0x89, 0x1C, 0x25, 0x10, 0x00, 0x00, 0x00, // mov [gs:0x10], rbx
+            0x64, 0x48, 0x8B, 0x14, 0x25, 0x08, 0x00, 0x00, 0x00, // mov rdx, [fs:0x8]
+            0x65, 0x48, 0x8B, 0x34, 0x25, 0x10, 0x00, 0x00, 0x00, // mov rsi, [gs:0x10]
+            0xF4, // hlt
+        ];
+        const FS_BASE: u64 = 0x7000;
+        const GS_BASE: u64 = 0x8000;
+        const STORED_VALUE: u64 = 0x1122_3344_5566_7788;
+
+        // The native DBT path.
+        let (mut engine, mut cpu, mut memory) = fixture(&CODE);
+        cpu.fs_base = FS_BASE;
+        cpu.gs_base = GS_BASE;
+        cpu.set(Register::Rbx, STORED_VALUE);
+        memory
+            .map_region(FS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory
+            .map_region(GS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        let native = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(native.exit_reason, ExitReason::Halt);
+        let native_memory = memory;
+
+        // The software interpreter path over the same program.
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region_with_data(ENTRY, CODE.len(), MemoryPermissions::READ_EXECUTE, &CODE)
+            .unwrap();
+        memory
+            .map_region(FS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory
+            .map_region(GS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        let mut cpu = CpuState::new(ENTRY, 0);
+        cpu.fs_base = FS_BASE;
+        cpu.gs_base = GS_BASE;
+        cpu.set(Register::Rbx, STORED_VALUE);
+        let mut interp = crate::cpu::Interpreter::new(cpu, &mut memory, 16);
+        let interpreted = interp.run();
+
+        assert_eq!(interpreted.exit_reason, native.exit_reason);
+        assert_eq!(interpreted.final_state, native.final_state);
+        assert_eq!(
+            memory.read_u64(FS_BASE + 8).unwrap(),
+            native.final_state.get(Register::Rbx)
+        );
+        assert_eq!(
+            memory.read_u64(GS_BASE + 0x10).unwrap(),
+            native.final_state.get(Register::Rbx)
+        );
+        // The bytes each path left in guest memory must be identical, not only the
+        // two words checked above.
+        for base in [FS_BASE, GS_BASE] {
+            assert_eq!(
+                region_bytes(&native_memory, base, 0x100),
+                region_bytes(&memory, base, 0x100),
+                "segment region at {base:#x}"
+            );
+        }
+    }
+
+    fn region_bytes(memory: &GuestMemory, base: u64, len: usize) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        memory.read_bytes(base, &mut bytes).unwrap();
+        bytes
+    }
+
+    /// FS and GS RIP-relative loads and stores with positive and negative
+    /// displacements. The effective address is the segment base plus the address of
+    /// the next instruction plus the signed disp32 (AMD64 APM vol. 1, RIP-relative
+    /// addressing; FS/GS overrides still apply in 64-bit mode). Each expected address
+    /// below is worked out by hand from that rule.
+    const RIP_CODE: [u8; 33] = [
+        // 0x1000: mov fs:[rip - 0x100], rbx   -> FS + 0x1008 - 0x100 = FS + 0x0F08
+        0x64, 0x48, 0x89, 0x1D, 0x00, 0xFF, 0xFF, 0xFF,
+        // 0x1008: mov gs:[rip + 0x40], rbx    -> GS + 0x1010 + 0x40 = GS + 0x1050
+        0x65, 0x48, 0x89, 0x1D, 0x40, 0x00, 0x00, 0x00,
+        // 0x1010: mov rdx, fs:[rip - 0x28]    -> FS + 0x1018 - 0x28 = FS + 0x0FF0
+        0x64, 0x48, 0x8B, 0x15, 0xD8, 0xFF, 0xFF, 0xFF,
+        // 0x1018: mov rsi, gs:[rip + 0x20]    -> GS + 0x1020 + 0x20 = GS + 0x1040
+        0x65, 0x48, 0x8B, 0x35, 0x20, 0x00, 0x00, 0x00, // 0x1020: hlt
+        0xF4,
+    ];
+    const RIP_FS: u64 = 0x10_0000;
+    const RIP_GS: u64 = 0x20_0000;
+    const RIP_STORED: u64 = 0x0102_0304_0506_0708;
+    const RIP_FS_SEED: u64 = 0xA1A2_A3A4_A5A6_A7A8;
+    const RIP_GS_SEED: u64 = 0xB1B2_B3B4_B5B6_B7B8;
+
+    fn rip_setup(cpu: &mut CpuState, memory: &mut GuestMemory) {
+        cpu.fs_base = RIP_FS;
+        cpu.gs_base = RIP_GS;
+        cpu.set(Register::Rbx, RIP_STORED);
+        for base in [RIP_FS, RIP_GS] {
+            memory
+                .map_region(base, 0x2000, MemoryPermissions::READ_WRITE)
+                .unwrap();
+        }
+        memory.write_u64(RIP_FS + 0x0FF0, RIP_FS_SEED).unwrap();
+        memory.write_u64(RIP_GS + 0x1040, RIP_GS_SEED).unwrap();
+    }
+
+    fn check_rip_results(state: &CpuState, memory: &GuestMemory, path: &str) {
+        assert_eq!(
+            memory.read_u64(RIP_FS + 0x0F08).unwrap(),
+            RIP_STORED,
+            "{path}: FS store, negative disp"
+        );
+        assert_eq!(
+            memory.read_u64(RIP_GS + 0x1050).unwrap(),
+            RIP_STORED,
+            "{path}: GS store, positive disp"
+        );
+        assert_eq!(
+            state.get(Register::Rdx),
+            RIP_FS_SEED,
+            "{path}: FS load, negative disp"
+        );
+        assert_eq!(
+            state.get(Register::Rsi),
+            RIP_GS_SEED,
+            "{path}: GS load, positive disp"
+        );
+    }
+
+    #[test]
+    fn fs_and_gs_rip_relative_loads_and_stores_use_the_segment_base() {
+        let (mut engine, mut cpu, mut memory) = fixture(&RIP_CODE);
+        rip_setup(&mut cpu, &mut memory);
+        let native = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(native.exit_reason, ExitReason::Halt);
+        check_rip_results(&native.final_state, &memory, "native DBT");
+    }
+
+    #[test]
+    fn interpreter_and_native_dbt_agree_on_rip_relative_segment_accesses() {
+        let (mut engine, mut cpu, mut native_memory) = fixture(&RIP_CODE);
+        rip_setup(&mut cpu, &mut native_memory);
+        let native = engine.run(&mut cpu, &mut native_memory, 16);
+
+        let (_, mut cpu, mut memory) = fixture(&RIP_CODE);
+        rip_setup(&mut cpu, &mut memory);
+        let interpreted = crate::cpu::Interpreter::new(cpu, &mut memory, 16).run();
+
+        assert_eq!(interpreted.exit_reason, native.exit_reason);
+        assert_eq!(interpreted.final_state, native.final_state);
+        check_rip_results(&interpreted.final_state, &memory, "interpreter");
+        for base in [RIP_FS, RIP_GS] {
+            assert_eq!(
+                region_bytes(&native_memory, base, 0x2000),
+                region_bytes(&memory, base, 0x2000),
+                "segment region at {base:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn rip_relative_segment_faults_report_the_segment_adjusted_address() {
+        // One instruction per case, with nothing mapped at either segment base.
+        let cases: [(&[u8], u64); 4] = [
+            // mov fs:[rip - 0x10], rbx   -> FS + 0x1008 - 0x10
+            (
+                &[0x64, 0x48, 0x89, 0x1D, 0xF0, 0xFF, 0xFF, 0xFF, 0xF4],
+                RIP_FS + 0x0FF8,
+            ),
+            // mov gs:[rip + 0x30], rbx   -> GS + 0x1008 + 0x30
+            (
+                &[0x65, 0x48, 0x89, 0x1D, 0x30, 0x00, 0x00, 0x00, 0xF4],
+                RIP_GS + 0x1038,
+            ),
+            // mov rdx, fs:[rip - 0x800]  -> FS + 0x1008 - 0x800
+            (
+                &[0x64, 0x48, 0x8B, 0x15, 0x00, 0xF8, 0xFF, 0xFF, 0xF4],
+                RIP_FS + 0x0808,
+            ),
+            // mov rsi, gs:[rip + 0x8]    -> GS + 0x1008 + 0x8
+            (
+                &[0x65, 0x48, 0x8B, 0x35, 0x08, 0x00, 0x00, 0x00, 0xF4],
+                RIP_GS + 0x1010,
+            ),
+        ];
+        for (code, fault) in cases {
+            let expected = ExitReason::MemoryFault(MemoryError::UnmappedAddress(fault));
+            let (mut engine, mut cpu, mut memory) = fixture(code);
+            cpu.fs_base = RIP_FS;
+            cpu.gs_base = RIP_GS;
+            let native = engine.run(&mut cpu, &mut memory, 16);
+            assert_eq!(
+                native.exit_reason, expected,
+                "native DBT, fault at {fault:#x}"
+            );
+
+            let (_, mut cpu, mut memory) = fixture(code);
+            cpu.fs_base = RIP_FS;
+            cpu.gs_base = RIP_GS;
+            let interpreted = crate::cpu::Interpreter::new(cpu, &mut memory, 16).run();
+            assert_eq!(
+                interpreted.exit_reason, expected,
+                "interpreter, fault at {fault:#x}"
+            );
+        }
+    }
+
+    /// Both execution paths must agree when an instruction carries an FS and
+    /// a GS override together.
+    ///
+    /// The Intel SDM states that "the effect of redundant prefixes (more than
+    /// one prefix from a group) is undefined", and FS and GS are in the same
+    /// prefix group. The architecture therefore does not define which base
+    /// applies, so this test pins the local rule instead: both paths prefer
+    /// GS, and they must agree with each other.
+    ///
+    /// The encoding is `mov [fs:0x8], rbx` preceded by a GS override
+    /// (65 64 48 89 1C 25 08 00 00 00).
+    #[test]
+    fn redundant_fs_and_gs_overrides_are_handled_the_same_by_both_paths() {
+        const CODE: [u8; 11] = [
+            0x65, 0x64, 0x48, 0x89, 0x1C, 0x25, 0x08, 0x00, 0x00, 0x00, // mov [fs:0x8], rbx
+            0xF4, // hlt
+        ];
+        const FS_BASE: u64 = 0x7000;
+        const GS_BASE: u64 = 0x8000;
+        const STORED_VALUE: u64 = 0x1122_3344_5566_7788;
+
+        let (mut engine, mut cpu, mut memory) = fixture(&CODE);
+        cpu.fs_base = FS_BASE;
+        cpu.gs_base = GS_BASE;
+        cpu.set(Register::Rbx, STORED_VALUE);
+        memory
+            .map_region(FS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory
+            .map_region(GS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        let native = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(native.exit_reason, ExitReason::Halt);
+
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region_with_data(ENTRY, CODE.len(), MemoryPermissions::READ_EXECUTE, &CODE)
+            .unwrap();
+        memory
+            .map_region(FS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory
+            .map_region(GS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        let mut cpu = CpuState::new(ENTRY, 0);
+        cpu.fs_base = FS_BASE;
+        cpu.gs_base = GS_BASE;
+        cpu.set(Register::Rbx, STORED_VALUE);
+        let mut interp = crate::cpu::Interpreter::new(cpu, &mut memory, 16);
+        let interpreted = interp.run();
+
+        assert_eq!(interpreted.exit_reason, native.exit_reason);
+        assert_eq!(interpreted.final_state, native.final_state);
+        // The local rule prefers GS, so the store landed at the GS base.
+        assert_eq!(memory.read_u64(GS_BASE + 8).unwrap(), STORED_VALUE);
+        assert_eq!(memory.read_u64(FS_BASE + 8).unwrap(), 0);
+    }
+
+    /// The GS segment override adds the GS base, and distinct FS and GS bases
+    /// must not be confused with each other.
+    ///
+    /// The encodings are `mov [gs:0x8], rbx` (65 48 89 1C 25 08 00 00 00)
+    /// and `mov rdx, [gs:0x8]` (65 48 8B 14 25 08 00 00 00), as produced by
+    /// LLVM 23.1.6 `llvm-mc -show-encoding`.
+    #[test]
+    fn gs_segment_override_adds_the_gs_base_to_the_address() {
+        let code = [
+            0x65, 0x48, 0x89, 0x1C, 0x25, 0x08, 0x00, 0x00, 0x00, // mov [gs:0x8], rbx
+            0x65, 0x48, 0x8B, 0x14, 0x25, 0x08, 0x00, 0x00, 0x00, // mov rdx, [gs:0x8]
+            0xF4, // hlt
+        ];
+        let (mut engine, mut cpu, mut memory) = fixture(&code);
+        const FS_BASE: u64 = 0x7000;
+        const GS_BASE: u64 = 0x8000;
+        const STORED_VALUE: u64 = 0x1122_3344_5566_7788;
+        cpu.fs_base = FS_BASE;
+        cpu.gs_base = GS_BASE;
+        cpu.set(Register::Rbx, STORED_VALUE);
+        memory
+            .map_region(FS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory
+            .map_region(GS_BASE, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+
+        let result = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        assert_eq!(memory.read_u64(GS_BASE + 8).unwrap(), STORED_VALUE);
+        // The FS base must be untouched.
+        assert_eq!(memory.read_u64(FS_BASE + 8).unwrap(), 0);
+        assert_eq!(result.final_state.get(Register::Rdx), STORED_VALUE);
+    }
+
+    /// A segment-relative access to an unmapped address must fault, and the
+    /// fault must report the segment-adjusted address.
+    ///
+    /// The encoding is `mov [fs:0x8], rbx` (64 48 89 1C 25 08 00 00 00).
+    /// The FS base points outside every mapped region, so the store faults at
+    /// `FS_BASE + 8`.
+    #[test]
+    fn segment_relative_access_to_an_unmapped_address_faults() {
+        let code = [
+            0x64, 0x48, 0x89, 0x1C, 0x25, 0x08, 0x00, 0x00, 0x00, // mov [fs:0x8], rbx
+            0xF4, // hlt
+        ];
+        let (mut engine, mut cpu, mut memory) = fixture(&code);
+        const FS_BASE: u64 = 0x7000;
+        cpu.fs_base = FS_BASE;
+        cpu.set(Register::Rbx, 0x1122_3344_5566_7788);
+        // No region is mapped at FS_BASE, so the segment-adjusted address
+        // FS_BASE + 8 is unmapped.
+
+        let result = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(
+            result.exit_reason,
+            ExitReason::MemoryFault(MemoryError::UnmappedAddress(FS_BASE + 8))
+        );
+    }
 }
