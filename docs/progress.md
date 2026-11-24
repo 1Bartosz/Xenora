@@ -1,18 +1,25 @@
 # Engineering progress
 
-**NOT RELEASE-READY.** The three-fixture demo checkpoint was pushed at `96cff7c66e55f1e4693ace19577c207795258d5c` and its [Native Rust checks](https://github.com/ranveersoni98/Xenora/actions/runs/45001680455) passed. See the [current assurance report](testing/phase01-assurance.md) for candidate evidence and the [historical engineering report](testing/phase01-checkpoint.md) for the initial checkpoint.
+Xenora is an experimental research project. Verified work is restricted to
+independently authored synthetic programs and shaders; commercial game
+execution and authentic Xbox startup are unsupported. Progress is measured by
+reproducible tests, not by estimated game compatibility percentages.
 
 ## Reading the progress graphic
 
 - **Decoded forms** counts rows marked decoded in the [status registry](status.toml), out of all rows in that reviewed gfx1030 instruction inventory.
-- **Accepted Metal forms** counts rows with accepted native fixture readback, over the same inventory. See the [form-by-form results](shaders/instruction-coverage.md) and [implementation checkpoint](testing/phase-02-baseline.md#implementation-checkpoint) for class A evidence from Apple M5. Arithmetic shift has its own [fixture record](../fixtures/rdna2/ashr.md); its CPU path now has explicit checkpoints, a positive-value control and independent-oracle coverage, while its native readback remains local evidence with independent acceptance open.
-- **Accepted guest milestones** counts the recorded fixture demonstrations for native guest instruction execution (X1), executable loading (X2), guest-to-GPU command submission (X3), and guest-driven Metal rendering (X4), out of those four milestones. See the [guest acceptance record](testing/phase-02-baseline.md#track-b--guest-execution).
+- **Accepted Metal forms** counts rows with accepted native fixture readback, over the same inventory. See the [form-by-form results](shaders/instruction-coverage.md) and [implementation checkpoint](testing/phase-02-baseline.md#implementation-checkpoint) for class A evidence from Apple M5.
+
+## Feature status
 
 <!-- status:features:start -->
 | Feature | Target | Implementation | Correctness | Hardware | Evidence | Limits |
 | --- | --- | --- | --- | --- | --- | --- |
 | native-compute | arm64 macOS | implemented | initial-native-suite-passed | verified on Apple M5 | A | Trusted MSL with bounded word buffers and an original native offscreen rendering test on Apple M5. |
 | synthetic-gfx1030 | gfx1030 Wave32 | three-fixture-demo-implemented | three-way-output-passed | verified on Apple M5 | A, B | Synthetic memory contract, statically resolved forward control flow, exact positive normal FP32 only. |
+| translated-blend | arm64 macOS Metal | implemented | metal-validated-passed | verified on Apple M5 Pro | A | 39 Metal-validated passes over two original overlapping triangles (see [README](../README.md#blend-pass)). |
+| indexed-draws | arm64 macOS Metal | implemented | metal-validated-passed | verified on Apple M5 Pro | A | 16 Metal-validated passes: both index sizes, 32-bit indices above 16 bits, odd 16-bit start, positive and negative base vertex, draw order (see [README](../README.md#indexed-draws)). |
+| translated-depth | arm64 macOS Metal | implemented | metal-validated-passed | verified on Apple M5 Pro | A | 30 Metal-validated passes of overlapping triangles with all eight compare functions and the no-attachment case (see [README](../README.md#depth-pass)). |
 | xbox-execution | Xbox Series X\|S | unsupported | untested | unverified | U | Game execution, proprietary guest containers and full guest execution-mask divergence are unsupported. The console launch ABI is unknown. |
 <!-- status:features:end -->
 
@@ -35,18 +42,8 @@ scripts/audit/claims.sh
 scripts/audit/dependencies.sh
 ```
 
-The independent CPU validation tests are part of the workspace. The native suite and optional LLVM oracle run separately so CPU-only CI can report them accurately. Final local logs are under ignored `artifacts/phase01/`. Keep the historical lab and candidate logs separate.
-
-## Dual-track execution
-
-The [dual-track baseline](testing/phase-02-baseline.md) records Phase 02
-GPU prerequisites and the separate guest execution milestones.
+The independent CPU validation tests are part of the workspace. The native suite and optional LLVM oracle run separately so CPU-only CI can report them accurately. Final local logs are under ignored `artifacts/`. Keep the historical lab and candidate logs separate.
 
 ## Remaining work
 
-See the [assurance checkpoint](testing/phase01-assurance.md) for the original gate ledger and commands, and the [independent review](testing/review-log.md#phase-01-evidence-recheck-at-4b9a4ce) for later findings.
-
-1. The independent reference (G5), LLVM decoder comparison (G6), and mutation testing (G7) passed at the Phase 01 candidate. The [integrated review](testing/mutation.md#integrated-source-campaign-at-4b9a4ce) confirmed 359 of 361 non-equivalent source mutants killed, all 44 independent-oracle kills and all 12 native semantic kills. The form-by-form validation report is in the [validation inventory](../tests/validation/README.md).
-2. Parser fuzzing (G9) passed for the Phase 01 candidate. Native decoder and reference runs at `4b9a4ce` exited 0 after 123,522,954 and 240,077,291 executions respectively, each in 601 seconds. The fixture run at `aff46b0` exited 0 after 244,422,168 executions in 601 seconds. The fuzz source, dependencies, script and fixture inputs are identical between these commits. Logs and executable hashes are under `artifacts/g9/4b9a4ce-20261123T041525Z/`. Phase 02 source changes require their own assurance.
-3. Finish benchmark corpus and protocol coverage before rerunning on AC and an idle system. Preserve the [exploratory battery and AC records](testing/benchmarks.md).
-4. Close independent claims, status, history and review findings against the integrated candidate. Verify the [runtime redistribution blockers](licenses.md#runtime-redistribution-review) before closing the redistribution gate (G11).
+See the [current limitations](../README.md#current-limitations) for the outstanding items. The active research steps are: finish the remaining RDNA2 wave execution and mesh stages, translated texture sampling, broader resource binding and synchronization. Close independent claims, status, history and review findings against the current candidates, and verify the [runtime redistribution blockers](licenses.md#runtime-redistribution-review) before closing the redistribution gate (G11).

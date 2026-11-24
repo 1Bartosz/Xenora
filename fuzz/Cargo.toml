@@ -18,6 +18,12 @@ xenora-shader = { path = "../crates/shader" }
 [workspace]
 
 [[bin]]
+name = "cpu_decode"
+path = "fuzz_targets/cpu_decode.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "instruction_stream"
 path = "fuzz_targets/instruction_stream.rs"
 test = false

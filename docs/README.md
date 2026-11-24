@@ -10,8 +10,14 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 
 ## Architecture and technical design
 
-- [Interface contracts](interfaces.md) — Shader inputs, guest services, native command submission, and synthetic textures.
+- [Interface contracts](interfaces.md) — Translated shader stages, guest services, native command submission, and synthetic textures.
 - [Fixture memory model](adr/0003-demo-memory-model.md) and [CPU boundary](adr/0004-cpu-boundary.md) — Buffer bindings, guest address translation, and dependency direction.
+
+## Native Metal graphics
+
+- [Translated offscreen stages](interfaces.md#translated-offscreen-stages) — Translated vertex and pixel stages for the bounded gfx1030 subset.
+- [Blend and depth passes](interfaces.md) — Native blend and depth graphics passes with per-draw state.
+- [Apple GPU evidence](research/apple-gpu.md) and [host lab record](research/host-lab.md) — Observed behavior and historical floating-point results.
 
 ## RDNA 2 decoding and shader translation
 
@@ -19,11 +25,6 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [SOP2 scalar ALU](shaders/scalar-alu.md) — Supported scalar add, subtract and bitwise forms, their SCC rules and sources.
 - [VOPC integer compares](shaders/vector-compare.md) — Wave32 compare forms, the VCC/EXEC contract, runtime `s_cbranch_vccz` and the Metal mapping.
 - [Metal Shading Language generation](shaders/msl.md) and [independent CPU reference](shaders/reference-interpreter.md) — Translation rules and separate CPU execution models.
-
-## Native Metal backend
-
-- [Compute interface](interfaces.md#gfx1030-compute-fixtures) — Resource limits, dispatch, completion, and profiling.
-- [Apple GPU evidence](research/apple-gpu.md) and [host lab record](research/host-lab.md) — Observed behavior and historical floating-point results.
 
 ## Guest CPU and runtime experiments
 
@@ -36,7 +37,6 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Engineering progress](progress.md) — Verification commands, metric definitions, and open release gates.
 - [Test inventory comparison](testing/test-inventory.md) — Detect missing or newly ignored Cargo tests across commits.
 - [Persistent resource and translated rendering acceptance](testing/x9-acceptance.md) — Pinned upstream tests, native ARM64 results and unsupported cases.
-
 - [Baseline acceptance](testing/phase-02-baseline.md), [Phase 01 assurance](testing/phase01-assurance.md), and [independent reviews](testing/review-log.md) — Candidate-specific results and release findings.
 - [Mutation testing](testing/mutation.md) and [benchmark protocol](testing/benchmarks.md) — Test sensitivity, benchmark inputs, and timing requirements.
 
