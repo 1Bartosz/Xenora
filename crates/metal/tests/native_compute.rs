@@ -368,23 +368,35 @@ fn errors_propagate() {
 }
 
 /// Identical outputs alone cannot show which width ran, so each thread also
-/// reports its group size and in-group index.
+/// reports the requested group width, its own group's size and its in-group
+/// index (11, 11 and 10 bits).
 #[test]
 fn requested_threadgroup_width_is_dispatched() {
+    const SOURCE: &str = r"
+#include <metal_stdlib>
+using namespace metal;
+kernel void fixture(device const uint *input [[buffer(0)]],
+                    device uint *output [[buffer(1)]],
+                    uint id [[thread_position_in_grid]],
+                    uint local [[thread_index_in_threadgroup]],
+                    uint group_size [[threads_per_threadgroup]],
+                    uint requested [[dispatch_threads_per_threadgroup]]) {
+    output[id] = (requested << 21u) | (group_size << 10u) | local;
+}
+";
     let context = context();
-    let source = fixture("output[id] = (group_size << 16u) | local;");
-    let limit = native(context.max_group_width(&source, "fixture"));
+    let limit = native(context.max_group_width(SOURCE, "fixture"));
     for (grid, width) in [(1000_usize, 33_usize), (4093, 64), (4096, 256), (65, 1024)] {
         if width > limit {
             println!("skipped grid={grid} width={width}: device/pipeline limit is {limit}");
             continue;
         }
         let profile =
-            native(context.run_words_with_group_width(&source, "fixture", &vec![0; grid], width));
+            native(context.run_words_with_group_width(SOURCE, "fixture", &vec![0; grid], width));
         for (id, word) in profile.output.iter().enumerate() {
             // dispatchThreads trims the last group to the grid's remainder.
             let size = width.min(grid - id / width * width);
-            let expected = u32::try_from((size << 16) | (id % width)).unwrap();
+            let expected = u32::try_from((width << 21) | (size << 10) | (id % width)).unwrap();
             assert_eq!(*word, expected, "grid={grid} width={width} id={id}");
         }
     }
