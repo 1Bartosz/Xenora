@@ -67,6 +67,16 @@ fn test_manifest_and_codegen_pipeline() {
     assert_eq!(summary.get("standard-service"), Some(&5));
     assert_eq!(manifest.generatable().count(), 4);
 
+    let emissions = manifest.emission_summary();
+    assert_eq!(emissions.get("generated-adapter"), Some(&1));
+    assert_eq!(emissions.get("generated-stub"), Some(&2));
+    assert_eq!(emissions.get("runtime-service"), Some(&5));
+    assert_eq!(emissions.get("no-binding"), Some(&1));
+    let csv = tmp_dir.join("manifest.csv");
+    manifest.write_csv(csv.to_str().unwrap()).unwrap();
+    let csv = std::fs::read_to_string(csv).unwrap();
+    assert!(csv.contains("\"acos\",0x00001000,crt-native,generated-stub"));
+
     let files = generate(&manifest, &db);
     assert!(files.crt_rs.contains("register_generated_crt_services"));
     assert_eq!(files.crt_rs.matches("\"tolower\"").count(), 1);

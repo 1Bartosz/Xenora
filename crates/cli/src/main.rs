@@ -334,10 +334,15 @@ fn run_imports_generate_cli(args: &[String]) -> ExitCode {
     let manifest = xenora_import_gen::Manifest::build(&records, &db);
     let summary = manifest.summary();
 
-    println!("Classification summary:");
+    println!("Catalog classification by import slot:");
     for (tier, count) in &summary {
         let pct = (*count as f64 / records.len() as f64 * 100.0) as u32;
         println!("  - {tier}: {count} ({pct}%)");
+    }
+
+    println!("Emitted disposition by distinct import:");
+    for (disposition, count) in manifest.emission_summary() {
+        println!("  - {disposition}: {count}");
     }
 
     let files = xenora_import_gen::generate(&manifest, &db);

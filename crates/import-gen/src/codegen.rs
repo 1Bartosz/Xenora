@@ -338,7 +338,7 @@ fn symbol_to_ident_lower(sym: &str) -> String {
 }
 
 /// Returns a dispatch body for CRT calls with a compatible guest ABI adapter.
-fn crt_dispatch_expr(symbol: &str) -> Option<String> {
+pub(crate) fn crt_dispatch_expr(symbol: &str) -> Option<String> {
     Some(match symbol {
         // abs(int) -> int
         "abs" | "labs" => r#"let x = args.rcx as i32;

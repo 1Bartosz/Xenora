@@ -14,6 +14,8 @@ remains unsupported.
 
 ### Added
 
+- Import manifests now report emitted adapters, stubs, and existing runtime bindings separately from catalog classifications.
+
 - Generated import conformance tests now execute emitted service handlers and verify unsupported stubs.
 - Added a typed runtime service registry (`crates/loader/runtime/services.txt`) and `xenora-runtime-gen`, which generates Win64 argument and result adapters, static metadata and a coverage report. It covers 20 services: 16 existing kernel32 services moved to typed handlers, and `sqrt`, `sqrtf`, `fabs` and `fabsf` with arguments and results in XMM registers. Conflicting keys, unlisted API sets, unsupported types and behaviour without an existing test are rejected. See `docs/runtime/registry.md`.
 - Added SSE and SSE2 floating point in scalar and packed, binary32 and binary64 forms: add, subtract, multiply, divide, minimum, maximum, square root, compares, COMI/UCOMI and the conversions between formats and integers (parts of #127 and #128; awaiting independent review). `crates/loader/src/softfloat.rs` computes every result exactly and rounds once, with MXCSR rounding modes, sticky flags, denormals-are-zero, flush-to-zero, tininess after rounding and x86 NaN rules; host floating point is not used because ARM64 differs. An unmasked exception exits with `SimdException` and leaves everything but MXCSR unchanged. RCP, RSQRT and MMX conversions are rejected, and no floating-point form is translated to NEON yet.
