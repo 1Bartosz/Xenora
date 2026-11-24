@@ -69,6 +69,8 @@ pub struct CpuState {
     pub gpr: [u64; 16],
     pub rip: u64,
     pub flags: RFlags,
+    pub gs_base: u64,
+    pub fs_base: u64,
 }
 
 impl CpuState {
@@ -79,6 +81,8 @@ impl CpuState {
             gpr,
             rip: entry_point,
             flags: RFlags::default(),
+            gs_base: 0,
+            fs_base: 0,
         }
     }
 
@@ -131,8 +135,10 @@ mod layout_tests {
         assert_eq!(std::mem::offset_of!(CpuState, gpr), 0);
         assert_eq!(std::mem::offset_of!(CpuState, rip), 16 * 8);
         assert_eq!(std::mem::offset_of!(CpuState, flags), 16 * 8 + 8);
+        assert_eq!(std::mem::offset_of!(CpuState, gs_base), 16 * 8 + 8 + 8);
+        assert_eq!(std::mem::offset_of!(CpuState, fs_base), 16 * 8 + 8 + 8 + 8);
         assert_eq!(std::mem::size_of::<RFlags>(), 4);
-        assert_eq!(std::mem::size_of::<CpuState>(), 16 * 8 + 8 + 8);
+        assert_eq!(std::mem::size_of::<CpuState>(), 16 * 8 + 8 + 8 + 8 + 8);
 
         let cpu = CpuState::default();
         let base = std::ptr::addr_of!(cpu) as usize;
@@ -243,8 +249,20 @@ impl<'a> Interpreter<'a> {
         let mut rex_w = false;
         let mut rex_r = false;
         let mut rex_b = false;
+        let mut seg_gs = false;
+        let mut seg_fs = false;
 
         let mut byte = self.fetch_u8()?;
+
+        // Handle legacy segment prefixes: 0x65 (GS), 0x64 (FS)
+        while byte == 0x65 || byte == 0x64 {
+            if byte == 0x65 {
+                seg_gs = true;
+            } else {
+                seg_fs = true;
+            }
+            byte = self.fetch_u8()?;
+        }
 
         // Handle REX prefix (0x40 - 0x4F)
         if (byte & 0xF0) == 0x40 {
@@ -406,7 +424,7 @@ impl<'a> Interpreter<'a> {
             // MOV r/m, reg (0x89) or MOV reg, r/m (0x8B)
             0x89 | 0x8B => {
                 let modrm = self.fetch_u8()?;
-                self.execute_mov_rm(modrm, rex_w, rex_r, rex_b, byte == 0x8B)
+                self.execute_mov_rm(modrm, rex_w, rex_r, rex_b, byte == 0x8B, seg_gs, seg_fs)
             }
 
             // JMP rel8 (0xEB)
@@ -519,6 +537,8 @@ impl<'a> Interpreter<'a> {
         rex_r: bool,
         rex_b: bool,
         is_load: bool,
+        seg_gs: bool,
+        seg_fs: bool,
     ) -> Result<Option<ExitReason>, ExitReason> {
         let mode = (modrm >> 6) & 3;
         let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
@@ -596,11 +616,17 @@ impl<'a> Interpreter<'a> {
             (base_val, disp)
         };
 
-        let effective_addr = if mode == 0 && (rm_idx & 7) == 5 {
+        let mut effective_addr = if mode == 0 && (rm_idx & 7) == 5 {
             (self.cpu.rip as i64 + disp) as u64
         } else {
             (base_val as i64 + disp) as u64
         };
+
+        if seg_gs {
+            effective_addr = effective_addr.wrapping_add(self.cpu.gs_base);
+        } else if seg_fs {
+            effective_addr = effective_addr.wrapping_add(self.cpu.fs_base);
+        }
 
         if is_load {
             // Load from memory to reg

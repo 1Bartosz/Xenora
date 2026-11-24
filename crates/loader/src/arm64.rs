@@ -157,6 +157,37 @@ impl Arm64Assembler {
         );
     }
 
+    /// ADD (shifted register, 64-bit): ADD Xd, Xn, Xm, LSL #shift
+    pub fn add_reg_shifted_64(&mut self, xd: u8, xn: u8, xm: u8, shift: u8) {
+        self.emit(
+            0x8b000000
+                | ((shift as u32 & 0x3f) << 10)
+                | ((xm as u32 & 0x1f) << 16)
+                | ((xn as u32 & 0x1f) << 5)
+                | (xd as u32 & 0x1f),
+        );
+    }
+
+    /// UXTB (32-bit/zero-extended): UXTB Wd, Wn (UBFM Wd, Wn, #0, #7)
+    pub fn uxtb_32(&mut self, wd: u8, wn: u8) {
+        self.emit(0x53001c00 | ((wn as u32 & 0x1f) << 5) | (wd as u32 & 0x1f));
+    }
+
+    /// UXTH (32-bit/zero-extended): UXTH Wd, Wn (UBFM Wd, Wn, #0, #15)
+    pub fn uxth_32(&mut self, wd: u8, wn: u8) {
+        self.emit(0x53003c00 | ((wn as u32 & 0x1f) << 5) | (wd as u32 & 0x1f));
+    }
+
+    /// SXTB (64-bit/sign-extended): SXTB Xd, Wn (SBFM Xd, Xn, #0, #7)
+    pub fn sxtb_64(&mut self, xd: u8, wn: u8) {
+        self.emit(0x93401c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
+    }
+
+    /// SXTH (64-bit/sign-extended): SXTH Xd, Wn (SBFM Xd, Xn, #0, #15)
+    pub fn sxth_64(&mut self, xd: u8, wn: u8) {
+        self.emit(0x93403c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
+    }
+
     /// ADD (extended/shifted register, 32-bit): ADD Wd, Wn, Wm
     pub fn add_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
         self.emit(
@@ -275,6 +306,26 @@ impl Arm64Assembler {
                 | ((xn as u32 & 0x1f) << 5)
                 | (xd as u32 & 0x1f),
         );
+    }
+
+    /// ANDS (register, 32-bit, flags updating / TST): ANDS Wd, Wn, Wm
+    pub fn ands_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
+        self.emit(
+            0x6a000000
+                | ((wm as u32 & 0x1f) << 16)
+                | ((wn as u32 & 0x1f) << 5)
+                | (wd as u32 & 0x1f),
+        );
+    }
+
+    /// TST (register, 64-bit): ANDS XZR, Xn, Xm
+    pub fn tst_reg_64(&mut self, xn: u8, xm: u8) {
+        self.ands_reg_64(XZR, xn, xm);
+    }
+
+    /// TST (register, 32-bit): ANDS WZR, Wn, Wm
+    pub fn tst_reg_32(&mut self, wn: u8, wm: u8) {
+        self.ands_reg_32(XZR, wn, wm);
     }
 
     /// ORR (register, 64-bit): ORR Xd, Xn, Xm

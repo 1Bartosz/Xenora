@@ -80,8 +80,14 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
     }
 
     let mut pc = 0usize;
-    let b0 = slice[pc];
+    let mut b0 = slice[pc];
     pc += 1;
+
+    // Legacy segment prefixes: 0x65 (GS), 0x64 (FS)
+    while (b0 == 0x65 || b0 == 0x64) && pc < slice.len() {
+        b0 = slice[pc];
+        pc += 1;
+    }
 
     let mut rex_w = false;
     let mut op = b0;
@@ -233,14 +239,16 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                     if pc < slice.len() {
                         let sib = slice[pc];
                         pc += 1;
-                        if mode == 1 && pc < slice.len() {
+                        if mode == 0 && (sib & 7) == 5 && pc + 4 <= slice.len() {
+                            pc += 4; // disp32 with no base register
+                        } else if mode == 1 && pc < slice.len() {
                             pc += 1; // disp8
                         } else if mode == 2 && pc + 4 <= slice.len() {
                             pc += 4; // disp32
                         }
                         mnemonic = format!("mov [SIB=0x{sib:02x}]");
-                        is_interp = true; // SIB implemented in interpreter
-                        notes = "SIB memory addressing form (interpreter only)".to_string();
+                        is_dbt = true;
+                        is_interp = true;
                     }
                 } else {
                     if mode == 1 && pc < slice.len() {
@@ -248,6 +256,7 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                     } else if (mode == 2 || (mode == 0 && rm == 5)) && pc + 4 <= slice.len() {
                         pc += 4;
                     }
+                    is_dbt = true;
                     is_interp = true;
                 }
             }
