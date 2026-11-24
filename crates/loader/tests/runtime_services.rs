@@ -131,6 +131,7 @@ struct Guest {
     engine: DbtEngine,
     memory: GuestMemory,
     clock: Arc<MockClock>,
+    teb: u64,
     /// Upper halves and XMM lanes of unrelated arguments hold this pattern.
     xmm: [u128; 4],
 }
@@ -161,6 +162,7 @@ impl Guest {
             engine,
             memory,
             clock,
+            teb: 0,
             xmm: [0xAAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0123_4567; 4],
         }
     }
@@ -171,6 +173,7 @@ impl Guest {
             .position(|service| service.symbol == symbol)
             .unwrap();
         let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index as u64, STACK_TOP);
+        cpu.gs_base = self.teb;
         for (index, register) in cpu.gpr.iter_mut().enumerate() {
             if index != Register::Rsp as usize {
                 *register = 0x0101_0101_0101_0101 * (index as u64 + 1);
@@ -321,6 +324,24 @@ fn system_time_comes_from_the_injected_clock() {
         assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
         assert_eq!(guest.memory.read_u32(SCRATCH + 0xFC).unwrap(), before);
     }
+}
+
+#[test]
+fn last_error_isolated_across_guest_thread_switches() {
+    let mut guest = Guest::new();
+    guest.teb = 0x10000;
+    guest.call("SetLastError", &[123]);
+    guest.teb = 0x20000;
+    assert_eq!(guest.last_error(), 0);
+    assert_eq!(guest.call("CloseHandle", &[123]), 0);
+    assert_eq!(guest.last_error(), 6);
+    guest.teb = 0x10000;
+    guest.call("GetCurrentProcessId", &[]);
+    assert_eq!(guest.last_error(), 123);
+    guest.call("SetLastError", &[0]);
+    assert_eq!(guest.last_error(), 0);
+    guest.teb = 0x20000;
+    assert_eq!(guest.last_error(), 6);
 }
 
 #[test]

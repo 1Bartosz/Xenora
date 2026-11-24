@@ -61,13 +61,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     for (symbol, wide, load) in named_operations {
         let state = Arc::clone(state);
         let modules = Arc::clone(&modules);
-        registry.register(KERNEL32, symbol, move |args, _, memory| {
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
             if args.rcx == 0 {
-                return state.fail(MODULE_NOT_FOUND, 0);
+                return state.fail(cpu.gs_base, MODULE_NOT_FOUND, 0);
             }
             let Some(name) = read_name(memory, args.rcx, wide).map_err(ExitReason::MemoryFault)?
             else {
-                return state.fail(MODULE_NOT_FOUND, 0);
+                return state.fail(cpu.gs_base, MODULE_NOT_FOUND, 0);
             };
             let mut name = name.to_ascii_lowercase();
             if !name.contains('.') {
@@ -75,17 +75,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             }
             let modules = modules.get().expect("built-in module catalog");
             let Some(&handle) = modules.names.get(&name) else {
-                return state.fail(MODULE_NOT_FOUND, 0);
+                return state.fail(cpu.gs_base, MODULE_NOT_FOUND, 0);
             };
             let mut references = modules.references.lock().expect("module references");
             if load {
                 let count = references.entry(handle).or_default();
                 let Some(next) = count.checked_add(1) else {
-                    return state.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+                    return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
                 };
                 *count = next;
             } else if handle != MODULE_BASE && !references.contains_key(&handle) {
-                return state.fail(MODULE_NOT_FOUND, 0);
+                return state.fail(cpu.gs_base, MODULE_NOT_FOUND, 0);
             }
             Ok(handle)
         });
@@ -94,11 +94,11 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     let release = Arc::clone(&modules);
     let release_state = Arc::clone(state);
     let release_trampolines = registry.dynamic_trampolines();
-    registry.register(KERNEL32, "FreeLibrary", move |args, _, _| {
+    registry.register(KERNEL32, "FreeLibrary", move |args, cpu, _| {
         let modules = release.get().expect("built-in module catalog");
         let mut references = modules.references.lock().expect("module references");
         let Some(count) = references.get_mut(&args.rcx) else {
-            return release_state.fail(ERROR_INVALID_HANDLE, 0);
+            return release_state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         };
         *count -= 1;
         if *count == 0 {
@@ -113,11 +113,11 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     let lookup = Arc::clone(&modules);
     let trampolines = registry.dynamic_trampolines();
     let state = Arc::clone(state);
-    registry.register(KERNEL32, "GetProcAddress", move |args, _, memory| {
+    registry.register(KERNEL32, "GetProcAddress", move |args, cpu, memory| {
         let modules = lookup.get().expect("built-in module catalog");
         let references = modules.references.lock().expect("module references");
         if args.rcx != MODULE_BASE && !references.contains_key(&args.rcx) {
-            return state.fail(ERROR_INVALID_HANDLE, 0);
+            return state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         }
         let export = if let Ok(ordinal) = u16::try_from(args.rdx) {
             ImportName::Ordinal(ordinal)
@@ -125,13 +125,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             let Some(symbol) =
                 read_name(memory, args.rdx, false).map_err(ExitReason::MemoryFault)?
             else {
-                return state.fail(PROCEDURE_NOT_FOUND, 0);
+                return state.fail(cpu.gs_base, PROCEDURE_NOT_FOUND, 0);
             };
             ImportName::Name(symbol)
         };
         match modules.exports[&args.rcx].get(&export) {
             Some(&index) => Ok(trampolines.expose(index)),
-            None => state.fail(PROCEDURE_NOT_FOUND, 0),
+            None => state.fail(cpu.gs_base, PROCEDURE_NOT_FOUND, 0),
         }
     });
 

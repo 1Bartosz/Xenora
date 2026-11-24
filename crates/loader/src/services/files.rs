@@ -153,7 +153,7 @@ fn share_mask(access: u32) -> u32 {
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     let open = Arc::clone(state);
-    registry.register(KERNEL32, "CreateFileW", move |args, _, memory| {
+    registry.register(KERNEL32, "CreateFileW", move |args, cpu, memory| {
         let access = args.rdx as u32;
         let share = args.r8 as u32;
         let disposition = args.get(4, memory).map_err(ExitReason::MemoryFault)? as u32;
@@ -165,31 +165,31 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             || access & !(READ | WRITE) != 0
             || share & !3 != 0
         {
-            return open.fail(ERROR_NOT_SUPPORTED, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, INVALID_HANDLE);
         }
         if !(1..=5).contains(&disposition) {
-            return open.fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, INVALID_HANDLE);
         }
         if matches!(disposition, 2 | 5) && access & WRITE == 0 {
-            return open.fail(ERROR_ACCESS_DENIED, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, ERROR_ACCESS_DENIED, INVALID_HANDLE);
         }
         let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-            return open.fail(INVALID_NAME, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, INVALID_NAME, INVALID_HANDLE);
         };
         let mut objects = open.objects.lock().expect("guest object state");
         let parent = parent(&path);
         if !parent.is_empty() && !objects.directories.contains(parent) {
-            return open.fail(PATH_NOT_FOUND, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, PATH_NOT_FOUND, INVALID_HANDLE);
         }
         if objects.directories.contains(&path) {
-            return open.fail(ERROR_ACCESS_DENIED, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, ERROR_ACCESS_DENIED, INVALID_HANDLE);
         }
         let exists = objects.files.contains_key(&path);
         if exists && disposition == 1 {
-            return open.fail(FILE_EXISTS, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, FILE_EXISTS, INVALID_HANDLE);
         }
         if !exists && matches!(disposition, 3 | 5) {
-            return open.fail(FILE_NOT_FOUND, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, FILE_NOT_FOUND, INVALID_HANDLE);
         }
         for object in objects.handles.values() {
             if let GuestObject::File(file) = object
@@ -197,22 +197,22 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 && (share_mask(access) & !file.share != 0
                     || share_mask(file.open_access) & !share != 0)
             {
-                return open.fail(SHARING_VIOLATION, INVALID_HANDLE);
+                return open.fail(cpu.gs_base, SHARING_VIOLATION, INVALID_HANDLE);
             }
         }
         let Some(handle) = objects.next_handle() else {
-            return open.fail(ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
+            return open.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
         };
         if !exists {
             if objects.files.len() >= MAX_FILES {
-                return open.fail(DISK_FULL, INVALID_HANDLE);
+                return open.fail(cpu.gs_base, DISK_FULL, INVALID_HANDLE);
             }
             objects.files.insert(path.clone(), Vec::new());
         } else if matches!(disposition, 2 | 5) {
             *objects.files.get_mut(&path).expect("existing file") = Vec::new();
         }
         if matches!(disposition, 2 | 4) {
-            open.fail(if exists { ALREADY_EXISTS } else { 0 }, 0)?;
+            open.fail(cpu.gs_base, if exists { ALREADY_EXISTS } else { 0 }, 0)?;
         }
         objects.insert_handle(
             handle,
@@ -228,77 +228,77 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     });
 
     let create = Arc::clone(state);
-    registry.register(KERNEL32, "CreateDirectoryW", move |args, _, memory| {
+    registry.register(KERNEL32, "CreateDirectoryW", move |args, cpu, memory| {
         if args.rdx != 0 {
-            return create.fail(ERROR_NOT_SUPPORTED, 0);
+            return create.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
         }
         let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-            return create.fail(INVALID_NAME, 0);
+            return create.fail(cpu.gs_base, INVALID_NAME, 0);
         };
         let mut objects = create.objects.lock().expect("guest object state");
         let parent = parent(&path);
         if !parent.is_empty() && !objects.directories.contains(parent) {
-            return create.fail(PATH_NOT_FOUND, 0);
+            return create.fail(cpu.gs_base, PATH_NOT_FOUND, 0);
         }
         if objects.directories.contains(&path) || objects.files.contains_key(&path) {
-            return create.fail(ALREADY_EXISTS, 0);
+            return create.fail(cpu.gs_base, ALREADY_EXISTS, 0);
         }
         if objects.directories.len() >= MAX_DIRECTORIES {
-            return create.fail(DISK_FULL, 0);
+            return create.fail(cpu.gs_base, DISK_FULL, 0);
         }
         objects.directories.insert(path);
         Ok(1)
     });
 
     let remove = Arc::clone(state);
-    registry.register(KERNEL32, "RemoveDirectoryW", move |args, _, memory| {
+    registry.register(KERNEL32, "RemoveDirectoryW", move |args, cpu, memory| {
         let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-            return remove.fail(INVALID_NAME, 0);
+            return remove.fail(cpu.gs_base, INVALID_NAME, 0);
         };
         let mut objects = remove.objects.lock().expect("guest object state");
         if !objects.directories.contains(&path) {
-            return remove.fail(PATH_NOT_FOUND, 0);
+            return remove.fail(cpu.gs_base, PATH_NOT_FOUND, 0);
         }
         if objects.directories.iter().any(|key| parent(key) == path)
             || objects.files.keys().any(|key| parent(key) == path)
         {
-            return remove.fail(DIRECTORY_NOT_EMPTY, 0);
+            return remove.fail(cpu.gs_base, DIRECTORY_NOT_EMPTY, 0);
         }
         objects.directories.remove(&path);
         Ok(1)
     });
 
     let delete = Arc::clone(state);
-    registry.register(KERNEL32, "DeleteFileW", move |args, _, memory| {
+    registry.register(KERNEL32, "DeleteFileW", move |args, cpu, memory| {
         let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-            return delete.fail(INVALID_NAME, 0);
+            return delete.fail(cpu.gs_base, INVALID_NAME, 0);
         };
         let mut objects = delete.objects.lock().expect("guest object state");
         if objects.directories.contains(&path) {
-            return delete.fail(ERROR_ACCESS_DENIED, 0);
+            return delete.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
         }
         let parent = parent(&path);
         if !parent.is_empty() && !objects.directories.contains(parent) {
-            return delete.fail(PATH_NOT_FOUND, 0);
+            return delete.fail(cpu.gs_base, PATH_NOT_FOUND, 0);
         }
         if objects
             .handles
             .values()
             .any(|object| matches!(object, GuestObject::File(file) if file.path == path))
         {
-            return delete.fail(SHARING_VIOLATION, 0);
+            return delete.fail(cpu.gs_base, SHARING_VIOLATION, 0);
         }
         if objects.files.remove(&path).is_none() {
-            return delete.fail(FILE_NOT_FOUND, 0);
+            return delete.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
         }
         Ok(1)
     });
 
     let attributes = Arc::clone(state);
-    registry.register(KERNEL32, "GetFileAttributesW", move |args, _, memory| {
+    registry.register(KERNEL32, "GetFileAttributesW", move |args, cpu, memory| {
         const INVALID_ATTRIBUTES: u64 = u32::MAX as u64;
         let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-            return attributes.fail(INVALID_NAME, INVALID_ATTRIBUTES);
+            return attributes.fail(cpu.gs_base, INVALID_NAME, INVALID_ATTRIBUTES);
         };
         let objects = attributes.objects.lock().expect("guest object state");
         if objects.directories.contains(&path) {
@@ -313,39 +313,39 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         } else {
             PATH_NOT_FOUND
         };
-        attributes.fail(error, INVALID_ATTRIBUTES)
+        attributes.fail(cpu.gs_base, error, INVALID_ATTRIBUTES)
     });
 
     let rename = Arc::clone(state);
-    registry.register(KERNEL32, "MoveFileW", move |args, _, memory| {
+    registry.register(KERNEL32, "MoveFileW", move |args, cpu, memory| {
         let Some(source) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-            return rename.fail(INVALID_NAME, 0);
+            return rename.fail(cpu.gs_base, INVALID_NAME, 0);
         };
         let Some(target) = guest_path(memory, args.rdx).map_err(ExitReason::MemoryFault)? else {
-            return rename.fail(INVALID_NAME, 0);
+            return rename.fail(cpu.gs_base, INVALID_NAME, 0);
         };
         let mut objects = rename.objects.lock().expect("guest object state");
         if [parent(&source), parent(&target)]
             .into_iter()
             .any(|path| !path.is_empty() && !objects.directories.contains(path))
         {
-            return rename.fail(PATH_NOT_FOUND, 0);
+            return rename.fail(cpu.gs_base, PATH_NOT_FOUND, 0);
         }
         if objects.directories.contains(&source) {
-            return rename.fail(ERROR_NOT_SUPPORTED, 0);
+            return rename.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
         }
         if !objects.files.contains_key(&source) {
-            return rename.fail(FILE_NOT_FOUND, 0);
+            return rename.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
         }
         if objects.files.contains_key(&target) || objects.directories.contains(&target) {
-            return rename.fail(ALREADY_EXISTS, 0);
+            return rename.fail(cpu.gs_base, ALREADY_EXISTS, 0);
         }
         if objects
             .handles
             .values()
             .any(|object| matches!(object, GuestObject::File(file) if file.path == source))
         {
-            return rename.fail(SHARING_VIOLATION, 0);
+            return rename.fail(cpu.gs_base, SHARING_VIOLATION, 0);
         }
         let data = objects.files.remove(&source).expect("source file exists");
         objects.files.insert(target, data);
@@ -353,9 +353,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     });
 
     let find = Arc::clone(state);
-    registry.register(KERNEL32, "FindFirstFileW", move |args, _, memory| {
+    registry.register(KERNEL32, "FindFirstFileW", move |args, cpu, memory| {
         let Some(path) = read_guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-            return find.fail(INVALID_NAME, INVALID_HANDLE);
+            return find.fail(cpu.gs_base, INVALID_NAME, INVALID_HANDLE);
         };
         let directory = parent(&path);
         let pattern = path.rsplit('\\').next().unwrap_or_default();
@@ -363,12 +363,12 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             || (!directory.is_empty() && !directory.split('\\').all(valid_component))
             || !valid_component(&pattern.replace(['*', '?'], "x"))
         {
-            return find.fail(INVALID_NAME, INVALID_HANDLE);
+            return find.fail(cpu.gs_base, INVALID_NAME, INVALID_HANDLE);
         }
         let pattern = if pattern == "*.*" { "*" } else { pattern };
         let mut objects = find.objects.lock().expect("guest object state");
         if !directory.is_empty() && !objects.directories.contains(directory) {
-            return find.fail(PATH_NOT_FOUND, INVALID_HANDLE);
+            return find.fail(cpu.gs_base, PATH_NOT_FOUND, INVALID_HANDLE);
         }
         let candidates = objects
             .directories
@@ -394,7 +394,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let Some(first) = entries.first() else {
-            return find.fail(FILE_NOT_FOUND, INVALID_HANDLE);
+            return find.fail(cpu.gs_base, FILE_NOT_FOUND, INVALID_HANDLE);
         };
         if objects
             .handles
@@ -403,49 +403,49 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             .count()
             >= 32
         {
-            return find.fail(ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
+            return find.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
         }
         let Some(handle) = objects.next_handle() else {
-            return find.fail(ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
+            return find.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
         };
         if write_find_data(memory, args.rdx, first).is_err() {
-            return find.fail(ERROR_NOACCESS, INVALID_HANDLE);
+            return find.fail(cpu.gs_base, ERROR_NOACCESS, INVALID_HANDLE);
         }
         objects.insert_handle(handle, GuestObject::Search(Search { entries, next: 1 }));
         Ok(handle)
     });
 
     let find_next = Arc::clone(state);
-    registry.register(KERNEL32, "FindNextFileW", move |args, _, memory| {
+    registry.register(KERNEL32, "FindNextFileW", move |args, cpu, memory| {
         let mut objects = find_next.objects.lock().expect("guest object state");
         let Some(GuestObject::Search(search)) = objects.handles.get_mut(&args.rcx) else {
-            return find_next.fail(ERROR_INVALID_HANDLE, 0);
+            return find_next.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         };
         let Some(entry) = search.entries.get(search.next) else {
-            return find_next.fail(18, 0); // ERROR_NO_MORE_FILES
+            return find_next.fail(cpu.gs_base, 18, 0); // ERROR_NO_MORE_FILES
         };
         if write_find_data(memory, args.rdx, entry).is_err() {
-            return find_next.fail(ERROR_NOACCESS, 0);
+            return find_next.fail(cpu.gs_base, ERROR_NOACCESS, 0);
         }
         search.next += 1;
         Ok(1)
     });
 
     let find_close = Arc::clone(state);
-    registry.register(KERNEL32, "FindClose", move |args, _, _| {
+    registry.register(KERNEL32, "FindClose", move |args, cpu, _| {
         let mut objects = find_close.objects.lock().expect("guest object state");
         if !matches!(objects.handles.get(&args.rcx), Some(GuestObject::Search(_))) {
-            return find_close.fail(ERROR_INVALID_HANDLE, 0);
+            return find_close.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         }
         objects.handles.remove(&args.rcx);
         Ok(1)
     });
 
     let size = Arc::clone(state);
-    registry.register(KERNEL32, "GetFileSizeEx", move |args, _, memory| {
+    registry.register(KERNEL32, "GetFileSizeEx", move |args, cpu, memory| {
         let objects = size.objects.lock().expect("guest object state");
         let Some(GuestObject::File(file)) = objects.handles.get(&args.rcx) else {
-            return size.fail(ERROR_INVALID_HANDLE, 0);
+            return size.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         };
         let bytes = objects
             .files
@@ -453,67 +453,67 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             .expect("open file exists")
             .len();
         if args.rdx == 0 || memory.write_u64(args.rdx, bytes as u64).is_err() {
-            return size.fail(ERROR_NOACCESS, 0);
+            return size.fail(cpu.gs_base, ERROR_NOACCESS, 0);
         }
         Ok(1)
     });
 
     let seek = Arc::clone(state);
-    registry.register(KERNEL32, "SetFilePointerEx", move |args, _, memory| {
+    registry.register(KERNEL32, "SetFilePointerEx", move |args, cpu, memory| {
         let mut objects = seek.objects.lock().expect("guest object state");
         let super::ObjectState { handles, files, .. } = &mut *objects;
         let Some(GuestObject::File(file)) = handles.get_mut(&args.rcx) else {
-            return seek.fail(ERROR_INVALID_HANDLE, 0);
+            return seek.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         };
         if file.access & (READ | WRITE) == 0 {
-            return seek.fail(ERROR_ACCESS_DENIED, 0);
+            return seek.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
         }
         let origin = match args.r9 as u32 {
             0 => None,
             1 => Some(file.position.load(Ordering::Relaxed)),
             2 => Some(files.get(&file.path).expect("open file exists").len() as u64),
-            _ => return seek.fail(ERROR_INVALID_PARAMETER, 0),
+            _ => return seek.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0),
         };
         let position = match origin {
             None => args.rdx,
             Some(origin) => {
                 let distance = args.rdx as i64;
                 if distance.is_negative() && distance.unsigned_abs() > origin {
-                    return seek.fail(NEGATIVE_SEEK, 0);
+                    return seek.fail(cpu.gs_base, NEGATIVE_SEEK, 0);
                 }
                 let Some(position) = origin.checked_add_signed(distance) else {
-                    return seek.fail(ERROR_INVALID_PARAMETER, 0);
+                    return seek.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
                 };
                 position
             }
         };
         if args.r8 != 0 && memory.write_u64(args.r8, position).is_err() {
-            return seek.fail(ERROR_NOACCESS, 0);
+            return seek.fail(cpu.gs_base, ERROR_NOACCESS, 0);
         }
         file.position.store(position, Ordering::Relaxed);
         Ok(1)
     });
 
     let truncate = Arc::clone(state);
-    registry.register(KERNEL32, "SetEndOfFile", move |args, _, _| {
+    registry.register(KERNEL32, "SetEndOfFile", move |args, cpu, _| {
         let mut objects = truncate.objects.lock().expect("guest object state");
         let super::ObjectState { handles, files, .. } = &mut *objects;
         let Some(GuestObject::File(file)) = handles.get(&args.rcx) else {
-            return truncate.fail(ERROR_INVALID_HANDLE, 0);
+            return truncate.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         };
         if file.access & WRITE == 0 {
-            return truncate.fail(ERROR_ACCESS_DENIED, 0);
+            return truncate.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
         }
         let position = file.position.load(Ordering::Relaxed);
         if position > MAX_BYTES as u64 {
-            return truncate.fail(DISK_FULL, 0);
+            return truncate.fail(cpu.gs_base, DISK_FULL, 0);
         }
         let used = files.values().map(Vec::len).sum::<usize>();
         let data = files.get_mut(&file.path).expect("open file exists");
         let length = position as usize;
         let growth = length.saturating_sub(data.len());
         if growth > MAX_BYTES - used {
-            return truncate.fail(DISK_FULL, 0);
+            return truncate.fail(cpu.gs_base, DISK_FULL, 0);
         }
         data.try_reserve_exact(growth)
             .map_err(|_| ExitReason::MemoryFault(MemoryError::AllocationFailed))?;
@@ -528,25 +528,25 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 
     for (symbol, writing) in [("ReadFile", false), ("WriteFile", true)] {
         let state = Arc::clone(state);
-        registry.register(KERNEL32, symbol, move |args, _, memory| {
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
             if args.get(4, memory).map_err(ExitReason::MemoryFault)? != 0 {
-                return state.fail(ERROR_NOT_SUPPORTED, 0);
+                return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
             let count = args.r8 as u32 as usize;
             if count > MAX_TRANSFER {
-                return state.fail(ERROR_NOT_SUPPORTED, 0);
+                return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
             let mut objects = state.objects.lock().expect("guest object state");
             let super::ObjectState { handles, files, .. } = &mut *objects;
             let Some(GuestObject::File(file)) = handles.get_mut(&args.rcx) else {
-                return state.fail(ERROR_INVALID_HANDLE, 0);
+                return state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
             };
             let required = if writing { WRITE } else { READ };
             if file.access & required == 0 {
-                return state.fail(ERROR_ACCESS_DENIED, 0);
+                return state.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
             }
             if args.r9 == 0 || memory.check_write(args.r9, 4).is_err() {
-                return state.fail(ERROR_NOACCESS, 0);
+                return state.fail(cpu.gs_base, ERROR_NOACCESS, 0);
             }
 
             let used = if writing {
@@ -564,16 +564,16 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                         .checked_add(count as u64)
                         .filter(|end| *end <= MAX_BYTES as u64)
                     else {
-                        return state.fail(DISK_FULL, 0);
+                        return state.fail(cpu.gs_base, DISK_FULL, 0);
                     };
                     let end = end as usize;
                     let growth = end.saturating_sub(data.len());
                     if growth > MAX_BYTES - used {
-                        return state.fail(DISK_FULL, 0);
+                        return state.fail(cpu.gs_base, DISK_FULL, 0);
                     }
                     let mut input = vec![0; count];
                     if args.rdx == 0 || memory.read_bytes(args.rdx, &mut input).is_err() {
-                        return state.fail(ERROR_NOACCESS, 0);
+                        return state.fail(cpu.gs_base, ERROR_NOACCESS, 0);
                     }
                     if growth != 0 {
                         data.try_reserve_exact(growth)
@@ -592,7 +592,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                             .write_bytes(args.rdx, &data[start..start + transferred])
                             .is_err())
                 {
-                    return state.fail(ERROR_NOACCESS, 0);
+                    return state.fail(cpu.gs_base, ERROR_NOACCESS, 0);
                 }
                 transferred
             };

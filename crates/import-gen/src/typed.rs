@@ -305,14 +305,9 @@ pub fn generate_rust(services: &[Service]) -> String {
         } else {
             "Ok(result.place(cpu))"
         };
-        let cpu = if service.result == "void" && count == 0 {
-            "        let _ = cpu;\n"
-        } else {
-            ""
-        };
         let _ = writeln!(
             out,
-            "{cpu}        let mut context = ServiceContext {{ state: &s, memory }};\n        {binding} = handlers::{}(&mut context{names})?;\n        {place}\n    }});",
+            "        let mut context = ServiceContext {{ state: &s, memory, teb: cpu.gs_base }};\n        {binding} = handlers::{}(&mut context{names})?;\n        {place}\n    }});",
             service.handler
         );
         if let Some((ordinal, _)) = &service.ordinal {

@@ -2165,7 +2165,7 @@ fn test_virtual_allocation_release_through_iat() {
         assert_eq!(result.execution.exit_reason, ExitReason::Halt);
         assert_eq!(result.bound_imports, if free.is_some() { 2 } else { 1 });
         let value = result.execution.final_state.get(Register::Rax);
-        let error = state.last_error.load(std::sync::atomic::Ordering::SeqCst);
+        let error = state.last_error(result.execution.final_state.gs_base);
         (result.image.memory, value, error)
     };
 

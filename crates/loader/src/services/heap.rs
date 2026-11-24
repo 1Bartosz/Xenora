@@ -58,41 +58,41 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     });
 
     let service_state = Arc::clone(state);
-    registry.register(KERNEL32, "HeapCreate", move |args, _, memory| {
+    registry.register(KERNEL32, "HeapCreate", move |args, cpu, memory| {
         let flags = args.get(0, memory).map_err(ExitReason::MemoryFault)? as u32;
         let initial = args.get(1, memory).map_err(ExitReason::MemoryFault)?;
         let maximum = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
         if flags != 0 || maximum != 0 {
-            return service_state.fail(ERROR_NOT_SUPPORTED, 0);
+            return service_state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
         }
         match memory.create_private_heap(initial) {
             Some(handle) => Ok(handle),
-            None => service_state.fail(ERROR_NOT_ENOUGH_MEMORY, 0),
+            None => service_state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0),
         }
     });
 
     let service_state = Arc::clone(state);
-    registry.register(KERNEL32, "HeapDestroy", move |args, _, memory| {
+    registry.register(KERNEL32, "HeapDestroy", move |args, cpu, memory| {
         let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
         if !memory.destroy_private_heap(handle) {
-            return service_state.fail(ERROR_INVALID_HANDLE, 0);
+            return service_state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         }
         Ok(1)
     });
 
     let state = Arc::clone(state);
-    registry.register(KERNEL32, "HeapFree", move |args, _, memory| {
+    registry.register(KERNEL32, "HeapFree", move |args, cpu, memory| {
         let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
         let flags = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
         let address = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
         if !memory.has_heap(handle) {
-            return state.fail(ERROR_INVALID_HANDLE, 0);
+            return state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         }
         if flags != 0 {
-            return state.fail(ERROR_NOT_SUPPORTED, 0);
+            return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
         }
         if address != 0 && !memory.release_heap_allocation(handle, address) {
-            return state.fail(ERROR_INVALID_ADDRESS, 0);
+            return state.fail(cpu.gs_base, ERROR_INVALID_ADDRESS, 0);
         }
         Ok(1)
     });

@@ -21,7 +21,7 @@ use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -169,7 +169,7 @@ pub struct ServicesState {
     priority_boost_disabled: AtomicBool,
     pub thread_id: u32,
     objects: Mutex<ObjectState>,
-    pub last_error: AtomicU32,
+    last_errors: Mutex<BTreeMap<u64, u32>>,
     pub next_alloc_addr: AtomicU64,
     pub graphics: Arc<Mutex<crate::graphics::GraphicsContext>>,
 }
@@ -183,7 +183,7 @@ impl ServicesState {
             process_id: 0x4100, // Synthetic process ID
             thread_id: 0x4104,  // Synthetic main thread ID
             objects: Mutex::new(ObjectState::default()),
-            last_error: AtomicU32::new(0),
+            last_errors: Mutex::default(),
             next_alloc_addr: AtomicU64::new(0x0000_0002_0000_0000), // 8GB guest heap
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),
         }
@@ -201,18 +201,36 @@ impl ServicesState {
         self.priority_boost_disabled.load(Ordering::SeqCst)
     }
 
+    /// Read the last-error value for a guest thread's TEB.
+    pub fn last_error(&self, teb: u64) -> u32 {
+        self.last_errors
+            .lock()
+            .expect("guest last-error state")
+            .get(&teb)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn set_last_error(&self, teb: u64, error: u32) {
+        let mut errors = self.last_errors.lock().expect("guest last-error state");
+        if error == 0 {
+            errors.remove(&teb);
+        } else {
+            errors.insert(teb, error);
+        }
+    }
+
     /// Record a guest error and return the documented failure value.
-    fn fail<T>(&self, error: u32, value: T) -> Result<T, ExitReason> {
-        self.last_error.store(error, Ordering::SeqCst);
+    fn fail<T>(&self, teb: u64, error: u32, value: T) -> Result<T, ExitReason> {
+        self.set_last_error(teb, error);
         Ok(value)
     }
 
-    fn is_current_process(&self, handle: u64) -> bool {
+    fn is_current_process(&self, teb: u64, handle: u64) -> bool {
         if handle == CURRENT_PROCESS {
             return true;
         }
-        self.last_error
-            .store(ERROR_INVALID_HANDLE, Ordering::SeqCst);
+        self.set_last_error(teb, ERROR_INVALID_HANDLE);
         false
     }
 }
@@ -223,11 +241,11 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crate::runtime_table::register(registry, &state);
 
     let s = state.clone();
-    registry.register(KERNEL32, "GetThreadId", move |args, _, mem| {
+    registry.register(KERNEL32, "GetThreadId", move |args, cpu, mem| {
         let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
         let thread = s.objects.lock().expect("guest object state");
         if let Err(error) = thread.check_access(handle, THREAD_QUERY_RIGHTS) {
-            return s.fail(error, 0);
+            return s.fail(cpu.gs_base, error, 0);
         }
         Ok(u64::from(s.thread_id))
     });
@@ -236,7 +254,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     registry.set_status(KERNEL32, "GetThreadId", ServiceStatus::Partial);
 
     let s = state.clone();
-    registry.register(KERNEL32, "DuplicateHandle", move |args, _, mem| {
+    registry.register(KERNEL32, "DuplicateHandle", move |args, cpu, mem| {
         let source_process = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
         let source = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
         let target_process = args.get(2, mem).map_err(ExitReason::MemoryFault)?;
@@ -246,10 +264,10 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         let options = args.get(6, mem).map_err(ExitReason::MemoryFault)? as u32;
 
         if source_process != CURRENT_PROCESS || target_process != CURRENT_PROCESS {
-            return s.fail(ERROR_INVALID_HANDLE, 0);
+            return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         }
         if inherit != 0 || options & !DUPLICATE_SAME_ACCESS != 0 || source == CURRENT_PROCESS {
-            return s.fail(ERROR_NOT_SUPPORTED, 0);
+            return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
         }
         let mut thread = s.objects.lock().expect("guest object state");
         let (granted, mut object) = if source == CURRENT_THREAD {
@@ -268,8 +286,8 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                     },
                 ),
                 Some(GuestObject::File(file)) => (file.access, GuestObject::File(file.clone())),
-                Some(GuestObject::Search(_)) => return s.fail(ERROR_NOT_SUPPORTED, 0),
-                None => return s.fail(ERROR_INVALID_HANDLE, 0),
+                Some(GuestObject::Search(_)) => return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0),
+                None => return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
             }
         };
         let access = if options & DUPLICATE_SAME_ACCESS != 0 {
@@ -277,13 +295,13 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         } else if desired & !granted == 0 {
             desired
         } else {
-            return s.fail(ERROR_ACCESS_DENIED, 0);
+            return s.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
         };
         let Some(handle) = thread.next_handle() else {
-            return s.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+            return s.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
         };
         if output == 0 || mem.write_u64(output, handle).is_err() {
-            return s.fail(ERROR_NOACCESS, 0);
+            return s.fail(cpu.gs_base, ERROR_NOACCESS, 0);
         }
         match &mut object {
             GuestObject::Thread(rights) | GuestObject::Waitable { access: rights, .. } => {
@@ -307,22 +325,26 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     heap::register(registry, &state);
 
     let s = state.clone();
-    registry.register(KERNEL32, "QueryPerformanceCounter", move |args, _, mem| {
-        let ptr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        if ptr == 0 || mem.write_u64(ptr, s.clock.performance_count()).is_err() {
-            return s.fail(ERROR_NOACCESS, 0);
-        }
-        Ok(1)
-    });
+    registry.register(
+        KERNEL32,
+        "QueryPerformanceCounter",
+        move |args, cpu, mem| {
+            let ptr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+            if ptr == 0 || mem.write_u64(ptr, s.clock.performance_count()).is_err() {
+                return s.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            Ok(1)
+        },
+    );
 
     let s = state.clone();
     registry.register(
         KERNEL32,
         "QueryPerformanceFrequency",
-        move |args, _, mem| {
+        move |args, cpu, mem| {
             let ptr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
             if ptr == 0 || mem.write_u64(ptr, PERFORMANCE_FREQUENCY).is_err() {
-                return s.fail(ERROR_NOACCESS, 0);
+                return s.fail(cpu.gs_base, ERROR_NOACCESS, 0);
             }
             Ok(1)
         },
@@ -534,7 +556,7 @@ pub(crate) mod handlers {
         process: u64,
         disable: bool,
     ) -> Outcome<bool> {
-        if !context.state.is_current_process(process) {
+        if !context.state.is_current_process(context.teb, process) {
             return Ok(false);
         }
         context
@@ -549,12 +571,12 @@ pub(crate) mod handlers {
         process: u64,
         disabled: OutPtr<4>,
     ) -> Outcome<bool> {
-        if !context.state.is_current_process(process) {
+        if !context.state.is_current_process(context.teb, process) {
             return Ok(false);
         }
         let value = u32::from(context.state.priority_boost_disabled());
         if disabled.store(context.memory, value.to_le_bytes()).is_err() {
-            return context.state.fail(ERROR_NOACCESS, false);
+            return context.state.fail(context.teb, ERROR_NOACCESS, false);
         }
         Ok(true)
     }
@@ -564,7 +586,7 @@ pub(crate) mod handlers {
     }
 
     pub fn get_process_id(context: &mut ServiceContext<'_>, process: u64) -> Outcome<u32> {
-        Ok(if context.state.is_current_process(process) {
+        Ok(if context.state.is_current_process(context.teb, process) {
             context.state.process_id
         } else {
             0
@@ -591,14 +613,14 @@ pub(crate) mod handlers {
     ) -> Outcome<u64> {
         let state = context.state;
         if id != state.thread_id {
-            return state.fail(ERROR_INVALID_PARAMETER, 0);
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
         }
         if inherit || access & !THREAD_SUPPORTED_RIGHTS != 0 {
-            return state.fail(ERROR_NOT_SUPPORTED, 0);
+            return state.fail(context.teb, ERROR_NOT_SUPPORTED, 0);
         }
         let mut thread = state.objects.lock().expect("guest object state");
         let Some(handle) = thread.next_handle() else {
-            return state.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+            return state.fail(context.teb, ERROR_NOT_ENOUGH_MEMORY, 0);
         };
         thread.insert_handle(handle, GuestObject::Thread(access));
         Ok(handle)
@@ -609,7 +631,7 @@ pub(crate) mod handlers {
         if let Err(error) = thread.check_access(handle, THREAD_QUERY_RIGHTS) {
             return context
                 .state
-                .fail(error, THREAD_PRIORITY_ERROR_RETURN as i32);
+                .fail(context.teb, error, THREAD_PRIORITY_ERROR_RETURN as i32);
         }
         Ok(thread.priority)
     }
@@ -622,13 +644,13 @@ pub(crate) mod handlers {
         let state = context.state;
         let mut thread = state.objects.lock().expect("guest object state");
         if let Err(error) = thread.check_access(handle, THREAD_SET_RIGHTS) {
-            return state.fail(error, false);
+            return state.fail(context.teb, error, false);
         }
         if matches!(priority, 0x0001_0000 | 0x0002_0000) {
-            return state.fail(ERROR_NOT_SUPPORTED, false);
+            return state.fail(context.teb, ERROR_NOT_SUPPORTED, false);
         }
         if !matches!(priority, -15 | -2..=2 | 15) {
-            return state.fail(ERROR_INVALID_PARAMETER, false);
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, false);
         }
         thread.priority = priority;
         Ok(true)
@@ -637,14 +659,14 @@ pub(crate) mod handlers {
     pub fn close_handle(context: &mut ServiceContext<'_>, handle: u64) -> Outcome<bool> {
         let mut objects = context.state.objects.lock().expect("guest object state");
         if matches!(objects.handles.get(&handle), Some(GuestObject::Search(_))) {
-            return context.state.fail(ERROR_INVALID_HANDLE, false);
+            return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false);
         }
         let closed = matches!(handle, CURRENT_PROCESS | CURRENT_THREAD)
             || objects.handles.remove(&handle).is_some();
         if closed {
             Ok(true)
         } else {
-            context.state.fail(ERROR_INVALID_HANDLE, false)
+            context.state.fail(context.teb, ERROR_INVALID_HANDLE, false)
         }
     }
 
@@ -658,11 +680,11 @@ pub(crate) mod handlers {
     }
 
     pub fn get_last_error(context: &mut ServiceContext<'_>) -> Outcome<u32> {
-        Ok(context.state.last_error.load(Ordering::SeqCst))
+        Ok(context.state.last_error(context.teb))
     }
 
     pub fn set_last_error(context: &mut ServiceContext<'_>, code: u32) -> Outcome<()> {
-        context.state.last_error.store(code, Ordering::SeqCst);
+        context.state.set_last_error(context.teb, code);
         Ok(())
     }
 
@@ -675,28 +697,28 @@ pub(crate) mod handlers {
     ) -> Outcome<u64> {
         let state = context.state;
         if size == 0 {
-            return state.fail(ERROR_INVALID_PARAMETER, 0);
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
         }
         if kind != MEM_COMMIT_RESERVE {
-            return state.fail(ERROR_NOT_SUPPORTED, 0);
+            return state.fail(context.teb, ERROR_NOT_SUPPORTED, 0);
         }
         // Executable allocations require guest translation cache invalidation.
         let permissions = match protect {
             0x01 => MemoryPermissions::NO_ACCESS,
             0x02 => MemoryPermissions::READ_ONLY,
             0x04 => MemoryPermissions::READ_WRITE,
-            _ => return state.fail(ERROR_INVALID_PARAMETER, 0),
+            _ => return state.fail(context.teb, ERROR_INVALID_PARAMETER, 0),
         };
         let base = requested & !(ALLOCATION_GRANULARITY - 1);
         if requested != 0 && base == 0 {
-            return state.fail(ERROR_INVALID_ADDRESS, 0);
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, 0);
         }
         let Some(size) = size
             .checked_add(requested - base)
             .and_then(|span| span.checked_next_multiple_of(PAGE_SIZE))
             .and_then(|span| usize::try_from(span).ok())
         else {
-            return state.fail(ERROR_INVALID_PARAMETER, 0);
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
         };
         match context
             .memory
@@ -704,9 +726,9 @@ pub(crate) mod handlers {
         {
             Ok(address) => Ok(address),
             Err(MemoryError::OverlappingRegion { .. } | MemoryError::Overflow) => {
-                state.fail(ERROR_INVALID_ADDRESS, 0)
+                state.fail(context.teb, ERROR_INVALID_ADDRESS, 0)
             }
-            Err(_) => state.fail(ERROR_NOT_ENOUGH_MEMORY, 0),
+            Err(_) => state.fail(context.teb, ERROR_NOT_ENOUGH_MEMORY, 0),
         }
     }
 
@@ -718,13 +740,13 @@ pub(crate) mod handlers {
     ) -> Outcome<bool> {
         let state = context.state;
         if kind != MEM_RELEASE {
-            return state.fail(ERROR_NOT_SUPPORTED, false);
+            return state.fail(context.teb, ERROR_NOT_SUPPORTED, false);
         }
         if size != 0 {
-            return state.fail(ERROR_INVALID_PARAMETER, false);
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, false);
         }
         if !context.memory.release_virtual_allocation(address) {
-            return state.fail(ERROR_INVALID_ADDRESS, false);
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, false);
         }
         Ok(true)
     }

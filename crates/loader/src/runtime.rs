@@ -16,6 +16,7 @@ use crate::services::ServicesState;
 /// What a service may use.
 pub struct ServiceContext<'a> {
     pub state: &'a ServicesState,
+    pub teb: u64,
     pub memory: &'a mut GuestMemory,
 }
 
