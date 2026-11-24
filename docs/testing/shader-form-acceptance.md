@@ -1,9 +1,14 @@
-# gfx1030 form acceptance
+# AMD RDNA2 desktop GPU (gfx1030) form acceptance
 
-This is the promotion rule for desktop gfx1030 instruction forms in
-[`docs/status.toml`](../status.toml). It implements the documentation step of
-[#302](https://github.com/ranveersoni98/Xenora/issues/302). It does not claim
-Xbox-hardware verification or commercial-game compatibility.
+This is the promotion rule for AMD RDNA2 desktop GPU (`gfx1030`) instruction
+forms in [`docs/status.toml`](../status.toml). It implements the documentation
+step of [#302](https://github.com/ranveersoni98/Xenora/issues/302). It does not
+claim Xbox-hardware verification or commercial-game compatibility.
+
+The **LLVM three-way decoder check** is the ignored `llvm-mc` comparison in
+[`crates/decoder/tests/gfx1030.rs`](../../crates/decoder/tests/gfx1030.rs). It
+compares Xenora's decoder with LLVM's gfx1030 decoder over the fixture and
+probe encodings; it is encoding evidence, not GPU-semantics evidence.
 
 ## Status meanings
 
@@ -11,6 +16,7 @@ Xbox-hardware verification or commercial-game compatibility.
 | --- | --- |
 | `local known-answer test passed` | The implementation's CPU known-answer test passed locally. This is not independent acceptance. |
 | `local Apple M5 readback passed; acceptance pending` | A local native Metal readback passed with validation, but the independence and evidence rules below are incomplete. |
+| `fixture verified on Apple M5` | The host-qualified spelling used by three existing rows. `scripts/audit/status.py` treats it as equivalent to `fixture verified`; existing rows do not need re-acceptance solely for this wording. New entries should normally use `fixture verified` and record the host in the review log. |
 | `fixture verified` | The form or documented family batch passed independent acceptance at a named commit, with CPU, LLVM and native Metal evidence recorded. |
 
 A skipped test is not a pass. A shader compile without readback is not GPU
@@ -18,6 +24,10 @@ verification. Agreement with a spec-derived reference is not agreement with
 Xbox hardware.
 
 ## Independence
+
+> **Proposed policy, pending maintainer confirmation.** The independence rule in
+> this section is the proposal from #302. Do not use it to promote forms until
+> the maintainer confirms or revises it.
 
 The person running the acceptance pass must not be the author of the pull
 request that added the form being accepted. The runner may use the existing
@@ -48,9 +58,9 @@ filters to make a form pass.
 6. **Save raw logs.** Put raw output under ignored
    `artifacts/acceptance/<commit>/`. Do not commit raw logs.
 7. **Write the review-log summary.** Add an entry to
-   [`review-log.md`](review-log.md) with the commit, runner, host, scope, exact
-   commands or log path, and CPU/LLVM/Metal results. The runner signs the entry
-   by name; a reviewer confirms it if the runner is not the maintainer.
+   [`review-log.md`](review-log.md) with the commit, runner's GitHub login, host,
+   scope, exact commands or log path, and CPU/LLVM/Metal results. A reviewer
+   confirms the entry if the runner is not the maintainer.
 8. **Promote only passed forms.** Change `cpu` and `gpu` in `docs/status.toml`
    only for forms covered by a passing entry. Regenerate the status tables and
    progress graphic, then run `python3 scripts/audit/status.py --check`.
@@ -94,9 +104,9 @@ result to a form or family batch.
 Use one row per commit and scope. Add rows to
 [`review-log.md`](review-log.md); keep raw output only in `artifacts/`.
 
-| Date | Commit | Runner | Host and tools | Forms or batch | Commands / raw log | CPU | LLVM | Metal | Review |
+| Date | Commit | Runner (GitHub login) | Host and tools | Forms or batch | Commands / raw log | CPU | LLVM | Metal | Review |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| YYYY-MM-DD | full SHA | name | Mac, macOS, Xcode, Rust, LLVM | explicit form list | exact commands and `artifacts/acceptance/<commit>/` path | pass/fail/skip counts | pass/fail counts | pass/fail/skip counts; validation on | reviewer name or maintainer exception |
+| YYYY-MM-DD | full SHA | @login | Mac, macOS, Xcode, Rust, LLVM | explicit form list | exact commands and `artifacts/acceptance/<commit>/` path | pass/fail/skip counts | pass/fail counts | pass/fail/skip counts; validation on | reviewer GitHub login or maintainer exception |
 
 Do not write `pass` without counts. Do not count a skipped native test as Metal
 evidence.

@@ -2,7 +2,7 @@
 
 ## gfx1030 form acceptance
 
-Use the [gfx1030 form acceptance rule](shader-form-acceptance.md) for entries that
+Use the [AMD RDNA2 desktop GPU (gfx1030) form acceptance rule](shader-form-acceptance.md) for entries that
 promote instruction forms to `fixture verified`. Record only completed runs with
 a named commit, independent runner, host, exact commands and real counts. Raw
 logs stay under ignored `artifacts/acceptance/<commit>/`.
