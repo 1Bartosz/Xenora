@@ -142,14 +142,16 @@ const VALUES: [u32; 15] = [
 const MARKER: u32 = 0x0f0f_1234;
 const INPUT: [u32; 2] = [0, u32::MAX];
 
-const COUNTS: [(&str, usize); 7] = [
+const COUNTS: [(&str, usize); 9] = [
     ("sopk movk", 10 * 2),
     ("sopk cmovk", 10 * 2 * 2),
-    ("sopk cmpk", 12 * 15 * 10),
+    ("sopk cmpk", 12 * 15 * 10 * 2),
     ("sopk addk", 15 * 10),
     ("sopk mulk", 15 * 10 * 2),
     ("sopk no literal", 16 * 2),
     ("sopk s105", 16),
+    ("sopk cmovk unwritten sdst", 10),
+    ("sopk no other write", 16),
 ];
 /// Per form: SDST 106-127; per writing form: SDST s0-s7; per reading form: an
 /// uninitialized SDST.
@@ -237,10 +239,13 @@ fn cases() -> Vec<Case> {
                         }
                     }
                 }
+                // Both SCC values before, so neither a missing write nor a
+                // flip of the old SCC passes.
                 _ => {
                     for d in VALUES {
-                        let scc = !expect(form, d, false, k).1;
-                        cases.push(single(form, name, "sopk cmpk", d, scc, k));
+                        for scc in [false, true] {
+                            cases.push(single(form, name, "sopk cmpk", d, scc, k));
+                        }
                     }
                 }
             }
@@ -254,6 +259,32 @@ fn cases() -> Vec<Case> {
             let label = format!("simm16 {k:#06x}, then s_movk_i32 s9");
             let after = expect(form, d, scc, k).1;
             cases.push(case(name, "sopk no literal", label, code, (0x42, after)));
+        }
+        // s10 (the marker) and s9 keep their values: the form writes only
+        // SDST s8. The result is s10.
+        let code = program(
+            &[(8, 0x8000_0000), (9, 0x9999)],
+            true,
+            &[sopk(op, 8, 0x8000)],
+            10,
+        );
+        let after = expect(form, 0x8000_0000, true, 0x8000).1;
+        let label = "s10 after the form on s8".to_string();
+        cases.push(case(
+            name,
+            "sopk no other write",
+            label,
+            code,
+            (MARKER, after),
+        ));
+        if form == Form::CmovK {
+            // A taken move initializes a never-written SDST: s20 is not read.
+            for k in IMMEDIATES {
+                let code = program(&[], true, &[sopk(op, 20, k)], 20);
+                let label = format!("s20 unwritten, simm16 {k:#06x}");
+                let family = "sopk cmovk unwritten sdst";
+                cases.push(case(name, family, label, code, (sext(k), true)));
+            }
         }
         // The top supported SGPR, s105, as SDST; the result is s105.
         let (d, k) = (0x7fff_fff0, 0x0020);
@@ -403,12 +434,44 @@ fn unsupported_sopk_operands_are_rejected() {
 
 #[test]
 fn other_sopk_opcodes_stay_unsupported() {
-    // Table 66: 1 s_version, 17 unlisted, 18-28 getreg, setreg, call, waitcnt
-    // and subvector loops. 29-31 are the SOP1, SOPC and SOPP encodings. With
-    // SDST s8, opcode 23 is not the `null, 0` store fence either.
+    // Table 66: 1 s_version, 18-19 getreg and setreg, 21 setreg_imm32 (its
+    // literal here would be the next word, refused all the same), 22 call,
+    // 23-26 waitcnt and 27-28 subvector loops; 17 and 20 are unlisted. 29-31
+    // are the SOP1, SOPC and SOPP encodings. With SDST s8, opcode 23 is not
+    // the `null, 0` store fence either.
     for op in [1].into_iter().chain(17..=28) {
         let code = program(&[(8, 1)], true, &[sopk(op, 8, 0)], 8);
         assert_rejected_at_alu(&format!("opcode {op}"), &code, 1);
+    }
+    // `s_waitcnt_vscnt null, 1`: only the zero count is the supported fence.
+    let code = program(&[(8, 1)], true, &[sopk(23, 125, 1)], 8);
+    assert_rejected_at_alu("s_waitcnt_vscnt null, 1", &code, 1);
+}
+
+#[test]
+fn cmovk_without_scc_is_rejected() {
+    // The header and the s10 marker move, then `s_cmovk_i32 s8, 1` with SCC
+    // never written: both interpreters must refuse it at byte 20.
+    let code = words(&[
+        0xe030_2000,
+        0x8000_0100,
+        0xbf8c_3f70,
+        0xbe80_03ff | 10 << 16,
+        MARKER,
+        sopk(Form::CmovK as u32, 8, 1),
+        0x7e04_0208,
+        0xe070_2000,
+        0x8001_0200,
+        0xbbfd_0000,
+        0xbf81_0000,
+    ]);
+    match xenora_ref::execute(&code, &INPUT) {
+        Ok(_) => panic!("reference accepted s_cmovk_i32 without SCC"),
+        Err(error) => assert_eq!(error.offset, 20, "reference rejected it elsewhere"),
+    }
+    match independent_ref::execute(&code, &INPUT) {
+        Ok(_) => panic!("independent accepted s_cmovk_i32 without SCC"),
+        Err(error) => assert!(error.starts_with("0x14:"), "independent: {error}"),
     }
 }
 
