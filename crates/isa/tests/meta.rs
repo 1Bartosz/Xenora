@@ -70,8 +70,8 @@ fn hand_assembled_words_identify() {
     assert_eq!(name_of(&[0x7e00_0301]), ("V_MOV_B32", 4));
     // VOP2 v_add_f32 v0, v1, v2: opcode 3 at bits 30:25, VSRC1 = 2 at bits 16:9.
     assert_eq!(name_of(&[0x0600_0501]), ("V_ADD_F32", 4));
-    // VOP3 v_add_f32_e64 v0, v1, v2: VOP3 opcode 259 = 256 + VOP2 opcode 3.
-    assert_eq!(name_of(&[0xd503_0000, 0x0002_0501]), ("V_ADD_F32", 8));
+    // VOP3 v_add_f32_e64 v0, v1, v2 (LLVM 23 encoding): opcode 259 = 256 + VOP2 opcode 3.
+    assert_eq!(name_of(&[0xd503_0000, 0x0202_0501]), ("V_ADD_F32", 8));
 }
 
 #[test]
