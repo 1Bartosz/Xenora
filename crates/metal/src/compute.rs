@@ -23,6 +23,8 @@ use xenora_texture::{
 #[path = "render.rs"]
 mod render;
 
+pub use render::{DepthCompare, DepthDraw, DepthFill, DepthOutput, DepthPass, DepthState};
+
 const MAX_THREADS_PER_GROUP: usize = 64;
 const MAX_GROUPS: usize = 64;
 const MAX_GRID_WORDS: usize = MAX_GROUPS * MAX_THREADS_PER_GROUP;
@@ -552,6 +554,56 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         entry: &str,
         input: &[u32],
     ) -> Result<RunProfile, MetalError> {
+        self.run_profiled_words(source, entry, input, None)
+    }
+
+    /// Run trusted MSL with an explicit one-dimensional threadgroup width.
+    ///
+    /// The grid still contains one invocation per input word. The requested width
+    /// is passed to Metal even when the grid is smaller or ends in a partial group.
+    /// The trusted-kernel requirements of [`Self::run_words`] apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::run_words_profiled`], with dispatch
+    /// bounds evaluated using this width. Zero and widths above the device or
+    /// pipeline limit are rejected.
+    pub fn run_words_with_group_width(
+        &self,
+        source: &str,
+        entry: &str,
+        input: &[u32],
+        width: usize,
+    ) -> Result<RunProfile, MetalError> {
+        self.run_profiled_words(source, entry, input, Some(width))
+    }
+
+    /// Compile the kernel and report the smaller of the device and pipeline width limits.
+    ///
+    /// Input size and threadgroup count are checked separately at dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if source validation, compilation or pipeline setup fails.
+    pub fn max_group_width(&self, source: &str, entry: &str) -> Result<usize, MetalError> {
+        validate_source(source, &[entry])?;
+        autoreleasepool(|_| {
+            let options = compile_options()?;
+            let library = self.compile_library(source, &options)?;
+            let function = find_function(&library, entry)?;
+            let pipeline = self.compute_pipeline(&function)?;
+            verify_shader_validation(&pipeline)?;
+            Ok(self.pipeline_group_width_limit(&pipeline))
+        })
+    }
+
+    fn run_profiled_words(
+        &self,
+        source: &str,
+        entry: &str,
+        input: &[u32],
+        group_width: Option<usize>,
+    ) -> Result<RunProfile, MetalError> {
         if !(1..=MAX_GRID_WORDS).contains(&input.len()) {
             return Err(MetalError::new(
                 "dispatch bounds",
@@ -559,7 +611,7 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             ));
         }
         validate_source(source, &[entry])?;
-        autoreleasepool(|_| self.run(source, entry, ComputeInput::Words(input)))
+        autoreleasepool(|_| self.run_sized(source, entry, ComputeInput::Words(input), group_width))
     }
 
     fn run(
@@ -568,6 +620,18 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         entry: &str,
         input: ComputeInput<'_>,
     ) -> Result<RunProfile, MetalError> {
+        self.run_sized(source, entry, input, None)
+    }
+
+    /// [`Self::run`] with an optional explicit threadgroup width; `None` keeps
+    /// the default sizing.
+    fn run_sized(
+        &self,
+        source: &str,
+        entry: &str,
+        input: ComputeInput<'_>,
+        group_width: Option<usize>,
+    ) -> Result<RunProfile, MetalError> {
         let host_start = Instant::now();
         let options = compile_options()?;
         let library_start = Instant::now();
@@ -575,22 +639,21 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         let library_seconds = library_start.elapsed().as_secs_f64();
         let function = find_function(&library, entry)?;
         let pipeline_start = Instant::now();
-        let pipeline = self
-            .device
-            .newComputePipelineStateWithFunction_error(&function)
-            .map_err(|error| {
-                MetalError::new(
-                    "newComputePipelineStateWithFunction",
-                    error.localizedDescription().to_string(),
-                )
-            })?;
+        let pipeline = self.compute_pipeline(&function)?;
         let pipeline_seconds = pipeline_start.elapsed().as_secs_f64();
         verify_shader_validation(&pipeline)?;
 
-        let width = MAX_THREADS_PER_GROUP
-            .min(input.len())
-            .min(self.device.maxThreadsPerThreadgroup().width)
-            .min(pipeline.maxTotalThreadsPerThreadgroup());
+        let limit = self.pipeline_group_width_limit(&pipeline);
+        let width = match group_width {
+            Some(width) if (1..=limit).contains(&width) => width,
+            Some(width) => {
+                return Err(MetalError::new(
+                    "threadgroup width",
+                    format!("expected a nonzero width at most {limit}, got {width}"),
+                ));
+            }
+            None => MAX_THREADS_PER_GROUP.min(input.len()).min(limit),
+        };
         if width == 0 || input.len().div_ceil(width) > MAX_GROUPS {
             return Err(MetalError::new(
                 "dispatch bounds",
@@ -679,6 +742,30 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
                     error.localizedDescription().to_string(),
                 )
             })
+    }
+
+    fn compute_pipeline(
+        &self,
+        function: &ProtocolObject<dyn MTLFunction>,
+    ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+        self.device
+            .newComputePipelineStateWithFunction_error(function)
+            .map_err(|error| {
+                MetalError::new(
+                    "newComputePipelineStateWithFunction",
+                    error.localizedDescription().to_string(),
+                )
+            })
+    }
+
+    fn pipeline_group_width_limit(
+        &self,
+        pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    ) -> usize {
+        self.device
+            .maxThreadsPerThreadgroup()
+            .width
+            .min(pipeline.maxTotalThreadsPerThreadgroup())
     }
 
     fn new_buffer(
