@@ -2,13 +2,11 @@
 
 **Experimental Xbox Series X|S emulation research for Apple Silicon Macs.**
 
-Xenora is an open-source project written primarily in Rust, exploring native Xbox Series X|S compatibility on ARM64 macOS.
-
-The project combines a bounded x86-64 guest execution environment, Portable Executable (PE32+) loading, AMD RDNA 2 shader translation, and a native Apple Metal graphics backend.
+Xenora is an open-source project written primarily in Rust that builds and verifies a native, bounded execution environment on Apple Silicon: an independent x86-64 guest path, original PE32+ loading, AMD RDNA 2 shader translation, and a native Apple Metal graphics backend.
 
 **No Wine. No CrossOver. No Rosetta. No Vulkan runtime.**
 
-Xenora is still experimental. It currently executes independently authored synthetic guest programs and shaders. **Commercial Xbox games, including Grand Theft Auto VI, do not boot.** Authentic Xbox executable loading and system-service compatibility remain unsupported.
+Xenora is still experimental. Verified work is restricted to independently authored synthetic programs and shaders; authentic Xbox executable loading, system-service compatibility and commercial game execution remain unsupported. See the [current limitations](#current-limitations).
 
 [![Native Rust checks](https://github.com/ranveersoni98/Xenora/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ranveersoni98/Xenora/actions/workflows/ci.yml)
 
