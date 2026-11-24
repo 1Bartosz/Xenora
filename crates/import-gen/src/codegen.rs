@@ -347,30 +347,6 @@ fn symbol_to_ident_lower(sym: &str) -> String {
 /// Returns a dispatch body for CRT calls with a compatible guest ABI adapter.
 fn crt_dispatch_expr(symbol: &str) -> Option<String> {
     Some(match symbol {
-        // strcmp(a, b) -> int
-        "strcmp" => r#"let a = args.rcx;
-            let b = args.rdx;
-            let mut i = 0u64;
-            loop {
-                let ca = mem.read_u8(a + i).map_err(ExitReason::MemoryFault)?;
-                let cb = mem.read_u8(b + i).map_err(ExitReason::MemoryFault)?;
-                if ca != cb { return Ok((ca as i64 - cb as i64) as u64); }
-                if ca == 0 { return Ok(0); }
-                i += 1;
-            }"#
-        .to_string(),
-        // strncmp(a, b, n) -> int
-        "strncmp" => r#"let a = args.rcx;
-            let b = args.rdx;
-            let n = args.r8 as usize;
-            for i in 0..n as u64 {
-                let ca = mem.read_u8(a + i).map_err(ExitReason::MemoryFault)?;
-                let cb = mem.read_u8(b + i).map_err(ExitReason::MemoryFault)?;
-                if ca != cb { return Ok((ca as i64 - cb as i64) as u64); }
-                if ca == 0 { return Ok(0); }
-            }
-            Ok(0)"#
-            .to_string(),
         // abs(int) -> int
         "abs" | "labs" => r#"let x = args.rcx as i32;
             Ok(x.abs() as u64)"#

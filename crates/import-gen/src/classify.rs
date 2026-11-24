@@ -205,7 +205,9 @@ impl SymbolDb {
     fn populate_crt_string(&mut self) {
         let m = "api-ms-win-crt-string-l1-1-0.dll";
         for module in [m, "ucrtbase.dll"] {
-            for symbol in ["strlen", "strnlen", "memset", "memcpy", "memmove", "memcmp"] {
+            for symbol in [
+                "strlen", "strnlen", "strcmp", "strncmp", "memset", "memcpy", "memmove", "memcmp",
+            ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
         }
@@ -224,11 +226,9 @@ impl SymbolDb {
             ("toupper", "toupper"),
             ("memchr", "memchr"),
             ("strcat", "strcat"),
-            ("strcmp", "strcmp"),
             ("strcpy", "strcpy"),
             ("strcspn", "strcspn"),
             ("strncat", "strncat"),
-            ("strncmp", "strncmp"),
             ("strncpy", "strncpy"),
             ("strpbrk", "strpbrk"),
             ("strspn", "strspn"),

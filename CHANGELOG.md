@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added checked guest CRT byte string comparison with `strcmp` and `strncmp`.
+
 - Added bounded guest CRT byte fill, copy, move, and comparison services.
 
 - Added guest CRT string length services for UCRT and its string API set.

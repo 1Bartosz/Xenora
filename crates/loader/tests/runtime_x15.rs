@@ -1062,6 +1062,26 @@ fn test_guest_crt_memory_through_iat() {
 }
 
 #[test]
+fn test_guest_crt_string_comparison_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let slot = PROCESS_FIXTURE_OUTPUT;
+    for (symbol, a, b, limit, expected) in [
+        ("strcmp", slot, slot + 8, 0, 255),
+        ("strcmp", slot + 8, slot, 0, -255),
+        ("strcmp", slot, slot, 0, 0),
+        ("strncmp", slot, slot + 1, 7, 0),
+        ("strncmp", slot, slot + 1, 8, 255),
+        ("strncmp", u64::MAX, u64::MAX, 0, 0),
+    ] {
+        let result = call_service_fixture(&state, "ucrtbase.dll", symbol, &[a, b, limit]);
+        assert_eq!(
+            result.execution.final_state.get(Register::Rax) as i32,
+            expected
+        );
+    }
+}
+
+#[test]
 fn test_guest_crt_string_length_through_iat() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     for module in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {
