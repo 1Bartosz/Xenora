@@ -12,6 +12,12 @@ remains unsupported.
 ### Added
 
 - Added explicit claim-before-work rules for contributors and coding agents to `AGENTS.md`, `CONTRIBUTING.md` and the pull request template: check for existing claims, claim with `/claim`, keep a 24-hour lease alive with `/progress`, `/release` when stopping, and link the claimed issue. Without the claim workflow, the earliest valid claim comment wins.
+- Added a CPU decoder for a bounded subset of BC6H (signed and unsigned HDR) in
+  `xenora-texture`: the four single-subset modes (Khronos modes 3, 7, 11 and 15, Microsoft
+  modes 11 to 14), listed in `BC6H_SUPPORTED_MODES`, plus the reserved modes, which decode to
+  zero as specified. The ten two-subset modes are rejected with `Bc6hError::UnsupportedMode`
+  and are not implemented. Tests check hand-derived values and 128 known-answer vectors from a
+  separate clean-room reference decoder.
 - Added native Metal upload and readback of BC2 and BC3 textures: `xenora-texture` gains a
   pitched `BcAlphaUpload` for 16-byte blocks, and `NativeCompute::read_bc_alpha_upload` sends
   the original blocks to `BC2_RGBA` or `BC3_RGBA` textures when the device reports BC support.
