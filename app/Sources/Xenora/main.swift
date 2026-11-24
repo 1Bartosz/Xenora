@@ -5,6 +5,7 @@
 // by native Metal) and shows the verified read-back frame. No other executable can run.
 
 import AppKit
+import AVFoundation
 import CXenora
 import Foundation
 import SwiftUI
@@ -113,12 +114,13 @@ struct AudioVfsFrame {
     let samples: UInt32
     let totalAudioBytes: UInt64
     let rgba: [UInt8]
+    let pcm: [UInt8]
 
-    static func run() -> AudioVfsFrame {
+    static func run(captureAudio: Bool = false) -> AudioVfsFrame {
         var session: xenora_session = 0
         var status = xenora_session_create(XENORA_ABI_VERSION, &session)
         guard status == XENORA_OK else {
-            return AudioVfsFrame(status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0, rgba: [])
+            return AudioVfsFrame(status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0, rgba: [], pcm: [])
         }
         defer { _ = xenora_session_destroy(session) }
         var rgba = [UInt8](repeating: 0, count: 16)
@@ -133,13 +135,25 @@ struct AudioVfsFrame {
         var underruns: UInt32 = 0
         var total: UInt64 = 0
         _ = xenora_session_audio_status(session, &queued, &underruns, &total)
+        var pcm: [UInt8] = []
+        if captureAudio && status == XENORA_OK && queued > 0 && queued <= 256 * 1024 {
+            pcm = [UInt8](repeating: 0, count: Int(queued))
+            var read: UInt64 = 0
+            let readStatus = pcm.withUnsafeMutableBufferPointer { buffer in
+                xenora_session_audio_read(session, buffer.baseAddress, UInt64(buffer.count), &read)
+            }
+            if readStatus != XENORA_OK || read != UInt64(queued) {
+                pcm.removeAll()
+            }
+        }
         return AudioVfsFrame(
             status: status,
             width: Int(width),
             height: Int(height),
             samples: samples,
             totalAudioBytes: total,
-            rgba: status == XENORA_OK ? rgba : []
+            rgba: status == XENORA_OK ? rgba : [],
+            pcm: pcm
         )
     }
 
@@ -156,6 +170,46 @@ struct AudioVfsFrame {
         let pixels = rgba.map(String.init).joined(separator: ",")
         return "status=\(status) frame=\(width)x\(height) samples=\(samples) audio_total=\(totalAudioBytes) pixels=[\(pixels)]"
     }
+}
+
+private enum FixturePlaybackError: Error {
+    case invalidPCM
+    case timedOut
+}
+
+private func playFixturePCM(_ pcm: [UInt8]) throws -> Int {
+    // The embedded audio/VFS fixture submits mono 48 kHz S16LE frames.
+    guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
+          let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1),
+          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(pcm.count / 2)),
+          let samples = buffer.floatChannelData?[0] else {
+        throw FixturePlaybackError.invalidPCM
+    }
+    buffer.frameLength = buffer.frameCapacity
+    for frame in 0..<Int(buffer.frameLength) {
+        let low = UInt16(pcm[frame * 2])
+        let high = UInt16(pcm[frame * 2 + 1]) << 8
+        samples[frame] = Float(Int16(bitPattern: low | high)) / 32_768
+    }
+    let engine = AVAudioEngine()
+    let player = AVAudioPlayerNode()
+    let played = DispatchSemaphore(value: 0)
+    engine.attach(player)
+    engine.connect(player, to: engine.mainMixerNode, format: format)
+    defer {
+        player.stop()
+        engine.stop()
+        engine.detach(player)
+    }
+    try engine.start()
+    player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+        played.signal()
+    }
+    player.play()
+    guard played.wait(timeout: .now() + .seconds(3)) == .success else {
+        throw FixturePlaybackError.timedOut
+    }
+    return Int(buffer.frameLength)
 }
 
 /// Owns the latest fixture run. A class with @Published avoids SwiftUI macros,
@@ -587,6 +641,22 @@ if CommandLine.arguments.contains("--smoke-resources") {
 }
 
 // `--smoke-audio-vfs` tests VFS asset loading, PCM audio streaming, and Metal texture presentation.
+if CommandLine.arguments.contains("--smoke-native-audio") {
+    let frame = AudioVfsFrame.run(captureAudio: true)
+    guard frame.status == XENORA_OK, frame.samples == 256, frame.pcm.count == 512 else {
+        print("smoke-native-audio: fixture PCM unavailable")
+        exit(1)
+    }
+    do {
+        let played = try playFixturePCM(frame.pcm)
+        print("smoke-native-audio: playedBackFrames=\(played)")
+        exit(played == Int(frame.samples) ? 0 : 1)
+    } catch {
+        print("smoke-native-audio: \(error)")
+        exit(1)
+    }
+}
+
 if CommandLine.arguments.contains("--smoke-audio-vfs") {
     let frame = AudioVfsFrame.run()
     print("smoke-audio-vfs: \(frame.summary)")
