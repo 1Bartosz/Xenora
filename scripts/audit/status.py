@@ -30,7 +30,7 @@ def replace_block(path, name, body, check):
     if check:
         print(f"{path}: status table differs from docs/status.toml", file=sys.stderr)
         return False
-    path.write_text(updated, encoding="utf-8")
+    path.write_text(updated, encoding="utf-8", newline="\n")
     return True
 
 
@@ -95,7 +95,7 @@ def check_asset(path, svg, check):
     if check:
         print(f"{path}: progress graphic differs from docs/status.toml", file=sys.stderr)
         return False
-    path.write_text(svg, encoding="utf-8")
+    path.write_text(svg, encoding="utf-8", newline="\n")
     return True
 
 
