@@ -176,6 +176,7 @@ pub struct ServicesState {
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     gdk_queues: Mutex<gdk_queue::QueueHandles>,
+    gdk_queue_changed: Condvar,
     winsock_changed: Condvar,
     pub next_alloc_addr: AtomicU64,
     pub graphics: Arc<Mutex<crate::graphics::GraphicsContext>>,
@@ -194,6 +195,7 @@ impl ServicesState {
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             gdk_queues: Mutex::default(),
+            gdk_queue_changed: Condvar::new(),
             winsock_changed: Condvar::new(),
             next_alloc_addr: AtomicU64::new(0x0000_0002_0000_0000), // 8GB guest heap
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),

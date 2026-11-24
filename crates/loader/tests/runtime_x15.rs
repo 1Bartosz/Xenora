@@ -1160,7 +1160,7 @@ fn guest_gdk_dispatch_runs_callback_and_resumes_caller() {
         .code(&code)
         .build();
     let mut registry = ImportRegistry::new();
-    register_standard_services(&mut registry, state);
+    register_standard_services(&mut registry, Arc::clone(&state));
     let result = run_synthetic_startup(
         &image,
         StartupLayout {
@@ -1177,6 +1177,10 @@ fn guest_gdk_dispatch_runs_callback_and_resumes_caller() {
     assert_eq!(cpu.get(Register::Rbx), 1);
     assert_eq!(cpu.get(Register::Rax), 0);
     assert_eq!(result.image.memory.read_u64(output).unwrap(), 0);
+    let start = std::time::Instant::now();
+    let timeout = call_service_fixture(&state, MODULE, "XTaskQueueDispatch", &[queue, 0, 10]);
+    assert_eq!(timeout.execution.final_state.get(Register::Rax), 0);
+    assert!(start.elapsed() >= std::time::Duration::from_millis(10));
 }
 
 #[test]

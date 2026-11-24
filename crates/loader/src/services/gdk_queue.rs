@@ -10,9 +10,11 @@ use crate::memory::GuestMemory;
 use crate::runtime::HResult;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const MODULE: &str = "xgameruntime.dll";
 const MAX_HANDLES: usize = 64;
+const MAX_DISPATCH_WAIT_MS: u32 = 1_000;
 const MAX_CALLBACKS_PER_PORT: usize = 32;
 const ERROR_OUTOFMEMORY: u32 = 14;
 const MANUAL: u32 = 0;
@@ -125,6 +127,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 .lock()
                 .expect("GDK queue handle table")
                 .close(args.rcx);
+            close.gdk_queue_changed.notify_all();
             Ok(0)
         },
     );
@@ -184,34 +187,45 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 context: args.r8,
             };
             let mut queues = submit.gdk_queues.lock().expect("GDK queue handle table");
-            Ok(guest_hresult(queues.submit(
-                args.rcx,
-                args.rdx as u32,
-                callback,
-            )))
+            let result = queues.submit(args.rcx, args.rdx as u32, callback);
+            if result.is_ok() {
+                submit.gdk_queue_changed.notify_all();
+            }
+            Ok(guest_hresult(result))
         },
     );
     let dispatch = Arc::clone(state);
     registry.register_callback_dispatch(MODULE, "XTaskQueueDispatch", move |args, memory| {
-        if args.r8 as u32 != 0 {
+        let timeout = args.r8 as u32;
+        if timeout > MAX_DISPATCH_WAIT_MS {
             return Ok(None);
         }
+        let deadline = Instant::now() + Duration::from_millis(u64::from(timeout));
         let mut queues = dispatch.gdk_queues.lock().expect("GDK queue handle table");
-        let Some(&port) = queues
-            .queues
-            .get(&args.rcx)
-            .and_then(|ports| ports.get(args.rdx as u32 as usize))
-        else {
-            return Ok(None);
-        };
-        let Some(pending) = queues.pending.get_mut(&port) else {
-            return Ok(None);
-        };
-        if let Some(callback) = pending.front() {
-            memory
-                .fetch_instruction_byte(callback.entry)
-                .map_err(ExitReason::MemoryFault)?;
+        loop {
+            let Some(&port) = queues
+                .queues
+                .get(&args.rcx)
+                .and_then(|ports| ports.get(args.rdx as u32 as usize))
+            else {
+                return Ok(None);
+            };
+            if let Some(pending) = queues.pending.get_mut(&port)
+                && let Some(callback) = pending.front()
+            {
+                memory
+                    .fetch_instruction_byte(callback.entry)
+                    .map_err(ExitReason::MemoryFault)?;
+                return Ok(pending.pop_front());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            (queues, _) = dispatch
+                .gdk_queue_changed
+                .wait_timeout(queues, remaining)
+                .expect("GDK queue handle table");
         }
-        Ok(pending.pop_front())
     });
 }
