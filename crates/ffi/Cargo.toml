@@ -12,5 +12,11 @@ crate-type = ["staticlib", "rlib"]
 [lints]
 workspace = true
 
+[features]
+# Runs the tests that need a native Metal device (scripts/test-gpu.sh).
+gpu-tests = []
+
 [dependencies]
 xenora-loader = { path = "../loader" }
+xenora-metal = { path = "../metal" }
+xenora-shader = { path = "../shader" }

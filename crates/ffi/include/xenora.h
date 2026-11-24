@@ -25,7 +25,13 @@ enum {
     XENORA_INTERNAL_ERROR = 4,
     XENORA_PE_ERROR = 5,
     XENORA_LIMIT_EXCEEDED = 6,
+    XENORA_BUFFER_TOO_SMALL = 7,
+    XENORA_EXECUTION_FAILED = 8,
 };
+
+/* Size of the frame drawn by the trusted fixture: RGBA8, rows top to bottom. */
+#define XENORA_FIXTURE_FRAME_WIDTH 4u
+#define XENORA_FIXTURE_FRAME_HEIGHT 3u
 
 typedef uint64_t xenora_session;
 
@@ -43,5 +49,20 @@ xenora_status xenora_session_inspect_trusted_fixture(
     xenora_session session,
     uint32_t *out_section_count,
     uint32_t *out_entry_rva);
+
+/*
+ * Run the bundled trusted PE fixture: its x86-64 code is translated and executed,
+ * and its single draw request is rendered on the native Metal device. On XENORA_OK,
+ * `out_rgba` holds width * height * 4 bytes of the read-back frame, which has been
+ * checked against the fixture shader's known output. `capacity` is the size of
+ * `out_rgba` in bytes. Blocks the calling thread; call it off the main thread.
+ * Only the embedded fixture can run; no caller-supplied executable is accepted.
+ */
+xenora_status xenora_session_run_trusted_fixture(
+    xenora_session session,
+    uint8_t *out_rgba,
+    uint64_t capacity,
+    uint32_t *out_width,
+    uint32_t *out_height);
 
 #endif
