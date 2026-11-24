@@ -53,6 +53,7 @@ fn scalar_alu_dispatch_selects_exactly_the_registry_sop2_forms() {
         assert_eq!(row.family, EncodingFamily::Sop2);
         assert_eq!(row.name.to_ascii_lowercase(), op.mnemonic());
         assert_eq!(op.reads_scc(), row.carry_in == CarryIn::Scc);
+        assert_eq!(op.writes_scc(), row.scc != SccEffect::Unchanged);
     }
     dispatch_selects_exactly(EncodingFamily::Sop2, |word| {
         ScalarAluOp::from_word(word).map(|op| op.semantics().name)

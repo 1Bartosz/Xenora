@@ -68,6 +68,24 @@ pub enum Operation {
     SignExtend,
     /// Two's-complement absolute value; the most negative value maps to itself.
     Absolute,
+    /// S0 when it is strictly less than S1, otherwise S1.
+    Minimum,
+    /// S0 when it is strictly greater than S1, otherwise S1.
+    Maximum,
+    /// S0 when SCC is set, otherwise S1.
+    Select,
+    /// `((1 << S0[4:0]) - 1) << S1[4:0]`.
+    BitfieldMask,
+    /// Low 32 bits of the product.
+    Multiply,
+    /// High 32 bits of the 64-bit product.
+    MultiplyHigh,
+    /// The field of S0 at offset S1[4:0] with width S1[22:16]; sign-extended when signed.
+    BitfieldExtract,
+    /// Absolute value of the wrapped 32-bit difference S0 - S1.
+    AbsoluteDifference,
+    /// `(S0 << shift_amount) + S1`.
+    ShiftLeftAdd,
 }
 
 /// How the operands are interpreted. `Bitwise` exactly when the operation is logical.
@@ -81,12 +99,12 @@ pub enum Signedness {
     Bitwise,
 }
 
-/// Extra input consumed by the operation.
+/// Whether the operation reads SCC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CarryIn {
-    /// No carry or borrow input.
+    /// SCC is not read.
     None,
-    /// SCC as carry-in (add) or borrow-in (sub).
+    /// SCC as carry-in (add), borrow-in (sub) or the select condition (select).
     Scc,
 }
 
@@ -105,6 +123,8 @@ pub enum SccEffect {
     Nonzero,
     /// The compare's relation holds for S0 and S1.
     Relation,
+    /// The result is S0 by the strict comparison (min, max): equal operands give 0.
+    SelectedSrc0,
 }
 
 /// What a form writes to VCC or EXEC. Stage A forms leave both unchanged.
@@ -183,12 +203,14 @@ pub struct FormSemantics {
     pub operation: Operation,
     /// Operand interpretation.
     pub signedness: Signedness,
-    /// Carry or borrow input.
+    /// SCC input.
     pub carry_in: CarryIn,
     /// Operand and result width in bits.
     pub width: u8,
     /// Low bits of S1 used as the shift count by shift operations; 0 otherwise.
     pub shift_count_bits: u8,
+    /// Fixed left shift of S0 for shift-and-add operations (1 to 4); 0 otherwise.
+    pub shift_amount: u8,
     /// Low bits of S0 that the operation reads: `width`, or 8 or 16 for sign extension.
     pub source_bits: u8,
     /// The relation tested by compares (S0 on the left); `None` otherwise.
