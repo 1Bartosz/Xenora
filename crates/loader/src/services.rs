@@ -92,8 +92,14 @@ impl MockClock {
         }
     }
 
+    /// Move both readings forward by `intervals` 100-nanosecond ticks. Each
+    /// stops at its maximum, so neither ever runs backwards.
     pub fn advance(&self, intervals: u64) {
-        self.current.fetch_add(intervals, Ordering::SeqCst);
+        self.current
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.saturating_add(intervals))
+            })
+            .expect("clock update always returns a value");
         self.performance_count
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 Some(count.saturating_add(intervals).min(MAX_PERFORMANCE_COUNT))
