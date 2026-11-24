@@ -193,6 +193,8 @@ pub struct ServicesState {
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
     synch: Mutex<synch::Synch>,
+    /// Functions registered with `atexit`, run in reverse order by `_cexit`.
+    atexit: Mutex<Vec<u64>>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -215,6 +217,7 @@ impl ServicesState {
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
             synch: Mutex::default(),
+            atexit: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -361,7 +364,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_heap(registry);
     crt::register_errno(registry);
     crt::register_conversions(registry);
-    crt_callbacks::register(registry);
+    crt_callbacks::register(registry, &state);
     heap::register(registry, &state);
 
     let s = state.clone();

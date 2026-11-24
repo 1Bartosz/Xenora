@@ -381,9 +381,6 @@ impl SymbolDb {
             ("abort", "abort"),
             ("exit", "exit"),
             ("_exit", "_exit"),
-            ("atexit", "atexit"),
-            ("bsearch", "bsearch"),
-            ("qsort", "qsort"),
             ("rand", "rand"),
             ("srand", "srand"),
             ("atoi", "atoi"),
@@ -425,24 +422,21 @@ impl SymbolDb {
             "CRT invalid param abort",
         );
         self.win32_stub(m, "_purecall", false, "pure virtual call trap");
+        // Initializer and exit functions are guest code.
         for module in [m, "ucrtbase.dll"] {
-            for symbol in ["_initterm", "_initterm_e"] {
+            for symbol in [
+                "_initterm",
+                "_initterm_e",
+                "_initialize_onexit_table",
+                "_register_onexit_function",
+                "_execute_onexit_table",
+                "atexit",
+                "_crt_atexit",
+                "_cexit",
+            ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
         }
-        self.win32_stub(
-            m,
-            "_initialize_onexit_table",
-            false,
-            "CRT onexit table init — no-op",
-        );
-        self.win32_stub(
-            m,
-            "_register_onexit_function",
-            false,
-            "CRT onexit register — no-op",
-        );
-        self.win32_stub(m, "_crt_atexit", false, "CRT atexit variant — no-op");
         self.win32_stub(
             m,
             "_register_thread_local_exe_atexit_callback",

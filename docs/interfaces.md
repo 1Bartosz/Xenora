@@ -363,6 +363,14 @@ The CRT uses this for:
   initializer table in order. `_initterm_e` stops at the first nonzero
   result and returns it. Tables hold at most 65,536 entries.
 
+- `_initialize_onexit_table`, `_register_onexit_function` and
+  `_execute_onexit_table` manage `_onexit_table_t` tables. Their storage is
+  on the default guest heap, and they hold at most 65,536 entries. Execution
+  resets the table first, then calls the functions in reverse order of
+  registration. `atexit` and `_crt_atexit` record process exit functions,
+  which `_cexit` runs in reverse order. Process termination through `exit` is
+  not modeled.
+
 Null comparators, null arrays with a nonzero count, and reversed or
 misaligned tables would reach the CRT invalid-parameter handler. That
 handler is not modeled, so these inputs stop the guest with the

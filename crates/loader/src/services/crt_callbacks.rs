@@ -6,9 +6,11 @@
 //! Each service is a callback task. The comparator or initializer runs as
 //! ordinary translated guest code, and the service continues when it returns.
 
+use super::ServicesState;
 use crate::cpu::ExitReason;
 use crate::imports::{CallbackStart, CallbackStep, CallbackTask, ImportRegistry, ServiceStatus};
-use crate::memory::{GuestMemory, MemoryError};
+use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
+use std::sync::Arc;
 
 const UCRT: &str = "ucrtbase.dll";
 const CRT_UTILITY_API: &str = "api-ms-win-crt-utility-l1-1-0.dll";
@@ -303,7 +305,196 @@ fn start_initializers(
     })
 }
 
-pub(super) fn register(registry: &mut ImportRegistry) {
+/// `_onexit_table_t` from corecrt_startup.h: `_first`, `_last` and `_end`
+/// pointers to an array of function pointers.
+const ONEXIT_TABLE_SIZE: usize = 24;
+const ONEXIT_INITIAL_ENTRIES: u64 = 32;
+const MAX_ONEXIT_ENTRIES: u64 = 65_536;
+const CRT_FAILURE: u64 = u32::MAX as u64;
+
+fn read_onexit_table(memory: &GuestMemory, table: u64) -> Result<[u64; 3], ExitReason> {
+    let mut bytes = [0; ONEXIT_TABLE_SIZE];
+    memory.read_bytes(table, &mut bytes).map_err(fault)?;
+    Ok(std::array::from_fn(|index| {
+        u64::from_le_bytes(bytes[8 * index..8 * index + 8].try_into().unwrap())
+    }))
+}
+
+fn write_onexit_table(
+    memory: &mut GuestMemory,
+    table: u64,
+    pointers: [u64; 3],
+) -> Result<(), ExitReason> {
+    let mut bytes = [0; ONEXIT_TABLE_SIZE];
+    for (chunk, pointer) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(pointers) {
+        *chunk = pointer.to_le_bytes();
+    }
+    memory.write_bytes(table, &bytes).map_err(fault)
+}
+
+/// Append `function`, growing the table's storage on the default process heap.
+/// Returns false when the storage cannot grow.
+fn register_onexit(
+    memory: &mut GuestMemory,
+    table: u64,
+    function: u64,
+) -> Result<bool, ExitReason> {
+    let [mut first, mut last, mut end] = read_onexit_table(memory, table)?;
+    if first == 0 {
+        let bytes = (ONEXIT_INITIAL_ENTRIES * 8) as usize;
+        let Ok(storage) = memory.map_heap_allocation(PROCESS_HEAP, bytes) else {
+            return Ok(false);
+        };
+        (first, last, end) = (storage, storage, storage + bytes as u64);
+    }
+    if last < first || end < last || !(end - first).is_multiple_of(8) {
+        return unsupported();
+    }
+    if last == end {
+        let capacity = (end - first) / 8;
+        if capacity >= MAX_ONEXIT_ENTRIES {
+            return Ok(false);
+        }
+        let bytes = (capacity * 2 * 8) as usize;
+        let Ok(storage) = memory.resize_heap_allocation(PROCESS_HEAP, first, bytes, false) else {
+            return Ok(false);
+        };
+        (first, last, end) = (storage, storage + capacity * 8, storage + bytes as u64);
+    }
+    memory.write_u64(last, function).map_err(fault)?;
+    write_onexit_table(memory, table, [first, last + 8, end])?;
+    Ok(true)
+}
+
+/// Runs registered functions in reverse order of registration.
+struct ExitFunctions {
+    pending: Vec<u64>,
+}
+
+impl ExitFunctions {
+    fn next(&mut self) -> CallbackStep {
+        match self.pending.pop() {
+            Some(entry) => CallbackStep::Call {
+                entry,
+                args: [0; 4],
+            },
+            None => CallbackStep::Return(0),
+        }
+    }
+
+    fn start(mut self) -> CallbackStart {
+        match self.next() {
+            CallbackStep::Call { entry, args } => CallbackStart::Call {
+                task: Box::new(self),
+                entry,
+                args,
+            },
+            CallbackStep::Return(value) => CallbackStart::Return(value),
+        }
+    }
+}
+
+impl CallbackTask for ExitFunctions {
+    fn resume(&mut self, _: u64, _: u64, _: &mut GuestMemory) -> Result<CallbackStep, ExitReason> {
+        Ok(self.next())
+    }
+}
+
+fn register_exit_tables(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    registry.register(UCRT, "_initialize_onexit_table", |args, _, mem| {
+        let table = args.rcx;
+        if table == 0 {
+            return Ok(CRT_FAILURE);
+        }
+        // An initialized table keeps its registrations.
+        if read_onexit_table(mem, table)?[0] == 0 {
+            write_onexit_table(mem, table, [0; 3])?;
+        }
+        Ok(0)
+    });
+
+    registry.register(UCRT, "_register_onexit_function", |args, _, mem| {
+        if args.rcx == 0 {
+            return Ok(CRT_FAILURE);
+        }
+        Ok(if register_onexit(mem, args.rcx, args.rdx)? {
+            0
+        } else {
+            CRT_FAILURE
+        })
+    });
+
+    registry.register_callback_task(
+        UCRT,
+        "_execute_onexit_table",
+        ServiceStatus::Partial,
+        |args, _, mem, _| {
+            let table = args.rcx;
+            if table == 0 {
+                return Ok(CallbackStart::Return(CRT_FAILURE));
+            }
+            let [first, last, _] = read_onexit_table(mem, table)?;
+            if first == 0 {
+                return Ok(CallbackStart::Return(0));
+            }
+            if last < first || !(last - first).is_multiple_of(8) {
+                return unsupported();
+            }
+            let mut pending = Vec::with_capacity(((last - first) / 8) as usize);
+            for slot in (first..last).step_by(8) {
+                let entry = mem.read_u64(slot).map_err(fault)?;
+                if entry != 0 {
+                    pending.push(entry);
+                }
+            }
+            // The table is reset before the functions run, so a function
+            // registered while they run starts a new table.
+            write_onexit_table(mem, table, [0; 3])?;
+            mem.release_heap_allocation(PROCESS_HEAP, first);
+            Ok(ExitFunctions { pending }.start())
+        },
+    );
+
+    for symbol in ["atexit", "_crt_atexit"] {
+        let s = Arc::clone(state);
+        registry.register(UCRT, symbol, move |args, _, _| {
+            let mut functions = s.atexit.lock().expect("guest atexit functions");
+            if args.rcx == 0 || functions.len() as u64 >= MAX_ONEXIT_ENTRIES {
+                return Ok(CRT_FAILURE);
+            }
+            functions.push(args.rcx);
+            Ok(0)
+        });
+    }
+
+    let s = Arc::clone(state);
+    registry.register_callback_task(UCRT, "_cexit", ServiceStatus::Partial, move |_, _, _, _| {
+        let pending = std::mem::take(&mut *s.atexit.lock().expect("guest atexit functions"));
+        Ok(ExitFunctions { pending }.start())
+    });
+
+    for symbol in [
+        "_initialize_onexit_table",
+        "_register_onexit_function",
+        "atexit",
+        "_crt_atexit",
+    ] {
+        registry.set_status(UCRT, symbol, ServiceStatus::Partial);
+    }
+    for symbol in [
+        "_initialize_onexit_table",
+        "_register_onexit_function",
+        "_execute_onexit_table",
+        "_crt_atexit",
+        "_cexit",
+    ] {
+        registry.alias(CRT_RUNTIME_API, UCRT, symbol);
+    }
+    registry.alias(CRT_RUNTIME_API, UCRT, "atexit");
+}
+
+pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    register_exit_tables(registry, state);
     registry.register_callback_task(UCRT, "qsort", ServiceStatus::Partial, |args, _, mem, _| {
         let compare = Comparator {
             entry: args.r9,

@@ -79,6 +79,12 @@ const IMPORTS: &[(&str, &str)] = &[
     (UCRT, "bsearch_s"),
     (CRT_RUNTIME, "_initterm"),
     (UCRT, "_initterm_e"),
+    (CRT_RUNTIME, "_initialize_onexit_table"),
+    (UCRT, "_register_onexit_function"),
+    (CRT_RUNTIME, "_execute_onexit_table"),
+    (UCRT, "atexit"),
+    (CRT_RUNTIME, "_crt_atexit"),
+    (CRT_RUNTIME, "_cexit"),
 ];
 
 const UCRT: &str = "ucrtbase.dll";
@@ -108,9 +114,11 @@ enum Routine {
     InitOnceFail,
     /// `void cleanup(void *value)` adding the value to LOG.
     FlsAdd,
+    /// `void count(void)` incrementing COUNTER.
+    Count,
 }
 
-const ROUTINES: [Routine; 10] = [
+const ROUTINES: [Routine; 11] = [
     Routine::Compare,
     Routine::CompareCounting,
     Routine::Append(1),
@@ -121,6 +129,7 @@ const ROUTINES: [Routine; 10] = [
     Routine::InitOnceStore,
     Routine::InitOnceFail,
     Routine::FlsAdd,
+    Routine::Count,
 ];
 
 impl Routine {
@@ -168,6 +177,11 @@ impl Routine {
                 code.extend_from_slice(&[0x48, 0x01, 0x08, 0xC3]); // add [rax], rcx; ret
                 code
             }
+            Self::Count => {
+                let mut code = mov_rax(COUNTER);
+                code.extend_from_slice(&[0x48, 0xFF, 0x00, 0xC3]); // inc qword [rax]; ret
+                code
+            }
         }
     }
 }
@@ -182,6 +196,7 @@ const CLOBBER_RBX: usize = 6;
 const INIT_ONCE_STORE: usize = 7;
 const INIT_ONCE_FAIL: usize = 8;
 const FLS_ADD: usize = 9;
+const COUNT: usize = 10;
 
 const WAIT_TIMEOUT: u64 = 258;
 const ERROR_INVALID_HANDLE: u64 = 6;
@@ -902,4 +917,66 @@ fn init_once_execute_once_runs_the_initializer_exactly_once() {
     assert_eq!(execute(&mut guest, reserved, INIT_ONCE_STORE, 0x7001), 0);
     assert_eq!(guest.error(), ERROR_INVALID_PARAMETER);
     assert_eq!(guest.u64_at(reserved), 0);
+}
+
+#[test]
+fn onexit_tables_run_registered_functions_in_reverse_order() {
+    let mut guest = new_guest();
+    let table = SCRATCH + 0x400;
+    let pointers = |guest: &Guest| [0, 8, 16].map(|offset| guest.u64_at(table + offset));
+    let status = |value: u64| value as u32;
+    assert_eq!(guest.call("_initialize_onexit_table", &[table]), 0);
+    assert_eq!(pointers(&guest), [0; 3]);
+    assert_eq!(
+        status(guest.call("_initialize_onexit_table", &[0])),
+        u32::MAX
+    );
+    assert_eq!(
+        status(guest.call("_register_onexit_function", &[0, routine(APPEND_1)])),
+        u32::MAX
+    );
+
+    for digit in [APPEND_1, APPEND_2, APPEND_3] {
+        assert_eq!(
+            guest.call("_register_onexit_function", &[table, routine(digit)]),
+            0
+        );
+    }
+    let [first, last, end] = pointers(&guest);
+    assert_ne!(first, 0);
+    assert_eq!(last - first, 24);
+    assert!(end >= last);
+    // Reinitializing a table keeps its registrations.
+    assert_eq!(guest.call("_initialize_onexit_table", &[table]), 0);
+    assert_eq!(pointers(&guest), [first, last, end]);
+
+    guest.memory.write_u64(LOG, 0).unwrap();
+    assert_eq!(guest.call("_execute_onexit_table", &[table]), 0);
+    assert_eq!(guest.u64_at(LOG), 321);
+    assert_eq!(pointers(&guest), [0; 3]);
+    assert_eq!(guest.call("_execute_onexit_table", &[table]), 0);
+    assert_eq!(guest.u64_at(LOG), 321);
+
+    // The table grows past its initial storage.
+    for _ in 0..100 {
+        assert_eq!(
+            guest.call("_register_onexit_function", &[table, routine(COUNT)]),
+            0
+        );
+    }
+    let [first, last, _] = pointers(&guest);
+    assert_eq!(last - first, 800);
+    guest.memory.write_u64(COUNTER, 0).unwrap();
+    assert_eq!(guest.call("_execute_onexit_table", &[table]), 0);
+    assert_eq!(guest.u64_at(COUNTER), 100);
+
+    // atexit functions run in reverse order when the CRT is shut down.
+    assert_eq!(guest.call("atexit", &[routine(APPEND_1)]), 0);
+    assert_eq!(guest.call("_crt_atexit", &[routine(APPEND_2)]), 0);
+    assert_eq!(status(guest.call("atexit", &[0])), u32::MAX);
+    guest.memory.write_u64(LOG, 0).unwrap();
+    assert_eq!(guest.call("_cexit", &[]), 0);
+    assert_eq!(guest.u64_at(LOG), 21);
+    assert_eq!(guest.call("_cexit", &[]), 0);
+    assert_eq!(guest.u64_at(LOG), 21);
 }
