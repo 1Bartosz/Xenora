@@ -288,7 +288,7 @@ fn run_imports_generate_cli(args: &[String]) -> ExitCode {
         }
     }
 
-    let records = if let Some(ref pe) = pe_path {
+    let mut records = if let Some(ref pe) = pe_path {
         println!("Extracting imports from PE executable: {pe}");
         let bytes = match std::fs::read(pe) {
             Ok(b) => b,
@@ -311,6 +311,10 @@ fn run_imports_generate_cli(args: &[String]) -> ExitCode {
             .map(|imp| xenora_import_gen::ImportRecord {
                 module: imp.dll,
                 symbol: imp.symbol,
+                ordinal: match imp.import_name {
+                    xenora_loader::import_table::ImportName::Ordinal(ordinal) => Some(ordinal),
+                    xenora_loader::import_table::ImportName::Name(_) => None,
+                },
                 iat_rva: imp.iat_rva as u64,
             })
             .collect::<Vec<_>>()
@@ -329,6 +333,8 @@ fn run_imports_generate_cli(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
 
+    records.sort();
+    records.dedup();
     println!("Total imports extracted: {}", records.len());
     let db = xenora_import_gen::SymbolDb::builtin();
     let manifest = xenora_import_gen::Manifest::build(&records, &db);

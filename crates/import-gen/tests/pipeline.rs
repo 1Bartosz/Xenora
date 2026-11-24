@@ -34,6 +34,40 @@ fn test_builtin_db_case_insensitive() {
 }
 
 #[test]
+fn typed_csv_preserves_ordinals_and_identically_spelled_names() {
+    let dir = std::env::temp_dir().join(format!("xenora-typed-imports-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("imports.csv");
+    std::fs::write(
+        &input,
+        "module,symbol_or_ordinal,iat_rva,import_kind\n\
+         \"demo.dll\",\"Ordinal#42\",0x1000,ordinal\n\
+         \"DEMO.dll\",\"Ordinal#42\",0x1004,ordinal\n\
+         \"demo.dll\",\"Ordinal#42\",0x1008,name\n",
+    )
+    .unwrap();
+    let records = parse_csv(input.to_str().unwrap()).unwrap();
+    let db = SymbolDb::builtin();
+    let manifest = Manifest::build(&records, &db);
+    assert_eq!(manifest.emission_summary().get("no-binding"), Some(&2));
+    assert_eq!(manifest.generatable().count(), 0);
+    let output = dir.join("manifest.csv");
+    manifest.write_csv(output.to_str().unwrap()).unwrap();
+    let csv = std::fs::read_to_string(output).unwrap();
+    assert!(csv.contains("0x00001000,manual,no-binding,ordinal"));
+    assert!(csv.contains("0x00001008,manual,no-binding,name"));
+    let files = generate(&manifest, &db);
+    assert!(!files.crt_rs.contains("Ordinal#42"));
+    assert!(!files.stubs_rs.contains("Ordinal#42"));
+    assert!(
+        files
+            .manifest_md
+            .contains("requires a documented export mapping")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn test_manifest_and_codegen_pipeline() {
     let csv_content = r#""module","symbol_or_ordinal","iat_rva"
 "api-ms-win-crt-math-l1-1-0.dll","acos",0x1000

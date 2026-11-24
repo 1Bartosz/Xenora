@@ -11,11 +11,24 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct ManifestEntry {
     pub module: String,
     pub symbol: String,
+    pub ordinal: Option<u16>,
     pub iat_rva: u64,
     pub classification: Classification,
 }
 
 impl ManifestEntry {
+    pub(crate) fn key(&self) -> (String, Option<u16>, &str) {
+        (
+            self.module.to_ascii_lowercase(),
+            self.ordinal,
+            if self.ordinal.is_none() {
+                &self.symbol
+            } else {
+                ""
+            },
+        )
+    }
+
     pub fn tier(&self) -> &'static str {
         self.classification.tier_name()
     }
@@ -48,7 +61,11 @@ impl Manifest {
         let mut entries = Vec::with_capacity(records.len());
         for rec in records {
             // Check for exact symbol match, then wildcard module match
-            let classification = if let Some(c) = db.get(&rec.module, &rec.symbol) {
+            let classification = if rec.ordinal.is_some() {
+                Classification::Manual {
+                    reason: "ordinal requires a documented export mapping in the typed runtime registry",
+                }
+            } else if let Some(c) = db.get(&rec.module, &rec.symbol) {
                 c.clone()
             } else if let Some(c) = db.get(&rec.module, "__wildcard__") {
                 c.clone()
@@ -61,6 +78,7 @@ impl Manifest {
             entries.push(ManifestEntry {
                 module: rec.module.clone(),
                 symbol: rec.symbol.clone(),
+                ordinal: rec.ordinal,
                 iat_rva: rec.iat_rva,
                 classification,
             });
@@ -82,7 +100,7 @@ impl Manifest {
         let mut seen = BTreeSet::new();
         let mut counts = BTreeMap::new();
         for entry in &self.entries {
-            if seen.insert((entry.module.to_ascii_lowercase(), entry.symbol.as_str())) {
+            if seen.insert(entry.key()) {
                 *counts.entry(entry.emission()).or_default() += 1;
             }
         }
@@ -98,10 +116,15 @@ impl Manifest {
 
     /// Write the manifest as CSV for `xenora imports sync` integration.
     pub fn write_csv(&self, path: &str) -> Result<(), String> {
-        let mut out = String::from("module,symbol,iat_rva,tier,emission\n");
+        let mut out = String::from("module,symbol,iat_rva,tier,emission,import_kind\n");
         for e in &self.entries {
+            let kind = if e.ordinal.is_some() {
+                "ordinal"
+            } else {
+                "name"
+            };
             out.push_str(&format!(
-                "\"{}\",\"{}\",0x{:08x},{},{}\n",
+                "\"{}\",\"{}\",0x{:08x},{},{},{kind}\n",
                 e.module,
                 e.symbol,
                 e.iat_rva,

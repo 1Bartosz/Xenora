@@ -42,9 +42,10 @@ fn write_file(dir: &str, name: &str, content: &str) -> Result<(), String> {
 
 fn unique_entries(manifest: &Manifest) -> impl Iterator<Item = &crate::manifest::ManifestEntry> {
     let mut seen = std::collections::BTreeSet::new();
-    manifest.entries.iter().filter(move |entry| {
-        seen.insert((entry.module.to_ascii_lowercase(), entry.symbol.as_str()))
-    })
+    manifest
+        .entries
+        .iter()
+        .filter(move |entry| seen.insert(entry.key()))
 }
 
 /// Generate all files from the manifest.
