@@ -106,6 +106,7 @@ impl<'a> TiledBc1<'a> {
         blocks
             .try_reserve_exact(width * height * BLOCK_BYTES)
             .map_err(|_| TextureError::AllocationFailed)?;
+        // Construction requires the exact padded length, so each selected tile row is in bounds.
         for y in 0..height {
             let row_start =
                 base + (y / TILE_BLOCKS) * tile_row_stride + (y % TILE_BLOCKS) * TILE_ROW_BYTES;
