@@ -2608,12 +2608,15 @@ add_memory_crosses_contiguous_pages: rdi=D+1000 mffd=ffffffffffffffff => mffd=00
 push_pop_cross_contiguous_pages: rsp=D+1004 rax=1122334455667788 => rbx=1122334455667788 mffc=8877665544332211 f=*
 ";
 
-const DEFECT_EXACT_UNMASKED_OVERFLOW: &str = r"
+const EXACT_UNMASKED_OVERFLOW: &str = r"
 @ mulss xmm1, xmm2
   !f30f59ca
   SDM 1 D.4.2.3 Table D-16 (PE only if inexact); APM 1 4.10.2.8
 unmasked_overflow_exact_sets_only_oe: x1=s:7f7fffff x2=s:40000000 mx=1b80 => mx=1b88 f=* ! XM
 unmasked_negative_overflow_exact_sets_only_oe: x1=s:ff7fffff x2=s:40000000 mx=1b80 => mx=1b88 f=* ! XM
+unmasked_overflow_exact_sets_only_oe_down: x1=s:7f7fffff x2=s:40000000 mx=3b80 => mx=3b88 f=* ! XM
+unmasked_overflow_exact_sets_only_oe_up: x1=s:7f7fffff x2=s:40000000 mx=5b80 => mx=5b88 f=* ! XM
+unmasked_overflow_exact_sets_only_oe_zero: x1=s:7f7fffff x2=s:40000000 mx=7b80 => mx=7b88 f=* ! XM
 @ addsd xmm1, xmm2
   !f20f58ca
   SDM 1 D.4.2.3 Table D-16 (PE only if inexact); APM 1 4.10.2.8
@@ -2661,10 +2664,7 @@ const GROUPS: &[(&str, &str)] = &[
     ("fp_mxcsr_and_unmasked", FP_MXCSR_AND_UNMASKED),
     ("fp_beyond_sse2", FP_BEYOND_SSE2),
     ("defect_overlong_instruction", DEFECT_OVERLONG_INSTRUCTION),
-    (
-        "defect_exact_unmasked_overflow",
-        DEFECT_EXACT_UNMASKED_OVERFLOW,
-    ),
+    ("exact_unmasked_overflow", EXACT_UNMASKED_OVERFLOW),
     ("page_crossing", PAGE_CROSSING),
 ];
 
@@ -3510,9 +3510,8 @@ fn defect_overlong_instruction() {
 }
 
 #[test]
-#[ignore = "known defect (#155): an exact unmasked overflow sets PE as well as OE"]
-fn defect_exact_unmasked_overflow() {
-    check_group(DEFECT_EXACT_UNMASKED_OVERFLOW);
+fn exact_unmasked_overflow() {
+    check_group(EXACT_UNMASKED_OVERFLOW);
 }
 
 #[test]
@@ -4731,12 +4730,7 @@ fn deliver(
     }
     if lowest + precision - 1 > format.max_exponent() {
         if mxcsr & OM == 0 {
-            // PE of an exact overflow is `defect_exact_unmasked_overflow`; this
-            // sweep compares every other bit.
-            return Outcome {
-                open: if unbounded_exact { PE } else { 0 },
-                ..outcome(0, OE | unbounded_inexact)
-            };
+            return outcome(0, OE | unbounded_inexact);
         }
         let to_infinity = match mode {
             0 => true,
