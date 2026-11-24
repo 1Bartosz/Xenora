@@ -310,6 +310,9 @@ OPERAND_RULES = {
                 {"field": "SRC1", "class": "vgpr"},
             ],
             "max_literals": 0,
+            # Declared in the data, so every reader (the planner too) knows this
+            # rule only re-encodes declared forms.
+            "variant_only": True,
         },
         # Two VGPR sources only, with ABS, OP_SEL, CLAMP, OMOD and NEG clear and
         # SRC2 the assembler's unused inline zero; the decoder rejects the rest.
@@ -388,11 +391,16 @@ def load_registry(path=REGISTRY):
         raise RegistryError(f"{path.name}: a family file is included twice")
     rules = registry.setdefault("operand_rules", {})
     forms = registry.setdefault("form", [])
+    directory = (path.parent / path.stem).resolve()
     for include in includes:
         part_path = path.parent / include
         family = Path(include).stem.upper()
         if not part_path.is_file():
             raise RegistryError(f"{path.name}: included family file {include} does not exist")
+        # A family file is a regular file directly in the registry directory,
+        # not a link to data elsewhere (nor a second name for another include).
+        if part_path.is_symlink() or part_path.resolve().parent != directory:
+            raise RegistryError(f"{path.name}: included family file {include} is a link or outside {path.stem}/")
         with open(part_path, "rb") as handle:
             part = tomllib.load(handle)
         unknown = sorted(set(part) - FAMILY_FILE_KEYS)
@@ -727,6 +735,9 @@ def validate(registry, snapshot):
             errors.append(f"{label}: operation {form['operation']} does not fit rule {form['operands']}")
         _check_spec(label, form["spec"], documents, errors)
         verify = form["verify"]
+        if not isinstance(verify, list) or not all(isinstance(item, str) for item in verify):
+            errors.append(f"{label}: verify must be a list of evidence names")
+            verify = []
         if not verify:
             errors.append(f"{label}: no verification requirement")
         if any(item not in EVIDENCE for item in verify):
@@ -793,7 +804,11 @@ def _check_variants(registry, rules, documents, snapshot, seen, errors):
             )
         _check_spec(label, variant["spec"], documents, errors)
         verify = variant["verify"]
-        if not verify or any(item not in EVIDENCE for item in verify) or len(set(verify)) != len(verify):
+        if (
+            not isinstance(verify, list) or not all(isinstance(item, str) for item in verify)
+            or not verify or any(item not in EVIDENCE for item in verify)
+            or len(set(verify)) != len(verify)
+        ):
             errors.append(f"{label}: invalid verification requirements {verify}")
         # The XML check runs on the re-encoded declaration, so the variant's
         # operands must agree with the base form's widths, signedness and effects.
@@ -802,14 +817,23 @@ def _check_variants(registry, rules, documents, snapshot, seen, errors):
         # data format, in the same order (VSRC1 of VOP2 is SRC1 of VOP3).
         base_xml = snapshot["variants"].get((base["name"], _family_encoding(base["family"])))
         own_xml = snapshot["variants"].get((variant["of"], _family_encoding(variant["family"])))
-        if base_xml and own_xml:
-            formats = [
-                [row[1] for row in record["operands"] if row[0]] for record in (base_xml, own_xml)
-            ]
-            if formats[0] != formats[1]:
-                errors.append(
-                    f"{label}: XML operand formats {formats[1]} differ from the form's {formats[0]}"
-                )
+        base_rule = rules.get(base.get("operands"))
+        if base_xml and own_xml and isinstance(base_rule, dict):
+            # Operands correspond by role, in rule order: the destination, then
+            # each source (VSRC1 of VOP2 is SRC1 of VOP3).
+            def roles(rule, record):
+                by_field = {row[0]: row[1] for row in record["operands"] if row[0]}
+                fields = ([rule["dst"]["field"]] if "dst" in rule else [])
+                fields += [src["field"] for src in rule.get("src", [])]
+                return [(field, by_field.get(field)) for field in fields]
+
+            pairs = list(zip(roles(base_rule, base_xml), roles(rule, own_xml)))
+            for (base_field, base_format), (field, data_format) in pairs:
+                if base_format != data_format:
+                    errors.append(
+                        f"{label}: XML {field} format {data_format} differs from the form's "
+                        f"{base_field} format {base_format}"
+                    )
 
 
 def _implemented_rule(form):
@@ -831,9 +855,15 @@ def _rule_enum(form):
 
 def _check_spec(label, spec, documents, errors):
     has_guide = False
+    if not isinstance(spec, list):
+        errors.append(f"{label}: spec must be a list of references")
+        return
     for ref in spec:
-        if set(ref) != {"document", "section", "page"}:
+        if not isinstance(ref, dict) or set(ref) != {"document", "section", "page"}:
             errors.append(f"{label}: spec reference needs exactly document, section, page")
+            continue
+        if not isinstance(ref["document"], str):
+            errors.append(f"{label}: spec document must be a name")
             continue
         if ref["document"] not in documents:
             errors.append(f"{label}: spec cites undeclared document {ref['document']!r}")

@@ -70,14 +70,20 @@ class Rdna2Plan(unittest.TestCase):
         # A rule that only encoding variants use (vop3_vgpr2 re-encodes declared
         # VOP2 forms) cannot host a new VOP3 form such as V_FMA_F32.
         variant_rules = {
-            variant["operands"] for variant in self.data["registry"].get("encoding_variant", [])
+            name for name, rule in self.data["registry"]["operand_rules"].items()
+            if rule.get("variant_only") is True
         }
         if not variant_rules:
-            self.skipTest("no encoding variants declared")
+            self.skipTest("no variant-only operand rules declared")
         vop3 = classify_unsupported(self.data, families=["VOP3"])
         self.assertTrue(vop3)
         for cand in vop3:
             self.assertNotIn(cand.operand_layout, variant_rules, cand.name)
+            self.assertNotEqual(cand.status, "reuse-primitives", cand.name)
+        # The flag, not current usage, decides: without any variant using the
+        # rule, the family still has no rule for new forms.
+        data = dict(self.data, registry=dict(self.data["registry"], encoding_variant=[]))
+        for cand in classify_unsupported(data, families=["VOP3"]):
             self.assertNotEqual(cand.status, "reuse-primitives", cand.name)
 
     def test_manifests_exclude_claims_and_stay_deterministic(self):

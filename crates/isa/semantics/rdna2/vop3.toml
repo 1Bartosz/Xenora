@@ -18,6 +18,8 @@ src = [
   { field = "SRC1", class = "vgpr" },
 ]
 max_literals = 0
+# Only [[encoding_variant]] entries may use this rule; it hosts no new forms.
+variant_only = true
 unsupported = [
   "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
   "src_float_inline", "src_special", "src_literal", "modifiers", "src2",

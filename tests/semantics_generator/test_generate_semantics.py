@@ -881,10 +881,40 @@ class Validate(unittest.TestCase):
         snap["variants"][("V_MIN_I32", "ENC_VOP3")]["operands"][0][1] = "FMT_NUM_F32"
         self.rejects(
             variants(),
-            "V_MIN_I32 (VOP3): XML operand formats ['FMT_NUM_F32', 'FMT_NUM_I32', 'FMT_NUM_I32'] "
-            "differ from the form's ['FMT_NUM_I32', 'FMT_NUM_I32', 'FMT_NUM_I32']",
+            "V_MIN_I32 (VOP3): XML VDST format FMT_NUM_F32 differs from the form's VDST format FMT_NUM_I32",
             snap,
         )
+
+    def test_compares_variant_formats_by_role_not_row_order(self):
+        snap = snapshot()
+        rows = snap["variants"][("V_MIN_I32", "ENC_VOP3")]["operands"]
+        rows[0], rows[1] = rows[1], rows[0]
+        self.assertEqual(self.errors(variants(), snap), [])
+        # A genuine mismatch on the second source is still reported by role.
+        rows[2][1] = U32
+        self.rejects(
+            variants(), "V_MIN_I32 (VOP3): XML SRC1 format FMT_NUM_U32 differs from the form's VSRC1", snap
+        )
+
+    def test_rejects_malformed_spec_and_verify_without_a_traceback(self):
+        cases = (
+            ("spec", 1, "spec must be a list of references"),
+            ("spec", [[]], "spec reference needs exactly document, section, page"),
+            ("spec", [{"document": [], "section": "1", "page": 1}], "spec document must be a name"),
+            ("verify", 1, "invalid verification requirements"),
+            ("verify", [[]], "invalid verification requirements"),
+        )
+        for key, value, fragment in cases:
+            with self.subTest(key=key, value=value):
+                reg = variants()
+                reg["encoding_variant"][0][key] = value
+                self.rejects(reg, fragment)
+        for key, value, fragment in cases:
+            with self.subTest(form=True, key=key, value=value):
+                reg = variants()
+                form(reg, "V_MIN_I32")[key] = value
+                expected = "verify must be a list of evidence names" if key == "verify" else fragment
+                self.rejects(reg, expected)
 
     def test_rejects_malformed_variant_fields_without_a_traceback(self):
         for key in ("of", "operands", "family"):
@@ -1235,6 +1265,13 @@ class LoadRegistry(unittest.TestCase):
             with self.subTest(include=include):
                 root = self.write(f'include = ["{include}"]\n', {"sop2.toml": ""})
                 self.fails(root, f"include {include!r} is not rdna2/<family>.toml")
+
+    def test_rejects_a_family_file_that_is_a_link(self):
+        outside = self.dir / "outside.toml"
+        outside.write_text("", encoding="utf-8")
+        (self.dir / "rdna2" / "sop2.toml").symlink_to(outside)
+        root = self.write('include = ["rdna2/sop2.toml"]\n', {})
+        self.fails(root, "included family file rdna2/sop2.toml is a link or outside rdna2/")
 
     def test_rejects_a_missing_or_repeated_include(self):
         self.fails(self.write('include = ["rdna2/sop2.toml"]\n', {}), "included family file rdna2/sop2.toml does not exist")

@@ -200,10 +200,12 @@ def classify_unsupported(
     registry = data["registry"]
     rules = data["rules"]
     ops = _declared_ops(registry)
-    form_rules = {form.get("operands") for form in registry.get("form", [])}
+    # A rule declared `variant_only` re-encodes declared forms (for example the
+    # VOP3 encoding of a VOP2 form) and cannot host a new form of its family.
     variant_only_rules = {
-        variant.get("operands") for variant in registry.get("encoding_variant", [])
-    } - form_rules
+        name for name, rule in registry.get("operand_rules", {}).items()
+        if isinstance(rule, dict) and rule.get("variant_only") is True
+    }
     family_widths: dict[str, set[int]] = defaultdict(set)
     family_types: dict[str, set[str]] = defaultdict(set)
     for form in registry.get("form", []):
@@ -225,8 +227,6 @@ def classify_unsupported(
             continue
         opcode = identified[(family, name)]
         reusable = sorted(op for op in ops if op)
-        # Rules that only encoding variants use (another encoding of an already
-        # declared form) cannot host a new form, so they do not count here.
         family_rule_names = [
             n for n, (fam, _) in rules.items() if fam == family and n not in variant_only_rules
         ]

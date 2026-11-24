@@ -29,7 +29,7 @@ equals one file with the parts concatenated (splitting the original single file
 left `semantics_gen.rs` byte-identical). A family file may hold only
 `[operand_rules.*]`, `[[form]]` and `[[encoding_variant]]` entries of the family
 it is named after: `rdna2/vop2.toml` holds VOP2 rules and forms and nothing else.
-Each include must be `rdna2/<lower-case family>.toml`. The loader rejects a form,
+Each include must be `rdna2/<lower-case family>.toml`, a regular file in that directory (not a link). The loader rejects a form,
 rule or variant of another family, a rule declared in two files, root keys in a
 family file, any other include path, and a missing or repeated include. The
 coverage report and the RDNA2 planner use the same loader. Work on different
@@ -60,7 +60,10 @@ bits, then an explicit match on the OP field), `base()` (the inherited form),
 `assembly_name()` and `semantics()`, and one `FORMS` row per variant after the
 forms. Because the enum has no undeclared members, an instruction cannot name a
 VOP3 encoding that does not exist. Every explicit XML operand of the variant,
-destination included, must have the base encoding's data format. A
+destination included, must have the data format of the base operand in the same
+role (destination, then the sources in rule order). A variant-only rule says so
+in the data (`variant_only = true`), so the RDNA2 planner does not count it as a
+rule that can host new forms. A
 variant-only rule (one marked `variant_of` in the generator) cannot be used by a
 form. The validator rejects a variant of an undeclared form, one in the form's
 own family, a duplicate encoding of a form or a duplicate `(family, opcode)`, a
