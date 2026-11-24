@@ -11,6 +11,14 @@ remains unsupported.
 
 ### Added
 
+- Added native Metal upload and readback of BC4 and BC5 textures (UNORM and SNORM):
+  `xenora-texture` gains a pitched `BcChannelUpload`, and `NativeCompute::read_bc_channel_upload`
+  sends the original blocks to `BC4_R*` or `BC5_RG*` textures when the device reports BC
+  support, failing with `supportsBCTextureCompression` otherwise. GPU tests cover six- and
+  eight-value interpolation, equal and extreme endpoints (signed -128 reads as -1.0), red-green
+  channel order, padded row and slice pitches, two layers and two mips against the CPU decoders
+  and hand-derived anchors. On an Apple M5 Pro interpolated codes were within 1.71 codes of the
+  exact values and up to two codes from the truncating CPU reference.
 - Added native Metal upload and readback of BC2 and BC3 textures: `xenora-texture` gains a
   pitched `BcAlphaUpload` for 16-byte blocks, and `NativeCompute::read_bc_alpha_upload` sends
   the original blocks to `BC2_RGBA` or `BC3_RGBA` textures when the device reports BC support.
