@@ -155,6 +155,66 @@ pub const V_MUL_F32: Opcode = Opcode {
     bits: 0x10000000,
     bytes: 4,
 };
+pub const V_CMP_LT_I32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d020000,
+    bytes: 4,
+};
+pub const V_CMP_EQ_I32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d040000,
+    bytes: 4,
+};
+pub const V_CMP_LE_I32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d060000,
+    bytes: 4,
+};
+pub const V_CMP_GT_I32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d080000,
+    bytes: 4,
+};
+pub const V_CMP_NE_I32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d0a0000,
+    bytes: 4,
+};
+pub const V_CMP_GE_I32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d0c0000,
+    bytes: 4,
+};
+pub const V_CMP_LT_U32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d820000,
+    bytes: 4,
+};
+pub const V_CMP_EQ_U32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d840000,
+    bytes: 4,
+};
+pub const V_CMP_LE_U32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d860000,
+    bytes: 4,
+};
+pub const V_CMP_GT_U32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d880000,
+    bytes: 4,
+};
+pub const V_CMP_NE_U32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d8a0000,
+    bytes: 4,
+};
+pub const V_CMP_GE_U32: Opcode = Opcode {
+    mask: 0xfffe0000,
+    bits: 0x7d8c0000,
+    bytes: 4,
+};
 pub const EXP: Opcode = Opcode {
     mask: 0xfc000000,
     bits: 0xf8000000,

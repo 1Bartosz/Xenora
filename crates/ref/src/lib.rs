@@ -48,8 +48,10 @@ pub enum Op {
     Move(u8, Source),
     Add(u8, u8, u8),
     ScalarMove(u8, Source),
-    /// VOP1 move of a normal SGPR into a VGPR.
+    /// VOP1 move of a normal SGPR or `vcc_lo` (106) into a VGPR.
     MoveScalar(u8, u8),
+    /// VOPC 32-bit integer compare writing the Wave32 mask to `vcc_lo`.
+    Compare(Comparison, CompareSource, u8),
     /// SOP2 operation writing an SGPR and SCC.
     Scalar(ScalarAlu, u8, Source, Source),
     CompareEqual(Source, Source),
@@ -59,6 +61,52 @@ pub enum Op {
     },
     Vector(VectorAlu, u8, u8, u8),
     End,
+}
+
+/// Relation and operand interpretation of a VOPC integer compare.
+///
+/// AMD RDNA 2 ISA guide section 12.9, Tables 59 and 61: opcode 128 + offset
+/// for signed and 192 + offset for unsigned 32-bit operands, with offsets
+/// LT 1, EQ 2, LE 3, GT 4, NE 5, GE 6.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Comparison {
+    /// Opcode offset 1-6 within the 32-bit integer group.
+    pub offset: u8,
+    /// Whether the operands are two's-complement integers.
+    pub signed: bool,
+}
+
+impl Comparison {
+    /// The per-lane result, from an exact comparison of the widened operands.
+    fn holds(self, s0: u32, s1: u32) -> bool {
+        let widen = |bits: u32| {
+            if self.signed {
+                i64::from(bits as i32)
+            } else {
+                i64::from(bits)
+            }
+        };
+        let (s0, s1) = (widen(s0), widen(s1));
+        match self.offset {
+            1 => s0 < s1,
+            2 => s0 == s1,
+            3 => s0 <= s1,
+            4 => s0 > s1,
+            5 => s0 != s1,
+            _ => s0 >= s1,
+        }
+    }
+}
+
+/// First source of a VOPC compare.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompareSource {
+    /// VGPR index.
+    Vector(u8),
+    /// SGPR index s0-s105, or 106 for `vcc_lo`.
+    Scalar(u8),
+    /// Inline integer or literal bits.
+    Immediate(u32),
 }
 
 /// Scalar condition tested by a forward branch.
@@ -151,11 +199,13 @@ pub fn execute(code: &[u8], input: &[u32]) -> Result<Vec<u32>, ReferenceError> {
     {
         return Err(error(code.len(), "missing s_endpgm"));
     }
-    input
-        .iter()
-        .enumerate()
-        .map(|(index, &word)| execute_lane(&program, word, index % 32))
-        .collect()
+    // Waves are consecutive groups of 32 dispatch indices; a final partial
+    // wave has absent lanes, which contribute 0 to compare masks.
+    let mut output = Vec::with_capacity(input.len());
+    for wave in input.chunks(32) {
+        output.extend(execute_wave(&program, wave)?);
+    }
+    Ok(output)
 }
 
 fn error(offset: usize, detail: &'static str) -> ReferenceError {
@@ -298,13 +348,45 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 let src1 = (middle >> 1) | ((hi & 1) << 7);
                 (Op::Add(*dst, *lo, src1), 8)
             }
+            // VOPC (bits 31-25 = 0b0111110): SRC0 bits 0-8, VSRC1 bits 9-16, OP bits 17-24.
+            [lo, packed, upper, tag @ 0x7c..=0x7d, tail @ ..]
+                if matches!(
+                    (u16::from(*tag & 1) << 7) | u16::from(*upper >> 1),
+                    129..=134 | 193..=198
+                ) =>
+            {
+                let opcode = (u16::from(*tag & 1) << 7) | u16::from(*upper >> 1);
+                let comparison = Comparison {
+                    offset: (opcode & 0x3f) as u8,
+                    signed: opcode < 192,
+                };
+                let vsrc1 = (packed >> 1) | ((upper & 1) << 7);
+                let selector = u16::from(*lo) | (u16::from(packed & 1) << 8);
+                let (src0, length) = match selector {
+                    0..=106 => (CompareSource::Scalar(*lo), 4),
+                    128..=192 => (CompareSource::Immediate(u32::from(selector - 128)), 4),
+                    193..=208 => (
+                        CompareSource::Immediate(0_u32.wrapping_sub(u32::from(selector - 192))),
+                        4,
+                    ),
+                    255 => {
+                        let literal = tail
+                            .first_chunk::<4>()
+                            .ok_or_else(|| error(offset, "truncated literal"))?;
+                        (CompareSource::Immediate(u32::from_le_bytes(*literal)), 8)
+                    }
+                    256..=511 => (CompareSource::Vector(*lo), 4),
+                    _ => return Err(error(offset, "unsupported VOPC source")),
+                };
+                (Op::Compare(comparison, src0, vsrc1), length)
+            }
             [lo, packed, upper, tag @ 0x7e..=0x7f, tail @ ..]
                 if packed & 0xfe == 2 && upper & 1 == 0 =>
             {
                 let dst = (upper >> 1) | ((tag & 1) << 7);
                 let selector = u16::from(*lo) | (u16::from(packed & 1) << 8);
-                if selector <= 105 {
-                    // VOP1 SRC0 0-105 selects a normal SGPR.
+                if selector <= 106 {
+                    // VOP1 SRC0 0-105 selects a normal SGPR, 106 vcc_lo.
                     program.push(DecodedInstruction {
                         offset,
                         byte_len: 4,
@@ -427,21 +509,26 @@ fn vector_alu(op: VectorAlu, a: u32, b: u32, offset: usize) -> Result<u32, Refer
     Ok(result.to_bits())
 }
 
-fn execute_lane(
-    program: &[DecodedInstruction],
-    input: u32,
-    lane: usize,
-) -> Result<u32, ReferenceError> {
-    let mut registers = [None; 256];
+const VCC_LO: usize = 106;
+const VCC_HI: usize = 107;
+const EXEC_LO: usize = 126;
+
+/// Runs one Wave32 wave in lockstep. Scalar state is shared by the lanes;
+/// VGPRs, transfers and outputs are per lane.
+fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32>, ReferenceError> {
+    let lanes = input.len();
+    let mut registers = vec![[None::<u32>; 256]; lanes];
     let mut scalars = [None; 128];
     let mut exec = u32::MAX;
-    scalars[126] = Some(exec);
+    scalars[EXEC_LO] = Some(exec);
     let mut scc = None;
+    // Whether VCC_LO was last written by a compare with nonzero EXEC.
+    let mut lane_derived_vcc = false;
     let mut target = 0;
     let mut pending_read = None;
-    let mut pending_write = None;
-    let mut output = None;
-    for &DecodedInstruction { offset, op, .. } in program {
+    let mut pending_write = vec![None; lanes];
+    let mut output = vec![None; lanes];
+    for (position, &DecodedInstruction { offset, op, .. }) in program.iter().enumerate() {
         if offset < target {
             continue;
         }
@@ -450,23 +537,29 @@ fn execute_lane(
                 .ok_or_else(|| error(offset, "read from uninitialized SGPR")),
             Source::Immediate(value) => Ok(value),
         };
-        let read = |register: u8| {
+        let read = |lane: usize, register: u8| {
             if register == 0 {
                 return Err(error(offset, "v0 is reserved for the resource index"));
             }
             if pending_read == Some(register) {
                 return Err(error(offset, "VGPR read before load wait"));
             }
-            registers[usize::from(register)]
+            registers[lane][usize::from(register)]
                 .ok_or_else(|| error(offset, "read from uninitialized VGPR"))
         };
+        // Lanes that execute a vector ALU instruction under the current EXEC.
+        let executes = |lane: usize| exec & (1 << lane) != 0;
         if exec != u32::MAX {
             match op {
                 Op::Move(dst, _)
                 | Op::MoveScalar(dst, _)
                 | Op::Add(dst, ..)
                 | Op::Vector(_, dst, ..) => {
-                    if exec != 0 && registers[usize::from(dst)].is_none() {
+                    if exec != 0
+                        && registers
+                            .iter()
+                            .any(|lane| lane[usize::from(dst)].is_none())
+                    {
                         return Err(error(offset, "partial EXEC requires an initialized VGPR"));
                     }
                     // As in translation, an SGPR source must be known even for an inactive lane.
@@ -475,9 +568,6 @@ fn execute_lane(
                     {
                         read_scalar(Source::Register(src))?;
                     }
-                    if exec & (1 << lane) == 0 {
-                        continue;
-                    }
                 }
                 Op::Load { .. } | Op::Store { .. } => {
                     return Err(error(offset, "vector memory requires full Wave32 EXEC"));
@@ -485,7 +575,9 @@ fn execute_lane(
                 _ => {}
             }
         }
-        let set = match op {
+        // Per-lane results of a vector ALU instruction, applied after all lanes read.
+        let mut results: Vec<Option<(u8, u32)>> = vec![None; lanes];
+        match op {
             Op::Load { data: dst, .. } => {
                 if dst == 0 || pending_read.is_some() {
                     return Err(error(
@@ -494,42 +586,72 @@ fn execute_lane(
                     ));
                 }
                 pending_read = Some(dst);
-                None
             }
             Op::Store { data: src, .. } => {
-                let value = read(src)?;
-                if pending_write.is_some() || output.is_some() {
-                    return Err(error(offset, "multiple writes to the output"));
+                for lane in 0..lanes {
+                    let value = read(lane, src)?;
+                    if pending_write[lane].is_some() || output[lane].is_some() {
+                        return Err(error(offset, "multiple writes to the output"));
+                    }
+                    pending_write[lane] = Some(value);
                 }
-                pending_write = Some(value);
-                None
             }
-            Op::WaitRead => pending_read.take().map(|dst| (dst, input)),
+            Op::WaitRead => {
+                if let Some(dst) = pending_read.take() {
+                    for (lane, &word) in input.iter().enumerate() {
+                        results[lane] = Some((dst, word));
+                    }
+                }
+            }
             Op::WaitWrite => {
-                if let Some(value) = pending_write.take() {
-                    output = Some(value);
+                for lane in 0..lanes {
+                    if let Some(value) = pending_write[lane].take() {
+                        output[lane] = Some(value);
+                    }
                 }
-                None
             }
-            Op::Move(dst, Source::Register(src)) => Some((dst, read(src)?)),
-            Op::Move(dst, Source::Immediate(value)) => Some((dst, value)),
-            Op::Add(dst, lhs, rhs) => Some((dst, read(lhs)?.wrapping_add(read(rhs)?))),
+            Op::Move(dst, source) => {
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    let value = match source {
+                        Source::Register(src) => read(lane, src)?,
+                        Source::Immediate(value) => value,
+                    };
+                    results[lane] = Some((dst, value));
+                }
+            }
+            Op::Add(dst, lhs, rhs) => {
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    let value = read(lane, lhs)?.wrapping_add(read(lane, rhs)?);
+                    results[lane] = Some((dst, value));
+                }
+            }
+            Op::MoveScalar(dst, src) => {
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    results[lane] = Some((dst, read_scalar(Source::Register(src))?));
+                }
+            }
+            Op::Vector(operator, dst, lhs, rhs) => {
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    let value = vector_alu(operator, read(lane, lhs)?, read(lane, rhs)?, offset)?;
+                    results[lane] = Some((dst, value));
+                }
+            }
             Op::ScalarMove(dst, src) => {
                 if dst < 8 {
                     return Err(error(offset, "write to a reserved resource SGPR"));
                 }
                 let value = read_scalar(src)?;
-                if dst == 126 {
+                if usize::from(dst) == EXEC_LO {
                     exec = value;
                 }
+                if usize::from(dst) == VCC_LO {
+                    lane_derived_vcc = false;
+                }
                 scalars[usize::from(dst)] = Some(value);
-                None
             }
             Op::CompareEqual(lhs, rhs) => {
                 scc = Some(read_scalar(lhs)? == read_scalar(rhs)?);
-                None
             }
-            Op::MoveScalar(dst, src) => Some((dst, read_scalar(Source::Register(src))?)),
             Op::Scalar(kind, dst, lhs, rhs) => {
                 if dst < 8 {
                     return Err(error(offset, "write to a reserved resource SGPR"));
@@ -573,46 +695,160 @@ fn execute_lane(
                 let value = exact.rem_euclid(1 << 32) as u32;
                 scalars[usize::from(dst)] = Some(value);
                 scc = Some(flag);
-                None
+            }
+            // RDNA 2 ISA section 3.9: VCC[n] = EXEC[n] & test(n), fully written.
+            Op::Compare(comparison, src0, src1) => {
+                let mut mask = 0u32;
+                if exec != 0 {
+                    // Sources are checked once for the wave, even if no present lane is active.
+                    let check = |register: u8| {
+                        (0..lanes).try_for_each(|lane| read(lane, register).map(|_| ()))
+                    };
+                    match src0 {
+                        CompareSource::Vector(register) => check(register)?,
+                        CompareSource::Scalar(register) => {
+                            read_scalar(Source::Register(register))?;
+                        }
+                        CompareSource::Immediate(_) => {}
+                    }
+                    check(src1)?;
+                    for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                        let s0 = match src0 {
+                            CompareSource::Vector(register) => read(lane, register)?,
+                            CompareSource::Scalar(register) => {
+                                read_scalar(Source::Register(register))?
+                            }
+                            CompareSource::Immediate(bits) => bits,
+                        };
+                        if comparison.holds(s0, read(lane, src1)?) {
+                            mask |= 1 << lane;
+                        }
+                    }
+                }
+                scalars[VCC_LO] = Some(mask);
+                scalars[VCC_HI] = None;
+                lane_derived_vcc = exec != 0;
             }
             Op::Branch {
                 target: destination,
                 condition,
             } => {
+                if condition == BranchCondition::VccZero && scalars[VCC_LO].is_none() {
+                    return Err(error(offset, "branch with uninitialized VCC_LO"));
+                }
+                if condition == BranchCondition::VccZero && lane_derived_vcc {
+                    check_runtime_region(
+                        &program[position + 1..],
+                        destination,
+                        &registers,
+                        &scalars,
+                        exec,
+                        pending_read.is_some(),
+                        offset,
+                    )?;
+                }
                 let take_branch = match condition {
                     BranchCondition::Always => true,
                     BranchCondition::SccZero => {
                         !scc.ok_or_else(|| error(offset, "branch with uninitialized SCC"))?
                     }
-                    BranchCondition::VccZero => scalars[106] == Some(0),
+                    BranchCondition::VccZero => scalars[VCC_LO] == Some(0),
                     BranchCondition::ExecZero => exec == 0,
                 };
-                if condition == BranchCondition::VccZero && scalars[106].is_none() {
-                    return Err(error(offset, "branch with uninitialized VCC_LO"));
-                }
                 if take_branch {
                     target = destination;
                 }
-                None
-            }
-            Op::Vector(operator, dst, lhs, rhs) => {
-                Some((dst, vector_alu(operator, read(lhs)?, read(rhs)?, offset)?))
             }
             Op::End => {
-                if pending_read.is_some() || pending_write.is_some() {
+                if pending_read.is_some() || pending_write.iter().any(Option::is_some) {
                     return Err(error(offset, "outstanding transfer at termination"));
                 }
-                return output.ok_or_else(|| error(offset, "lane did not write its output"));
+                return output
+                    .iter()
+                    .map(|value| {
+                        value.ok_or_else(|| error(offset, "lane did not write its output"))
+                    })
+                    .collect();
             }
-        };
-        if let Some((dst, value)) = set {
-            if dst == 0 || pending_read == Some(dst) {
-                return Err(error(offset, "write to immutable or pending VGPR"));
+        }
+        for (lane, result) in results.into_iter().enumerate() {
+            if let Some((dst, value)) = result {
+                if dst == 0 || pending_read == Some(dst) {
+                    return Err(error(offset, "write to immutable or pending VGPR"));
+                }
+                registers[lane][usize::from(dst)] = Some(value);
             }
-            registers[usize::from(dst)] = Some(value);
         }
     }
     Err(error(0, "missing decoded termination"))
+}
+
+/// docs/shaders/vector-compare.md section 6: code skipped by `s_cbranch_vccz`
+/// on a lane-derived VCC_LO may hold only integer vector ALU instructions
+/// whose destinations and sources are ready at the branch. Checked on the
+/// code itself, whether or not the branch is taken.
+fn check_runtime_region(
+    following: &[DecodedInstruction],
+    end: usize,
+    registers: &[[Option<u32>; 256]],
+    scalars: &[Option<u32>; 128],
+    exec: u32,
+    load_pending: bool,
+    branch: usize,
+) -> Result<(), ReferenceError> {
+    if load_pending {
+        return Err(error(branch, "runtime VCC branch with an outstanding load"));
+    }
+    let ready = |register: u8| {
+        register != 0
+            && registers
+                .iter()
+                .all(|lane| lane[usize::from(register)].is_some())
+    };
+    for instruction in following.iter().take_while(|item| item.offset < end) {
+        let offset = instruction.offset;
+        let (dst, vector_sources, scalar_source) = match instruction.op {
+            Op::Move(dst, Source::Register(src)) => (dst, vec![src], None),
+            Op::Move(dst, Source::Immediate(_)) => (dst, vec![], None),
+            Op::MoveScalar(dst, src) => (dst, vec![], Some(src)),
+            Op::Add(dst, lhs, rhs) => (dst, vec![lhs, rhs], None),
+            Op::Vector(kind, dst, lhs, rhs)
+                if !matches!(kind, VectorAlu::FloatAdd | VectorAlu::FloatMultiply) =>
+            {
+                (dst, vec![lhs, rhs], None)
+            }
+            _ => {
+                return Err(error(
+                    offset,
+                    "runtime VCC branch skips a non-integer-vector instruction",
+                ));
+            }
+        };
+        if !ready(dst) {
+            return Err(error(
+                offset,
+                "runtime VCC branch skips a write to an uninitialized VGPR",
+            ));
+        }
+        if exec == 0 {
+            continue;
+        }
+        if vector_sources.into_iter().any(|register| !ready(register)) {
+            return Err(error(
+                offset,
+                "runtime VCC branch skips an unready VGPR read",
+            ));
+        }
+        if let Some(register) = scalar_source
+            && scalars[usize::from(register)].is_none()
+        {
+            return Err(error(
+                offset,
+                "runtime VCC branch skips an unknown SGPR read",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
