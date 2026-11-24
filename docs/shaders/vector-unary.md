@@ -28,8 +28,11 @@ updating either register binding. Under partial EXEC, each register receives
 its own lane merge.
 
 The [guide-derived oracle](../../tests/validation/tests/vop1_integer.rs) checks
-752 accepted cases against each CPU interpreter and the compiler, and verifies
-that 610 rejected programs fail at the same instruction offset. The
+the 752 accepted cases' outputs against its expected values on each CPU
+interpreter and, through the translator, on native Metal (Apple M5, API and
+shader validation on: 752 cases in 613 programs). A CPU test checks that the
+compiler accepts every case and refuses each of the 610 rejected programs at
+the same instruction offset as the interpreters. The
 [LLVM-assembled fixture](../../fixtures/rdna2/vector-unary.s) exercises all
-six forms with a partial EXEC swap. Native Metal execution and independent
-acceptance of the translator are pending. Xbox hardware agreement is unknown.
+six forms with a partial EXEC swap. Independent acceptance of the
+translator is pending. Xbox hardware agreement is unknown.
