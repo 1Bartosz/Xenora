@@ -106,7 +106,7 @@ fn upload_bytes(format: BcChannelFormat, layers: &[Layer; 2]) -> (Vec<u8>, usize
 }
 
 /// Crops decoded blocks (a row-major block grid) to a `width`×`height` level.
-fn crop(blocks: &[[u32; 16]], blocks_x: usize, width: usize, height: usize) -> Vec<u32> {
+fn crop<T: Copy>(blocks: &[[T; 16]], blocks_x: usize, width: usize, height: usize) -> Vec<T> {
     let mut texels = Vec::new();
     for y in 0..height {
         for x in 0..width {
@@ -116,24 +116,84 @@ fn crop(blocks: &[[u32; 16]], blocks_x: usize, width: usize, height: usize) -> V
     texels
 }
 
-/// Per-channel distance; signed formats compare bytes as two's complement.
-fn distance(format: BcChannelFormat, got: u32, want: u32) -> u8 {
+/// Per-channel distances; signed formats compare bytes as two's complement.
+fn distances(format: BcChannelFormat, got: u32, want: u32) -> [u8; 4] {
     let signed = matches!(
         format,
         BcChannelFormat::Bc4Snorm | BcChannelFormat::Bc5Snorm
     );
-    got.to_le_bytes()
-        .iter()
-        .zip(want.to_le_bytes())
-        .map(|(&g, w)| {
-            if signed {
-                (g as i8).abs_diff(w as i8)
-            } else {
-                g.abs_diff(w)
-            }
-        })
-        .max()
-        .unwrap()
+    let (got, want) = (got.to_le_bytes(), want.to_le_bytes());
+    std::array::from_fn(|c| {
+        if signed {
+            (got[c] as i8).abs_diff(want[c] as i8)
+        } else {
+            got[c].abs_diff(want[c])
+        }
+    })
+}
+
+/// Per-channel tolerance of each texel: zero where a channel block's index
+/// selects a stored endpoint or a six-value fixed code (and for the constant
+/// channels), [`TOLERANCE`] only for interpolated codes.
+fn tolerances(format: BcChannelFormat, block: &[u8]) -> [[u8; 4]; 16] {
+    let signed = matches!(
+        format,
+        BcChannelFormat::Bc4Snorm | BcChannelFormat::Bc5Snorm
+    );
+    let limit = |channel: &[u8], t: usize| {
+        let mut bits = [0; 8];
+        bits[..6].copy_from_slice(&channel[2..8]);
+        let index = (u64::from_le_bytes(bits) >> (3 * t)) & 7;
+        let six_value = if signed {
+            channel[0] as i8 <= channel[1] as i8
+        } else {
+            channel[0] <= channel[1]
+        };
+        if index < 2 || (six_value && index >= 6) {
+            0
+        } else {
+            TOLERANCE
+        }
+    };
+    std::array::from_fn(|t| {
+        let green = if block.len() == 16 {
+            limit(&block[8..], t)
+        } else {
+            0
+        };
+        [limit(&block[..8], t), green, 0, 0]
+    })
+}
+
+/// Asserts every channel is within its tolerance and returns the worst.
+fn check_texels(
+    label: &str,
+    format: BcChannelFormat,
+    actual: &[u32],
+    expected: &[(u32, [u8; 4])],
+) -> u8 {
+    assert_eq!(actual.len(), expected.len(), "{label}: texel count");
+    let mut worst = 0;
+    for (texel, (&got, &(want, limit))) in actual.iter().zip(expected).enumerate() {
+        let diff = distances(format, got, want);
+        assert!(
+            diff.iter().zip(limit).all(|(&d, l)| d <= l),
+            "{label}: texel {texel} got {got:#010x}, want {want:#010x} (per-channel limit {limit:?})"
+        );
+        worst = worst.max(*diff.iter().max().unwrap());
+    }
+    worst
+}
+
+/// CPU reference words of `block` with their per-channel tolerances.
+fn expected_block(
+    case_format: BcChannelFormat,
+    reference: fn(&[u8]) -> [u32; 16],
+    block: &[u8],
+) -> [(u32, [u8; 4]); 16] {
+    let words = reference(block);
+    let limits = tolerances(case_format, block);
+    std::array::from_fn(|t| (words[t], limits[t]))
 }
 
 /// GPU reads of both layers: `[layer][mip]`.
@@ -161,7 +221,7 @@ fn read_and_compare(case: &Case) -> (Reads, u8) {
     let reads = std::array::from_fn(|layer| {
         let decoded: Vec<_> = case.layers[layer]
             .iter()
-            .map(|block| (case.reference)(block))
+            .map(|block| expected_block(case.format, case.reference, block))
             .collect();
         let levels = [
             crop(&decoded[..4], 2, WIDTH, HEIGHT),
@@ -170,16 +230,8 @@ fn read_and_compare(case: &Case) -> (Reads, u8) {
         std::array::from_fn(|mip| {
             let actual = native(gpu.read_bc_channel_upload(&upload, layer, mip as u32));
             let expected = &levels[mip];
-            assert_eq!(actual.len(), expected.len());
-            for (texel, (&got, &want)) in actual.iter().zip(expected).enumerate() {
-                let diff = distance(case.format, got, want);
-                assert!(
-                    diff <= TOLERANCE,
-                    "{:?} layer {layer} mip {mip}: texel {texel} got {got:#010x}, want {want:#010x}",
-                    case.format
-                );
-                worst = worst.max(diff);
-            }
+            let label = format!("{:?} layer {layer} mip {mip}", case.format);
+            worst = worst.max(check_texels(&label, case.format, &actual, expected));
             actual
         })
     });
@@ -412,15 +464,17 @@ fn read_edge(
     )
     .unwrap();
     let actual = native(context().read_bc_channel_upload(&upload, 0, 0));
-    let decoded: Vec<_> = blocks.iter().map(|b| reference(b)).collect();
+    let decoded: Vec<_> = blocks
+        .iter()
+        .map(|block| expected_block(format, reference, block))
+        .collect();
     let expected = crop(&decoded, blocks_x, width, height);
-    assert_eq!(actual.len(), expected.len());
-    for (texel, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
-        assert!(
-            distance(format, got, want) <= TOLERANCE,
-            "{format:?} {width}x{height}: texel {texel} got {got:#010x}, want {want:#010x}"
-        );
-    }
+    check_texels(
+        &format!("{format:?} {width}x{height}"),
+        format,
+        &actual,
+        &expected,
+    );
     actual
 }
 
