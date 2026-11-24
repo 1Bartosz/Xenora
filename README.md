@@ -16,7 +16,7 @@ Xenora is still experimental. Verified work is restricted to independently autho
 
 Xenora has progressed from executing individual x86-64 instructions to running original PE32+ guest programs that interact with translated GPU workloads on Apple Silicon.
 
-The latest verified milestone includes **translated gfx1030 vertex and pixel shaders executing through native Apple Metal**, with rendered pixels compared against independently calculated reference results.
+The latest verified milestones include **translated gfx1030 vertex and pixel shaders executing through native Apple Metal**, the native Metal **blend pass** (`NativeCompute::render_blend`) and **indexed triangle draws** (`NativeCompute::render_indexed`) into offscreen targets, with rendered pixels compared against independently calculated reference results.
 
 ### Development milestones
 
@@ -95,14 +95,35 @@ The current graphics subset supports:
 - Offscreen RGBA8 render targets.
 - Native GPU readback and pixel-by-pixel validation.
 - Explicit rejection of unsupported shader forms.
+- Flat-coloured triangle draws with colour write masks and blending (see [Blend pass](#blend-pass)).
+- Indexed triangle draws (see [Indexed draws](#indexed-draws)).
+- Depth testing with an optional `Depth32Float` attachment (see [Depth pass](#depth-pass)).
 
 These are genuine translated shader stages, not merely demonstrations using handwritten Metal vertex and fragment programs.
 
 The current rendering tests are deliberately narrow: original fixtures, a single triangle per draw, and controlled shader inputs and outputs.
 
+### Blend pass
+
+`NativeCompute::render_blend` draws up to 16 flat-coloured triangles in order into an offscreen RGBA8 target. Each draw has its own colour write mask (any subset of R, G, B, A) and either blending disabled or separate RGB and alpha blend factors (Zero, One, source and destination colour and alpha, and their one-minus forms) and operations (Add, Subtract, ReverseSubtract, and Min and Max). Colours are compared per channel against images derived independently (in exact fractions) from the public Metal blend equations.
+
+GPU verification (Metal API and shader validation enabled): 39 Metal-validated passes over two original overlapping triangles — a clear-only pass; blending disabled; each source factor with the destination term zeroed and each destination factor with the source term zeroed; every operation; additive clamping; separate alpha factors; a separate alpha operation; eight write masks; and a pass whose first draw is itself blended and masked. On an Apple M5 Pro every rounded channel matched round-to-nearest exactly.
+
+### Indexed draws
+
+`NativeCompute::render_indexed` issues one real `drawIndexedPrimitives` call per draw (up to 16) on a 16- or 32-bit index buffer with a start index and a signed base vertex, into an offscreen RGBA8 target. A draw can sample an original BC1 texture uploaded natively.
+
+GPU verification (Metal API and shader validation enabled): 16 Metal-validated passes (both index sizes, 32-bit indices above 16 bits, odd 16-bit start, positive and negative base vertex, reversed winding, flat and textured two-triangle draws, draw order, BC1-textured draws), compared per pixel against images derived independently from the geometry, the public D3D12 and Metal index semantics and the public BC1 rules.
+
+### Depth pass
+
+`NativeCompute::render_depth` draws up to 16 triangles in order into an offscreen RGBA8 target with an optional `Depth32Float` attachment, a chosen clear depth, a per-draw depth compare function (all eight) and depth write enable. Colour and the stored depth are both read back.
+
+GPU verification (Metal API and shader validation enabled): 30 Metal-validated passes of original overlapping triangles: clear, every compare function at three depths, write enabled and disabled, depth test disabled with an attachment and no attachment at all, and a BC1-textured draw.
+
 ### Verified Apple M5 results
 
-The X9 native Metal acceptance run reported **20 passing tests, zero failures and zero ignored tests**, with Metal API and GPU validation enabled.
+The X9 native Metal acceptance run reported **20 passing tests, zero failures and zero ignored tests**, with Metal API and GPU validation enabled. The newer passes below are separate Metal-validated campaigns, also with Metal API and shader validation enabled.
 
 Representative checks include:
 
@@ -113,6 +134,9 @@ Representative checks include:
 | Perspective interpolation | Exact checks of 16 pixels and another 16 after swapping vertex color channels |
 | BC1 texture handling | 33 texels across selected mip levels and array layers |
 | Guest rendering | PE32+ guest receives and checks the translated render output |
+| Blend pass | 39 Metal-validated passes over two overlapping triangles |
+| Indexed draws | 16 Metal-validated passes (both index sizes, signed base vertices, draw order) |
+| Depth pass | 30 Metal-validated passes (all eight compare functions, no-attachment case) |
 
 The expected results were calculated independently of the production shader translation path.
 
