@@ -970,22 +970,13 @@ impl SymbolDb {
             false,
             "CreateFile — stub returning INVALID_HANDLE_VALUE",
         );
-        self.win32_stub(
-            m,
-            "CreateFileW",
-            false,
-            "CreateFileW — stub returning INVALID_HANDLE_VALUE",
-        );
-        self.win32_stub(m, "ReadFile", false, "ReadFile — stub returning FALSE");
-        self.win32_stub(m, "WriteFile", false, "WriteFile — stub returning FALSE");
+        for module in [m, "kernel32.dll"] {
+            for symbol in ["CreateFileW", "ReadFile", "WriteFile", "GetFileSizeEx"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         self.win32_stub(m, "CloseHandle", false, "CloseHandle — no-op stub");
         self.win32_stub(m, "GetFileSize", false, "GetFileSize — stub returning 0");
-        self.win32_stub(
-            m,
-            "GetFileSizeEx",
-            false,
-            "GetFileSizeEx — stub returning 0",
-        );
         self.win32_stub(m, "SetFilePointerEx", false, "SetFilePointerEx — stub");
         self.win32_stub(
             m,

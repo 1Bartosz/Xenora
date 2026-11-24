@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added a bounded synthetic guest drive with synchronous file open, read, write, and size queries.
+
 - Added unnamed guest semaphores with checked release and immediate mixed-object waits.
 
 - Added non-alertable extended event waits through both Win64 wait APIs.

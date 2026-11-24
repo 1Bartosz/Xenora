@@ -11,6 +11,7 @@
 
 mod crt;
 mod events;
+mod files;
 mod heap;
 
 use crate::cpu::ExitReason;
@@ -117,6 +118,7 @@ impl Clock for SystemClock {
 
 enum GuestObject {
     Thread(u32),
+    File(files::OpenFile),
     Waitable {
         state: Arc<Mutex<events::Waitable>>,
         access: u32,
@@ -128,6 +130,7 @@ struct ObjectState {
     priority: i32,
     last_handle: u64,
     handles: BTreeMap<u64, GuestObject>,
+    files: BTreeMap<String, Vec<u8>>,
 }
 
 impl ObjectState {
@@ -367,6 +370,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             match thread.handles.get(&source) {
                 Some(GuestObject::Thread(rights)) => (*rights, None),
                 Some(GuestObject::Waitable { state, access }) => (*access, Some(Arc::clone(state))),
+                Some(GuestObject::File(_)) => return s.fail(ERROR_NOT_SUPPORTED, 0),
                 None => return s.fail(ERROR_INVALID_HANDLE, 0),
             }
         };
@@ -394,6 +398,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     registry.set_status(KERNEL32, "DuplicateHandle", ServiceStatus::Partial);
 
     events::register(registry, &state);
+    files::register(registry, &state);
     crt::register(registry);
     crt::register_heap(registry);
     crt::register_errno(registry);

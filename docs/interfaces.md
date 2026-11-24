@@ -192,6 +192,16 @@ clamps the result and sets ERANGE. Scans have a 1 MiB input budget. The long-lon
 Microsoft's _strtoi64, _strtoui64, _wcstoi64, and _wcstoui64 apply the
 same rules with 64-bit results.
 
+### Synthetic guest files
+
+The runtime exposes an in-memory C: drive through CreateFileW, ReadFile,
+WriteFile, GetFileSizeEx, and CloseHandle. It supports root-level UTF-16
+names, ASCII case folding, synchronous I/O, per-handle positions, and
+read/write sharing. Paths cannot access host files. The drive supports
+256 files and 16 MiB of data, with a 1 MiB limit per transfer.
+Directories, persistence, asynchronous I/O, and file handle duplication
+remain outside this subset.
+
 ### Event and semaphore signaling
 
 The synthetic runtime supports unnamed manual-reset and auto-reset events

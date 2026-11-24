@@ -1122,6 +1122,85 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn test_guest_synthetic_file_io_through_iat() {
+    const IMAGE: u64 = 0x140000000;
+    const MODULE: &str = "api-ms-win-core-file-l1-1-0.dll";
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let open = |name: &str, access: u64, disposition: u64| {
+        let mut code = vec![0x48, 0x83, 0xec, 0x48];
+        for (register, value) in [
+            ([0x48, 0xb9], IMAGE + 0x1080),
+            ([0x48, 0xba], access),
+            ([0x49, 0xb8], 0),
+            ([0x49, 0xb9], 0),
+        ] {
+            code.extend_from_slice(&register);
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        for (offset, value) in [(0x20, disposition), (0x28, 0x80), (0x30, 0)] {
+            code.extend_from_slice(&[0x48, 0xb8]);
+            code.extend_from_slice(&value.to_le_bytes());
+            code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, offset]);
+        }
+        append_import_call(&mut code, 0x2060);
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x48, 0xf4]);
+        code.resize(0x80, 0);
+        code.extend(name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+        let bytes = TestPeBuilder::new(IMAGE, 0x1000)
+            .add_import(MODULE, "CreateFileW")
+            .code(&code)
+            .build();
+        let mut imports = ImportRegistry::new();
+        register_standard_services(&mut imports, state.clone());
+        let result = run_synthetic_startup(
+            &bytes,
+            StartupLayout {
+                image_base: IMAGE,
+                stack_top: PROCESS_FIXTURE_STACK_TOP,
+                tls_base: 0x300000000,
+            },
+            imports,
+            100,
+        )
+        .unwrap();
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result.execution.final_state.get(Register::Rax)
+    };
+    let call = |symbol, args: &[u64]| call_service_fixture(&state, "kernel32.dll", symbol, args);
+    let output = PROCESS_FIXTURE_OUTPUT;
+    assert_eq!(open("C:/../outside", 0x4000_0000, 2), u64::MAX);
+    let writer = open("C:/Sample.dat", 0x4000_0000, 2);
+    assert_ne!(writer, u64::MAX);
+    assert_eq!(open("sample.dat", 0x8000_0000, 3), u64::MAX);
+    let wrote = call("WriteFile", &[writer, output, 4, output + 8, 0]);
+    assert_eq!(wrote.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(wrote.image.memory.read_u32(output + 8).unwrap(), 4);
+    assert_eq!(
+        call("CloseHandle", &[writer])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+
+    let reader = open("sample.DAT", 0x8000_0000, 3);
+    assert_ne!(reader, u64::MAX);
+    let size = call("GetFileSizeEx", &[reader, output]);
+    assert_eq!(size.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(size.image.memory.read_u64(output).unwrap(), 4);
+    let read = call("ReadFile", &[reader, output + 8, 8, output, 0]);
+    assert_eq!(read.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(read.image.memory.read_u32(output).unwrap(), 4);
+    assert_eq!(
+        read.image.memory.read_u64(output + 8).unwrap(),
+        u64::from(u32::MAX)
+    );
+    let eof = call("ReadFile", &[reader, output + 8, 8, output, 0]);
+    assert_eq!(eof.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(eof.image.memory.read_u32(output).unwrap(), 0);
+}
+
+#[test]
 fn test_guest_semaphore_counts_through_iat() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let call = |symbol, args: &[u64]| call_service_fixture(&state, "kernel32.dll", symbol, args);

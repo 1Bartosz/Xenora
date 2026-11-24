@@ -388,6 +388,21 @@ impl GuestMemory {
         true
     }
 
+    pub(crate) fn check_write(&self, address: u64, size: usize) -> Result<(), MemoryError> {
+        let region = self
+            .regions
+            .iter()
+            .find(|region| region.contains(address, size))
+            .ok_or(MemoryError::UnmappedAddress(address))?;
+        if !region.permissions.write {
+            return Err(MemoryError::PermissionViolation {
+                address,
+                required: "write",
+            });
+        }
+        Ok(())
+    }
+
     /// Write raw bytes into guest memory at the specified address, checking permissions.
     pub fn write_bytes(&mut self, address: u64, src: &[u8]) -> Result<(), MemoryError> {
         for region in &mut self.regions {
