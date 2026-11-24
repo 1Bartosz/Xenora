@@ -7,6 +7,9 @@
 //! Every exported function catches panics and reports them as `XENORA_INTERNAL_ERROR`.
 
 use std::fmt::Write as _;
+mod frame_loop;
+
+use frame_loop::FrameLoop;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
@@ -25,6 +28,16 @@ pub const XENORA_PE_ERROR: i32 = 5;
 pub const XENORA_LIMIT_EXCEEDED: i32 = 6;
 pub const XENORA_BUFFER_TOO_SMALL: i32 = 7;
 pub const XENORA_EXECUTION_FAILED: i32 = 8;
+pub const XENORA_INVALID_STATE: i32 = 9;
+
+pub const XENORA_LOOP_NONE: u32 = 0;
+pub const XENORA_LOOP_RUNNING: u32 = frame_loop::RUNNING;
+pub const XENORA_LOOP_PAUSED: u32 = frame_loop::PAUSED;
+pub const XENORA_LOOP_FINISHED: u32 = frame_loop::FINISHED;
+pub const XENORA_LOOP_STOPPED: u32 = frame_loop::STOPPED;
+pub const XENORA_LOOP_FAILED: u32 = frame_loop::FAILED;
+pub const XENORA_FRAME_LOOP_MAX_FRAMES: u32 = frame_loop::MAX_FRAMES;
+pub const XENORA_NO_FRAME: u32 = u32::MAX;
 
 pub const XENORA_FIXTURE_FRAME_WIDTH: u32 = 4;
 pub const XENORA_FIXTURE_FRAME_HEIGHT: u32 = 3;
@@ -38,6 +51,8 @@ const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/trusted-runner.exe")
 struct Slot {
     /// Odd while live, even while free; starts at 0 so the first handle is never 0.
     generation: u32,
+    /// The session's persistent frame loop, if one was started.
+    frame_loop: Option<Arc<FrameLoop>>,
 }
 
 static SESSIONS: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
@@ -79,7 +94,10 @@ pub unsafe extern "C" fn xenora_session_create(abi_version: u32, out_session: *m
         let index = match slots.iter().position(|slot| slot.generation % 2 == 0) {
             Some(index) => index,
             None if slots.len() < MAX_SESSIONS => {
-                slots.push(Slot { generation: 0 });
+                slots.push(Slot {
+                    generation: 0,
+                    frame_loop: None,
+                });
                 slots.len() - 1
             }
             None => return XENORA_LIMIT_EXCEEDED,
@@ -105,7 +123,128 @@ pub extern "C" fn xenora_session_destroy(session: u64) -> i32 {
         if !is_live(&slots, session) {
             return XENORA_INVALID_HANDLE;
         }
-        slots[split(session).0].generation += 1;
+        let slot = &mut slots[split(session).0];
+        slot.generation += 1;
+        let running = slot.frame_loop.take();
+        drop(slots);
+        // Stop and join the guest thread without holding the session table.
+        if let Some(running) = running {
+            running.stop();
+        }
+        XENORA_OK
+    })
+}
+
+/// The live session's frame loop, or the status to return.
+fn session_loop(session: u64) -> Result<Option<Arc<FrameLoop>>, i32> {
+    let slots = SESSIONS.lock().map_err(|_| XENORA_INTERNAL_ERROR)?;
+    if !is_live(&slots, session) {
+        return Err(XENORA_INVALID_HANDLE);
+    }
+    Ok(slots[split(session).0].frame_loop.clone())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_start_frame_loop(session: u64, frame_count: u32) -> i32 {
+    guarded(|| {
+        if !(1..=XENORA_FRAME_LOOP_MAX_FRAMES).contains(&frame_count) {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        if slot.frame_loop.is_some() {
+            return XENORA_INVALID_STATE;
+        }
+        slot.frame_loop = Some(FrameLoop::start(frame_count));
+        XENORA_OK
+    })
+}
+
+fn set_paused(session: u64, paused: bool) -> i32 {
+    guarded(|| match session_loop(session) {
+        Ok(Some(running)) if running.set_paused(paused) => XENORA_OK,
+        Ok(_) => XENORA_INVALID_STATE,
+        Err(status) => status,
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_pause_frame_loop(session: u64) -> i32 {
+    set_paused(session, true)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_resume_frame_loop(session: u64) -> i32 {
+    set_paused(session, false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_stop_frame_loop(session: u64) -> i32 {
+    guarded(|| match session_loop(session) {
+        Ok(Some(running)) => {
+            running.stop();
+            XENORA_OK
+        }
+        Ok(None) => XENORA_INVALID_STATE,
+        Err(status) => status,
+    })
+}
+
+/// # Safety
+/// Each `u32` output must be null or valid for one aligned write; `out_rgba` must be
+/// null or valid for `capacity` byte writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_frame_loop_status(
+    session: u64,
+    out_state: *mut u32,
+    out_completed: *mut u32,
+    out_frame_id: *mut u32,
+    out_rgba: *mut u8,
+    capacity: u64,
+) -> i32 {
+    guarded(|| {
+        if out_state.is_null()
+            || out_completed.is_null()
+            || out_frame_id.is_null()
+            || out_rgba.is_null()
+        {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        if capacity < frame_loop::FRAME_BYTES as u64 {
+            return XENORA_BUFFER_TOO_SMALL;
+        }
+        let running = match session_loop(session) {
+            Ok(running) => running,
+            Err(status) => return status,
+        };
+        let (state, completed, latest) = match running {
+            Some(running) => {
+                let snapshot = running.snapshot();
+                (snapshot.status, snapshot.completed, snapshot.latest)
+            }
+            None => (XENORA_LOOP_NONE, 0, None),
+        };
+        // SAFETY: all outputs checked non-null and `out_rgba` at least FRAME_BYTES long.
+        unsafe {
+            out_state.write(state);
+            out_completed.write(completed);
+            match latest {
+                Some((id, pixels)) => {
+                    out_frame_id.write(id);
+                    std::ptr::copy_nonoverlapping(
+                        pixels.as_ptr(),
+                        out_rgba,
+                        frame_loop::FRAME_BYTES,
+                    );
+                }
+                None => out_frame_id.write(XENORA_NO_FRAME),
+            }
+        }
         XENORA_OK
     })
 }
@@ -439,6 +578,13 @@ mod tests {
             ("XENORA_LIMIT_EXCEEDED", XENORA_LIMIT_EXCEEDED),
             ("XENORA_BUFFER_TOO_SMALL", XENORA_BUFFER_TOO_SMALL),
             ("XENORA_EXECUTION_FAILED", XENORA_EXECUTION_FAILED),
+            ("XENORA_INVALID_STATE", XENORA_INVALID_STATE),
+            ("XENORA_LOOP_NONE", XENORA_LOOP_NONE as i32),
+            ("XENORA_LOOP_RUNNING", XENORA_LOOP_RUNNING as i32),
+            ("XENORA_LOOP_PAUSED", XENORA_LOOP_PAUSED as i32),
+            ("XENORA_LOOP_FINISHED", XENORA_LOOP_FINISHED as i32),
+            ("XENORA_LOOP_STOPPED", XENORA_LOOP_STOPPED as i32),
+            ("XENORA_LOOP_FAILED", XENORA_LOOP_FAILED as i32),
         ] {
             assert!(header.contains(&format!("{name} = {value},")), "{name}");
         }
@@ -448,6 +594,13 @@ mod tests {
         assert!(header.contains(&format!(
             "XENORA_FIXTURE_FRAME_HEIGHT {XENORA_FIXTURE_FRAME_HEIGHT}u"
         )));
+        assert!(header.contains(&format!(
+            "XENORA_MAX_INSPECT_BYTES {XENORA_MAX_INSPECT_BYTES}u"
+        )));
+        assert!(header.contains(&format!(
+            "XENORA_FRAME_LOOP_MAX_FRAMES {XENORA_FRAME_LOOP_MAX_FRAMES}u"
+        )));
+        assert!(header.contains("XENORA_NO_FRAME 0xFFFFFFFFu"));
     }
 
     #[test]
@@ -653,6 +806,53 @@ mod tests {
         assert_eq!(
             unsafe { xenora_inspect_executable(std::ptr::null(), 0, &mut c, 1, &mut req) },
             XENORA_INVALID_ARGUMENT
+        );
+    }
+
+    #[test]
+    fn frame_loop_rejects_bad_arguments_and_states() {
+        let _serial = serial();
+        let handle = create();
+        assert_eq!(
+            xenora_session_start_frame_loop(handle, 0),
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            xenora_session_start_frame_loop(handle, XENORA_FRAME_LOOP_MAX_FRAMES + 1),
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            xenora_session_pause_frame_loop(handle),
+            XENORA_INVALID_STATE
+        );
+        assert_eq!(
+            xenora_session_resume_frame_loop(handle),
+            XENORA_INVALID_STATE
+        );
+        assert_eq!(xenora_session_stop_frame_loop(handle), XENORA_INVALID_STATE);
+        let (mut state, mut done, mut id, mut rgba) = (9, 9, 9, [0u8; 48]);
+        let mut status = |h, cap| unsafe {
+            xenora_session_frame_loop_status(
+                h,
+                &mut state,
+                &mut done,
+                &mut id,
+                rgba.as_mut_ptr(),
+                cap,
+            )
+        };
+        assert_eq!(status(handle, 47), XENORA_BUFFER_TOO_SMALL);
+        assert_eq!(status(handle, 48), XENORA_OK);
+        xenora_session_destroy(handle);
+        assert_eq!(status(handle, 48), XENORA_INVALID_HANDLE);
+        assert_eq!((state, done, id), (XENORA_LOOP_NONE, 0, XENORA_NO_FRAME));
+        assert_eq!(
+            xenora_session_start_frame_loop(handle, 1),
+            XENORA_INVALID_HANDLE
+        );
+        assert_eq!(
+            xenora_session_pause_frame_loop(handle),
+            XENORA_INVALID_HANDLE
         );
     }
 }
