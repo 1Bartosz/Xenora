@@ -54,7 +54,7 @@ def cases():
         for bits in (8, 16, 32, 64):
             out += [f"{op} {reg(1, bits)}", f"{op} {reg(9, bits)}", f"{op} {mem(bits)}"]
         out.append(f"{op} ch")
-    for op in "rol ror shl shr sar".split():
+    for op in "rol ror rcl rcr shl shr sar".split():
         for bits in (8, 16, 32, 64):
             for count in ("1", "3", "7", "cl"):
                 out += [f"{op} {reg(3, bits)}, {count}", f"{op} {mem(bits)}, {count}"]
