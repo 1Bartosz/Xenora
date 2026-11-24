@@ -237,6 +237,15 @@ impl<E, F: FnMut(u64) -> Result<u8, E>> Cursor<F> {
     }
 }
 
+/// Whether `byte` is a legacy prefix: an operand-size, address-size, segment,
+/// LOCK or repeat prefix (Intel SDM Vol. 2A, 2.1.1).
+fn is_legacy_prefix(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
+    )
+}
+
 /// Decode one instruction at `rip`. `fetch` supplies the byte at an address and
 /// is called only for bytes that belong to the instruction, in order.
 ///
@@ -258,9 +267,22 @@ pub fn decode<E>(
     let mut repne = false;
     let mut lock = false;
     let mut segment = None;
+    let mut rex = 0;
     let mut byte = cursor.u8()?;
     loop {
         let selected = match byte {
+            // REX applies only immediately before the opcode. One that is
+            // followed by a legacy prefix is ignored (Intel SDM Vol. 2A, 2.2.1).
+            0x40..=0x4F => {
+                let next = cursor.u8()?;
+                if !is_legacy_prefix(next) {
+                    rex = byte;
+                    byte = next;
+                    break;
+                }
+                byte = next;
+                continue;
+            }
             0x64 => Segment::Fs,
             0x65 => Segment::Gs,
             0x66 => {
@@ -299,10 +321,6 @@ pub fn decode<E>(
         byte = cursor.u8()?;
     }
 
-    let rex = if byte & 0xF0 == 0x40 { byte } else { 0 };
-    if rex != 0 {
-        byte = cursor.u8()?;
-    }
     let (rex_w, rex_r, rex_x, rex_b) =
         (rex & 8 != 0, (rex & 4) << 1, (rex & 2) << 2, (rex & 1) << 3);
 
