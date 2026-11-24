@@ -122,6 +122,8 @@ pub struct GuestMemory {
     private_heap_serial: u64,
     // Stable errno pointers indexed by the guest thread's TEB address.
     crt_errno: std::collections::BTreeMap<u64, u64>,
+    pub(crate) callback_frames:
+        std::collections::BTreeMap<(u64, u64), crate::imports::CallbackFrame>,
 }
 
 impl GuestMemory {

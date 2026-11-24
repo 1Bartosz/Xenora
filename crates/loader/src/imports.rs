@@ -195,11 +195,30 @@ fn trampoline_address(index: usize) -> u64 {
     IMPORT_TRAMPOLINE_BASE_VA + index as u64 * IMPORT_TRAMPOLINE_STRIDE
 }
 
+const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
+const MAX_CALLBACK_DEPTH: usize = 32;
+
+pub(crate) struct GuestCallback {
+    pub(crate) entry: u64,
+    pub(crate) context: u64,
+}
+
+type CallbackDispatch = Box<
+    dyn Fn(&Win64Args, &GuestMemory) -> Result<Option<GuestCallback>, ExitReason> + Send + Sync,
+>;
+
+#[derive(Clone)]
+pub(crate) struct CallbackFrame {
+    resume: u64,
+    preserved: Nonvolatile,
+}
+
 /// Registry for resolving and binding import symbols to guest trampoline VAs.
 pub struct ImportRegistry {
     // (lower-case module, name) -> service index. Symbol names keep their case.
     services: HashMap<(String, ImportName), usize>,
     handlers: Vec<ServiceDescriptor>,
+    callback_dispatchers: HashMap<usize, CallbackDispatch>,
     dynamic_trampolines: DynamicTrampolines,
     trampoline_to_service: HashMap<u64, usize>, // Trampoline VA -> service_index
 }
@@ -215,6 +234,7 @@ impl ImportRegistry {
         Self {
             services: HashMap::new(),
             handlers: Vec::new(),
+            callback_dispatchers: HashMap::new(),
             trampoline_to_service: HashMap::new(),
             dynamic_trampolines: DynamicTrampolines::default(),
         }
@@ -488,9 +508,29 @@ impl ImportRegistry {
         Ok(slots.len())
     }
 
+    pub(crate) fn register_callback_dispatch(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        handler: impl Fn(&Win64Args, &GuestMemory) -> Result<Option<GuestCallback>, ExitReason>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        self.register_with_status(module, symbol, ServiceStatus::Partial, |_, _, _| {
+            Err(ExitReason::IllegalInstruction(0xff))
+        });
+        let index = self
+            .service_index(module, symbol)
+            .expect("registered dispatcher");
+        self.callback_dispatchers.insert(index, Box::new(handler));
+    }
+
     /// Check if target RIP matches a synthetic service trampoline.
     pub fn is_service_trampoline(&self, rip: u64) -> bool {
-        self.trampoline_to_service.contains_key(&rip) || self.dynamic_trampolines.get(rip).is_some()
+        rip == CALLBACK_RETURN
+            || self.trampoline_to_service.contains_key(&rip)
+            || self.dynamic_trampolines.get(rip).is_some()
     }
 
     /// Dispatch a service call when guest RIP hits a service trampoline.
@@ -500,6 +540,19 @@ impl ImportRegistry {
         cpu: &mut CpuState,
         memory: &mut GuestMemory,
     ) -> Result<(), ExitReason> {
+        if rip == CALLBACK_RETURN {
+            let key = (cpu.gs_base, cpu.get(Register::Rsp));
+            let frame = memory
+                .callback_frames
+                .remove(&key)
+                .ok_or(ExitReason::IllegalInstruction(0xff))?;
+            if Nonvolatile::of(cpu) != frame.preserved {
+                return Err(ExitReason::ServiceAbiViolation);
+            }
+            cpu.set(Register::Rax, 1);
+            cpu.rip = frame.resume;
+            return Ok(());
+        }
         let service_idx = self
             .trampoline_to_service
             .get(&rip)
@@ -518,6 +571,39 @@ impl ImportRegistry {
 
         let args = Win64Args::new(cpu);
         let preserved = Nonvolatile::of(cpu);
+        if let Some(dispatcher) = self.callback_dispatchers.get(&service_idx) {
+            let key = (cpu.gs_base, after);
+            if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
+                || memory.callback_frames.contains_key(&key)
+            {
+                return Err(ExitReason::ServiceAbiViolation);
+            }
+            memory
+                .check_write(rsp, 8)
+                .map_err(ExitReason::MemoryFault)?;
+            if let Some(callback) = dispatcher(&args, memory)? {
+                memory
+                    .write_u64(rsp, CALLBACK_RETURN)
+                    .map_err(ExitReason::MemoryFault)?;
+                let mut preserved = preserved;
+                preserved.gpr[4] = after;
+                memory.callback_frames.insert(
+                    key,
+                    CallbackFrame {
+                        resume: ret_addr,
+                        preserved,
+                    },
+                );
+                cpu.set(Register::Rcx, callback.context);
+                cpu.set(Register::Rdx, 0);
+                cpu.rip = callback.entry;
+                return Ok(());
+            }
+            cpu.set(Register::Rax, 0);
+            cpu.set(Register::Rsp, after);
+            cpu.rip = ret_addr;
+            return Ok(());
+        }
         let value = (descriptor.handler)(&args, cpu, memory)?;
         if Nonvolatile::of(cpu) != preserved {
             return Err(ExitReason::ServiceAbiViolation);
@@ -531,7 +617,7 @@ impl ImportRegistry {
 }
 
 /// Registers a Win64 callee must preserve (Microsoft x64 calling convention).
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Nonvolatile {
     gpr: [u64; 9],
     xmm: [u128; 10],

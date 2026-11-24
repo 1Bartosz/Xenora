@@ -1122,6 +1122,64 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn guest_gdk_dispatch_runs_callback_and_resumes_caller() {
+    const IMAGE: u64 = 0x140000000;
+    const MODULE: &str = "xgameruntime.dll";
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let output = PROCESS_FIXTURE_STACK_TOP - 0x400;
+    let created = call_service_fixture(&state, MODULE, "XTaskQueueCreate", &[0, 0, output]);
+    let queue = created.image.memory.read_u64(output).unwrap();
+    assert_ne!(queue, 0);
+    let mut code = vec![0x48, 0x83, 0xec, 0x48];
+    let set_args = |code: &mut Vec<u8>, values: &[u64]| {
+        for (register, value) in [[0x48, 0xb9], [0x48, 0xba], [0x49, 0xb8], [0x49, 0xb9]]
+            .into_iter()
+            .zip(values)
+        {
+            code.extend_from_slice(&register);
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+    };
+    code.extend_from_slice(&[0x48, 0xb8]);
+    code.extend_from_slice(&output.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0xc7, 0x00, 0xff, 0xff, 0xff, 0xff]);
+    set_args(&mut code, &[queue, 0, output, IMAGE + 0x1100]);
+    append_import_call(&mut code, 0x2060);
+    set_args(&mut code, &[queue, 0, 0]);
+    append_import_call(&mut code, 0x21a0);
+    code.extend_from_slice(&[0x48, 0x89, 0xc3]); // retain successful dispatch in RBX
+    set_args(&mut code, &[queue, 0, 0]);
+    append_import_call(&mut code, 0x21a0);
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x48, 0xf4]);
+    code.resize(0x100, 0);
+    // Store canceled, then clobber RAX to verify the dispatch return is restored.
+    code.extend_from_slice(&[0x48, 0x89, 0x11, 0xb8, 99, 0, 0, 0, 0xc3]);
+    let image = TestPeBuilder::new(IMAGE, 0x1000)
+        .add_import(MODULE, "XTaskQueueSubmitCallback")
+        .add_import(MODULE, "XTaskQueueDispatch")
+        .code(&code)
+        .build();
+    let mut registry = ImportRegistry::new();
+    register_standard_services(&mut registry, state);
+    let result = run_synthetic_startup(
+        &image,
+        StartupLayout {
+            image_base: IMAGE,
+            stack_top: PROCESS_FIXTURE_STACK_TOP,
+            tls_base: 0x300000000,
+        },
+        registry,
+        100,
+    )
+    .unwrap();
+    assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+    let cpu = result.execution.final_state;
+    assert_eq!(cpu.get(Register::Rbx), 1);
+    assert_eq!(cpu.get(Register::Rax), 0);
+    assert_eq!(result.image.memory.read_u64(output).unwrap(), 0);
+}
+
+#[test]
 fn guest_gdk_manual_queue_handles_have_independent_lifetimes() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let call = |symbol, args: &[u64]| {

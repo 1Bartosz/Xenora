@@ -4,7 +4,8 @@
 
 use super::ServicesState;
 use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED};
-use crate::imports::{ImportRegistry, ServiceStatus};
+use crate::cpu::ExitReason;
+use crate::imports::{GuestCallback, ImportRegistry, ServiceStatus};
 use crate::memory::GuestMemory;
 use crate::runtime::HResult;
 use std::collections::{BTreeMap, VecDeque};
@@ -21,12 +22,6 @@ pub(super) struct QueueHandles {
     last_id: u64,
     queues: BTreeMap<u64, [u64; 2]>,
     pending: BTreeMap<u64, VecDeque<GuestCallback>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GuestCallback {
-    entry: u64,
-    context: u64,
 }
 
 impl QueueHandles {
@@ -196,4 +191,27 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             )))
         },
     );
+    let dispatch = Arc::clone(state);
+    registry.register_callback_dispatch(MODULE, "XTaskQueueDispatch", move |args, memory| {
+        if args.r8 as u32 != 0 {
+            return Ok(None);
+        }
+        let mut queues = dispatch.gdk_queues.lock().expect("GDK queue handle table");
+        let Some(&port) = queues
+            .queues
+            .get(&args.rcx)
+            .and_then(|ports| ports.get(args.rdx as u32 as usize))
+        else {
+            return Ok(None);
+        };
+        let Some(pending) = queues.pending.get_mut(&port) else {
+            return Ok(None);
+        };
+        if let Some(callback) = pending.front() {
+            memory
+                .fetch_instruction_byte(callback.entry)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        Ok(pending.pop_front())
+    });
 }
