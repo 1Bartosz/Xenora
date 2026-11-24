@@ -5,17 +5,17 @@ use std::fmt;
 pub use xenora_isa::{
     Architecture, CompareRelation, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp,
     ScalarCompareOp, ScalarImmediateCompareOp, ScalarImmediateOp, ScalarSource, ScalarUnaryOp,
-    VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorSource,
+    VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorSource, VectorSwapOp, VectorUnaryOp,
 };
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
-    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32,
+    S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_ENDPGM, S_WAITCNT, S_WAITCNT_VSCNT, V_ADD_F32,
     V_INTERP_P1_F32, V_INTERP_P2_F32, V_MOV_B32, V_MUL_F32, VCC_LO,
 };
 
 use xenora_isa::meta::EncodingFamily;
-pub use xenora_isa::semantics::VectorBinary;
 use xenora_isa::semantics::{FORM_IDS, OperandRule};
+pub use xenora_isa::semantics::{VectorBinary, VectorUnary};
 
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
 /// operand combination: the hand-written forms below followed by every form of
@@ -40,7 +40,7 @@ const fn concat_forms<const N: usize>() -> [(&'static str, EncodingFamily); N] {
 }
 
 /// Decoded forms not yet described by the semantic registry.
-const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 17] = [
+const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 16] = [
     ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
     ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
     ("EXP", EncodingFamily::Exp),
@@ -50,7 +50,6 @@ const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 17] = [
     ("S_CBRANCH_SCC0", EncodingFamily::Sopp),
     ("S_CBRANCH_VCCZ", EncodingFamily::Sopp),
     ("S_ENDPGM", EncodingFamily::Sopp),
-    ("S_MOV_B32", EncodingFamily::Sop1),
     ("S_WAITCNT", EncodingFamily::Sopp),
     ("S_WAITCNT_VSCNT", EncodingFamily::Sopk),
     ("V_ADD_F32", EncodingFamily::Vop2),
@@ -317,6 +316,23 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     if V_MOV_B32.matches(first) {
         return move_b32(first, bytes);
     }
+    // AMD RDNA 2 ISA guide 13.3.2: VDST occupies bits 17–24 and SRC0 bits 0–8.
+    if let Some(op) = VectorUnaryOp::from_word(first) {
+        let dst = (first >> 17) as u8;
+        let (src, len) = vector_src0(first, bytes, op.assembly_name())?;
+        return Ok((Instruction::VectorUnary { op, dst, src }, len));
+    }
+    if let Some(op) = VectorSwapOp::from_word(first) {
+        if first & 0x100 == 0 {
+            return Err(unsupported(
+                op.assembly_name(),
+                "expected a VGPR SRC0 for writeback",
+            ));
+        }
+        let dst = (first >> 17) as u8;
+        let src = first as u8;
+        return Ok((Instruction::VectorSwap { op, dst, src }, 4));
+    }
     if let Some(op) = VectorCompareOp::from_word(first) {
         return vector_compare(op, first, bytes);
     }
@@ -324,23 +340,21 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         let second = word(bytes, 8)?;
         return Ok((vop3_vgpr2(op, first, second)?, 8));
     }
-    if S_MOV_B32.matches(first) {
-        let dst = ((first >> 16) & 0x7f) as u8;
-        if !matches!(dst, 0..=107 | 126..=127) {
-            return Err(unsupported(
-                "s_mov_b32",
-                "expected a normal SGPR or EXEC/VCC destination",
-            ));
-        }
-        let (src, len) = scalar_source(first as u8, bytes, "s_mov_b32")?;
-        return Ok((Instruction::ScalarMoveB32 { dst, src }, len));
-    }
     if let Some(op) = ScalarUnaryOp::from_word(first) {
         // SOP1: SSRC0 in bits 0-7, SDST in bits 16-22.
         let mnemonic = op.mnemonic();
         let dst = ((first >> 16) & 0x7f) as u8;
-        if dst > 105 {
-            return Err(unsupported(mnemonic, "expected a normal SGPR destination"));
+        match op.semantics().operands {
+            OperandRule::Sop1Move if !matches!(dst, 0..=107 | 126..=127) => {
+                return Err(unsupported(
+                    mnemonic,
+                    "expected a normal SGPR or EXEC/VCC destination",
+                ));
+            }
+            OperandRule::Sop1Sgpr if dst > 105 => {
+                return Err(unsupported(mnemonic, "expected a normal SGPR destination"));
+            }
+            _ => {}
         }
         let (src, len) = scalar_source(first as u8, bytes, mnemonic)?;
         return Ok((Instruction::ScalarUnary { op, dst, src }, len));
@@ -660,11 +674,23 @@ fn vector_compare(
     bytes: &[u8],
 ) -> Result<(Instruction, u8), DecodeErrorKind> {
     let src1 = ((first >> 9) & 0xff) as u8;
-    let (src0, len) = vector_src0(first, bytes, op.assembly_name())?;
+    let mnemonic = op.assembly_name();
+    if op.semantics().width == 64 {
+        // Guide §3.6.3 requires even SGPR bases. Reject invalid selectors
+        // before reading a literal word or considering the execution mask.
+        let source = first & 0x1ff;
+        if src1 == 255
+            || !matches!(source, 0..=104 | 128..=208 | 256..=510)
+            || (source <= 104 && !source.is_multiple_of(2))
+        {
+            return Err(unsupported(mnemonic, "invalid 64-bit compare source"));
+        }
+    }
+    let (src0, len) = vector_src0(first, bytes, mnemonic)?;
     Ok((Instruction::VectorCompare { op, src0, src1 }, len))
 }
 
-/// The 9-bit SRC0 of a VOPC or VOP2 word: a VGPR, `s0-s105`, `vcc_lo`, an
+/// The 9-bit SRC0 of a VOP1, VOP2 or VOPC word: a VGPR, `s0-s105`, `vcc_lo`, an
 /// inline integer -16..64 or a literal word; everything else is unsupported.
 fn vector_src0(
     first: u32,

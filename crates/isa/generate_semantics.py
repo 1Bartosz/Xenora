@@ -61,7 +61,7 @@ OPERATIONS = {
     "mul": "Multiply", "mul_hi": "MultiplyHigh", "bfe": "BitfieldExtract",
     "absdiff": "AbsoluteDifference", "lshl_add": "ShiftLeftAdd",
     "mul24": "Multiply24", "mul_hi24": "MultiplyHigh24",
-    "mov": "Move", "cmov": "ConditionalMove",
+    "mov": "Move", "cmov": "ConditionalMove", "swap": "Swap",
 }
 # Unary operations read one source; they need an operand rule of the unary kind.
 UNARY = {"not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs"}
@@ -76,10 +76,9 @@ RELATIONS = {
 }
 # F and T exist only as VOPC compares (guide Table 59 offsets 0 and 7).
 VECTOR_ONLY_RELATIONS = {"f", "t"}
-# Guide 12.9 Table 59 and Table 61: a 32-bit integer VOPC compare's opcode is
-# its group base (128 for _I32, 192 for _U32) plus its relation's offset. This
-# is the guide's opcode layout, not a reading of the mnemonic.
-VOPC_INTEGER_BASES = {"signed": 128, "unsigned": 192}
+# Guide 12.9 Tables 59 and 61: integer VOPC opcodes are the group base
+# for the operand width and signedness plus the relation offset.
+VOPC_INTEGER_BASES = {32: {"signed": 128, "unsigned": 192}, 64: {"signed": 160, "unsigned": 224}}
 VOPC_RELATION_OFFSETS = {"f": 0, "lt": 1, "eq": 2, "le": 3, "gt": 4, "lg": 5, "ge": 6, "t": 7}
 # (relation, signedness) -> primitive. Equality does not depend on signedness,
 # so both declared signednesses of EQ and LG share one primitive.
@@ -97,7 +96,7 @@ COMPARE_PRIMITIVES = {
 # the signedness their primitive names, and their S1 is an unsigned count.
 LOGICAL = {
     "and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor",
-    "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "cselect", "bfm",
+    "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "cselect", "bfm", "swap",
 }
 ARITHMETIC = {
     "add", "sub", "min", "max", "mul", "mul_hi", "bfe", "absdiff", "lshl_add", "mul24", "mul_hi24",
@@ -143,7 +142,7 @@ WAVE = {"any": "Any", "wave32": "Wave32"}
 # wave size: the lane-mask compares, whose one entry point is the Wave32
 # compute fixture ABI (docs/shaders/vector-compare.md section 2). Every other
 # kind must be "any".
-WAVE_BY_KIND = {"vector_compare": "wave32"}
+WAVE_BY_KIND = {"vector_compare": "wave32", "vector_unary": "wave32", "vector_swap": "wave32"}
 EVIDENCE = {
     "reference": "Reference",
     "independent": "Independent",
@@ -164,7 +163,6 @@ PINNED_DOCUMENTS = {
         "file": "amdgpu_isa_rdna2.xml",
     },
 }
-WIDTHS = {32}
 
 # (operation, signedness) -> (required SCC effect, primitive, takes carry-in).
 # A form whose declaration is not a row here has no primitive and is rejected.
@@ -184,6 +182,7 @@ PRIMITIVES = {
     ("lshl", "bitwise"): ("nonzero", "lshl_nonzero_b32", False),
     ("lshr", "unsigned"): ("nonzero", "lshr_nonzero_b32", False),
     ("ashr", "signed"): ("nonzero", "ashr_nonzero_i32", False),
+    ("mov", "bitwise"): ("unchanged", "mov_b32", False),
     ("not", "bitwise"): ("nonzero", "not_nonzero_b32", False),
     ("brev", "bitwise"): ("unchanged", "brev_b32", False),
     ("bcnt0", "bitwise"): ("nonzero", "bcnt0_nonzero_b32", False),
@@ -258,7 +257,45 @@ UNSUPPORTED_COMBOS = {
 # VOP3 rules also name source classes and encoding fields they refuse.
 VOP3_COMBOS = {"src_sgpr", "src_inline", "src_literal", "modifiers", "src2"}
 ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null"} | VOP3_COMBOS
+VECTOR_UNARY_PRIMITIVES = {
+    ("not", "bitwise"): "Not",
+    ("brev", "bitwise"): "ReverseBits",
+    ("flbit", "unsigned"): "FindHighUnsigned",
+    ("ff1", "bitwise"): "FindLow",
+    ("flbit", "signed"): "FindHighSigned",
+}
+
 OPERAND_RULES = {
+    "vop1_vgpr": {
+        "rust": "Vop1Vgpr",
+        "enum": "VectorUnaryOp",
+        "shape": {
+            "family": "VOP1",
+            "dst": {"field": "VDST", "class": "vgpr", "min": 0, "max": 255},
+            "src": [{"field": "SRC0", "class": "vector_source"}],
+            "max_literals": 1,
+        },
+        "unsupported": {
+            "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_float_inline",
+            "src_special",
+        },
+        "kind": "vector_unary",
+    },
+    "vop1_swap": {
+        "rust": "Vop1Swap",
+        "enum": "VectorSwapOp",
+        "shape": {
+            "family": "VOP1",
+            "dst": {"field": "VDST", "class": "vgpr", "min": 0, "max": 255},
+            "src": [{"field": "SRC0", "class": "vgpr"}],
+            "max_literals": 0,
+        },
+        "unsupported": {
+            "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+            "src_float_inline", "src_special", "src_literal",
+        },
+        "kind": "vector_swap",
+    },
     "sop2_sgpr": {
         "rust": "Sop2Sgpr",
         "enum": "ScalarAluOp",
@@ -301,6 +338,18 @@ OPERAND_RULES = {
         },
         # One source, so two literals cannot occur; the rest are rejected.
         "unsupported": {combo for combo in UNSUPPORTED_COMBOS if combo != "two_literals"},
+        "kind": "unary",
+    },
+    "sop1_move": {
+        "rust": "Sop1Move",
+        "enum": "ScalarUnaryOp",
+        "shape": {
+            "family": "SOP1",
+            "dst": {"field": "SDST", "class": "sgpr_or_vcc_exec"},
+            "src": [{"field": "SSRC0", "class": "scalar_source"}],
+            "max_literals": 1,
+        },
+        "unsupported": UNSUPPORTED_COMBOS - {"two_literals", "dst_vcc", "dst_exec"},
         "kind": "unary",
     },
     "sopk_sgpr": {
@@ -349,6 +398,24 @@ OPERAND_RULES = {
             "src_special",
         },
         "kind": "vector_compare",
+    },
+    "vopc_vcc_pair": {
+        "rust": "VopcVccPair",
+        "enum": "VectorCompareOp",
+        "shape": {
+            "family": "VOPC",
+            "src": [
+                {"field": "SRC0", "class": "vector_pair_or_inline_integer"},
+                {"field": "VSRC1", "class": "vgpr_pair"},
+            ],
+            "max_literals": 0,
+        },
+        "unsupported": {
+            "src_vcc", "src_literal", "src_exec", "src_m0", "src_ttmp", "src_null",
+            "src_float_inline", "src_special",
+        },
+        "kind": "vector_compare",
+        "width": 64,
     },
     "vop3_vgpr2": {
         "rust": "Vop3Vgpr2",
@@ -637,7 +704,10 @@ def _check_xml(form, rule, snapshot, errors):
         expected = bits if type(bits) is int else form["width"]
         if size != expected:
             errors.append(f"{label}: {field} is {size} bits in the XML, declared {expected}")
-        if (is_input, is_output) != (is_source, not is_source):
+        # The XML marks both swap operands as outputs. Guide 12.8 also
+        # reads both old values before assigning either result.
+        direction = (False, True) if _rule_kind(form) == "vector_swap" else (is_source, not is_source)
+        if (is_input, is_output) != direction:
             errors.append(f"{label}: {field} direction disagrees with the XML")
         if field == count_field:
             if data_format != "FMT_NUM_U32":
@@ -647,7 +717,11 @@ def _check_xml(form, rule, snapshot, errors):
         elif type(bits) is int:
             if data_format != f"FMT_NUM_I{bits}":
                 errors.append(f"{label}: {field} has XML format {data_format}, not FMT_NUM_I{bits}")
-        elif is_source and data_format not in SOURCE_FORMATS.get(form["signedness"], ()):
+        elif is_source and data_format not in (
+            {f"FMT_NUM_{'I' if form['signedness'] == 'signed' else 'U'}64"}
+            if form["operands"] == "vopc_vcc_pair"
+            else SOURCE_FORMATS.get(form["signedness"], ())
+        ):
             errors.append(
                 f"{label}: signedness {form['signedness']} contradicts XML format {data_format}"
             )
@@ -728,7 +802,8 @@ def validate(registry, snapshot):
             )
         if form["exec"] != "unchanged":
             errors.append(f"{label}: exec {form['exec']} has no contract (requires unchanged)")
-        if type(form["width"]) is not int or form["width"] not in WIDTHS:
+        expected_width = (_implemented_rule(form) or {}).get("width", 32)
+        if type(form["width"]) is not int or form["width"] != expected_width:
             errors.append(f"{label}: width {form['width']} is not supported")
         for key, value in (
             ("name", form["name"]),
@@ -794,7 +869,7 @@ def validate(registry, snapshot):
                         f"{expected} (guide 13.1.2), not {form['opcode']}"
                     )
             elif _rule_kind(form) == "vector_compare":
-                base = VOPC_INTEGER_BASES.get(form["signedness"])
+                base = VOPC_INTEGER_BASES.get(expected_width, {}).get(form["signedness"])
                 expected = None if base is None else base + VOPC_RELATION_OFFSETS[relation]
                 if form["opcode"] != expected:
                     errors.append(
@@ -808,10 +883,16 @@ def validate(registry, snapshot):
             if form["carry_in"] != "none":
                 errors.append(f"{label}: carry_in {form['carry_in']} contradicts compare")
             primitive = (scc, None, False)
-        elif _rule_kind(form) == "vector":
+        elif _rule_kind(form) in ("vector", "vector_unary", "vector_swap"):
             if RELATION_KEY in form:
                 errors.append(f"{label}: {RELATION_KEY} on a non-compare operation")
-            lowering = VECTOR_PRIMITIVES.get((form["operation"], form["signedness"]))
+            key = (form["operation"], form["signedness"])
+            table = {
+                "vector": VECTOR_PRIMITIVES,
+                "vector_unary": VECTOR_UNARY_PRIMITIVES,
+                "vector_swap": {("swap", "bitwise"): "Swap"},
+            }[_rule_kind(form)]
+            lowering = table.get(key)
             primitive = None if lowering is None else ("unchanged", lowering, False)
         else:
             if RELATION_KEY in form:
@@ -839,7 +920,11 @@ def validate(registry, snapshot):
         elif form["operands"] in OPERAND_RULES and OPERAND_RULES[form["operands"]]["kind"] != (
             (_rule_kind(form) if _rule_kind(form) in ("vector_compare", "immediate_compare") else "compare")
             if form["operation"] == "compare"
-            else "unary" if form["operation"] in UNARY
+            else "vector_swap" if form["operation"] == "swap"
+            else "vector_unary" if _rule_kind(form) == "vector_unary" and form["operation"] in UNARY
+            else "unary" if form["operation"] in UNARY or (
+                form["operation"] == "mov" and form["family"] == "SOP1"
+            )
             else "vector" if _rule_kind(form) == "vector" and form["operation"] not in UNARY
             else "immediate" if _rule_kind(form) == "immediate"
             else "alu"
@@ -1027,7 +1112,7 @@ def render(registry, snapshot):
         "use crate::primitive;",
         "use crate::semantics::{",
         "    CarryIn, Document, Evidence, FormSemantics, MaskEffect, Operation, OperandRule, SccEffect,",
-        "    Signedness, SpecRef, VectorBinary, Wave,",
+        "    Signedness, SpecRef, VectorBinary, VectorUnary, Wave,",
         "};",
         "use crate::CompareRelation;",
         "",
@@ -1274,6 +1359,31 @@ def _render_enum(rule_name, forms, snapshot, positions):
         "        }]",
         "    }",
     ]
+    if kind in ("vector_unary", "vector_swap"):
+        out += [
+            "",
+            "    /// Assembler name of the 32-bit VOP1 encoding.",
+            "    pub const fn assembly_name(self) -> &'static str {",
+            "        match self {",
+        ]
+        suffix = "_e32" if kind == "vector_unary" else ""
+        out += [f"            Self::{form['variant']} => \"{form['name'].lower()}{suffix}\"," for form in forms]
+        out += ["        }", "    }"]
+    if kind == "vector_swap":
+        return out + ["}"]
+    if kind == "vector_unary":
+        out += [
+            "",
+            "    /// Per-lane integer operation selected by the registry.",
+            "    pub const fn lowering(self) -> VectorUnary {",
+            "        match self {",
+        ]
+        out += [
+            f"            Self::{form['variant']} => "
+            f"VectorUnary::{VECTOR_UNARY_PRIMITIVES[(form['operation'], form['signedness'])]},"
+            for form in forms
+        ]
+        return out + ["        }", "    }", "}"]
     if kind == "immediate":
         out += [
             "",
@@ -1473,6 +1583,7 @@ def _render_enum(rule_name, forms, snapshot, positions):
         out += ["        }", "    }"]
     if kind in ("compare", "vector_compare"):
         result = "SCC" if kind == "compare" else "per-lane result"
+        has_pairs = any(form["width"] == 64 for form in forms)
         out += [
             "",
             "    /// The relation tested, with S0 on the left.",
@@ -1489,11 +1600,27 @@ def _render_enum(rule_name, forms, snapshot, positions):
             "",
             f"    /// The {result}: whether the relation holds for S0 and S1.",
             "    pub const fn test(self, src0: u32, src1: u32) -> bool {",
-            "        match self {",
         ]
+        if has_pairs:
+            out += [
+                "        self.test_bits(src0 as u64, src1 as u64)",
+                "    }",
+                "",
+                "    /// Test raw operand bits at the width declared by this VOPC form.",
+                "    pub const fn test_bits(self, src0: u64, src1: u64) -> bool {",
+            ]
+        out += ["        match self {"]
         for form in forms:
-            function = COMPARE_PRIMITIVES[(form[RELATION_KEY], form["signedness"])]
-            out.append(f"            Self::{form['variant']} => primitive::{function}(src0, src1),")
+            relation = form[RELATION_KEY]
+            if form["width"] == 64 and relation not in VECTOR_ONLY_RELATIONS:
+                symbol = {"lt": "<", "eq": "==", "le": "<=", "gt": ">", "lg": "!=", "ge": ">="}[relation]
+                left, right = ("(src0 as i64)", "(src1 as i64)") if form["signedness"] == "signed" else ("src0", "src1")
+                expression = f"{left} {symbol} {right}"
+            else:
+                function = COMPARE_PRIMITIVES[(relation, form["signedness"])]
+                args = "src0 as u32, src1 as u32" if has_pairs else "src0, src1"
+                expression = f"primitive::{function}({args})"
+            out.append(f"            Self::{form['variant']} => {expression},")
         out += ["        }", "    }", "}"]
         return out
     out += [

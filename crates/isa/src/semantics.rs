@@ -94,6 +94,23 @@ pub enum Operation {
     Move,
     /// SOPK: SDST receives the sign-extended SIMM16 when SCC is set.
     ConditionalMove,
+    /// Swap the two old per-lane VGPR values (guide 12.8).
+    Swap,
+}
+
+/// Per-lane integer operation with one input and one result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VectorUnary {
+    /// Bitwise complement.
+    Not,
+    /// Reverse bit order.
+    ReverseBits,
+    /// Count leading zeros, or return all ones for zero.
+    FindHighUnsigned,
+    /// Count trailing zeros, or return all ones for zero.
+    FindLow,
+    /// Count leading sign bits, or return all ones if every bit matches.
+    FindHighSigned,
 }
 
 /// The per-lane integer operation a vector form lowers to. One reusable MSL
@@ -208,6 +225,9 @@ pub enum OperandRule {
     /// SOP1 unary: SDST is s0-s105; SSRC0 is s0-s105, an inline integer -16..64 or
     /// a literal word. Everything else is rejected as unsupported.
     Sop1Sgpr,
+    /// SOP1 move: the same sources as Sop1Sgpr, with VCC and EXEC halves
+    /// also allowed as explicit destinations.
+    Sop1Move,
     /// SOPK integer: SDST is s0-s105 and, except for compares, written (never s0-s7,
     /// which hold resource descriptors); SIMM16 is the 16-bit immediate. The word
     /// never takes a literal. Everything else is rejected as unsupported.
@@ -219,6 +239,9 @@ pub enum OperandRule {
     /// s0-s105, `vcc_lo`, an inline integer -16..64 or a literal word; VSRC1 is a
     /// VGPR. Everything else is rejected as unsupported.
     VopcVcc,
+    /// Wave32 VOPC with a VGPR pair, even normal SGPR pair or inline integer
+    /// as SRC0 and a VGPR pair as VSRC1. The destination is `vcc_lo`.
+    VopcVccPair,
     /// VOP3 encoding of a VOP2 vector form: VDST is v0-v255, SRC0 and SRC1 are
     /// VGPRs, no input or output modifiers, SRC2 unused. Everything else is
     /// rejected as unsupported.
@@ -230,6 +253,10 @@ pub enum OperandRule {
     /// VOP2 vector, VGPR sources only: VDST is v0-v255; SRC0 and VSRC1 are VGPRs.
     /// Everything else (SGPR, inline, literal SRC0) is rejected as unsupported.
     Vop2Vgpr2,
+    /// VOP1 unary: VGPR VDST and the same SRC0 domain as VOP2.
+    Vop1Vgpr,
+    /// VOP1 swap: VDST and SRC0 each read and write a VGPR.
+    Vop1Swap,
 }
 
 /// Evidence a form needs before it counts as verified.

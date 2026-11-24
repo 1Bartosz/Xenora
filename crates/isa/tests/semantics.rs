@@ -144,7 +144,6 @@ fn scalar_unary_dispatch_selects_exactly_the_registry_sop1_forms() {
         assert_eq!(row.name.to_ascii_lowercase(), op.mnemonic());
         assert_eq!(op.writes_scc(), row.scc != SccEffect::Unchanged);
     }
-    // s_mov_b32 (opcode 3) stays hand-written, so it must not be dispatched here.
     dispatch_selects_exactly(EncodingFamily::Sop1, |word| {
         ScalarUnaryOp::from_word(word).map(|op| op.semantics().name)
     });
@@ -169,7 +168,8 @@ fn vector_alu_dispatch_selects_exactly_the_registry_vop2_forms() {
 
 #[test]
 fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
-    const OPERANDS: [u32; 6] = [0, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_fffe, 0xffff_ffff];
+    const OPERANDS32: [u64; 6] = [0, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_fffe, 0xffff_ffff];
+    const OPERANDS64: [u64; 6] = [0, 1, u64::MAX >> 1, 1 << 63, u64::MAX - 1, u64::MAX];
     for op in VectorCompareOp::ALL {
         let row = op.semantics();
         assert_eq!(row.family, EncodingFamily::Vopc);
@@ -188,9 +188,16 @@ fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
         );
         // The per-lane test is the declared relation over the declared
         // signedness, with SRC0 on the left.
-        for src0 in OPERANDS {
-            for src1 in OPERANDS {
-                let ordering = if op.signed() {
+        let operands = if row.width == 64 {
+            OPERANDS64
+        } else {
+            OPERANDS32
+        };
+        for src0 in operands {
+            for src1 in operands {
+                let ordering = if op.signed() && row.width == 64 {
+                    (src0 as i64).cmp(&(src1 as i64))
+                } else if op.signed() {
                     (src0 as i32).cmp(&(src1 as i32))
                 } else {
                     src0.cmp(&src1)
@@ -206,7 +213,7 @@ fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
                     CompareRelation::True => true,
                 };
                 assert_eq!(
-                    op.test(src0, src1),
+                    op.test_bits(src0, src1),
                     expected,
                     "{} {src0:#x} {src1:#x}",
                     row.name
@@ -214,7 +221,7 @@ fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
             }
         }
     }
-    // v_cmpx and the 16-, 64-bit and float compares must not be dispatched.
+    // v_cmpx and the 16-bit and float compares must not be dispatched.
     dispatch_selects_exactly(EncodingFamily::Vopc, |word| {
         VectorCompareOp::from_word(word).map(|op| op.semantics().name)
     });
