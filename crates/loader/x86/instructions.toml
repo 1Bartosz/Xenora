@@ -61,6 +61,8 @@ cwde = { ref = "sdm CBW/CWDE/CDQE" }
 cdq = { ref = "sdm CWD/CDQ/CQO" }
 rol = { writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
 ror = { writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
+rcl = { reads = "cf", writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
+rcr = { reads = "cf", writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
 shl = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
 shr = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
 sar = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
@@ -779,7 +781,7 @@ digits = { 0 = "inc", 1 = "dec" }
 
 [[group]]
 opcodes = [[0xC0, "b", "ib", "rm_imm"], [0xC1, "v", "ib", "rm_imm"], [0xD0, "b", "", "rm_one"], [0xD1, "v", "", "rm_one"], [0xD2, "b", "", "rm_cl"], [0xD3, "v", "", "rm_cl"]]
-digits = { 0 = "rol", 1 = "ror", 4 = "shl", 5 = "shr", 7 = "sar" }
+digits = { 0 = "rol", 1 = "ror", 2 = "rcl", 3 = "rcr", 4 = "shl", 5 = "shr", 7 = "sar" }
 
 # SSE and SSE2 moves and packed integer forms.
 
