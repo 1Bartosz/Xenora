@@ -16,7 +16,7 @@ pub mod texture_pipeline;
 pub use compute::{
     BlendDraw, BlendFactor, BlendOperation, BlendPass, BlendState, ColorWriteMask, DepthCompare,
     DepthDraw, DepthFill, DepthOutput, DepthPass, DepthState, GuestBuffer, GuestBufferView,
-    MetalError, NativeCompute, RunProfile,
+    IndexBuffer, IndexedDraw, IndexedPass, MetalError, NativeCompute, RunProfile,
 };
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]

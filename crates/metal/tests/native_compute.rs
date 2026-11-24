@@ -10,6 +10,10 @@ mod depth;
 mod depth_cases;
 #[path = "native/guest_buffer.rs"]
 mod guest_buffer;
+#[path = "native/indexed.rs"]
+mod indexed;
+#[path = "support/indexed_cases.rs"]
+mod indexed_cases;
 #[path = "native/offscreen.rs"]
 mod offscreen;
 #[path = "native/texture.rs"]
