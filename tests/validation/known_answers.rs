@@ -1074,8 +1074,8 @@ mod review {
     #[test]
     fn scalar_alu_rejects_forms_outside_the_subset() {
         // load 8, wait 4, two literal moves 8 each, s_cmp 4: the SOP2 word is at 0x20.
-        for opcode in [6, 15, 17, 19] {
-            // s_min_i32 and the 64-bit bitwise forms.
+        for opcode in [11, 15, 17, 19] {
+            // s_cselect_b64 and the 64-bit bitwise forms.
             rejected_at(
                 &sop2_program(&[sop2(opcode, 10, 8, 9)], 10, 1, 2, Some(false)),
                 0x20,
