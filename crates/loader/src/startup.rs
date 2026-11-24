@@ -11,6 +11,14 @@ use crate::{
 
 const STACK_SIZE: usize = 64 * 1024;
 const JIT_CAPACITY: usize = 1024 * 1024;
+/// The TEB is placed this far above the TLS base and spans two 4 KiB pages.
+const TEB_OFFSET: u64 = 0x10000;
+const TEB_SIZE: usize = 0x2000;
+// Win64 TEB fields (NT_TIB prefix plus the TLS slot) written by the harness.
+const TEB_STACK_BASE: u64 = 0x08;
+const TEB_STACK_LIMIT: u64 = 0x10;
+const TEB_SELF: u64 = 0x30;
+const TEB_TLS_POINTER: u64 = 0x58;
 
 /// Guest addresses reserved by the fixture harness.
 pub struct StartupLayout {
@@ -79,6 +87,8 @@ pub fn run_synthetic_startup_with_observer(
         )
         .into());
     }
+    // Reject an impossible layout before parsing or mapping anything.
+    let (stack_base, teb_base) = layout_regions(&layout)?;
     let pe = ParsedPe::parse(bytes)?;
     observe(StartupEvent::Parsed {
         sections: pe.sections.len(),
@@ -112,24 +122,9 @@ pub fn run_synthetic_startup_with_observer(
         )?;
     }
 
-    let stack_base = layout
-        .stack_top
-        .checked_sub(STACK_SIZE as u64)
-        .ok_or(MemoryError::Overflow)?;
     memory.map_region(stack_base, STACK_SIZE, MemoryPermissions::READ_WRITE)?;
 
-    // Allocate and initialize Win64 TEB (Thread Environment Block)
-    // Layout in TEB:
-    // +0x08: StackBase (highest address)
-    // +0x10: StackLimit (lowest address)
-    // +0x30: Self pointer (TEB linear address)
-    // +0x58: ThreadLocalStoragePointer
-    let teb_base = layout.tls_base.saturating_add(0x10000);
-    memory.map_region(teb_base, 0x2000, MemoryPermissions::READ_WRITE)?;
-    memory.write_u64_bypass(teb_base + 0x08, layout.stack_top)?;
-    memory.write_u64_bypass(teb_base + 0x10, stack_base)?;
-    memory.write_u64_bypass(teb_base + 0x30, teb_base)?;
-    memory.write_u64_bypass(teb_base + 0x58, layout.tls_base)?;
+    map_teb(memory, teb_base, &layout, stack_base)?;
 
     let mut engine = DbtEngine::new(JIT_CAPACITY)?;
     engine.set_import_registry(imports);
@@ -170,4 +165,129 @@ pub fn run_synthetic_startup_with_observer(
         execution,
         dbt_metrics: engine.metrics,
     })
+}
+
+/// Validate the harness layout and return `(stack_base, teb_base)`.
+///
+/// The stack occupies `[stack_top - STACK_SIZE, stack_top)` and the TEB
+/// `[tls_base + TEB_OFFSET, + TEB_SIZE)`. Both ranges must fit in the address
+/// space and must not overlap each other.
+fn layout_regions(layout: &StartupLayout) -> Result<(u64, u64), MemoryError> {
+    let stack_base = layout
+        .stack_top
+        .checked_sub(STACK_SIZE as u64)
+        .ok_or(MemoryError::Overflow)?;
+    let teb_base = layout
+        .tls_base
+        .checked_add(TEB_OFFSET)
+        .ok_or(MemoryError::Overflow)?;
+    let teb_end = teb_base
+        .checked_add(TEB_SIZE as u64)
+        .ok_or(MemoryError::Overflow)?;
+    if teb_base < layout.stack_top && stack_base < teb_end {
+        return Err(MemoryError::OverlappingRegion {
+            base: teb_base,
+            size: TEB_SIZE as u64,
+        });
+    }
+    Ok((stack_base, teb_base))
+}
+
+/// Map the Win64 TEB and write the fields the harness provides.
+fn map_teb(
+    memory: &mut crate::GuestMemory,
+    teb_base: u64,
+    layout: &StartupLayout,
+    stack_base: u64,
+) -> Result<(), MemoryError> {
+    memory.map_region(teb_base, TEB_SIZE, MemoryPermissions::READ_WRITE)?;
+    memory.write_u64_bypass(teb_base + TEB_STACK_BASE, layout.stack_top)?;
+    memory.write_u64_bypass(teb_base + TEB_STACK_LIMIT, stack_base)?;
+    memory.write_u64_bypass(teb_base + TEB_SELF, teb_base)?;
+    memory.write_u64_bypass(teb_base + TEB_TLS_POINTER, layout.tls_base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::GuestMemory;
+
+    fn layout(stack_top: u64, tls_base: u64) -> StartupLayout {
+        StartupLayout {
+            image_base: 0x1_4000_0000,
+            stack_top,
+            tls_base,
+        }
+    }
+
+    #[test]
+    fn valid_layout_places_stack_and_teb() {
+        let regions = layout_regions(&layout(0x2_0001_0000, 0x3_0000_0000));
+        assert_eq!(regions, Ok((0x2_0000_0000, 0x3_0001_0000)));
+    }
+
+    #[test]
+    fn stack_below_zero_is_rejected() {
+        assert_eq!(
+            layout_regions(&layout(0x8000, 0x3_0000_0000)),
+            Err(MemoryError::Overflow)
+        );
+    }
+
+    #[test]
+    fn teb_address_overflow_is_rejected_not_saturated() {
+        for tls_base in [u64::MAX, u64::MAX - 0xFFFF, u64::MAX - TEB_OFFSET - 0x1FFF] {
+            assert_eq!(
+                layout_regions(&layout(0x2_0001_0000, tls_base)),
+                Err(MemoryError::Overflow),
+                "tls_base {tls_base:#x}"
+            );
+        }
+        // The highest TEB that fits ends at u64::MAX: an end of 2^64 is not
+        // representable, and GuestMemory could not map that range either.
+        let top = u64::MAX - TEB_OFFSET - TEB_SIZE as u64;
+        assert!(layout_regions(&layout(0x2_0001_0000, top)).is_ok());
+    }
+
+    #[test]
+    fn teb_overlapping_stack_is_rejected() {
+        // TEB at 0x2_0000_8000..0x2_0000_A000 lies inside the stack 0x2_0000_0000..0x2_0001_0000.
+        let collide = layout(0x2_0001_0000, 0x1_FFFF_8000);
+        assert!(matches!(
+            layout_regions(&collide),
+            Err(MemoryError::OverlappingRegion { .. })
+        ));
+        // Directly above the stack is fine.
+        assert!(layout_regions(&layout(0x2_0001_0000, 0x2_0000_0000)).is_ok());
+    }
+
+    #[test]
+    fn invalid_layout_fails_before_parsing() {
+        // Empty bytes would fail PE parsing; the layout error must come first.
+        let err = run_synthetic_startup(
+            &[],
+            layout(0x2_0001_0000, u64::MAX),
+            ImportRegistry::new(),
+            1,
+        )
+        .err()
+        .expect("startup must fail");
+        assert_eq!(
+            err.downcast_ref::<MemoryError>(),
+            Some(&MemoryError::Overflow)
+        );
+    }
+
+    #[test]
+    fn teb_fields_are_at_win64_offsets() {
+        let l = layout(0x2_0001_0000, 0x3_0000_0000);
+        let (stack_base, teb) = layout_regions(&l).unwrap();
+        let mut memory = GuestMemory::new();
+        map_teb(&mut memory, teb, &l, stack_base).unwrap();
+        assert_eq!(memory.read_u64(teb + 0x08), Ok(0x2_0001_0000));
+        assert_eq!(memory.read_u64(teb + 0x10), Ok(0x2_0000_0000));
+        assert_eq!(memory.read_u64(teb + 0x30), Ok(teb));
+        assert_eq!(memory.read_u64(teb + 0x58), Ok(0x3_0000_0000));
+        assert!(memory.read_u8(teb + TEB_SIZE as u64).is_err());
+    }
 }
