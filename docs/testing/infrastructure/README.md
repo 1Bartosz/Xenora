@@ -38,6 +38,7 @@ PYTHONPATH=scripts python3 -m qa rdna2 discrepancies
 PYTHONPATH=scripts python3 -m qa rdna2 diff --before before.json --after after.json --compact
 PYTHONPATH=scripts python3 -m qa verify quick
 PYTHONPATH=scripts python3 -m qa cpu-coverage --blockers
+PYTHONPATH=scripts python3 -m qa cpu-inventory --compact
 PYTHONPATH=scripts python3 -m qa bench-compare --baseline b.json --current c.json
 PYTHONPATH=scripts python3 -m release readiness --revision HEAD --live --binary path --app path.app
 ```
@@ -46,3 +47,12 @@ RDNA2 planning is read-only over the AMD snapshot, semantic registry, decoder ta
 `docs/status.toml`. Candidates and manifests are never counted as implemented forms.
 Family claims exclude those families; path-only claims block candidates whose default
 permitted files overlap. Reconcile reports mismatches without adjusting planner counts.
+
+## Phase III — compatibility intelligence
+
+Checkpoint ledger: [phase3-compat-ledger.md](phase3-compat-ledger.md).
+
+`cpu-inventory` consumes the x86 instruction registry (not heuristic opcode scans).
+Declared forms are decodable only; native vs shared-semantic partitions come from
+read-only `dbt.rs` analysis. Unsupported intentional rejections stay in a separate catalog.
+
