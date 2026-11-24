@@ -13,29 +13,29 @@ Update after each meaningful commit batch. Do not invent passing tests.
 
 | SHA | Summary | Tests |
 | --- | --- | --- |
-| `dcc6f7a` | fix(agent-queue): skip no-op gh issue edit on comment-only actions. | focused suite before commit |
-| `261493b` | test(agent-queue): add read-only claim conflict prediction coverage. | focused suite before commit |
-| `87a5ada` | docs(coordination): record infrastructure QA ownership manifest. | focused suite before commit |
-| `7fa9820` | fix(agent-queue): accept summary --now after the subcommand. | focused suite before commit |
-| `f902617` | fix(ci): grant agent-queue audit pull-requests:read. | focused suite before commit |
-| `f5c72a4` | docs(coordination): record agent-queue disposable smoke evidence. | focused suite before commit |
-| `a10ac43` | docs(coordination): add infrastructure QA campaign ledger. | focused suite before commit |
-| `8b5cee5` | feat(qa): preserve command exit status for orchestration pipes. | focused suite before commit |
-| `1b555a5` | feat(qa): add structured multi-suite test orchestration reports. | focused suite before commit |
-| `19879c8` | feat(qa): add advisory PR scope, DCO and artifact validators. | focused suite before commit |
-| `f772081` | feat(qa): analyze existing benchmark samples for percentiles. | focused suite before commit |
-| `53f73a8` | feat(qa): compare orchestration history and emit handoff reports. | focused suite before commit |
-| `fc1587e` | feat(qa): add Apple Silicon environment diagnostic helpers. | focused suite before commit |
-| `8e039d9` | feat(qa): predict claim file-scope conflicts before editing. | focused suite before commit |
-| `f6350ad` | feat(release): verify ARM64 Mach-O arch, linkage and app bundles. | focused suite before commit |
-| `eaf78a2` | feat(release): build checksum manifests and license inventories. | focused suite before commit |
-| `8694751` | docs(testing): index infrastructure QA and release tooling. | focused suite before commit |
-| `27c3d28` | docs(changelog): note infrastructure QA tooling and agent-queue smoke fixes. | focused suite before commit |
+| `8410e3d` | test(qa): cover environment diagnostic helpers. | focused suite before commit |
+| `48f44ca` | feat(qa): add operational python3 -m qa CLI. | focused suite before commit |
+| `f56d3c9` | feat(release): add python3 -m release CLI entrypoints. | focused suite before commit |
+| `22bafeb` | feat(qa): add read-only RDNA2 expansion planning over live inventories. | focused suite before commit |
+| `c651a9d` | feat(qa): add unified verification profiles with stale evidence detection. | focused suite before commit |
+| `f175a10` | feat(qa): scan CPU opcode and import coverage from existing sources. | focused suite before commit |
+| `f400550` | feat(qa): compare recorded benchmarks with identity and noise guards. | focused suite before commit |
+| `7a51764` | feat(qa): detect claim collisions across renames and deletions. | focused suite before commit |
+| `050df30` | feat(release): build release-readiness reports with SBOM and evidence. | focused suite before commit |
+| `63cf359` | test(qa): smoke-test qa and release CLIs against real commands. | focused suite before commit |
+| `313430c` | docs(testing): document Phase II qa and release CLI workflows. | focused suite before commit |
+| `0f7658b` | docs(changelog): record Phase II infrastructure automation CLIs. | focused suite before commit |
 
 ## Smoke repository
 
 - Repo: `ranveersoni98/xenora-agent-queue-smoke`
 - See `agent-queue-smoke.md` for Actions evidence
+
+## Limitations
+
+- Phase II deferred: exact `/verified` head-SHA smoke and wall-clock lease expiry still need a second eligible verifier / long wait.
+- `qa verify cpu|gpu|app|full` invoke heavy existing commands; use `quick` for local iteration.
+- CPU coverage statuses are heuristic where no authoritative opcode inventory file exists.
 
 ## Limitations
 
