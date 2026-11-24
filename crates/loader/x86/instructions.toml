@@ -1,0 +1,550 @@
+# Declarative registry of the x86-64 instruction forms Xenora decodes.
+#
+# Data only. crates/loader/generate_x86.py validates it against a closed
+# vocabulary and writes crates/loader/src/x86_table.rs. Behaviour lives in
+# reviewed Rust primitives (crates/loader/src/x86_exec.rs), never here.
+# Independence: tests/x86_integer.rs never reads this file.
+#
+# A form names its opcode map ("1" or "0f"), opcode byte, optional ModRM digit,
+# operand encoding, operand size and immediate. Declaring a form makes it
+# decodable; a form counts as implemented only once its operation has semantics
+# and independent tests. Forms not listed here are rejected.
+#
+# size: b = 8-bit, v = 16/32/64-bit by 0x66 and REX.W, q = 64-bit always,
+#       y = 32/64-bit only, n = no operand. imm: ib = signed 8-bit,
+#       iz = 16/32-bit sign-extended, iv = full operand size, iw = 16-bit,
+#       rel8/rel32 = signed branch offset.
+
+schema = 1
+architecture = "x86-64"
+
+[documents]
+sdm = "Intel 64 and IA-32 Architectures Software Developer's Manual, Volume 2"
+apm = "AMD64 Architecture Programmer's Manual, Volume 3"
+
+# Flag effects. "undefined" flags keep their previous value in Xenora, which is
+# one permitted outcome and is never relied on by a test.
+[operation]
+add = { writes = "cf zf sf of pf af", ref = "sdm ADD" }
+or = { writes = "cf zf sf of pf", undefined = "af", ref = "sdm OR" }
+adc = { reads = "cf", writes = "cf zf sf of pf af", ref = "sdm ADC" }
+sbb = { reads = "cf", writes = "cf zf sf of pf af", ref = "sdm SBB" }
+and = { writes = "cf zf sf of pf", undefined = "af", ref = "sdm AND" }
+sub = { writes = "cf zf sf of pf af", ref = "sdm SUB" }
+xor = { writes = "cf zf sf of pf", undefined = "af", ref = "sdm XOR" }
+cmp = { writes = "cf zf sf of pf af", ref = "sdm CMP" }
+test = { writes = "cf zf sf of pf", undefined = "af", ref = "sdm TEST" }
+inc = { writes = "zf sf of pf af", ref = "sdm INC" }
+dec = { writes = "zf sf of pf af", ref = "sdm DEC" }
+neg = { writes = "cf zf sf of pf af", ref = "sdm NEG" }
+not = { ref = "sdm NOT" }
+mov = { ref = "sdm MOV" }
+movzx = { ref = "sdm MOVZX" }
+movsx = { ref = "sdm MOVSX/MOVSXD" }
+movsxd = { ref = "sdm MOVSX/MOVSXD" }
+lea = { ref = "sdm LEA" }
+xchg = { ref = "sdm XCHG" }
+bswap = { ref = "sdm BSWAP" }
+cwde = { ref = "sdm CBW/CWDE/CDQE" }
+cdq = { ref = "sdm CWD/CDQ/CQO" }
+rol = { writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
+ror = { writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
+shl = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
+shr = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
+sar = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
+mul = { writes = "cf of", undefined = "zf sf pf af", ref = "sdm MUL" }
+imul = { writes = "cf of", undefined = "zf sf pf af", ref = "sdm IMUL" }
+imul2 = { writes = "cf of", undefined = "zf sf pf af", ref = "sdm IMUL" }
+div = { undefined = "cf zf sf of pf af", faults = true, ref = "sdm DIV" }
+idiv = { undefined = "cf zf sf of pf af", faults = true, ref = "sdm IDIV" }
+cmov = { reads = "cf zf sf of pf", ref = "sdm CMOVcc" }
+setcc = { reads = "cf zf sf of pf", ref = "sdm SETcc" }
+bt = { writes = "cf", undefined = "sf of pf af", ref = "sdm BT" }
+bts = { writes = "cf", undefined = "sf of pf af", ref = "sdm BTS" }
+btr = { writes = "cf", undefined = "sf of pf af", ref = "sdm BTR" }
+btc = { writes = "cf", undefined = "sf of pf af", ref = "sdm BTC" }
+bsf = { writes = "zf", undefined = "cf sf of pf af", ref = "sdm BSF" }
+bsr = { writes = "zf", undefined = "cf sf of pf af", ref = "sdm BSR" }
+popcnt = { writes = "cf zf sf of pf af", ref = "sdm POPCNT" }
+tzcnt = { writes = "cf zf", undefined = "sf of pf af", ref = "sdm TZCNT" }
+lzcnt = { writes = "cf zf", undefined = "sf of pf af", ref = "sdm LZCNT" }
+push = { ref = "sdm PUSH" }
+pop = { ref = "sdm POP" }
+leave = { ref = "sdm LEAVE" }
+call = { terminator = true, ref = "sdm CALL" }
+jmp = { terminator = true, ref = "sdm JMP" }
+jcc = { reads = "cf zf sf of pf", terminator = true, ref = "sdm Jcc" }
+ret = { terminator = true, ref = "sdm RET" }
+nop = { ref = "sdm NOP" }
+hlt = { terminator = true, ref = "sdm HLT" }
+syscall = { terminator = true, ref = "sdm SYSCALL" }
+clc = { writes = "cf", ref = "sdm CLC" }
+stc = { writes = "cf", ref = "sdm STC" }
+cmc = { reads = "cf", writes = "cf", ref = "sdm CMC" }
+
+# The eight classic ALU operations share six opcodes at index*8 and one digit
+# of the immediate groups 80, 81 and 83.
+[alu]
+operations = ["add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"]
+
+[[form]]
+op = "movsxd"
+opcode = 0x63
+enc = "reg_rm"
+size = "y"
+src = "d"
+
+[[form]]
+op = "push"
+opcode = 0x50
+count = 8
+enc = "op_reg"
+size = "q"
+
+[[form]]
+op = "pop"
+opcode = 0x58
+count = 8
+enc = "op_reg"
+size = "q"
+
+[[form]]
+op = "push"
+opcode = 0x68
+enc = "imm"
+size = "q"
+imm = "iz"
+
+[[form]]
+op = "push"
+opcode = 0x6A
+enc = "imm"
+size = "q"
+imm = "ib"
+
+[[form]]
+op = "push"
+opcode = 0xFF
+digit = 6
+enc = "rm"
+size = "q"
+
+[[form]]
+op = "pop"
+opcode = 0x8F
+digit = 0
+enc = "rm"
+size = "q"
+
+[[form]]
+op = "imul2"
+opcode = 0x69
+enc = "reg_rm_imm"
+size = "v"
+imm = "iz"
+
+[[form]]
+op = "imul2"
+opcode = 0x6B
+enc = "reg_rm_imm"
+size = "v"
+imm = "ib"
+
+[[form]]
+op = "imul2"
+map = "0f"
+opcode = 0xAF
+enc = "reg_rm"
+size = "v"
+
+[[form]]
+op = "jcc"
+opcode = 0x70
+count = 16
+enc = "rel"
+size = "n"
+imm = "rel8"
+
+[[form]]
+op = "jcc"
+map = "0f"
+opcode = 0x80
+count = 16
+enc = "rel"
+size = "n"
+imm = "rel32"
+
+[[form]]
+op = "cmov"
+map = "0f"
+opcode = 0x40
+count = 16
+enc = "reg_rm"
+size = "v"
+
+[[form]]
+op = "setcc"
+map = "0f"
+opcode = 0x90
+count = 16
+enc = "rm_only"
+size = "b"
+
+[[form]]
+op = "test"
+opcode = 0x84
+enc = "rm_reg"
+size = "b"
+
+[[form]]
+op = "test"
+opcode = 0x85
+enc = "rm_reg"
+size = "v"
+
+[[form]]
+op = "test"
+opcode = 0xA8
+enc = "acc_imm"
+size = "b"
+imm = "ib"
+
+[[form]]
+op = "test"
+opcode = 0xA9
+enc = "acc_imm"
+size = "v"
+imm = "iz"
+
+[[form]]
+op = "test"
+opcode = 0xF6
+digit = 0
+enc = "rm_imm"
+size = "b"
+imm = "ib"
+
+[[form]]
+op = "test"
+opcode = 0xF7
+digit = 0
+enc = "rm_imm"
+size = "v"
+imm = "iz"
+
+[[form]]
+op = "xchg"
+opcode = 0x86
+enc = "rm_reg"
+size = "b"
+
+[[form]]
+op = "xchg"
+opcode = 0x87
+enc = "rm_reg"
+size = "v"
+
+[[form]]
+op = "mov"
+opcode = 0x88
+enc = "rm_reg"
+size = "b"
+
+[[form]]
+op = "mov"
+opcode = 0x89
+enc = "rm_reg"
+size = "v"
+
+[[form]]
+op = "mov"
+opcode = 0x8A
+enc = "reg_rm"
+size = "b"
+
+[[form]]
+op = "mov"
+opcode = 0x8B
+enc = "reg_rm"
+size = "v"
+
+[[form]]
+op = "lea"
+opcode = 0x8D
+enc = "reg_rm"
+size = "v"
+memory_only = true
+
+[[form]]
+op = "nop"
+opcode = 0x90
+enc = "none"
+size = "n"
+no_rex_b = true
+
+[[form]]
+op = "nop"
+map = "0f"
+opcode = 0x1F
+digit = 0
+enc = "rm_unread"
+size = "v"
+
+[[form]]
+op = "cwde"
+opcode = 0x98
+enc = "none"
+size = "v"
+
+[[form]]
+op = "cdq"
+opcode = 0x99
+enc = "none"
+size = "v"
+
+[[form]]
+op = "mov"
+opcode = 0xB0
+count = 8
+enc = "op_reg_imm"
+size = "b"
+imm = "ib"
+
+[[form]]
+op = "mov"
+opcode = 0xB8
+count = 8
+enc = "op_reg_imm"
+size = "v"
+imm = "iv"
+
+[[form]]
+op = "mov"
+opcode = 0xC6
+digit = 0
+enc = "rm_imm"
+size = "b"
+imm = "ib"
+
+[[form]]
+op = "mov"
+opcode = 0xC7
+digit = 0
+enc = "rm_imm"
+size = "v"
+imm = "iz"
+
+[[form]]
+op = "ret"
+opcode = 0xC2
+enc = "imm"
+size = "n"
+imm = "iw"
+
+[[form]]
+op = "ret"
+opcode = 0xC3
+enc = "none"
+size = "n"
+
+[[form]]
+op = "leave"
+opcode = 0xC9
+enc = "none"
+size = "q"
+
+[[form]]
+op = "call"
+opcode = 0xE8
+enc = "rel"
+size = "n"
+imm = "rel32"
+
+[[form]]
+op = "jmp"
+opcode = 0xE9
+enc = "rel"
+size = "n"
+imm = "rel32"
+
+[[form]]
+op = "jmp"
+opcode = 0xEB
+enc = "rel"
+size = "n"
+imm = "rel8"
+
+[[form]]
+op = "call"
+opcode = 0xFF
+digit = 2
+enc = "rm"
+size = "q"
+
+[[form]]
+op = "jmp"
+opcode = 0xFF
+digit = 4
+enc = "rm"
+size = "q"
+
+[[form]]
+op = "hlt"
+opcode = 0xF4
+enc = "none"
+size = "n"
+
+[[form]]
+op = "cmc"
+opcode = 0xF5
+enc = "none"
+size = "n"
+
+[[form]]
+op = "clc"
+opcode = 0xF8
+enc = "none"
+size = "n"
+
+[[form]]
+op = "stc"
+opcode = 0xF9
+enc = "none"
+size = "n"
+
+[[form]]
+op = "syscall"
+map = "0f"
+opcode = 0x05
+enc = "none"
+size = "n"
+
+[[form]]
+op = "movzx"
+map = "0f"
+opcode = 0xB6
+enc = "reg_rm"
+size = "v"
+src = "b"
+
+[[form]]
+op = "movzx"
+map = "0f"
+opcode = 0xB7
+enc = "reg_rm"
+size = "v"
+src = "w"
+
+[[form]]
+op = "movsx"
+map = "0f"
+opcode = 0xBE
+enc = "reg_rm"
+size = "v"
+src = "b"
+
+[[form]]
+op = "movsx"
+map = "0f"
+opcode = 0xBF
+enc = "reg_rm"
+size = "v"
+src = "w"
+
+[[form]]
+op = "bswap"
+map = "0f"
+opcode = 0xC8
+count = 8
+enc = "op_reg"
+size = "y"
+
+[[form]]
+op = "bsf"
+map = "0f"
+opcode = 0xBC
+enc = "reg_rm"
+size = "v"
+
+[[form]]
+op = "bsr"
+map = "0f"
+opcode = 0xBD
+enc = "reg_rm"
+size = "v"
+
+[[form]]
+op = "popcnt"
+map = "0f"
+prefix = "f3"
+opcode = 0xB8
+enc = "reg_rm"
+size = "v"
+
+[[form]]
+op = "tzcnt"
+map = "0f"
+prefix = "f3"
+opcode = 0xBC
+enc = "reg_rm"
+size = "v"
+
+[[form]]
+op = "lzcnt"
+map = "0f"
+prefix = "f3"
+opcode = 0xBD
+enc = "reg_rm"
+size = "v"
+
+# Bit tests with a register index address memory beyond the operand when the
+# destination is memory, so that form is register-only here.
+[[form]]
+op = "bt"
+map = "0f"
+opcode = 0xA3
+enc = "rm_reg"
+size = "v"
+register_only = true
+
+[[form]]
+op = "bts"
+map = "0f"
+opcode = 0xAB
+enc = "rm_reg"
+size = "v"
+register_only = true
+
+[[form]]
+op = "btr"
+map = "0f"
+opcode = 0xB3
+enc = "rm_reg"
+size = "v"
+register_only = true
+
+[[form]]
+op = "btc"
+map = "0f"
+opcode = 0xBB
+enc = "rm_reg"
+size = "v"
+register_only = true
+
+# Groups whose digits select an operation: [opcode, size, immediate, encoding].
+[[group]]
+map = "0f"
+opcodes = [[0xBA, "v", "ib", "rm_imm"]]
+digits = { 4 = "bt", 5 = "bts", 6 = "btr", 7 = "btc" }
+
+[[group]]
+opcodes = [[0xF6, "b", "", "rm"], [0xF7, "v", "", "rm"]]
+digits = { 2 = "not", 3 = "neg", 4 = "mul", 5 = "imul", 6 = "div", 7 = "idiv" }
+
+[[group]]
+opcodes = [[0xFE, "b", "", "rm"], [0xFF, "v", "", "rm"]]
+digits = { 0 = "inc", 1 = "dec" }
+
+[[group]]
+opcodes = [[0xC0, "b", "ib", "rm_imm"], [0xC1, "v", "ib", "rm_imm"], [0xD0, "b", "", "rm_one"], [0xD1, "v", "", "rm_one"], [0xD2, "b", "", "rm_cl"], [0xD3, "v", "", "rm_cl"]]
+digits = { 0 = "rol", 1 = "ror", 4 = "shl", 5 = "shr", 7 = "sar" }

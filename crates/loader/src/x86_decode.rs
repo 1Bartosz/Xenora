@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Shared architectural decoding primitives for x86-64.
+//! Shared x86-64 decoder.
 //!
-//! The static PE probe, the software interpreter and the native DBT all use
-//! these constants and helpers so that decoding limits agree across the
-//! execution engines.
+//! The static PE probe, the software interpreter and the native DBT all decode
+//! through [`decode`], driven by static tables generated from
+//! `x86/instructions.toml`, so instruction boundaries, operands and rejected
+//! forms agree across them.
+
+use crate::x86_table::{FORMS, GROUPS, ONE_BYTE, Op, TWO_BYTE, TWO_BYTE_F3};
 
 /// Architectural x86-64 instruction length limit, in bytes.
 ///
@@ -28,6 +31,381 @@ pub fn segment_prefix_len(code: &[u8]) -> usize {
         len += 1;
     }
     len
+}
+
+/// One x86-64 instruction form from the generated registry tables.
+#[derive(Clone, Copy, Debug)]
+pub struct Form {
+    pub op: Op,
+    pub encoding: Encoding,
+    pub size: OperandSize,
+    pub immediate: Immediate,
+    /// Source width in bytes when it differs from the operand size, else 0.
+    pub source: u8,
+    pub has_modrm: bool,
+    pub memory_only: bool,
+    pub register_only: bool,
+    pub no_rex_b: bool,
+}
+
+/// Opcode table entry.
+#[derive(Clone, Copy, Debug)]
+pub enum Entry {
+    Unsupported,
+    Form(u16),
+    Group(u16),
+}
+
+/// How a form names its operands, destination first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoding {
+    None,
+    RmReg,
+    RegRm,
+    RegRmImm,
+    Rm,
+    RmUnread,
+    RmImm,
+    RmOne,
+    RmCl,
+    AccImm,
+    OpReg,
+    OpRegImm,
+    Imm,
+    Rel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperandSize {
+    Byte,
+    Variable,
+    Wide,
+    Quad,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Immediate {
+    None,
+    SignedByte,
+    SignedFull,
+    Signed32,
+    Full,
+    Word,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Segment {
+    Fs,
+    Gs,
+}
+
+/// A register operand. `high` selects AH, CH, DH or BH of `index`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegOperand {
+    pub index: u8,
+    pub high: bool,
+}
+
+/// A memory operand. A RIP-relative operand has its absolute address folded
+/// into `disp` and no base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemOperand {
+    pub base: Option<u8>,
+    pub index: Option<(u8, u8)>,
+    pub disp: i64,
+    pub segment: Option<Segment>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RmOperand {
+    Reg(RegOperand),
+    Mem(MemOperand),
+}
+
+/// A fully decoded instruction at a known address.
+#[derive(Clone, Copy, Debug)]
+pub struct Insn {
+    pub op: Op,
+    pub encoding: Encoding,
+    /// Index into [`FORMS`].
+    pub form: u16,
+    /// Guest address of the first byte.
+    pub rip: u64,
+    pub len: u8,
+    /// Operand size in bytes: 1, 2, 4 or 8, or 0 when there is none.
+    pub size: u8,
+    /// Width of the ModRM operand in bytes.
+    pub rm_size: u8,
+    pub rm: Option<RmOperand>,
+    /// ModRM `reg` operand, or the register encoded in the opcode.
+    pub reg: RegOperand,
+    /// Sign-extended immediate, or the absolute branch target.
+    pub imm: u64,
+    /// Condition code for Jcc, CMOVcc and SETcc.
+    pub condition: u8,
+}
+
+impl Insn {
+    /// Address of the following instruction.
+    pub fn next_rip(&self) -> u64 {
+        self.rip.wrapping_add(u64::from(self.len))
+    }
+
+    /// The memory operand, if any.
+    pub fn memory(&self) -> Option<MemOperand> {
+        match self.rm {
+            Some(RmOperand::Mem(operand)) => Some(operand),
+            _ => None,
+        }
+    }
+}
+
+/// Why bytes did not decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeError<E> {
+    /// The byte source refused a fetch.
+    Fetch(E),
+    /// No declared form matches; carries the byte that decided it.
+    Unsupported(u8),
+}
+
+struct Cursor<F> {
+    fetch: F,
+    rip: u64,
+    len: usize,
+    last: u8,
+}
+
+impl<E, F: FnMut(u64) -> Result<u8, E>> Cursor<F> {
+    fn u8(&mut self) -> Result<u8, DecodeError<E>> {
+        if self.len == MAX_INSTRUCTION_LEN {
+            return Err(DecodeError::Unsupported(self.last));
+        }
+        let byte =
+            (self.fetch)(self.rip.wrapping_add(self.len as u64)).map_err(DecodeError::Fetch)?;
+        self.len += 1;
+        self.last = byte;
+        Ok(byte)
+    }
+
+    /// Little-endian value of `count` bytes.
+    fn bytes(&mut self, count: usize) -> Result<u64, DecodeError<E>> {
+        let mut value = 0;
+        for index in 0..count {
+            value |= u64::from(self.u8()?) << (8 * index);
+        }
+        Ok(value)
+    }
+
+    fn signed(&mut self, count: usize) -> Result<u64, DecodeError<E>> {
+        let value = self.bytes(count)?;
+        let shift = 64 - 8 * count as u32;
+        Ok(((value << shift) as i64 >> shift) as u64)
+    }
+}
+
+/// Decode one instruction at `rip`. `fetch` supplies the byte at an address and
+/// is called only for bytes that belong to the instruction, in order.
+///
+/// Forms the registry does not declare, LOCK, REPNE, address-size overrides and
+/// conflicting segment overrides are rejected rather than approximated.
+pub fn decode<E>(
+    rip: u64,
+    fetch: impl FnMut(u64) -> Result<u8, E>,
+) -> Result<Insn, DecodeError<E>> {
+    let mut cursor = Cursor {
+        fetch,
+        rip,
+        len: 0,
+        last: 0,
+    };
+    let mut operand_size = false;
+    let mut rep = false;
+    let mut segment = None;
+    let mut byte = cursor.u8()?;
+    loop {
+        let selected = match byte {
+            0x64 => Segment::Fs,
+            0x65 => Segment::Gs,
+            0x66 => {
+                operand_size = true;
+                byte = cursor.u8()?;
+                continue;
+            }
+            0xF3 => {
+                rep = true;
+                byte = cursor.u8()?;
+                continue;
+            }
+            // CS, DS, ES and SS overrides have no effect in 64-bit mode. After
+            // FS or GS their meaning is not relied on, so it is rejected.
+            0x26 | 0x2E | 0x36 | 0x3E if segment.is_none() => {
+                byte = cursor.u8()?;
+                continue;
+            }
+            _ => break,
+        };
+        if segment.is_some_and(|previous| previous != selected) {
+            return Err(DecodeError::Unsupported(byte));
+        }
+        segment = Some(selected);
+        byte = cursor.u8()?;
+    }
+
+    let rex = if byte & 0xF0 == 0x40 { byte } else { 0 };
+    if rex != 0 {
+        byte = cursor.u8()?;
+    }
+    let (rex_w, rex_r, rex_x, rex_b) =
+        (rex & 8 != 0, (rex & 4) << 1, (rex & 2) << 2, (rex & 1) << 3);
+
+    let table = if byte == 0x0F {
+        byte = cursor.u8()?;
+        if rep { &TWO_BYTE_F3 } else { &TWO_BYTE }
+    } else {
+        &ONE_BYTE
+    };
+    let opcode = byte;
+    let one_byte = std::ptr::eq(table, &raw const ONE_BYTE);
+    // Only PAUSE (F3 90) has a meaning here for F3 on a one-byte opcode.
+    if rep && one_byte && opcode != 0x90 {
+        return Err(DecodeError::Unsupported(0xF3));
+    }
+
+    let entry = table[usize::from(opcode)];
+    let mut modrm = 0;
+    let form_index = match entry {
+        Entry::Unsupported => return Err(DecodeError::Unsupported(opcode)),
+        Entry::Form(index) => index,
+        Entry::Group(index) => {
+            modrm = cursor.u8()?;
+            GROUPS[usize::from(index)][usize::from((modrm >> 3) & 7)]
+        }
+    };
+    let form = FORMS
+        .get(usize::from(form_index))
+        .ok_or(DecodeError::Unsupported(opcode))?;
+    if form.has_modrm && matches!(entry, Entry::Form(_)) {
+        modrm = cursor.u8()?;
+    }
+
+    let size = match form.size {
+        OperandSize::None => 0,
+        OperandSize::Byte => 1,
+        OperandSize::Quad => 8,
+        OperandSize::Wide | OperandSize::Variable if rex_w => 8,
+        OperandSize::Variable if operand_size => 2,
+        OperandSize::Wide | OperandSize::Variable => 4,
+    };
+    let takes_operand_size =
+        matches!(form.size, OperandSize::Byte | OperandSize::Variable) || form.op == Op::Nop;
+    // REX.W takes precedence over 0x66 wherever the size is selectable.
+    let overridden = rex_w && form.size == OperandSize::Wide;
+    if operand_size && !takes_operand_size && !overridden {
+        return Err(DecodeError::Unsupported(0x66));
+    }
+    if form.no_rex_b && rex_b != 0 {
+        return Err(DecodeError::Unsupported(opcode));
+    }
+
+    let rm_size = if form.source != 0 { form.source } else { size };
+    let register = |field: u8, extension: u8, width: u8| {
+        if width == 1 && rex == 0 && field >= 4 {
+            RegOperand {
+                index: field - 4,
+                high: true,
+            }
+        } else {
+            RegOperand {
+                index: field | extension,
+                high: false,
+            }
+        }
+    };
+
+    let mut rm = None;
+    let mut rip_relative = false;
+    let mut reg = RegOperand {
+        index: 0,
+        high: false,
+    };
+    if form.has_modrm {
+        reg = register((modrm >> 3) & 7, rex_r, size);
+        let mode = modrm >> 6;
+        if mode == 3 {
+            if form.memory_only {
+                return Err(DecodeError::Unsupported(opcode));
+            }
+            rm = Some(RmOperand::Reg(register(modrm & 7, rex_b, rm_size)));
+        } else {
+            if form.register_only {
+                return Err(DecodeError::Unsupported(opcode));
+            }
+            let mut operand = MemOperand {
+                base: Some((modrm & 7) | rex_b),
+                index: None,
+                disp: 0,
+                segment,
+            };
+            let mut low_base = modrm & 7;
+            if low_base == 4 {
+                let sib = cursor.u8()?;
+                low_base = sib & 7;
+                operand.base = Some(low_base | rex_b);
+                // Index 100b means no index unless REX.X selects R12.
+                let index = ((sib >> 3) & 7) | rex_x;
+                operand.index = (index != 4).then_some((index, sib >> 6));
+            } else {
+                rip_relative = mode == 0 && low_base == 5;
+            }
+            if mode == 0 && low_base == 5 {
+                operand.base = None;
+                operand.disp = cursor.signed(4)? as i64;
+            } else if mode != 0 {
+                operand.disp = cursor.signed(if mode == 1 { 1 } else { 4 })? as i64;
+            }
+            rm = Some(RmOperand::Mem(operand));
+        }
+    } else if matches!(form.encoding, Encoding::OpReg | Encoding::OpRegImm) {
+        reg = register(opcode & 7, rex_b, size);
+    }
+
+    let mut imm = match form.immediate {
+        Immediate::None => 0,
+        Immediate::SignedByte => cursor.signed(1)?,
+        Immediate::SignedFull => cursor.signed(usize::from(size.min(4)))?,
+        Immediate::Signed32 => cursor.signed(4)?,
+        Immediate::Full => cursor.bytes(usize::from(size))?,
+        Immediate::Word => cursor.bytes(2)?,
+    };
+
+    let end = rip.wrapping_add(cursor.len as u64);
+    if rip_relative && let Some(RmOperand::Mem(operand)) = &mut rm {
+        operand.disp = end.wrapping_add_signed(operand.disp) as i64;
+    }
+    if form.encoding == Encoding::Rel {
+        imm = end.wrapping_add(imm);
+    }
+    if form.encoding == Encoding::AccImm {
+        reg = RegOperand {
+            index: 0,
+            high: false,
+        };
+    }
+    Ok(Insn {
+        op: form.op,
+        encoding: form.encoding,
+        form: form_index,
+        rip,
+        len: cursor.len as u8,
+        size,
+        rm_size,
+        rm,
+        reg,
+        imm,
+        condition: opcode & 0xF,
+    })
 }
 
 #[cfg(test)]

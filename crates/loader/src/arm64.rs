@@ -198,6 +198,98 @@ impl Arm64Assembler {
         );
     }
 
+    /// CSET Wd, cond (CSINC Wd, WZR, WZR, inverted cond)
+    pub fn cset_32(&mut self, wd: u8, cond: Condition) {
+        self.emit(0x1a9f_07e0 | (((cond as u32) ^ 1) << 12) | (u32::from(wd) & 0x1f));
+    }
+
+    /// CSEL Xd, Xn, Xm, cond
+    pub fn csel_64(&mut self, xd: u8, xn: u8, xm: u8, cond: Condition) {
+        self.emit(
+            0x9a80_0000
+                | ((u32::from(xm) & 0x1f) << 16)
+                | ((cond as u32) << 12)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(xd) & 0x1f),
+        );
+    }
+
+    /// STRB Wt, [Xn, #offset]
+    pub fn strb_uoff(&mut self, wt: u8, xn: u8, offset: u32) {
+        self.emit(
+            0x3900_0000
+                | ((offset & 0xfff) << 10)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(wt) & 0x1f),
+        );
+    }
+
+    /// LDRB Wt, [Xn, #offset]
+    pub fn ldrb_uoff(&mut self, wt: u8, xn: u8, offset: u32) {
+        self.emit(
+            0x3940_0000
+                | ((offset & 0xfff) << 10)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(wt) & 0x1f),
+        );
+    }
+
+    /// EOR Wd, Wn, Wm, LSR #shift
+    pub fn eor_lsr_32(&mut self, wd: u8, wn: u8, wm: u8, shift: u8) {
+        self.emit(
+            0x4a40_0000
+                | ((u32::from(wm) & 0x1f) << 16)
+                | ((u32::from(shift) & 0x1f) << 10)
+                | ((u32::from(wn) & 0x1f) << 5)
+                | (u32::from(wd) & 0x1f),
+        );
+    }
+
+    /// ORR Wd, Wn, Wm
+    pub fn orr_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
+        self.emit(
+            0x2a00_0000
+                | ((u32::from(wm) & 0x1f) << 16)
+                | ((u32::from(wn) & 0x1f) << 5)
+                | (u32::from(wd) & 0x1f),
+        );
+    }
+
+    /// BIC Wd, Wn, Wm (Wn & !Wm)
+    pub fn bic_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
+        self.emit(
+            0x0a20_0000
+                | ((u32::from(wm) & 0x1f) << 16)
+                | ((u32::from(wn) & 0x1f) << 5)
+                | (u32::from(wd) & 0x1f),
+        );
+    }
+
+    /// MVN Xd, Xm (ORN Xd, XZR, Xm)
+    pub fn mvn_64(&mut self, xd: u8, xm: u8) {
+        self.emit(0xaa20_03e0 | ((u32::from(xm) & 0x1f) << 16) | (u32::from(xd) & 0x1f));
+    }
+
+    /// UBFX Wd, Wn, #bit, #1
+    pub fn ubfx_bit_32(&mut self, wd: u8, wn: u8, bit: u8) {
+        self.emit(
+            0x5300_0000
+                | ((u32::from(bit) & 0x1f) << 16)
+                | ((u32::from(bit) & 0x1f) << 10)
+                | ((u32::from(wn) & 0x1f) << 5)
+                | (u32::from(wd) & 0x1f),
+        );
+    }
+
+    /// REV Xd, Xn, or REV Wd, Wn when not `wide`
+    pub fn rev(&mut self, d: u8, n: u8, wide: bool) {
+        self.emit(
+            (if wide { 0xdac0_0c00 } else { 0x5ac0_0800 })
+                | ((u32::from(n) & 0x1f) << 5)
+                | (u32::from(d) & 0x1f),
+        );
+    }
+
     /// SXTW (64-bit/sign-extended): SXTW Xd, Wn (SBFM Xd, Xn, #0, #31)
     pub fn sxtw_64(&mut self, xd: u8, wn: u8) {
         self.emit(0x93407c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));

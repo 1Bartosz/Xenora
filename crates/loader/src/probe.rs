@@ -10,11 +10,13 @@
 //! padding bytes (e.g. INT3 after an unconditional JMP) are never classified as
 //! startup blockers.
 
+use crate::dbt::{is_native, is_translatable};
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::MemoryPermissions;
 use crate::pe::{IMAGE_FILE_MACHINE_AMD64, PE32_PLUS_MAGIC, ParsedPe, PeError, PeSection};
 use crate::services::{MockClock, ServicesState, register_standard_services};
-use crate::x86_decode::MAX_INSTRUCTION_LEN;
+use crate::x86_decode::{Encoding, MAX_INSTRUCTION_LEN, decode};
+use crate::x86_table::Op;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::Write as _;
@@ -164,8 +166,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
         pc += 1;
     }
 
-    let mut is_dbt = false;
-    let mut is_interp = false;
     let mut mnemonic = String::new();
     let mut notes = String::new();
     let mut successors: Vec<u32> = Vec::new();
@@ -174,14 +174,10 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
     match op {
         0xF4 => {
             mnemonic = "hlt".to_string();
-            is_dbt = true;
-            is_interp = true;
             fall_through = false; // HLT terminates
         }
         0x90 => {
             mnemonic = "nop".to_string();
-            is_dbt = true;
-            is_interp = true;
         }
         0xCC => {
             mnemonic = "int3".to_string();
@@ -191,15 +187,11 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
         }
         0xC3 => {
             mnemonic = "ret".to_string();
-            is_dbt = true;
-            is_interp = true;
             fall_through = false;
         }
         0xC7 => {
             if let Some(&modrm) = slice.get(pc) {
                 pc += 1;
-                let mode = modrm >> 6;
-                let rm = modrm & 7;
                 if modrm & 0x38 != 0 {
                     mnemonic = format!("unsupported c7 extension (modrm 0x{modrm:02x})");
                     notes = "unknown instruction boundary".into();
@@ -219,14 +211,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                             )
                         };
                         mnemonic = format!("mov r/m{width}, {value} (modrm 0x{modrm:02x})");
-                        // The native C7 memory path always writes eight bytes and
-                        // does not apply segment bases or decode a SIB byte.
-                        is_dbt = mode == 3
-                            || (mode == 0 && rm != 4 && rex_w && !matches!(slice[0], 0x64 | 0x65));
-                        is_dbt &= !operand_override;
-                        if !is_dbt {
-                            notes = "MOV immediate operand form lacks native semantics".into();
-                        }
                     } else {
                         pc = slice.len();
                         fall_through = false;
@@ -246,22 +230,16 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 pc += 2;
             }
             mnemonic = "retn imm16".to_string();
-            is_dbt = false;
-            is_interp = false;
             notes = "near return with stack pop".to_string();
             fall_through = false;
         }
         0x50..=0x57 => {
             let r = op - 0x50;
             mnemonic = format!("push r{r}");
-            is_dbt = true;
-            is_interp = true;
         }
         0x58..=0x5F => {
             let r = op - 0x58;
             mnemonic = format!("pop r{r}");
-            is_dbt = true;
-            is_interp = true;
         }
         0x01 | 0x03 => {
             if pc < slice.len() {
@@ -269,10 +247,7 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 pc += 1;
                 pc += modrm_extra_len(modrm, slice, pc);
                 mnemonic = format!("add (modrm 0x{modrm:02x})");
-                if (modrm >> 6) == 3 {
-                    is_dbt = true;
-                    is_interp = true;
-                }
+                if (modrm >> 6) == 3 {}
             }
         }
         0x29 | 0x2B => {
@@ -281,10 +256,7 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 pc += 1;
                 pc += modrm_extra_len(modrm, slice, pc);
                 mnemonic = format!("sub (modrm 0x{modrm:02x})");
-                if (modrm >> 6) == 3 {
-                    is_dbt = true;
-                    is_interp = true;
-                }
+                if (modrm >> 6) == 3 {}
             }
         }
         0x31 | 0x33 => {
@@ -293,10 +265,7 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 pc += 1;
                 pc += modrm_extra_len(modrm, slice, pc);
                 mnemonic = format!("xor (modrm 0x{modrm:02x})");
-                if (modrm >> 6) == 3 {
-                    is_dbt = true;
-                    is_interp = true;
-                }
+                if (modrm >> 6) == 3 {}
             }
         }
         // MOVSXD r, r/m32
@@ -305,8 +274,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 pc = end;
                 let width = if rex_w { 64 } else { 32 };
                 mnemonic = format!("movsxd r{width}, r/m32 (modrm 0x{modrm:02x})");
-                is_dbt = true;
-                is_interp = true;
             } else {
                 pc = slice.len();
                 mnemonic = "truncated movsxd".into();
@@ -320,10 +287,7 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 pc += 2;
                 let sub_op = (modrm >> 3) & 7;
                 mnemonic = format!("imm8_group modrm=0x{modrm:02x} imm=0x{imm:02x}");
-                if (modrm >> 6) == 3 && (sub_op == 0 || sub_op == 5 || sub_op == 7) {
-                    is_dbt = true;
-                    is_interp = true;
-                }
+                if (modrm >> 6) == 3 && (sub_op == 0 || sub_op == 5 || sub_op == 7) {}
             }
         }
         0x85 => {
@@ -333,7 +297,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 pc += 1;
                 pc += modrm_extra_len(modrm, slice, pc);
                 mnemonic = format!("test (modrm 0x{modrm:02x})");
-                is_interp = true;
             }
         }
         0x89 | 0x8B => {
@@ -344,8 +307,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let rm = modrm & 7;
                 mnemonic = format!("mov (modrm 0x{modrm:02x})");
                 if mode == 3 {
-                    is_dbt = true;
-                    is_interp = true;
                 } else if rm == 4 {
                     // SIB
                     if pc < slice.len() {
@@ -359,8 +320,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                             pc += 4; // disp32
                         }
                         mnemonic = format!("mov [SIB=0x{sib:02x}]");
-                        is_dbt = true;
-                        is_interp = true;
                     }
                 } else {
                     if mode == 1 && pc < slice.len() {
@@ -368,8 +327,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                     } else if (mode == 2 || (mode == 0 && rm == 5)) && pc + 4 <= slice.len() {
                         pc += 4;
                     }
-                    is_dbt = true;
-                    is_interp = true;
                 }
             }
         }
@@ -378,8 +335,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
             if pc + imm_len <= slice.len() {
                 pc += imm_len;
                 mnemonic = format!("mov reg, imm{imm_len}");
-                is_dbt = true;
-                is_interp = true;
             }
         }
         // CALL rel32 — both call target and fall-through continuation are successors
@@ -390,8 +345,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let insn_len = pc as i64;
                 let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
                 mnemonic = format!("call rel32 -> 0x{target_va:016x}");
-                is_dbt = true;
-                is_interp = true;
                 // Push call target as a CFG successor; fall-through (return site) continues.
                 let call_rva = rva.wrapping_add(pc as u32).wrapping_add(rel32 as u32);
                 successors.push(call_rva);
@@ -406,8 +359,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let insn_len = pc as i64;
                 let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
                 mnemonic = format!("jmp rel32 -> 0x{target_va:016x}");
-                is_dbt = true;
-                is_interp = true;
                 let jmp_rva = rva.wrapping_add(pc as u32).wrapping_add(rel32 as u32);
                 successors.push(jmp_rva);
                 fall_through = false;
@@ -421,8 +372,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let insn_len = pc as i64;
                 let target_va = (va as i64 + insn_len + rel8 as i64) as u64;
                 mnemonic = format!("jmp rel8 -> 0x{target_va:016x}");
-                is_dbt = true;
-                is_interp = true;
                 let jmp_rva = (rva as i64 + insn_len + rel8 as i64) as u32;
                 successors.push(jmp_rva);
                 fall_through = false;
@@ -436,8 +385,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let insn_len = pc as i64;
                 let target_va = (va as i64 + insn_len + rel8 as i64) as u64;
                 mnemonic = format!("j{:x} rel8 -> 0x{target_va:016x}", op & 0xF);
-                is_dbt = true;
-                is_interp = true;
                 let jcc_rva = (rva as i64 + insn_len + rel8 as i64) as u32;
                 successors.push(jcc_rva);
                 // fall_through = true (not-taken path)
@@ -457,8 +404,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                             let insn_len = pc as i64;
                             let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
                             mnemonic = format!("j{:x} rel32 -> 0x{target_va:016x}", op2 & 0xF);
-                            is_dbt = true;
-                            is_interp = true;
                             let jcc_rva = (rva as i64 + insn_len + rel32 as i64) as u32;
                             successors.push(jcc_rva);
                             // fall_through = true
@@ -479,8 +424,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                             };
                             mnemonic =
                                 format!("{name} r{width}, r/m{source} (modrm 0x{modrm:02x})");
-                            is_dbt = true;
-                            is_interp = true;
                         } else {
                             pc = slice.len();
                             mnemonic = "truncated extension".into();
@@ -510,8 +453,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                             mnemonic = format!("call *[RIP + 0x{iat_target:016x}]");
                             notes = "indirect IAT symbol call - requires dynamic import linking"
                                 .to_string();
-                            is_dbt = true;
-                            is_interp = true;
                             // fall_through = true (return will come back here)
                         } else {
                             mnemonic = format!("jmp *[RIP + 0x{iat_target:016x}]");
@@ -523,8 +464,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                         if reg_field == 2 {
                             mnemonic = format!("call *r/m (modrm 0x{modrm:02x})");
                             notes = "indirect call - target unknown".to_string();
-                            is_dbt = true;
-                            is_interp = true;
                         } else {
                             mnemonic = format!("jmp *r/m (modrm 0x{modrm:02x})");
                             notes = "indirect jmp - target unknown statically".to_string();
@@ -535,8 +474,6 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                     // PUSH r/m
                     pc += modrm_extra_len(modrm, slice, pc);
                     mnemonic = format!("push r/m (modrm 0x{modrm:02x})");
-                    is_dbt = true;
-                    is_interp = true;
                 } else {
                     pc += modrm_extra_len(modrm, slice, pc);
                     mnemonic = format!("ff_group_r{reg_field} (modrm 0x{modrm:02x})");
@@ -564,6 +501,36 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
             fall_through: false,
         });
     }
+
+    // The decoder both engines execute with decides support, length and static
+    // control flow, so the report cannot claim a form they reject.
+    let (is_dbt, is_interp) = match decode(va, |address| {
+        slice
+            .get(address.wrapping_sub(va) as usize)
+            .copied()
+            .ok_or(())
+    }) {
+        Ok(insn) => {
+            pc = usize::from(insn.len);
+            if mnemonic.is_empty() || mnemonic.contains("opcode_0x") || mnemonic.starts_with("0f_")
+            {
+                mnemonic = insn.op.name().to_string();
+                notes.clear();
+            }
+            if !is_translatable(&insn) {
+                notes = "raw guest system calls are not dispatched by the DBT".into();
+            } else if !is_native(&insn) {
+                notes = "executed by the shared semantics, not translated to ARM64".into();
+            }
+            let relative = insn.encoding == Encoding::Rel;
+            if relative {
+                successors = vec![insn.imm.wrapping_sub(va).wrapping_add(u64::from(rva)) as u32];
+            }
+            fall_through = !matches!(insn.op, Op::Jmp | Op::Ret | Op::Hlt);
+            (is_translatable(&insn), true)
+        }
+        Err(_) => (false, false),
+    };
 
     Some(CfgDecoded {
         rva,

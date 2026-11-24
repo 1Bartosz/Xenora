@@ -260,6 +260,7 @@ fn register_extensions_match_the_architecture_in_both_engines() {
                     zf: flags_set,
                     sf: flags_set,
                     of: flags_set,
+                    ..RFlags::default()
                 };
                 let mut gpr = cpu.gpr;
                 gpr[case.dst] = expected(case, &cpu.gpr);
@@ -300,13 +301,16 @@ fn mov_immediate_is_never_decoded_as_a_sign_extension() {
 }
 
 #[test]
-fn sixteen_bit_mov_immediate_is_rejected_not_run_at_the_wrong_width() {
-    // 66 B9 34 12 = mov cx, 0x1234, a form neither engine implements.
-    let code = [0x66, 0xB9, 0x34, 0x12];
-    let cpu = CpuState::new(ENTRY, 0);
-    for (result, _) in both(&code, &[], &cpu, "mov cx, imm16") {
-        assert_eq!(result.exit_reason, ExitReason::IllegalInstruction(0x66));
-        assert_eq!(result.final_state, cpu);
+fn sixteen_bit_mov_immediate_writes_only_the_low_word() {
+    // 66 B9 34 12 = mov cx, 0x1234
+    let mut cpu = CpuState::new(ENTRY, 0);
+    cpu.gpr = [0xFFFF_FFFF_FFFF_FFFF; 16];
+    let mut gpr = cpu.gpr;
+    gpr[Register::Rcx as usize] = 0xFFFF_FFFF_FFFF_1234;
+    for (result, _) in both(&[0x66, 0xB9, 0x34, 0x12], &[], &cpu, "mov cx, 0x1234") {
+        assert_eq!(result.exit_reason, ExitReason::StepLimitExceeded);
+        assert_eq!(result.final_state.gpr, gpr);
+        assert_eq!(result.final_state.rip, ENTRY + 4);
     }
 }
 

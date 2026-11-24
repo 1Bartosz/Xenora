@@ -20,6 +20,9 @@ pub mod startup;
 pub mod tls;
 pub mod triage;
 pub mod x86_decode;
+pub mod x86_exec;
+#[rustfmt::skip]
+pub mod x86_table;
 
 pub use arm64::Arm64Assembler;
 pub use cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, RFlags, Register};
