@@ -41,6 +41,10 @@ jobs:
           for fixture in x2 x3 x4; do
             python3 "experiments/x1/fixtures/$fixture.py" --check || exit 1
           done
+      - name: Test agent task queue
+        run: |
+          PYTHONPATH=scripts python3 -m unittest discover -s tests/agent_queue
+          sh -n scripts/agent-queue.sh scripts/agent-sync.sh
       - name: Check formatting and lint
         run: |
           cargo fmt --all -- --check

@@ -1,0 +1,72 @@
+name: Agent task claims
+
+# Applies queue commands (/claim, /release, /reassign, /progress, /blocked,
+# /unblock, /approve-acceptance) and audits the queue hourly. Comment and issue
+# text is only parsed as data by scripts/agent_queue; it is never executed and
+# never interpolated into a shell. Not yet run on GitHub.
+
+on:
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  command:
+    if: github.event_name == 'issue_comment' && !github.event.issue.pull_request
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      issues: write
+    # One global group: claims are decided one at a time so file-overlap checks cannot race.
+    concurrency:
+      group: agent-queue
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Decide and apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PYTHONPATH: scripts
+        run: |
+          set -eu
+          python3 -m agent_queue event --path "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/event.json"
+          python3 -m agent_queue gather --repo "$GH_REPO" --no-prs > "$RUNNER_TEMP/state.json"
+          python3 -m agent_queue decide --event "$RUNNER_TEMP/event.json" --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
+          python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/actions.json"
+
+  audit:
+    if: github.event_name != 'issue_comment'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: agent-queue
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lapse stale claims, flag invalid tasks, write summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PYTHONPATH: scripts
+        run: |
+          set -eu
+          python3 -m agent_queue gather --repo "$GH_REPO" > "$RUNNER_TEMP/state.json"
+          python3 -m agent_queue audit --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
+          python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/actions.json"
+          {
+            echo '## Agent queue summary'
+            echo '```json'
+            python3 -m agent_queue summary --state "$RUNNER_TEMP/state.json" --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
