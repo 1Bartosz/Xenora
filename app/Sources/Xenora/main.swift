@@ -447,6 +447,7 @@ final class FrameLoopModel: ObservableObject {
     @Published var image: CGImage?
     @Published var errorMessage: String?
     @Published var isInteractive: Bool = false
+    @Published private(set) var controller: DetectedController?
 
     private var session: xenora_session = 0
     private var pollTask: Task<Void, Never>?
@@ -526,6 +527,7 @@ final class FrameLoopModel: ObservableObject {
             return
         }
         isInteractive = true
+        controller = nil
         state = UInt32(XENORA_LOOP_RUNNING)
         completed = 0
         frameId = XENORA_NO_FRAME
@@ -534,18 +536,31 @@ final class FrameLoopModel: ObservableObject {
     }
 
     func sendInput(buttons: UInt32) {
+        sendInput(buttons: buttons, x: 0, y: 0, connected: true)
+    }
+
+    private func sendInput(buttons: UInt32, x: Int16, y: Int16, connected: Bool) {
         guard session != 0 else { return }
         var input = xenora_input_state(
             buttons: buttons,
-            stick_x: 0,
-            stick_y: 0,
+            stick_x: x,
+            stick_y: y,
             mouse_dx: 0,
             mouse_dy: 0,
             mouse_buttons: 0,
-            connected: 1,
+            connected: connected ? 1 : 0,
             reserved: 0
         )
         _ = xenora_session_send_input(session, &input)
+    }
+
+    private func updateGameController() {
+        let next = pollGameController()
+        guard next != controller else { return }
+        controller = next
+        let snapshot = next?.snapshot
+        sendInput(buttons: snapshot?.buttons ?? 0, x: snapshot?.x ?? 0, y: snapshot?.y ?? 0,
+                  connected: next != nil)
     }
 
     func pause() {
@@ -569,6 +584,9 @@ final class FrameLoopModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 16_000_000)
                 guard let self = self, self.session != 0 else { break }
+                if self.isInteractive {
+                    self.updateGameController()
+                }
                 var st: UInt32 = 0
                 var comp: UInt32 = 0
                 var fId: UInt32 = 0
@@ -773,6 +791,11 @@ struct ContentView: View {
                         .disabled(!loop.isRunning && !loop.isPaused)
                 }
                 if loop.isInteractive && (loop.isRunning || loop.isPaused) {
+                    if let controller = loop.controller {
+                        Text("Controller: \(controller.name)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     HStack {
                         Button("◀ Left") { loop.sendInput(buttons: UInt32(XENORA_INPUT_LEFT)) }
                         Button("▶ Right") { loop.sendInput(buttons: UInt32(XENORA_INPUT_RIGHT)) }
@@ -830,6 +853,14 @@ if CommandLine.arguments.contains("--smoke-resources") {
 }
 
 // `--smoke-audio-vfs` tests VFS asset loading, PCM audio streaming, and Metal texture presentation.
+if CommandLine.arguments.contains("--smoke-controller") {
+    let simulated = ControllerSnapshot(buttons: 1, x: 0.1, y: -1, leftTrigger: 1.2, rightTrigger: .nan)
+    let physical = pollGameController()
+    print("smoke-controller: simulatedAxis=\(simulated.x),\(simulated.y) triggers=\(simulated.leftTrigger),\(simulated.rightTrigger) detected=\(physical?.name ?? "none")")
+    exit(simulated.buttons == 1 && simulated.x == 0 && simulated.y == -32767
+         && simulated.leftTrigger == 1 && simulated.rightTrigger == 0 ? 0 : 1)
+}
+
 if CommandLine.arguments.contains("--smoke-audio-mix") {
     do {
         let result = try measureAudioMixFixture()
