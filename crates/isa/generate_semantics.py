@@ -779,9 +779,10 @@ def _well_formed(rule):
     )
 
 
-def variant_row(registry, variant):
+def variant_row(registry, variant, base=None):
     """The base form re-encoded: its declaration with the variant's identity."""
-    base = next(form for form in registry["form"] if form.get("name") == variant["of"])
+    if base is None:
+        base = next(form for form in registry["form"] if form.get("name") == variant["of"])
     return dict(
         base, family=variant["family"], opcode=variant["opcode"], operands=variant["operands"],
         spec=variant["spec"], verify=variant["verify"],
@@ -854,7 +855,9 @@ def _check_variants(registry, rules, documents, snapshot, seen, errors):
         if FORM_KEYS - set(base):
             errors.append(f"{label}: not checked, its form {variant['of']} is incomplete")
             continue
-        _check_xml(variant_row(registry, variant), rule, snapshot, errors)
+        # The same base row as the completeness check above (with duplicate
+        # declarations, the dict keeps the last one).
+        _check_xml(variant_row(registry, variant, base), rule, snapshot, errors)
         # Every explicit operand, destination included, has the base encoding's
         # data format, in the same order (VSRC1 of VOP2 is SRC1 of VOP3).
         base_xml = snapshot["variants"].get((base["name"], _family_encoding(base["family"])))
