@@ -63,6 +63,7 @@ from .runtime_inventory import (
     compact_runtime,
     dumps_runtime,
 )
+from .compat_gaps import analyze_gaps, compact_gaps, dumps_gaps, load_dependency_report
 from .stale_branch import classify_sync, format_sync_reports
 from .verify import dumps_evidence, evidence_is_stale, load_evidence, run_profile
 
@@ -139,6 +140,11 @@ def main(argv: list[str] | None = None) -> int:
     rinv = sub.add_parser("runtime-inventory", help="typed runtime services from services.txt")
     rinv.add_argument("--compact", action="store_true")
     rinv.add_argument("--out", default="")
+
+    gaps = sub.add_parser("compat-gaps", help="read-only dependency gap analysis (no binary exec)")
+    gaps.add_argument("--deps", required=True, help="JSON dependency report path")
+    gaps.add_argument("--compact", action="store_true")
+    gaps.add_argument("--out", default="")
 
     ver = sub.add_parser("verify", help="run a verification profile")
     ver.add_argument("profile", choices=("quick", "cpu", "gpu", "app", "full", "release"))
@@ -363,6 +369,20 @@ def main(argv: list[str] | None = None) -> int:
             print(compact_runtime(inv), end="")
         else:
             print(dumps_runtime(inv), end="")
+        return 0
+
+    if args.command == "compat-gaps":
+        deps = load_dependency_report(Path(args.deps))
+        rt = build_runtime_inventory(root)
+        report = analyze_gaps(deps, implemented=rt.implemented, partial=rt.partial)
+        payload = report.to_dict()
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if args.compact or args.out:
+            print(compact_gaps(report), end="")
+        else:
+            print(dumps_gaps(report), end="")
         return 0
 
     if args.command == "verify":
