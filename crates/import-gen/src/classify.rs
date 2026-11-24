@@ -981,6 +981,8 @@ impl SymbolDb {
                 "CreateDirectoryW",
                 "RemoveDirectoryW",
                 "DeleteFileW",
+                "GetFileAttributesW",
+                "MoveFileW",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
@@ -993,7 +995,6 @@ impl SymbolDb {
             false,
             "GetFileAttributes — stub returning INVALID",
         );
-        self.win32_stub(m, "GetFileAttributesW", false, "GetFileAttributesW — stub");
         self.win32_stub(m, "DeleteFileA", false, "DeleteFile — stub returning FALSE");
         self.win32_stub(
             m,

@@ -204,7 +204,9 @@ Paths cannot access host files. The drive supports
 256 files and 16 MiB of data, with a 1 MiB limit per transfer.
 CreateDirectoryW and RemoveDirectoryW manage up to 256 directories. Parents
 must exist, and directories must be empty before removal. DeleteFileW
-deletes closed files. Traversal components and device names are rejected.
+deletes closed files. MoveFileW moves closed files to an unused name under
+an existing directory. GetFileAttributesW distinguishes files and directories.
+Traversal components and device names are rejected.
 Persistence, directory enumeration, asynchronous I/O, and file handle
 duplication remain outside this subset.
 

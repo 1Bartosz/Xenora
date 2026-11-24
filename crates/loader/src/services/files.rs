@@ -224,6 +224,64 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    let attributes = Arc::clone(state);
+    registry.register(KERNEL32, "GetFileAttributesW", move |args, _, memory| {
+        const INVALID_ATTRIBUTES: u64 = u32::MAX as u64;
+        let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return attributes.fail(INVALID_NAME, INVALID_ATTRIBUTES);
+        };
+        let objects = attributes.objects.lock().expect("guest object state");
+        if objects.directories.contains(&path) {
+            return Ok(0x10); // FILE_ATTRIBUTE_DIRECTORY
+        }
+        if objects.files.contains_key(&path) {
+            return Ok(0x80); // FILE_ATTRIBUTE_NORMAL
+        }
+        let parent = parent(&path);
+        let error = if parent.is_empty() || objects.directories.contains(parent) {
+            FILE_NOT_FOUND
+        } else {
+            PATH_NOT_FOUND
+        };
+        attributes.fail(error, INVALID_ATTRIBUTES)
+    });
+
+    let rename = Arc::clone(state);
+    registry.register(KERNEL32, "MoveFileW", move |args, _, memory| {
+        let Some(source) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return rename.fail(INVALID_NAME, 0);
+        };
+        let Some(target) = guest_path(memory, args.rdx).map_err(ExitReason::MemoryFault)? else {
+            return rename.fail(INVALID_NAME, 0);
+        };
+        let mut objects = rename.objects.lock().expect("guest object state");
+        if [parent(&source), parent(&target)]
+            .into_iter()
+            .any(|path| !path.is_empty() && !objects.directories.contains(path))
+        {
+            return rename.fail(PATH_NOT_FOUND, 0);
+        }
+        if objects.directories.contains(&source) {
+            return rename.fail(ERROR_NOT_SUPPORTED, 0);
+        }
+        if !objects.files.contains_key(&source) {
+            return rename.fail(FILE_NOT_FOUND, 0);
+        }
+        if objects.files.contains_key(&target) || objects.directories.contains(&target) {
+            return rename.fail(ALREADY_EXISTS, 0);
+        }
+        if objects
+            .handles
+            .values()
+            .any(|object| matches!(object, GuestObject::File(file) if file.path == source))
+        {
+            return rename.fail(SHARING_VIOLATION, 0);
+        }
+        let data = objects.files.remove(&source).expect("source file exists");
+        objects.files.insert(target, data);
+        Ok(1)
+    });
+
     let size = Arc::clone(state);
     registry.register(KERNEL32, "GetFileSizeEx", move |args, _, memory| {
         let objects = size.objects.lock().expect("guest object state");
@@ -396,6 +454,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "CreateDirectoryW",
         "RemoveDirectoryW",
         "DeleteFileW",
+        "GetFileAttributesW",
+        "MoveFileW",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

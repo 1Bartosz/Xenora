@@ -1126,11 +1126,18 @@ fn test_guest_synthetic_file_io_through_iat() {
     const IMAGE: u64 = 0x140000000;
     const MODULE: &str = "api-ms-win-core-file-l1-1-0.dll";
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
-    let path_call = |symbol, name: &str, access: u64, disposition: u64| {
+    let path_call = |symbol, name: &str, access: u64, disposition: u64, target: Option<&str>| {
         let mut code = vec![0x48, 0x83, 0xec, 0x48];
         for (register, value) in [
             ([0x48, 0xb9], IMAGE + 0x1080),
-            ([0x48, 0xba], access),
+            (
+                [0x48, 0xba],
+                if target.is_some() {
+                    IMAGE + 0x1180
+                } else {
+                    access
+                },
+            ),
             ([0x49, 0xb8], 0),
             ([0x49, 0xb9], 0),
         ] {
@@ -1146,6 +1153,10 @@ fn test_guest_synthetic_file_io_through_iat() {
         code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x48, 0xf4]);
         code.resize(0x80, 0);
         code.extend(name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+        if let Some(target) = target {
+            code.resize(0x180, 0);
+            code.extend(target.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+        }
         let bytes = TestPeBuilder::new(IMAGE, 0x1000)
             .add_import(MODULE, symbol)
             .code(&code)
@@ -1166,8 +1177,9 @@ fn test_guest_synthetic_file_io_through_iat() {
         assert_eq!(result.execution.exit_reason, ExitReason::Halt);
         result.execution.final_state.get(Register::Rax)
     };
-    let open = |name, access, disposition| path_call("CreateFileW", name, access, disposition);
-    let namespace = |symbol, path| path_call(symbol, path, 0, 0);
+    let open =
+        |name, access, disposition| path_call("CreateFileW", name, access, disposition, None);
+    let namespace = |symbol, path| path_call(symbol, path, 0, 0, None);
     let call = |symbol, args: &[u64]| call_service_fixture(&state, "kernel32.dll", symbol, args);
     let output = PROCESS_FIXTURE_OUTPUT;
     assert_eq!(open("C:/../outside", 0x4000_0000, 2), u64::MAX);
@@ -1302,6 +1314,28 @@ fn test_guest_synthetic_file_io_through_iat() {
     assert_eq!(open("data/nested/save.bin", 0x8000_0000, 3), u64::MAX);
     assert_eq!(namespace("RemoveDirectoryW", "DATA/NESTED"), 1);
     assert_eq!(namespace("RemoveDirectoryW", "DATA"), 1);
+    let move_file = |source, target| path_call("MoveFileW", source, 0, 0, Some(target));
+    assert_eq!(namespace("GetFileAttributesW", "sample.dat"), 0x80);
+    assert_eq!(move_file("sample.dat", "moved.dat"), 0); // Open writer.
+    assert_eq!(
+        call("CloseHandle", &[writer])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    assert_eq!(move_file("sample.dat", "missing/moved.dat"), 0);
+    assert_eq!(namespace("CreateDirectoryW", "Archive"), 1);
+    assert_eq!(namespace("GetFileAttributesW", "archive"), 0x10);
+    assert_eq!(move_file("sample.dat", "archive/moved.dat"), 1);
+    assert_eq!(
+        namespace("GetFileAttributesW", "sample.dat"),
+        u64::from(u32::MAX)
+    );
+    let moved = open("Archive/Moved.DAT", 0x8000_0000, 3);
+    assert_ne!(moved, u64::MAX);
+    let size = call("GetFileSizeEx", &[moved, output]);
+    assert_eq!(size.image.memory.read_u64(output).unwrap(), 6);
 }
 
 #[test]
