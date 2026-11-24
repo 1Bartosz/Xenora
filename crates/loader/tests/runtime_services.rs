@@ -716,8 +716,8 @@ fn guest_call_through_dbt_preserves_win64_abi_state() {
         cpu.set(Rdx, 0x22);
         cpu.set(R8, 0x33);
         cpu.set(R9, 0x44);
-        for reg in 0..6 {
-            cpu.xmm[reg] = u128::from(0x55_u64 + reg as u64);
+        for (reg, lane) in cpu.xmm[..6].iter_mut().enumerate() {
+            *lane = u128::from(0x55_u64 + reg as u64);
         }
         Ok(0x99AA_BBCC_DDEE_F001)
     });
@@ -747,8 +747,8 @@ fn guest_call_through_dbt_preserves_win64_abi_state() {
     for (index, register) in nonvolatile_gpr.into_iter().enumerate() {
         cpu.set(register, 0x6100 + index as u64);
     }
-    for index in 6..16 {
-        cpu.xmm[index] = u128::from(0x6200_u64 + index as u64);
+    for (offset, lane) in cpu.xmm[6..16].iter_mut().enumerate() {
+        *lane = u128::from(0x6200_u64 + (offset + 6) as u64);
     }
     let result = engine.run(&mut cpu, &mut memory, 1000);
     assert_eq!(result.exit_reason, ExitReason::Halt);
@@ -761,12 +761,9 @@ fn guest_call_through_dbt_preserves_win64_abi_state() {
     for (index, register) in nonvolatile_gpr.into_iter().enumerate() {
         assert_eq!(cpu.get(register), 0x6100 + index as u64, "{register:?}");
     }
-    for index in 6..16 {
-        assert_eq!(
-            cpu.xmm[index],
-            u128::from(0x6200_u64 + index as u64),
-            "xmm{index}"
-        );
+    for (offset, lane) in cpu.xmm[6..16].iter().enumerate() {
+        let index = offset + 6;
+        assert_eq!(*lane, u128::from(0x6200_u64 + index as u64), "xmm{index}");
     }
 }
 
@@ -1057,8 +1054,8 @@ fn service_calls_preserve_win64_abi_state() {
         cpu.set(R9, 0xA4);
         cpu.set(R10, 0xA5);
         cpu.set(R11, 0xA6);
-        for reg in 0..6 {
-            cpu.xmm[reg] = u128::from(0xB0_u64 + reg as u64);
+        for (reg, lane) in cpu.xmm[..6].iter_mut().enumerate() {
+            *lane = u128::from(0xB0_u64 + reg as u64);
         }
         Ok(0x1122_3344_5566_7788)
     });
@@ -1077,8 +1074,8 @@ fn service_calls_preserve_win64_abi_state() {
     for (index, register) in nonvolatile_gpr.into_iter().enumerate() {
         cpu.set(register, 0x5AA5_0000_0001_0000 + index as u64);
     }
-    for index in 6..16 {
-        cpu.xmm[index] = u128::from(0xD000_0000_0000_0000_u64 + index as u64);
+    for (offset, lane) in cpu.xmm[6..16].iter_mut().enumerate() {
+        *lane = u128::from(0xD000_0000_0000_0000_u64 + (offset + 6) as u64);
     }
     cpu.set(Rcx, 0x1357_9BDF_2468_ACE0);
     let result = registry.dispatch(trampoline, &mut cpu, &mut memory);
@@ -1111,9 +1108,10 @@ fn service_calls_preserve_win64_abi_state() {
             "nonvolatile {register:?} must be preserved"
         );
     }
-    for index in 6..16 {
+    for (offset, lane) in cpu.xmm[6..16].iter().enumerate() {
+        let index = offset + 6;
         assert_eq!(
-            cpu.xmm[index],
+            *lane,
             u128::from(0xD000_0000_0000_0000_u64 + index as u64),
             "nonvolatile xmm{index} must be preserved"
         );
