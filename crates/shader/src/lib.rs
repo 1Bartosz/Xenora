@@ -700,7 +700,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 } => dst,
                 _ => {
                     return Err(error(
-                        "code skipped by a runtime s_cbranch_vccz may contain only v_mov_b32, v_add_nc_u32_e64 and the hand-written integer VOP2 forms",
+                        "code skipped by a runtime s_cbranch_vccz may contain only v_mov_b32, v_add_nc_u32_e64 and the VOP2 logical and shift forms",
                     ));
                 }
             };
