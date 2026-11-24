@@ -1130,7 +1130,7 @@ fn guest_platform_saves_enforce_quota_and_preserve_existing_data() {
     let buffer = PROCESS_FIXTURE_STACK_TOP - 0x2000;
     assert_eq!(value("GetFixturePlatformCapabilities", &[]), 0);
     assert_eq!(value("OpenFixturePlatform", &[]), 1);
-    assert_eq!(value("GetFixturePlatformCapabilities", &[]), 3);
+    assert_eq!(value("GetFixturePlatformCapabilities", &[]), 15);
     let quota = |expected| {
         let result = call("GetFixtureSaveQuota", &[buffer]);
         assert_eq!(result.execution.final_state.get(Register::Rax), 1);
@@ -1171,6 +1171,31 @@ fn guest_platform_saves_enforce_quota_and_preserve_existing_data() {
     assert_eq!(value("WriteFixtureSave", &[6, buffer, 4088]), 1);
     quota(16 * 1024);
     assert_eq!(value("ReadFixtureSave", &[5, buffer, 4096]), 0);
+}
+
+#[test]
+fn guest_platform_profile_changes_are_delivered_in_order() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call =
+        |symbol, args: &[u64]| call_service_fixture(&state, "xenora_fixture.dll", symbol, args);
+    let value = |symbol, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    assert_eq!(value("OpenFixturePlatform", &[]), 1);
+    assert_eq!(value("CreateFixtureProfile", &[]), 1);
+    assert_eq!(value("CreateFixtureProfile", &[]), 2);
+    assert_eq!(value("SelectFixtureProfile", &[3]), 0);
+    assert_eq!(value("SelectFixtureProfile", &[1]), 1);
+    assert_eq!(value("SelectFixtureProfile", &[1]), 1);
+    assert_eq!(value("SelectFixtureProfile", &[2]), 1);
+    assert_eq!(value("GetSelectedFixtureProfile", &[]), 2);
+    assert_eq!(value("PollFixtureProfileChange", &[0]), 0);
+    let output = PROCESS_FIXTURE_STACK_TOP - 0x400;
+    for (previous, next) in [(0, 1), (1, 2)] {
+        let event = call("PollFixtureProfileChange", &[output]);
+        assert_eq!(event.execution.final_state.get(Register::Rax), 1);
+        assert_eq!(event.image.memory.read_u64(output).unwrap(), previous);
+        assert_eq!(event.image.memory.read_u64(output + 8).unwrap(), next);
+    }
+    assert_eq!(value("PollFixtureProfileChange", &[output]), 0);
 }
 
 #[test]

@@ -4,7 +4,7 @@
 
 use super::{ERROR_INVALID_PARAMETER, ERROR_NOACCESS, ERROR_NOT_ENOUGH_MEMORY, ServicesState};
 use crate::imports::ImportRegistry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 const MODULE: &str = "xenora_fixture.dll";
@@ -19,12 +19,19 @@ const ERROR_DISK_FULL: u32 = 112;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const CAP_LOCAL_SETTINGS: u64 = 1 << 0;
 const CAP_LOCAL_SAVES: u64 = 1 << 1;
+const CAP_LOCAL_PROFILES: u64 = 1 << 2;
+const CAP_PROFILE_NOTIFICATIONS: u64 = 1 << 3;
+const MAX_PROFILES: u64 = 8;
+const MAX_NOTIFICATIONS: usize = 16;
 
 #[derive(Default)]
 pub(super) struct PlatformFixture {
     active: bool,
     settings: BTreeMap<u32, u64>,
     saves: BTreeMap<u32, Vec<u8>>,
+    profile_count: u64,
+    selected_profile: u64,
+    profile_changes: VecDeque<(u64, u64)>,
 }
 
 impl PlatformFixture {
@@ -94,6 +101,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
     register_saves(registry, state);
+    register_profiles(registry, state);
 
     let capabilities = Arc::clone(state);
     registry.register(
@@ -107,7 +115,10 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             if !platform.active {
                 return capabilities.fail(cpu.gs_base, ERROR_INVALID_STATE, 0);
             }
-            Ok(CAP_LOCAL_SETTINGS | CAP_LOCAL_SAVES)
+            Ok(CAP_LOCAL_SETTINGS
+                | CAP_LOCAL_SAVES
+                | CAP_LOCAL_PROFILES
+                | CAP_PROFILE_NOTIFICATIONS)
         },
     );
 }
@@ -187,4 +198,73 @@ fn register_saves(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         }
         Ok(1)
     });
+}
+
+fn register_profiles(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    let create = Arc::clone(state);
+    registry.register(MODULE, "CreateFixtureProfile", move |_, cpu, _| {
+        let mut platform = create.platform_fixture.lock().expect("fixture platform");
+        if !platform.active {
+            return create.fail(cpu.gs_base, ERROR_INVALID_STATE, 0);
+        }
+        if platform.profile_count == MAX_PROFILES {
+            return create.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
+        }
+        platform.profile_count += 1;
+        Ok(platform.profile_count)
+    });
+
+    let select = Arc::clone(state);
+    registry.register(MODULE, "SelectFixtureProfile", move |args, cpu, _| {
+        let mut platform = select.platform_fixture.lock().expect("fixture platform");
+        let fail = |error| select.fail(cpu.gs_base, error, 0);
+        if !platform.active {
+            return fail(ERROR_INVALID_STATE);
+        }
+        let next = args.rcx;
+        if next > platform.profile_count {
+            return fail(ERROR_NOT_FOUND);
+        }
+        let previous = platform.selected_profile;
+        if previous != next {
+            if platform.profile_changes.len() == MAX_NOTIFICATIONS {
+                return fail(ERROR_NOT_ENOUGH_MEMORY);
+            }
+            platform.profile_changes.push_back((previous, next));
+            platform.selected_profile = next;
+        }
+        Ok(1)
+    });
+
+    let selected = Arc::clone(state);
+    registry.register(MODULE, "GetSelectedFixtureProfile", move |_, cpu, _| {
+        let platform = selected.platform_fixture.lock().expect("fixture platform");
+        if !platform.active {
+            return selected.fail(cpu.gs_base, ERROR_INVALID_STATE, 0);
+        }
+        Ok(platform.selected_profile)
+    });
+
+    let poll = Arc::clone(state);
+    registry.register(
+        MODULE,
+        "PollFixtureProfileChange",
+        move |args, cpu, memory| {
+            let mut platform = poll.platform_fixture.lock().expect("fixture platform");
+            if !platform.active {
+                return poll.fail(cpu.gs_base, ERROR_INVALID_STATE, 0);
+            }
+            let Some(&(previous, next)) = platform.profile_changes.front() else {
+                return Ok(0);
+            };
+            let mut record = [0; 16];
+            record[..8].copy_from_slice(&previous.to_le_bytes());
+            record[8..].copy_from_slice(&next.to_le_bytes());
+            if args.rcx == 0 || memory.write_bytes(args.rcx, &record).is_err() {
+                return poll.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            platform.profile_changes.pop_front();
+            Ok(1)
+        },
+    );
 }
