@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added guest file and directory enumeration with typed search handles.
+
 - Added closed-file moves and file and directory attribute queries on the synthetic guest drive.
 
 - Added nested guest directories and checked file deletion on the synthetic drive.

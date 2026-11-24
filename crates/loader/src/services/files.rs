@@ -36,7 +36,7 @@ pub(super) struct OpenFile {
     share: u32,
 }
 
-fn guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
+fn read_guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
     if address == 0 {
         return Ok(None);
     }
@@ -52,14 +52,78 @@ fn guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, Memo
             };
             let path = path.replace('/', "\\").to_ascii_lowercase();
             let name = path.strip_prefix("c:\\").unwrap_or(&path);
-            return Ok(name
-                .split('\\')
-                .all(valid_component)
-                .then(|| name.to_owned()));
+            return Ok(Some(name.to_owned()));
         }
         units.push(unit);
     }
     Ok(None)
+}
+
+fn guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
+    Ok(read_guest_path(memory, address)?.filter(|name| name.split('\\').all(valid_component)))
+}
+
+struct SearchEntry {
+    name: String,
+    attributes: u32,
+    size: u64,
+}
+
+pub(super) struct Search {
+    entries: Vec<SearchEntry>,
+    next: usize,
+}
+
+fn write_find_data(
+    memory: &mut GuestMemory,
+    output: u64,
+    entry: &SearchEntry,
+) -> Result<(), MemoryError> {
+    if output == 0 {
+        return Err(MemoryError::UnmappedAddress(0));
+    }
+    // WIN32_FIND_DATAW: attributes, three FILETIMEs, size high/low,
+    // two reserved DWORDs, WCHAR[260], then WCHAR[14].
+    let mut bytes = [0u8; 592];
+    bytes[..4].copy_from_slice(&entry.attributes.to_le_bytes());
+    bytes[28..32].copy_from_slice(&((entry.size >> 32) as u32).to_le_bytes());
+    bytes[32..36].copy_from_slice(&(entry.size as u32).to_le_bytes());
+    for (slot, unit) in bytes[44..564]
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(entry.name.encode_utf16())
+    {
+        slot.copy_from_slice(&unit.to_le_bytes());
+    }
+    memory.write_bytes(output, &bytes)
+}
+
+fn wildcard_match(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<_> = pattern.encode_utf16().collect();
+    let name: Vec<_> = name.encode_utf16().collect();
+    let (mut p, mut n, mut retry) = (0, 0, None);
+    while n < name.len() {
+        match pattern.get(p).copied() {
+            Some(42) => {
+                p += 1;
+                retry = Some((p, n));
+            }
+            Some(unit) if unit == 63 || unit == name[n] => {
+                p += 1;
+                n += 1;
+            }
+            _ => {
+                let Some((after_star, previous)) = retry else {
+                    return false;
+                };
+                n = previous + 1;
+                p = after_star;
+                retry = Some((p, n));
+            }
+        }
+    }
+    pattern[p..].iter().all(|&unit| unit == 42)
 }
 
 fn valid_component(name: &str) -> bool {
@@ -282,6 +346,95 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    let find = Arc::clone(state);
+    registry.register(KERNEL32, "FindFirstFileW", move |args, _, memory| {
+        let Some(path) = read_guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return find.fail(INVALID_NAME, INVALID_HANDLE);
+        };
+        let directory = parent(&path);
+        let pattern = path.rsplit('\\').next().unwrap_or_default();
+        if path.starts_with('\\')
+            || (!directory.is_empty() && !directory.split('\\').all(valid_component))
+            || !valid_component(&pattern.replace(['*', '?'], "x"))
+        {
+            return find.fail(INVALID_NAME, INVALID_HANDLE);
+        }
+        let pattern = if pattern == "*.*" { "*" } else { pattern };
+        let mut objects = find.objects.lock().expect("guest object state");
+        if !directory.is_empty() && !objects.directories.contains(directory) {
+            return find.fail(PATH_NOT_FOUND, INVALID_HANDLE);
+        }
+        let candidates = objects
+            .directories
+            .iter()
+            .map(|path| (path, 0x10, 0))
+            .chain(
+                objects
+                    .files
+                    .iter()
+                    .map(|(path, data)| (path, 0x80, data.len() as u64)),
+            );
+        let mut entries = Vec::new();
+        for (path, attributes, size) in candidates.filter(|(path, _, _)| parent(path) == directory)
+        {
+            let name = path.rsplit('\\').next().expect("candidate name");
+            if wildcard_match(pattern, name) {
+                entries.push(SearchEntry {
+                    name: name.to_owned(),
+                    attributes,
+                    size,
+                });
+            }
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let Some(first) = entries.first() else {
+            return find.fail(FILE_NOT_FOUND, INVALID_HANDLE);
+        };
+        if objects
+            .handles
+            .values()
+            .filter(|object| matches!(object, GuestObject::Search(_)))
+            .count()
+            >= 32
+        {
+            return find.fail(ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
+        }
+        let Some(handle) = objects.next_handle() else {
+            return find.fail(ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
+        };
+        if write_find_data(memory, args.rdx, first).is_err() {
+            return find.fail(ERROR_NOACCESS, INVALID_HANDLE);
+        }
+        objects.insert_handle(handle, GuestObject::Search(Search { entries, next: 1 }));
+        Ok(handle)
+    });
+
+    let find_next = Arc::clone(state);
+    registry.register(KERNEL32, "FindNextFileW", move |args, _, memory| {
+        let mut objects = find_next.objects.lock().expect("guest object state");
+        let Some(GuestObject::Search(search)) = objects.handles.get_mut(&args.rcx) else {
+            return find_next.fail(ERROR_INVALID_HANDLE, 0);
+        };
+        let Some(entry) = search.entries.get(search.next) else {
+            return find_next.fail(18, 0); // ERROR_NO_MORE_FILES
+        };
+        if write_find_data(memory, args.rdx, entry).is_err() {
+            return find_next.fail(ERROR_NOACCESS, 0);
+        }
+        search.next += 1;
+        Ok(1)
+    });
+
+    let find_close = Arc::clone(state);
+    registry.register(KERNEL32, "FindClose", move |args, _, _| {
+        let mut objects = find_close.objects.lock().expect("guest object state");
+        if !matches!(objects.handles.get(&args.rcx), Some(GuestObject::Search(_))) {
+            return find_close.fail(ERROR_INVALID_HANDLE, 0);
+        }
+        objects.handles.remove(&args.rcx);
+        Ok(1)
+    });
+
     let size = Arc::clone(state);
     registry.register(KERNEL32, "GetFileSizeEx", move |args, _, memory| {
         let objects = size.objects.lock().expect("guest object state");
@@ -456,6 +609,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "DeleteFileW",
         "GetFileAttributesW",
         "MoveFileW",
+        "FindFirstFileW",
+        "FindNextFileW",
+        "FindClose",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

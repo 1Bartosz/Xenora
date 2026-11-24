@@ -119,6 +119,7 @@ impl Clock for SystemClock {
 enum GuestObject {
     Thread(u32),
     File(files::OpenFile),
+    Search(files::Search),
     Waitable {
         state: Arc<Mutex<events::Waitable>>,
         access: u32,
@@ -333,13 +334,12 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     let s = state.clone();
     registry.register(KERNEL32, "CloseHandle", move |args, _, mem| {
         let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        let mut objects = s.objects.lock().expect("guest object state");
+        if matches!(objects.handles.get(&handle), Some(GuestObject::Search(_))) {
+            return s.fail(ERROR_INVALID_HANDLE, 0);
+        }
         if matches!(handle, CURRENT_PROCESS | CURRENT_THREAD)
-            || s.objects
-                .lock()
-                .expect("guest object state")
-                .handles
-                .remove(&handle)
-                .is_some()
+            || objects.handles.remove(&handle).is_some()
         {
             return Ok(1);
         }
@@ -371,7 +371,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             match thread.handles.get(&source) {
                 Some(GuestObject::Thread(rights)) => (*rights, None),
                 Some(GuestObject::Waitable { state, access }) => (*access, Some(Arc::clone(state))),
-                Some(GuestObject::File(_)) => return s.fail(ERROR_NOT_SUPPORTED, 0),
+                Some(GuestObject::File(_) | GuestObject::Search(_)) => {
+                    return s.fail(ERROR_NOT_SUPPORTED, 0);
+                }
                 None => return s.fail(ERROR_INVALID_HANDLE, 0),
             }
         };

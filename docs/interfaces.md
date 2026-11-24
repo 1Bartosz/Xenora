@@ -207,8 +207,12 @@ must exist, and directories must be empty before removal. DeleteFileW
 deletes closed files. MoveFileW moves closed files to an unused name under
 an existing directory. GetFileAttributesW distinguishes files and directories.
 Traversal components and device names are rejected.
-Persistence, directory enumeration, asynchronous I/O, and file handle
-duplication remain outside this subset.
+FindFirstFileW, FindNextFileW, and FindClose enumerate a sorted snapshot of
+direct children. The final path component accepts literal names, * and ?
+wildcards, and *.* matches every name. Results include attributes, byte size,
+and a UTF-16 name. Times and alternate names are zero. Up to 32 searches
+can be open. DOS wildcard edge cases, persistence, asynchronous I/O,
+and file handle duplication remain outside this subset.
 
 ### Event and semaphore signaling
 

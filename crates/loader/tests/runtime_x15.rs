@@ -1126,7 +1126,7 @@ fn test_guest_synthetic_file_io_through_iat() {
     const IMAGE: u64 = 0x140000000;
     const MODULE: &str = "api-ms-win-core-file-l1-1-0.dll";
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
-    let path_call = |symbol, name: &str, access: u64, disposition: u64, target: Option<&str>| {
+    let path_result = |symbol, name: &str, access: u64, disposition: u64, target: Option<&str>| {
         let mut code = vec![0x48, 0x83, 0xec, 0x48];
         for (register, value) in [
             ([0x48, 0xb9], IMAGE + 0x1080),
@@ -1175,7 +1175,13 @@ fn test_guest_synthetic_file_io_through_iat() {
         )
         .unwrap();
         assert_eq!(result.execution.exit_reason, ExitReason::Halt);
-        result.execution.final_state.get(Register::Rax)
+        result
+    };
+    let path_call = |symbol, name, access, disposition, target| {
+        path_result(symbol, name, access, disposition, target)
+            .execution
+            .final_state
+            .get(Register::Rax)
     };
     let open =
         |name, access, disposition| path_call("CreateFileW", name, access, disposition, None);
@@ -1336,6 +1342,66 @@ fn test_guest_synthetic_file_io_through_iat() {
     assert_ne!(moved, u64::MAX);
     let size = call("GetFileSizeEx", &[moved, output]);
     assert_eq!(size.image.memory.read_u64(output).unwrap(), 6);
+    assert_eq!(namespace("CreateDirectoryW", "archive/extra"), 1);
+    let find_data = output - 0x400;
+    let found = path_result("FindFirstFileW", "C:/Archive/*.*", find_data, 0, None);
+    let search = found.execution.final_state.get(Register::Rax);
+    assert_ne!(search, u64::MAX);
+    assert_eq!(found.image.memory.read_u32(find_data).unwrap(), 0x10);
+    assert_eq!(
+        found.image.memory.read_u16(find_data + 44).unwrap(),
+        u16::from(b'e')
+    );
+    assert_eq!(
+        call("CloseHandle", &[search])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+    assert_eq!(
+        call("FindNextFileW", &[search, u64::MAX])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+    let next = call("FindNextFileW", &[search, find_data]);
+    assert_eq!(next.execution.final_state.get(Register::Rax), 1);
+    assert_eq!(next.image.memory.read_u32(find_data).unwrap(), 0x80);
+    assert_eq!(next.image.memory.read_u32(find_data + 32).unwrap(), 6);
+    assert_eq!(
+        next.image.memory.read_u16(find_data + 44).unwrap(),
+        u16::from(b'm')
+    );
+    assert_eq!(
+        call("FindNextFileW", &[search, find_data])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
+    assert_eq!(
+        call("GetLastError", &[])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        18
+    );
+    assert_eq!(
+        call("FindClose", &[search])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        1
+    );
+    assert_eq!(
+        call("FindClose", &[search])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        0
+    );
 }
 
 #[test]

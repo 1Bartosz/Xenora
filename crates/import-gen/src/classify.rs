@@ -983,6 +983,9 @@ impl SymbolDb {
                 "DeleteFileW",
                 "GetFileAttributesW",
                 "MoveFileW",
+                "FindFirstFileW",
+                "FindNextFileW",
+                "FindClose",
             ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
