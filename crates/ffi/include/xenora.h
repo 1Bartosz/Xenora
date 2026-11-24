@@ -28,6 +28,9 @@ enum {
     XENORA_BUFFER_TOO_SMALL = 7,
     XENORA_EXECUTION_FAILED = 8,
     XENORA_INVALID_STATE = 9,
+    XENORA_FILE_NOT_FOUND = 10,
+    XENORA_ACCESS_DENIED = 11,
+    XENORA_IO_ERROR = 12,
 };
 
 /* Frame-loop states reported by xenora_session_frame_loop_status. */
@@ -300,6 +303,8 @@ xenora_status xenora_session_vfs_set_root(
 
 /*
  * Open a file within the virtual filesystem sandboxed root.
+ * Missing files return XENORA_FILE_NOT_FOUND. Host permission failures return
+ * XENORA_ACCESS_DENIED. Other host I/O failures return XENORA_IO_ERROR.
  */
 xenora_status xenora_session_vfs_open(
     xenora_session session,

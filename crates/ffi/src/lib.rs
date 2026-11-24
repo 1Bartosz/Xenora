@@ -29,6 +29,9 @@ pub const XENORA_LIMIT_EXCEEDED: i32 = 6;
 pub const XENORA_BUFFER_TOO_SMALL: i32 = 7;
 pub const XENORA_EXECUTION_FAILED: i32 = 8;
 pub const XENORA_INVALID_STATE: i32 = 9;
+pub const XENORA_FILE_NOT_FOUND: i32 = 10;
+pub const XENORA_ACCESS_DENIED: i32 = 11;
+pub const XENORA_IO_ERROR: i32 = 12;
 
 pub const XENORA_LOOP_NONE: u32 = 0;
 pub const XENORA_LOOP_RUNNING: u32 = frame_loop::RUNNING;
@@ -1449,6 +1452,17 @@ pub unsafe extern "C" fn xenora_session_vfs_set_root(
     })
 }
 
+fn vfs_read_status(kind: std::io::ErrorKind) -> i32 {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::NotFound | ErrorKind::NotADirectory => XENORA_FILE_NOT_FOUND,
+        ErrorKind::PermissionDenied => XENORA_ACCESS_DENIED,
+        ErrorKind::InvalidInput | ErrorKind::IsADirectory => XENORA_INVALID_ARGUMENT,
+        ErrorKind::OutOfMemory => XENORA_LIMIT_EXCEEDED,
+        _ => XENORA_IO_ERROR,
+    }
+}
+
 /// # Safety
 /// `rel_path` must be non-null and point to a valid NUL-terminated C string;
 /// `out_file` must be non-null and valid for one aligned `u64` write.
@@ -1483,7 +1497,7 @@ pub unsafe extern "C" fn xenora_session_vfs_open(
 
         let data = match std::fs::read(&full_path) {
             Ok(bytes) => bytes,
-            Err(_) => return XENORA_INVALID_ARGUMENT,
+            Err(error) => return vfs_read_status(error.kind()),
         };
 
         let file_idx = match slot.vfs.files.iter().position(|f| f.generation % 2 == 0) {
@@ -1977,6 +1991,21 @@ mod tests {
     }
 
     #[test]
+    fn host_vfs_read_errors_have_stable_statuses() {
+        use std::io::ErrorKind;
+        for (kind, expected) in [
+            (ErrorKind::NotFound, XENORA_FILE_NOT_FOUND),
+            (ErrorKind::NotADirectory, XENORA_FILE_NOT_FOUND),
+            (ErrorKind::PermissionDenied, XENORA_ACCESS_DENIED),
+            (ErrorKind::IsADirectory, XENORA_INVALID_ARGUMENT),
+            (ErrorKind::OutOfMemory, XENORA_LIMIT_EXCEEDED),
+            (ErrorKind::UnexpectedEof, XENORA_IO_ERROR),
+        ] {
+            assert_eq!(vfs_read_status(kind), expected);
+        }
+    }
+
+    #[test]
     fn header_and_rust_constants_agree() {
         let header = include_str!("../include/xenora.h");
         assert!(header.contains(&format!("#define XENORA_ABI_VERSION {XENORA_ABI_VERSION}u")));
@@ -1991,6 +2020,9 @@ mod tests {
             ("XENORA_BUFFER_TOO_SMALL", XENORA_BUFFER_TOO_SMALL),
             ("XENORA_EXECUTION_FAILED", XENORA_EXECUTION_FAILED),
             ("XENORA_INVALID_STATE", XENORA_INVALID_STATE),
+            ("XENORA_FILE_NOT_FOUND", XENORA_FILE_NOT_FOUND),
+            ("XENORA_ACCESS_DENIED", XENORA_ACCESS_DENIED),
+            ("XENORA_IO_ERROR", XENORA_IO_ERROR),
             ("XENORA_LOOP_NONE", XENORA_LOOP_NONE as i32),
             ("XENORA_LOOP_RUNNING", XENORA_LOOP_RUNNING as i32),
             ("XENORA_LOOP_PAUSED", XENORA_LOOP_PAUSED as i32),
