@@ -11,6 +11,7 @@ use crate::memory::{GuestMemory, MemoryError};
 use crate::pe::ParsedPe;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, RwLock};
 
 /// Base virtual address range reserved for synthetic guest import dispatch trampolines.
 pub const IMPORT_TRAMPOLINE_BASE_VA: u64 = 0x0000_0007_F000_0000;
@@ -129,10 +130,40 @@ pub struct ServiceDescriptor {
     pub status: ServiceStatus,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct DynamicTrampolines(Arc<RwLock<HashMap<u64, usize>>>);
+
+impl DynamicTrampolines {
+    pub(crate) fn expose(&self, index: usize) -> u64 {
+        let address = trampoline_address(index);
+        self.0
+            .write()
+            .expect("dynamic service trampolines")
+            .insert(address, index);
+        address
+    }
+
+    fn get(&self, address: u64) -> Option<usize> {
+        if address < IMPORT_TRAMPOLINE_BASE_VA {
+            return None;
+        }
+        self.0
+            .read()
+            .expect("dynamic service trampolines")
+            .get(&address)
+            .copied()
+    }
+}
+
+fn trampoline_address(index: usize) -> u64 {
+    IMPORT_TRAMPOLINE_BASE_VA + index as u64 * IMPORT_TRAMPOLINE_STRIDE
+}
+
 /// Registry for resolving and binding import symbols to guest trampoline VAs.
 pub struct ImportRegistry {
     services: HashMap<(String, String), usize>, // (module_lowercase, symbol) -> service_index
     handlers: Vec<ServiceDescriptor>,
+    dynamic_trampolines: DynamicTrampolines,
     trampoline_to_service: HashMap<u64, usize>, // Trampoline VA -> service_index
 }
 
@@ -148,13 +179,18 @@ impl ImportRegistry {
             services: HashMap::new(),
             handlers: Vec::new(),
             trampoline_to_service: HashMap::new(),
+            dynamic_trampolines: DynamicTrampolines::default(),
         }
     }
 
-    fn service_index(&self, module: &str, symbol: &str) -> Option<usize> {
+    pub(crate) fn service_index(&self, module: &str, symbol: &str) -> Option<usize> {
         self.services
             .get(&(module.to_ascii_lowercase(), symbol.to_owned()))
             .copied()
+    }
+
+    pub(crate) fn dynamic_trampolines(&self) -> DynamicTrampolines {
+        self.dynamic_trampolines.clone()
     }
 
     /// Check whether the exact import key has a binding, including stub handlers.
@@ -342,8 +378,7 @@ impl ImportRegistry {
                 };
 
                 // Assign a deterministic synthetic trampoline VA
-                let trampoline_va =
-                    IMPORT_TRAMPOLINE_BASE_VA + (service_idx as u64) * IMPORT_TRAMPOLINE_STRIDE;
+                let trampoline_va = trampoline_address(service_idx);
                 self.trampoline_to_service
                     .insert(trampoline_va, service_idx);
 
@@ -359,7 +394,7 @@ impl ImportRegistry {
 
     /// Check if target RIP matches a synthetic service trampoline.
     pub fn is_service_trampoline(&self, rip: u64) -> bool {
-        self.trampoline_to_service.contains_key(&rip)
+        self.trampoline_to_service.contains_key(&rip) || self.dynamic_trampolines.get(rip).is_some()
     }
 
     /// Dispatch a service call when guest RIP hits a service trampoline.
@@ -369,9 +404,11 @@ impl ImportRegistry {
         cpu: &mut CpuState,
         memory: &mut GuestMemory,
     ) -> Result<(), ExitReason> {
-        let service_idx = *self
+        let service_idx = self
             .trampoline_to_service
             .get(&rip)
+            .copied()
+            .or_else(|| self.dynamic_trampolines.get(rip))
             .ok_or(ExitReason::IllegalInstruction(0xFF))?;
 
         let descriptor = &self.handlers[service_idx];

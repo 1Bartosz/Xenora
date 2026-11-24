@@ -192,6 +192,15 @@ clamps the result and sets ERANGE. Scans have a 1 MiB input budget. The long-lon
 Microsoft's _strtoi64, _strtoui64, _wcstoi64, and _wcstoui64 apply the
 same rules with 64-bit results.
 
+### Built-in guest modules
+
+GetModuleHandleA and GetModuleHandleW recognize synthetic Kernel32 and UCRT
+module names and their registered API-set aliases. GetProcAddress resolves
+case-sensitive named exports to guest service trampolines. The registry
+captures built-in bindings at standard service registration and excludes
+stubs. Missing names and unsupported ordinals fail explicitly. These APIs
+expose synthetic module handles and never load host libraries.
+
 ### Synthetic guest files
 
 The runtime exposes an in-memory C: drive through CreateFileW, ReadFile,

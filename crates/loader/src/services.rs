@@ -13,6 +13,7 @@ mod crt;
 mod events;
 mod files;
 mod heap;
+mod modules;
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -760,4 +761,5 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         "SubmitGuestDraw",
         ServiceStatus::Implemented,
     );
+    modules::register(registry, &state);
 }

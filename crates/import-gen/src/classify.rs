@@ -887,19 +887,11 @@ impl SymbolDb {
             "LoadLibraryW — stub returning null",
         );
         self.win32_stub(m, "FreeLibrary", false, "FreeLibrary — no-op stub");
-        self.win32_stub(
-            m,
-            "GetModuleHandleA",
-            false,
-            "GetModuleHandle — stub returning synthetic base",
-        );
-        self.win32_stub(m, "GetModuleHandleW", false, "GetModuleHandleW — stub");
-        self.win32_stub(
-            m,
-            "GetProcAddress",
-            false,
-            "GetProcAddress — stub returning null",
-        );
+        for module in [m, "kernel32.dll"] {
+            for symbol in ["GetModuleHandleA", "GetModuleHandleW", "GetProcAddress"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         self.win32_stub(
             m,
             "GetModuleFileNameA",

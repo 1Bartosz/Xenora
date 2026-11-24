@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added guest module lookup and named symbol resolution for built-in Kernel32 and UCRT services.
+
 - Added same-process guest file handle duplication with a shared file position.
 
 - Added guest file and directory enumeration with typed search handles.

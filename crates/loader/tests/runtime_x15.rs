@@ -1122,6 +1122,67 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn test_guest_resolves_and_calls_a_dynamic_export() {
+    const IMAGE: u64 = 0x140000000;
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let run = |symbol: &str, invoke| {
+        let mut code = vec![0x48, 0x83, 0xec, 0x28, 0x48, 0xb9];
+        code.extend_from_slice(&(IMAGE + 0x1080).to_le_bytes());
+        append_import_call(&mut code, 0x2060);
+        code.extend_from_slice(&[0x48, 0x89, 0xc1, 0x48, 0xba]);
+        code.extend_from_slice(&(IMAGE + 0x10c0).to_le_bytes());
+        append_import_call(&mut code, 0x21a0);
+        if invoke {
+            code.extend_from_slice(&[0xff, 0xd0]); // call rax
+        }
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
+        code.resize(0x80, 0);
+        code.extend_from_slice(b"KERNEL32\0");
+        code.resize(0xc0, 0);
+        code.extend_from_slice(symbol.as_bytes());
+        code.push(0);
+        let bytes = TestPeBuilder::new(IMAGE, 0x1000)
+            .add_import(
+                "api-ms-win-core-libraryloader-l1-2-0.dll",
+                "GetModuleHandleA",
+            )
+            .add_import("kernel32.dll", "GetProcAddress")
+            .code(&code)
+            .build();
+        let mut imports = ImportRegistry::new();
+        register_standard_services(&mut imports, state.clone());
+        let result = run_synthetic_startup(
+            &bytes,
+            StartupLayout {
+                image_base: IMAGE,
+                stack_top: PROCESS_FIXTURE_STACK_TOP,
+                tls_base: 0x300000000,
+            },
+            imports,
+            100,
+        )
+        .unwrap();
+        assert_eq!(result.bound_imports, 2);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result.execution.final_state.get(Register::Rax)
+    };
+
+    assert_eq!(
+        run("GetCurrentProcessId", true),
+        u64::from(state.process_id)
+    );
+    assert_eq!(run("getcurrentprocessid", false), 0);
+    assert_eq!(
+        call_service_fixture(&state, "kernel32.dll", "GetLastError", &[])
+            .execution
+            .final_state
+            .get(Register::Rax),
+        127
+    );
+    assert_eq!(run("SubmitGuestDraw", false), 0);
+}
+
+#[test]
 fn test_guest_synthetic_file_io_through_iat() {
     const IMAGE: u64 = 0x140000000;
     const MODULE: &str = "api-ms-win-core-file-l1-1-0.dll";
