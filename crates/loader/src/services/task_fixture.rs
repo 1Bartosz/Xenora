@@ -60,6 +60,16 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(u64::from(tasks.queue.dispatch_work(now)))
     });
 
+    let background = Arc::clone(state);
+    registry.register(MODULE, "DispatchFixtureBackground", move |_, cpu, _| {
+        let now = Duration::from_millis(background.uptime_millis());
+        let mut tasks = background.task_fixture.lock().expect("fixture task queue");
+        match tasks.queue.dispatch_background(now) {
+            Ok(started) => Ok(u64::from(started)),
+            Err(_) => background.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0),
+        }
+    });
+
     let completion = Arc::clone(state);
     registry.register(
         MODULE,
@@ -83,6 +93,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 TaskResult::Finished(Err(error)) => (error, 0),
                 TaskResult::Cancelled => (995, 0),
                 TaskResult::TimedOut => (1460, 0),
+                TaskResult::WorkerPanicked => (31, 0),
             };
             let mut record = [0; COMPLETION_SIZE];
             record[..8].copy_from_slice(&id.raw().to_le_bytes());

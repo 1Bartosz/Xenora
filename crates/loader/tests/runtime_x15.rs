@@ -1160,6 +1160,22 @@ fn guest_manual_tasks_deliver_results_once_through_imports() {
         assert_eq!(memory.read_u64(output + 16).unwrap(), expected_value);
     }
     assert_eq!(value("DispatchFixtureCompletion", &[output]), 0);
+    let background = value("SubmitFixtureTask", &[11, 0]);
+    assert_eq!(value("DispatchFixtureBackground", &[]), 1);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let result = call("DispatchFixtureCompletion", &[output]);
+        if result.execution.final_state.get(Register::Rax) == 1 {
+            assert_eq!(result.image.memory.read_u64(output).unwrap(), background);
+            assert_eq!(result.image.memory.read_u64(output + 16).unwrap(), 121);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "guest worker did not complete"
+        );
+        std::thread::yield_now();
+    }
 }
 
 #[test]

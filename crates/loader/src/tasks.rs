@@ -4,6 +4,7 @@
 //! The caller supplies monotonic time, allowing deterministic dispatch in tests.
 
 use std::collections::VecDeque;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Identifier issued by a task queue and never reused within that queue.
@@ -33,6 +34,7 @@ pub enum TaskResult<T, E> {
     Finished(Result<T, E>),
     Cancelled,
     TimedOut,
+    WorkerPanicked,
 }
 
 type Work<T, E> = Box<dyn FnOnce() -> Result<T, E> + Send>;
@@ -51,12 +53,19 @@ struct Completion<T, E> {
     callback: Callback<T, E>,
 }
 
+struct Worker<T, E> {
+    id: TaskId,
+    callback: Callback<T, E>,
+    thread: JoinHandle<Result<T, E>>,
+}
+
 /// A manual task queue whose capacity covers pending work and undelivered completions.
 pub struct TaskQueue<T, E> {
     capacity: usize,
     last_id: u64,
     pending: VecDeque<Pending<T, E>>,
     completions: VecDeque<Completion<T, E>>,
+    worker: Option<Worker<T, E>>,
 }
 
 impl<T, E> TaskQueue<T, E> {
@@ -66,6 +75,7 @@ impl<T, E> TaskQueue<T, E> {
             last_id: 0,
             pending: VecDeque::new(),
             completions: VecDeque::new(),
+            worker: None,
         }
     }
 
@@ -76,7 +86,9 @@ impl<T, E> TaskQueue<T, E> {
         work: impl FnOnce() -> Result<T, E> + Send + 'static,
         callback: impl FnOnce(TaskId, TaskResult<T, E>) + Send + 'static,
     ) -> Result<TaskId, SubmitError> {
-        if self.pending.len() + self.completions.len() >= self.capacity {
+        if self.pending.len() + self.completions.len() + usize::from(self.worker.is_some())
+            >= self.capacity
+        {
             return Err(SubmitError::Full);
         }
         self.last_id = self
@@ -112,6 +124,10 @@ impl<T, E> TaskQueue<T, E> {
 
     /// Run one queued operation. An expired operation completes without running.
     pub fn dispatch_work(&mut self, now: Duration) -> bool {
+        self.collect_worker();
+        if self.worker.is_some() {
+            return false;
+        }
         let Some(task) = self.pending.pop_front() else {
             return false;
         };
@@ -130,12 +146,109 @@ impl<T, E> TaskQueue<T, E> {
 
     /// Invoke one callback on the caller's thread.
     pub fn dispatch_completion(&mut self) -> bool {
+        self.collect_worker();
         let Some(completion) = self.completions.pop_front() else {
             return false;
         };
         (completion.callback)(completion.id, completion.result);
         true
     }
+
+    fn collect_worker(&mut self) {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.thread.is_finished())
+        {
+            let worker = self.worker.take().expect("finished worker");
+            let result = worker
+                .thread
+                .join()
+                .map_or(TaskResult::WorkerPanicked, TaskResult::Finished);
+            self.completions.push_back(Completion {
+                id: worker.id,
+                result,
+                callback: worker.callback,
+            });
+        }
+    }
+}
+
+impl<T: Send + 'static, E: Send + 'static> TaskQueue<T, E> {
+    /// Start one background operation. At most one worker runs per queue.
+    pub fn dispatch_background(&mut self, now: Duration) -> std::io::Result<bool> {
+        self.collect_worker();
+        if self.worker.is_some() {
+            return Ok(false);
+        }
+        let Some(task) = self.pending.front() else {
+            return Ok(false);
+        };
+        if task.deadline.is_some_and(|deadline| now >= deadline) {
+            return Ok(self.dispatch_work(now));
+        }
+        let (send, receive) = std::sync::mpsc::channel::<Work<T, E>>();
+        // Start the thread before removing the task so spawn failure leaves it queued.
+        let thread = std::thread::Builder::new()
+            .name("xenora-task".into())
+            .spawn(move || receive.recv().expect("worker receives one operation")())?;
+        let task = self.pending.pop_front().expect("pending task");
+        assert!(send.send(task.work).is_ok());
+        self.worker = Some(Worker {
+            id: task.id,
+            callback: task.callback,
+            thread,
+        });
+        Ok(true)
+    }
+}
+
+impl<T, E> Drop for TaskQueue<T, E> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn background_worker_preserves_capacity_and_manual_completion() {
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    let mut queue = TaskQueue::<u32, u32>::new(1);
+    let (release, gate) = channel();
+    let (completed, results) = channel();
+    let id = queue
+        .submit(
+            None,
+            move || {
+                gate.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok(17)
+            },
+            move |id, result| completed.send((id, result)).unwrap(),
+        )
+        .unwrap();
+    assert!(queue.dispatch_background(Duration::ZERO).unwrap());
+    assert!(!queue.dispatch_background(Duration::ZERO).unwrap());
+    assert!(!queue.cancel(id));
+    assert!(!queue.dispatch_completion());
+    assert_eq!(
+        queue.submit(None, || Ok(0), |_, _| {}),
+        Err(SubmitError::Full)
+    );
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !queue.dispatch_completion() {
+        assert!(Instant::now() < deadline, "worker did not complete");
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        results.try_recv().unwrap(),
+        (id, TaskResult::Finished(Ok(17)))
+    );
+    assert!(!queue.dispatch_completion());
 }
 
 #[cfg(test)]
