@@ -29,6 +29,9 @@ const THREAD_SET_RIGHTS: u32 = 0x0020 | 0x0400;
 const THREAD_SUPPORTED_RIGHTS: u32 = THREAD_QUERY_RIGHTS | THREAD_SET_RIGHTS | 0x0010_0000;
 const THREAD_PRIORITY_ERROR_RETURN: u64 = 0x7fff_ffff;
 const MAX_THREAD_HANDLES: usize = 1024;
+const MAIN_THREAD_ID: u32 = 0x4104; // Synthetic main thread ID
+/// Most modeled thread contexts that may hold a parked last-error slot.
+pub const MAX_THREAD_CONTEXTS: usize = 1024;
 const PAGE_SIZE: u64 = 4096;
 const MEM_COMMIT_RESERVE: u32 = 0x3000;
 const MEM_RELEASE: u32 = 0x8000;
@@ -103,6 +106,25 @@ impl ThreadState {
     }
 }
 
+/// Last-error slots of the modeled guest thread contexts that are not running.
+///
+/// `ServicesState::last_error` is the slot of the running context; this holds
+/// every other one. No scheduler exists yet: a context is only an identifier
+/// with its own slot, and the embedder says which one is running.
+struct ThreadContexts {
+    current: u32,
+    parked: BTreeMap<u32, u32>,
+}
+
+/// Why a modeled thread context was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadContextError {
+    /// `MAX_THREAD_CONTEXTS` other contexts already hold a slot.
+    TooManyContexts,
+    /// The running context cannot be retired.
+    Running,
+}
+
 /// State container for runtime services.
 pub struct ServicesState {
     pub clock: Arc<dyn Clock>,
@@ -110,7 +132,9 @@ pub struct ServicesState {
     priority_boost_disabled: AtomicBool,
     pub thread_id: u32,
     thread: Mutex<ThreadState>,
+    /// Last error of the running thread context.
     pub last_error: AtomicU32,
+    contexts: Mutex<ThreadContexts>,
     pub next_alloc_addr: AtomicU64,
     pub graphics: Arc<Mutex<crate::graphics::GraphicsContext>>,
 }
@@ -121,9 +145,13 @@ impl ServicesState {
             clock,
             priority_boost_disabled: AtomicBool::new(false),
             process_id: 0x4100, // Synthetic process ID
-            thread_id: 0x4104,  // Synthetic main thread ID
+            thread_id: MAIN_THREAD_ID,
             thread: Mutex::new(ThreadState::default()),
             last_error: AtomicU32::new(0),
+            contexts: Mutex::new(ThreadContexts {
+                current: MAIN_THREAD_ID,
+                parked: BTreeMap::new(),
+            }),
             next_alloc_addr: AtomicU64::new(0x0000_0002_0000_0000), // 8GB guest heap
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),
         }
@@ -131,6 +159,46 @@ impl ServicesState {
     /// The scheduling policy recorded for the synthetic process.
     pub fn priority_boost_disabled(&self) -> bool {
         self.priority_boost_disabled.load(Ordering::SeqCst)
+    }
+
+    /// Identifier of the modeled thread context whose last error is live.
+    /// It starts as `thread_id`.
+    pub fn current_thread_context(&self) -> u32 {
+        self.contexts.lock().expect("guest thread contexts").current
+    }
+
+    /// Make `id` the running thread context. The outgoing context keeps its
+    /// last error; a context seen for the first time starts at zero, and one
+    /// seen before gets back the value it left with.
+    ///
+    /// Call this between service calls only: a service that is still running
+    /// would report its failure to the context that replaced it.
+    pub fn switch_thread_context(&self, id: u32) -> Result<(), ThreadContextError> {
+        let mut contexts = self.contexts.lock().expect("guest thread contexts");
+        if id == contexts.current {
+            return Ok(());
+        }
+        let incoming = contexts.parked.remove(&id);
+        if incoming.is_none() && contexts.parked.len() >= MAX_THREAD_CONTEXTS {
+            return Err(ThreadContextError::TooManyContexts);
+        }
+        let outgoing = self
+            .last_error
+            .swap(incoming.unwrap_or(0), Ordering::SeqCst);
+        let previous = std::mem::replace(&mut contexts.current, id);
+        contexts.parked.insert(previous, outgoing);
+        Ok(())
+    }
+
+    /// Drop the slot of a context that is not running, as when its thread
+    /// ends. Returns whether it held one; the identifier starts at zero if it
+    /// is used again.
+    pub fn retire_thread_context(&self, id: u32) -> Result<bool, ThreadContextError> {
+        let mut contexts = self.contexts.lock().expect("guest thread contexts");
+        if id == contexts.current {
+            return Err(ThreadContextError::Running);
+        }
+        Ok(contexts.parked.remove(&id).is_some())
     }
 
     /// Record a guest error and return the documented failure value.

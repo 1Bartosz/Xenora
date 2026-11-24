@@ -19,7 +19,9 @@ use xenora_loader::pe::ParsedPe;
 use xenora_loader::probe::{ProbeConfig, ProbeReport, probe_pe_bytes};
 use xenora_loader::runtime::{Call, Float32, Float64};
 use xenora_loader::runtime_table::SERVICES;
-use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
+use xenora_loader::services::{
+    MAX_THREAD_CONTEXTS, MockClock, ServicesState, ThreadContextError, register_standard_services,
+};
 
 const BASE: u64 = 0x1_4000_0000;
 const CODE_RVA: u32 = 0x1000;
@@ -120,10 +122,16 @@ fn build(imports: &[(&str, Symbol)]) -> Image {
 }
 
 fn standard(clock: u64) -> (ImportRegistry, Arc<MockClock>) {
-    let clock = Arc::new(MockClock::new(clock));
-    let mut registry = ImportRegistry::new();
-    register_standard_services(&mut registry, Arc::new(ServicesState::new(clock.clone())));
+    let (registry, clock, _) = standard_with_state(clock);
     (registry, clock)
+}
+
+fn standard_with_state(clock: u64) -> (ImportRegistry, Arc<MockClock>, Arc<ServicesState>) {
+    let clock = Arc::new(MockClock::new(clock));
+    let state = Arc::new(ServicesState::new(clock.clone()));
+    let mut registry = ImportRegistry::new();
+    register_standard_services(&mut registry, state.clone());
+    (registry, clock, state)
 }
 
 /// A guest whose image imports every generated service from its own library.
@@ -131,6 +139,7 @@ struct Guest {
     engine: DbtEngine,
     memory: GuestMemory,
     clock: Arc<MockClock>,
+    state: Arc<ServicesState>,
     /// Upper halves and XMM lanes of unrelated arguments hold this pattern.
     xmm: [u128; 4],
 }
@@ -150,7 +159,7 @@ impl Guest {
         memory
             .map_region(STACK, 0x1000, MemoryPermissions::READ_WRITE)
             .unwrap();
-        let (mut registry, clock) = standard(0x01DA_0000_1234_5678);
+        let (mut registry, clock, state) = standard_with_state(0x01DA_0000_1234_5678);
         let bound = registry
             .bind_imports(&pe, &image.bytes, BASE, &mut memory)
             .unwrap();
@@ -161,6 +170,7 @@ impl Guest {
             engine,
             memory,
             clock,
+            state,
             xmm: [0xAAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0123_4567; 4],
         }
     }
@@ -337,6 +347,115 @@ fn last_error_is_set_by_failures_and_by_the_guest() {
     );
     guest.call("CloseHandle", &[0x1234]);
     assert_eq!(guest.last_error(), 6);
+}
+
+/// GetLastError is documented as the calling thread's value, kept per thread
+/// so that threads do not overwrite each other's (errhandlingapi.h). These are
+/// modeled contexts switched by the test: no guest thread is scheduled.
+const MAIN_THREAD: u32 = 0x4104;
+const WORKER: u32 = 0x5000;
+const OTHER_WORKER: u32 = 0x5004;
+
+#[test]
+fn last_error_belongs_to_the_thread_context_that_set_it() {
+    let mut guest = Guest::new();
+    assert_eq!(guest.state.current_thread_context(), MAIN_THREAD);
+    guest.call("CloseHandle", &[0x1234]);
+    assert_eq!(guest.last_error(), 6); // ERROR_INVALID_HANDLE
+
+    guest.state.switch_thread_context(WORKER).unwrap();
+    assert_eq!(guest.state.current_thread_context(), WORKER);
+    assert_eq!(guest.last_error(), 0, "a new context starts clean");
+    assert_eq!(guest.call("GetCurrentProcess", &[]), PROCESS);
+    assert_eq!(guest.last_error(), 0, "success leaves it unchanged");
+    assert_eq!(guest.call("VirtualAlloc", &[0, 0, 0x3000, 4]), 0);
+    assert_eq!(guest.last_error(), 87); // ERROR_INVALID_PARAMETER
+
+    guest.state.switch_thread_context(OTHER_WORKER).unwrap();
+    assert_eq!(guest.last_error(), 0);
+    guest.call("SetLastError", &[0xFFFF_FFFF]);
+    assert_eq!(guest.last_error(), 0xFFFF_FFFF);
+    guest.call("SetLastError", &[0]);
+    assert_eq!(guest.last_error(), 0);
+
+    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
+    assert_eq!(guest.last_error(), 6, "untouched by the other contexts");
+    assert_eq!(guest.call("GetCurrentThreadId", &[]), 0x4104);
+    assert_eq!(guest.last_error(), 6);
+    guest.state.switch_thread_context(WORKER).unwrap();
+    assert_eq!(guest.last_error(), 87);
+    guest.state.switch_thread_context(OTHER_WORKER).unwrap();
+    assert_eq!(guest.last_error(), 0, "an explicit zero is kept as set");
+}
+
+#[test]
+fn switching_to_the_running_context_keeps_its_last_error() {
+    let mut guest = Guest::new();
+    guest.call("SetLastError", &[5]);
+    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
+    assert_eq!(guest.last_error(), 5);
+    guest.state.switch_thread_context(WORKER).unwrap();
+    guest.call("SetLastError", &[50]);
+    guest.state.switch_thread_context(WORKER).unwrap();
+    assert_eq!(guest.last_error(), 50);
+    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
+    assert_eq!(guest.last_error(), 5);
+}
+
+#[test]
+fn a_retired_thread_context_starts_clean_when_its_id_is_reused() {
+    let mut guest = Guest::new();
+    guest.state.switch_thread_context(WORKER).unwrap();
+    guest.call("SetLastError", &[998]);
+    assert_eq!(
+        guest.state.retire_thread_context(WORKER),
+        Err(ThreadContextError::Running)
+    );
+    assert_eq!(
+        guest.last_error(),
+        998,
+        "a refused retirement changes nothing"
+    );
+
+    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
+    assert_eq!(guest.state.retire_thread_context(WORKER), Ok(true));
+    assert_eq!(guest.state.retire_thread_context(WORKER), Ok(false));
+    assert_eq!(guest.state.retire_thread_context(OTHER_WORKER), Ok(false));
+    guest.state.switch_thread_context(WORKER).unwrap();
+    assert_eq!(guest.last_error(), 0);
+}
+
+#[test]
+fn thread_contexts_are_bounded_and_a_refused_switch_changes_nothing() {
+    let mut guest = Guest::new();
+    guest.call("SetLastError", &[1]);
+    // The running context holds no parked slot, so the limit is reached once
+    // MAX_THREAD_CONTEXTS others are parked.
+    let first = 0x1_0000;
+    for index in 0..MAX_THREAD_CONTEXTS as u32 {
+        guest.state.switch_thread_context(first + index).unwrap();
+        guest.call("SetLastError", &[u64::from(index) + 2]);
+    }
+    let running = first + MAX_THREAD_CONTEXTS as u32 - 1;
+    assert_eq!(
+        guest.state.switch_thread_context(0x9_0000),
+        Err(ThreadContextError::TooManyContexts)
+    );
+    assert_eq!(guest.state.current_thread_context(), running);
+    assert_eq!(guest.last_error(), MAX_THREAD_CONTEXTS as u64 + 1);
+
+    // A parked context is still reachable, and retiring one frees a slot.
+    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
+    assert_eq!(guest.last_error(), 1);
+    assert_eq!(
+        guest.state.switch_thread_context(0x9_0000),
+        Err(ThreadContextError::TooManyContexts)
+    );
+    assert_eq!(guest.state.retire_thread_context(first), Ok(true));
+    guest.state.switch_thread_context(0x9_0000).unwrap();
+    assert_eq!(guest.last_error(), 0);
+    guest.state.switch_thread_context(first + 1).unwrap();
+    assert_eq!(guest.last_error(), 3);
 }
 
 #[test]
