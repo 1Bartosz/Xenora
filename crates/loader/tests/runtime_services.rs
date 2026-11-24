@@ -339,6 +339,7 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
         "WSACleanup",
         "WSAPoll",
         "inet_pton",
+        "inet_ntop",
         "htons",
     ];
     let imports = symbols.map(|symbol| ("ws2_32.dll", Symbol::Name(symbol)));
@@ -378,6 +379,7 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
     let incoming = SCRATCH + 0x240;
     let text = SCRATCH + 0x260;
     let poll = SCRATCH + 0x280;
+    let formatted = SCRATCH + 0x2a0;
     memory.write_u16(address, 2).unwrap();
     let port = call(&mut memory, "htons", &[5000]);
     memory.write_u16(address + 2, port as u16).unwrap();
@@ -398,6 +400,22 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
         u64::from(u32::MAX)
     );
     assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10047);
+    memory.write_u8(formatted, 0xaa).unwrap();
+    assert_eq!(
+        call(&mut memory, "inet_ntop", &[2, address + 4, formatted, 9]),
+        0
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 87);
+    assert_eq!(memory.read_u8(formatted).unwrap(), 0xaa);
+    assert_eq!(
+        call(&mut memory, "inet_ntop", &[2, address + 4, formatted, 10]),
+        formatted
+    );
+    let mut formatted_address = [0; 10];
+    memory
+        .read_bytes(formatted, &mut formatted_address)
+        .unwrap();
+    assert_eq!(&formatted_address, b"127.0.0.1\0");
     assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, SCRATCH]), 0);
     let receiver = call(&mut memory, "socket", &[2, 2, 17]);
     let sender = call(&mut memory, "socket", &[2, 2, 17]);

@@ -2,7 +2,7 @@
 
 //! Process-local Winsock UDP loopback for the synthetic guest.
 
-use super::ServicesState;
+use super::{ERROR_INVALID_PARAMETER, ServicesState};
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::GuestMemory;
@@ -205,6 +205,34 @@ fn register_address_conversion(registry: &mut ImportRegistry, state: &Arc<Servic
             Ok(u64::from((args.rcx as u32).swap_bytes()))
         });
     }
+    let format_state = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "inet_ntop",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let fail = |error| format_state.fail(cpu.gs_base, error, 0);
+            if args.rcx as u32 != 2 {
+                return fail(WSAEAFNOSUPPORT);
+            }
+            if args.r8 == 0 || args.r9 == 0 {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            let mut address = [0; 4];
+            if args.rdx == 0 || memory.read_bytes(args.rdx, &mut address).is_err() {
+                return fail(WSAEFAULT);
+            }
+            let mut text = std::net::Ipv4Addr::from(address).to_string().into_bytes();
+            text.push(0);
+            if (text.len() as u64) > args.r9 {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            if memory.write_bytes(args.r8, &text).is_err() {
+                return fail(WSAEFAULT);
+            }
+            Ok(args.r8)
+        },
+    );
     let state = Arc::clone(state);
     registry.register_with_status(
         MODULE,
