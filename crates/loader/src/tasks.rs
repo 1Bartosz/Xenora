@@ -4,6 +4,8 @@
 //! The caller supplies monotonic time, allowing deterministic dispatch in tests.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -40,11 +42,26 @@ pub enum TaskResult<T, E> {
 type Work<T, E> = Box<dyn FnOnce() -> Result<T, E> + Send>;
 type Callback<T, E> = Box<dyn FnOnce(TaskId, TaskResult<T, E>) + Send>;
 
+/// A cancellation request that a running operation can observe at safe points.
+#[derive(Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn request(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+}
+
 struct Pending<T, E> {
     id: TaskId,
     deadline: Option<Duration>,
     work: Work<T, E>,
     callback: Callback<T, E>,
+    cancellation: Option<CancellationToken>,
 }
 
 struct Completion<T, E> {
@@ -57,6 +74,7 @@ struct Worker<T, E> {
     id: TaskId,
     callback: Callback<T, E>,
     thread: JoinHandle<Result<T, E>>,
+    cancellation: Option<CancellationToken>,
 }
 
 /// A manual task queue whose capacity covers pending work and undelivered completions.
@@ -86,6 +104,35 @@ impl<T, E> TaskQueue<T, E> {
         work: impl FnOnce() -> Result<T, E> + Send + 'static,
         callback: impl FnOnce(TaskId, TaskResult<T, E>) + Send + 'static,
     ) -> Result<TaskId, SubmitError> {
+        self.enqueue(deadline, Box::new(work), Box::new(callback), None)
+    }
+
+    /// Enqueue work that can observe a request received while it is running.
+    pub fn submit_cancellable(
+        &mut self,
+        deadline: Option<Duration>,
+        work: impl FnOnce(CancellationToken) -> Result<T, E> + Send + 'static,
+        callback: impl FnOnce(TaskId, TaskResult<T, E>) + Send + 'static,
+    ) -> Result<TaskId, SubmitError> {
+        let token = CancellationToken::default();
+        self.enqueue(
+            deadline,
+            Box::new({
+                let token = token.clone();
+                move || work(token)
+            }),
+            Box::new(callback),
+            Some(token),
+        )
+    }
+
+    fn enqueue(
+        &mut self,
+        deadline: Option<Duration>,
+        work: Work<T, E>,
+        callback: Callback<T, E>,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<TaskId, SubmitError> {
         if self.pending.len() + self.completions.len() + usize::from(self.worker.is_some())
             >= self.capacity
         {
@@ -99,14 +146,24 @@ impl<T, E> TaskQueue<T, E> {
         self.pending.push_back(Pending {
             id,
             deadline,
-            work: Box::new(work),
-            callback: Box::new(callback),
+            work,
+            callback,
+            cancellation,
         });
         Ok(id)
     }
 
-    /// Cancel work that is still queued. The completion port still receives its callback.
+    /// Cancel queued work or request cooperative cancellation of an active worker.
     pub fn cancel(&mut self, id: TaskId) -> bool {
+        self.collect_worker();
+        if let Some(worker) = &self.worker
+            && worker.id == id
+        {
+            return worker
+                .cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::request);
+        }
         let Some(index) = self.pending.iter().position(|task| task.id == id) else {
             return false;
         };
@@ -161,10 +218,18 @@ impl<T, E> TaskQueue<T, E> {
             .is_some_and(|worker| worker.thread.is_finished())
         {
             let worker = self.worker.take().expect("finished worker");
-            let result = worker
-                .thread
-                .join()
-                .map_or(TaskResult::WorkerPanicked, TaskResult::Finished);
+            let result = match worker.thread.join() {
+                Err(_) => TaskResult::WorkerPanicked,
+                Ok(_)
+                    if worker
+                        .cancellation
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled) =>
+                {
+                    TaskResult::Cancelled
+                }
+                Ok(result) => TaskResult::Finished(result),
+            };
             self.completions.push_back(Completion {
                 id: worker.id,
                 result,
@@ -198,6 +263,7 @@ impl<T: Send + 'static, E: Send + 'static> TaskQueue<T, E> {
             id: task.id,
             callback: task.callback,
             thread,
+            cancellation: task.cancellation,
         });
         Ok(true)
     }
@@ -206,9 +272,52 @@ impl<T: Send + 'static, E: Send + 'static> TaskQueue<T, E> {
 impl<T, E> Drop for TaskQueue<T, E> {
     fn drop(&mut self) {
         if let Some(worker) = self.worker.take() {
+            if let Some(token) = worker.cancellation {
+                token.request();
+            }
             let _ = worker.thread.join();
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn running_task_observes_cancellation_before_completion() {
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    let mut queue = TaskQueue::<u32, u32>::new(1);
+    let (running, started) = channel();
+    let (completed, results) = channel();
+    let id = queue
+        .submit_cancellable(
+            None,
+            move |token| {
+                running.send(()).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !token.is_cancelled() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "work did not observe cancellation"
+                    );
+                    std::thread::yield_now();
+                }
+                Ok(17)
+            },
+            move |id, result| completed.send((id, result)).unwrap(),
+        )
+        .unwrap();
+    assert!(queue.dispatch_background(Duration::ZERO).unwrap());
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(queue.cancel(id));
+    assert!(!queue.cancel(id));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !queue.dispatch_completion() {
+        assert!(Instant::now() < deadline, "worker did not complete");
+        std::thread::yield_now();
+    }
+    assert_eq!(results.try_recv().unwrap(), (id, TaskResult::Cancelled));
+    assert!(!queue.dispatch_completion());
 }
 
 #[cfg(test)]
