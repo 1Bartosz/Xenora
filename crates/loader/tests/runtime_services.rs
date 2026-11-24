@@ -524,6 +524,15 @@ fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
     assert_eq!(call(&mut memory, "WSAPoll", &[poll, 2, 0]), 1);
     assert_eq!(memory.read_u16(poll + 10).unwrap(), 0);
     assert_eq!(memory.read_u16(poll + 26).unwrap(), 0x0010);
+    let started = std::time::Instant::now();
+    assert_eq!(call(&mut memory, "WSAPoll", &[poll, 1, 10]), 0);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(10));
+    assert_eq!(memory.read_u16(poll + 10).unwrap(), 0);
+    assert_eq!(
+        call(&mut memory, "WSAPoll", &[poll, 1, 1001]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10045);
     assert_eq!(call(&mut memory, "WSACleanup", &[]), 0);
 }
 

@@ -8,6 +8,7 @@ use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::GuestMemory;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const MODULE: &str = "ws2_32.dll";
 const VERSION: u16 = 0x0202;
@@ -133,6 +134,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         net.refs -= 1;
         if net.refs == 0 {
             net.sockets.clear();
+            cleanup.winsock_changed.notify_all();
         }
         Ok(0)
     });
@@ -174,6 +176,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         if net.sockets.remove(&args.rcx).is_none() {
             return close.fail(cpu.gs_base, WSAENOTSOCK, SOCKET_ERROR);
         }
+        close.winsock_changed.notify_all();
         Ok(0)
     });
 
@@ -308,6 +311,7 @@ fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
                         socket.peer = Some(requested);
                         socket.pending.retain(|(source, _)| *source == requested);
                     }
+                    state.winsock_changed.notify_all();
                     Ok(0)
                 })();
                 socket_result(&state, cpu.gs_base, result)
@@ -347,6 +351,7 @@ fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
                         return Err(WSAENOBUFS);
                     }
                     target.pending.push_back((source, data));
+                    send.winsock_changed.notify_all();
                 }
                 Ok(length as u64)
             })();
@@ -379,6 +384,7 @@ fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
                 }
                 let truncated = copied < data.len();
                 socket.pending.pop_front();
+                recv.winsock_changed.notify_all();
                 if truncated {
                     return Err(WSAEMSGSIZE);
                 }
@@ -473,6 +479,7 @@ fn register_socket_options(registry: &mut ImportRegistry, state: &Arc<ServicesSt
 }
 
 fn register_poll(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    const MAX_POLL_MS: i32 = 1_000;
     const POLLFD_SIZE: usize = 16;
     const POLLNVAL: u16 = 0x0004;
     const POLLWRNORM: u16 = 0x0010;
@@ -485,8 +492,8 @@ fn register_poll(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         "WSAPoll",
         ServiceStatus::Partial,
         move |args, cpu, memory| {
-            let net = state.winsock.lock().expect("guest Winsock state");
             let result = (|| {
+                let mut net = state.winsock.lock().expect("guest Winsock state");
                 if net.refs == 0 {
                     return Err(WSANOTINITIALISED);
                 }
@@ -494,7 +501,8 @@ fn register_poll(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
                 if !(1..=MAX_SOCKETS).contains(&count) {
                     return Err(WSAEINVAL);
                 }
-                if args.r8 as u32 != 0 {
+                let timeout = args.r8 as i32;
+                if !(0..=MAX_POLL_MS).contains(&timeout) {
                     return Err(WSAEOPNOTSUPP);
                 }
                 if args.rcx == 0 {
@@ -505,32 +513,49 @@ fn register_poll(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
                 memory
                     .read_bytes(args.rcx, descriptors)
                     .map_err(|_| WSAEFAULT)?;
-                let mut ready = 0;
-                for fd in descriptors.as_chunks_mut::<POLLFD_SIZE>().0 {
-                    let handle = u64::from_le_bytes(fd[..8].try_into().expect("socket handle"));
-                    let events = u16::from_le_bytes([fd[8], fd[9]]);
-                    if events & !(POLLWRNORM | POLLRDNORM | POLLRDBAND) != 0 {
-                        return Err(WSAEINVAL);
+                memory
+                    .check_write(args.rcx, descriptors.len())
+                    .map_err(|_| WSAEFAULT)?;
+                let deadline = Instant::now() + Duration::from_millis(timeout as u64);
+                let ready = loop {
+                    if net.refs == 0 {
+                        return Err(WSANOTINITIALISED);
                     }
-                    let mut result = POLLNVAL;
-                    if let Some(socket) = net.sockets.get(&handle) {
-                        result = 0;
-                        if !socket.pending.is_empty() {
-                            result |= events & POLLRDNORM;
+                    let mut ready = 0;
+                    for fd in descriptors.as_chunks_mut::<POLLFD_SIZE>().0 {
+                        let handle = u64::from_le_bytes(fd[..8].try_into().expect("socket handle"));
+                        let events = u16::from_le_bytes([fd[8], fd[9]]);
+                        if events & !(POLLWRNORM | POLLRDNORM | POLLRDBAND) != 0 {
+                            return Err(WSAEINVAL);
                         }
-                        if let Some(peer) = socket.peer
-                            && !net.sockets.values().any(|target| {
-                                target.port == Some(peer)
-                                    && target.peer.is_none_or(|port| Some(port) == socket.port)
-                                    && target.pending.len() == MAX_PENDING_DATAGRAMS
-                            })
-                        {
-                            result |= events & POLLWRNORM;
+                        let mut result = POLLNVAL;
+                        if let Some(socket) = net.sockets.get(&handle) {
+                            result = 0;
+                            if !socket.pending.is_empty() {
+                                result |= events & POLLRDNORM;
+                            }
+                            if let Some(peer) = socket.peer
+                                && !net.sockets.values().any(|target| {
+                                    target.port == Some(peer)
+                                        && target.peer.is_none_or(|port| Some(port) == socket.port)
+                                        && target.pending.len() == MAX_PENDING_DATAGRAMS
+                                })
+                            {
+                                result |= events & POLLWRNORM;
+                            }
                         }
+                        fd[10..12].copy_from_slice(&result.to_le_bytes());
+                        ready += u64::from(result != 0);
                     }
-                    fd[10..12].copy_from_slice(&result.to_le_bytes());
-                    ready += u64::from(result != 0);
-                }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if ready != 0 || remaining.is_zero() {
+                        break ready;
+                    }
+                    (net, _) = state
+                        .winsock_changed
+                        .wait_timeout(net, remaining)
+                        .expect("guest Winsock state");
+                };
                 memory
                     .write_bytes(args.rcx, descriptors)
                     .map_err(|_| WSAEFAULT)?;
