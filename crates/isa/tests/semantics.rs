@@ -5,7 +5,8 @@ use xenora_isa::semantics::{
     CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, MaskEffect, SCHEMA, SccEffect, Signedness, Wave,
 };
 use xenora_isa::{
-    CompareRelation, ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorCompareOp,
+    CompareRelation, ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op,
+    VectorCompareOp,
 };
 
 #[test]
@@ -159,4 +160,42 @@ fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
     dispatch_selects_exactly(EncodingFamily::Vopc, |word| {
         VectorCompareOp::from_word(word).map(|op| op.semantics().name)
     });
+}
+
+#[test]
+fn vop3_variant_dispatch_selects_exactly_the_registry_vop3_rows() {
+    for op in VectorAluVop3Op::ALL {
+        let (row, base) = (op.semantics(), op.base().semantics());
+        assert_eq!((row.name, row.family), (base.name, EncodingFamily::Vop3));
+        // The variant inherits the base declaration; only identity and the
+        // operand rule differ.
+        assert_eq!(
+            (
+                base.operation,
+                base.signedness,
+                base.scc,
+                base.vcc,
+                base.exec
+            ),
+            (row.operation, row.signedness, row.scc, row.vcc, row.exec)
+        );
+        assert_eq!(row.swap_sources, base.swap_sources);
+        assert_eq!(op.assembly_name(), format!("{}_e64", op.base().mnemonic()));
+    }
+    dispatch_selects_exactly(EncodingFamily::Vop3, |word| {
+        VectorAluVop3Op::from_word(word).map(|op| op.semantics().name)
+    });
+    // No first word of the other 64-bit families (VOP3B shares VOP3's
+    // encoding bits) selects a variant.
+    for meta in META_FORMS
+        .iter()
+        .filter(|form| form.family != EncodingFamily::Vop3 && form.bytes == 8)
+    {
+        assert_eq!(
+            VectorAluVop3Op::from_word(meta.bits as u32),
+            None,
+            "{}",
+            meta.name
+        );
+    }
 }

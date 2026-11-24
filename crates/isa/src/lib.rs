@@ -19,7 +19,7 @@ pub use rdna2::{
     V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 pub use semantics_gen::{
-    ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorCompareOp,
+    ScalarAluOp, ScalarCompareOp, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp,
 };
 
 /// SGPR index of `vcc_lo`, the Wave32 vector condition code.
@@ -154,8 +154,14 @@ pub enum Instruction {
     WaitStore,
     /// VOP1 unmodified 32-bit vector move.
     MoveB32 { dst: u8, src: VectorSource },
-    /// VOP3 unsigned 32-bit addition with no carry or input/output modifiers.
-    AddNoCarryU32 { dst: u8, src0: u8, src1: u8 },
+    /// VOP3 encoding of a registry VOP2 integer operation (operand rule
+    /// `vop3_vgpr2`): two VGPR sources and no input or output modifiers.
+    VectorAluVop3 {
+        op: VectorAluVop3Op,
+        dst: u8,
+        src0: u8,
+        src1: u8,
+    },
     /// SOP1 32-bit move to a normal SGPR or an EXEC/VCC half.
     ScalarMoveB32 { dst: u8, src: ScalarSource },
     /// SOP1 32-bit unary integer operation writing a normal SGPR (s0-s105) and,
@@ -271,7 +277,7 @@ impl Instruction {
             Self::WaitLoad => "s_waitcnt",
             Self::WaitStore => "s_waitcnt_vscnt",
             Self::MoveB32 { .. } => "v_mov_b32_e32",
-            Self::AddNoCarryU32 { .. } => "v_add_nc_u32_e64",
+            Self::VectorAluVop3 { op, .. } => op.assembly_name(),
             Self::ScalarMoveB32 { .. } => "s_mov_b32",
             Self::ScalarUnary { op, .. } => op.mnemonic(),
             Self::ScalarAlu { op, .. } => op.mnemonic(),
@@ -328,7 +334,9 @@ impl fmt::Display for Instruction {
             Self::WaitLoad => formatter.write_str(" vmcnt(0)"),
             Self::WaitStore => formatter.write_str(" null, 0"),
             Self::MoveB32 { dst, src } => write!(formatter, " v{dst}, {src}"),
-            Self::AddNoCarryU32 { dst, src0, src1 }
+            Self::VectorAluVop3 {
+                dst, src0, src1, ..
+            }
             | Self::VectorLshlrevB32 { dst, src0, src1 }
             | Self::VectorLshrrevB32 { dst, src0, src1 }
             | Self::VectorAshrrevI32 { dst, src0, src1 }
