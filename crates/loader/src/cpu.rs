@@ -574,6 +574,27 @@ impl<'a> Interpreter<'a> {
                 Ok(None)
             }
 
+            // MOVSX r/m, r (0x63): sign-extend the source into the
+            // destination register. With REX.W this is MOVSXD r64, r/m32.
+            0x63 => {
+                let modrm = self.fetch_u8()?;
+                if (modrm >> 6) != 3 {
+                    return Err(ExitReason::IllegalInstruction(byte));
+                }
+                let src_idx = (modrm & 7) + if prefixes.rex_b { 8 } else { 0 };
+                let dst_idx = ((modrm >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 };
+                let src32 = self.cpu.get(Register::from_index(src_idx)) as u32;
+                let dst = Register::from_index(dst_idx);
+                if prefixes.rex_w {
+                    // MOVSXD r64, r/m32: sign-extend the 32-bit source into 64 bits.
+                    self.cpu.set(dst, src32 as i32 as u64);
+                } else {
+                    // MOVSX r32, r/m32: writing a 32-bit register zeroes the upper half.
+                    self.cpu.set(dst, u64::from(src32 as i32 as u32));
+                }
+                Ok(None)
+            }
+
             // Immediate group 1: 0x83 /op reg, imm8
             0x83 => {
                 let modrm = self.fetch_u8()?;
