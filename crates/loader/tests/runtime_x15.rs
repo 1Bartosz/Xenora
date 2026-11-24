@@ -1122,6 +1122,40 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn guest_winsock_lifecycle_balances_startup_and_invalidates_sockets() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call = |symbol, args: &[u64]| {
+        let result = call_service_fixture(&state, "ws2_32.dll", symbol, args);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result
+    };
+    let value = |symbol, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    let datagram = [2, 2, 17];
+    let output = PROCESS_FIXTURE_STACK_TOP - 0x400;
+    assert_eq!(value("socket", &datagram), u64::MAX);
+    assert_eq!(value("WSAGetLastError", &[]), 10093);
+    assert_eq!(value("WSAStartup", &[0x0202, 0]), 10014);
+    assert_eq!(value("WSAStartup", &[0x0101, output]), 10092);
+    assert_eq!(value("WSAGetLastError", &[]), 10093);
+    let first = call("WSAStartup", &[0x0102, output]);
+    assert_eq!(first.execution.final_state.get(Register::Rax), 0);
+    assert_eq!(first.image.memory.read_u32(output).unwrap(), 0x0202_0102);
+    assert_eq!(value("WSAStartup", &[0x0202, output]), 0);
+    let socket = value("socket", &datagram);
+    assert_ne!(socket, u64::MAX);
+    assert_eq!(value("WSACleanup", &[]), 0);
+    assert_eq!(value("closesocket", &[socket]), 0);
+    let stale = value("socket", &datagram);
+    assert_ne!(stale, socket);
+    assert_eq!(value("WSACleanup", &[]), 0);
+    assert_eq!(value("WSACleanup", &[]), u32::MAX as u64);
+    assert_eq!(value("WSAStartup", &[0x0202, output]), 0);
+    assert_eq!(value("closesocket", &[stale]), u32::MAX as u64);
+    assert_eq!(value("WSAGetLastError", &[]), 10038);
+    assert_ne!(value("socket", &datagram), stale);
+}
+
+#[test]
 fn guest_hresult_failures_preserve_last_error() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let call = |module, symbol, args: &[u64]| {
