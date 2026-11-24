@@ -13,7 +13,7 @@ use xenora_texture::{BcAlphaFormat, BcAlphaUpload, BcAlphaUploadDesc, decode_bc2
 
 /// The specifications define colour and BC3 alpha interpolation in real
 /// numbers, and the CPU reference truncates them. On an Apple M5 Pro the
-/// native decoder's interpolated values lie within 1.14 codes of the real
+/// native decoder's interpolated values lie within 8/7 (1.143) codes of the real
 /// value (they match 6-bit fixed-point weights), so they can sit two codes
 /// above the truncated reference: 124 against 122 for BC3 alpha
 /// (4 * 200 + 3 * 20) / 7 = 122.86. Endpoints, BC2 alpha and BC3's fixed
@@ -89,14 +89,48 @@ fn upload_bytes(layers: [Layer; 2]) -> Vec<u8> {
     bytes
 }
 
-/// Crops decoded blocks (a row-major block grid) to a `width`×`height` level
-/// of words with red in the lowest byte, as the readback kernel writes them.
-fn reference(blocks: &[[[u8; 4]; 16]], blocks_x: usize, width: usize, height: usize) -> Vec<u32> {
+/// Per-channel tolerance of each texel of `block`: zero where the index
+/// selects a stored endpoint, a BC2 alpha nibble or BC3's fixed 0 or 255,
+/// and [`TOLERANCE`] only for interpolated codes.
+fn tolerances(format: BcAlphaFormat, block: [u8; 16]) -> [[u8; 4]; 16] {
+    let colour = u32::from_le_bytes([block[12], block[13], block[14], block[15]]);
+    let mut alpha_bits = [0; 8];
+    alpha_bits[..6].copy_from_slice(&block[2..8]);
+    let alpha_indices = u64::from_le_bytes(alpha_bits);
+    let six_value = block[0] <= block[1];
+    std::array::from_fn(|t| {
+        let rgb = if (colour >> (2 * t)) & 3 < 2 {
+            0
+        } else {
+            TOLERANCE
+        };
+        let index = (alpha_indices >> (3 * t)) & 7;
+        let a = match format {
+            BcAlphaFormat::Bc2 => 0,
+            BcAlphaFormat::Bc3 if index < 2 || (six_value && index >= 6) => 0,
+            BcAlphaFormat::Bc3 => TOLERANCE,
+        };
+        [rgb, rgb, rgb, a]
+    })
+}
+
+/// Crops a row-major grid of blocks to a `width`×`height` level of CPU-decoded
+/// words (red in the lowest byte, as the readback kernel writes them), each
+/// with its per-channel tolerance.
+fn reference(
+    format: BcAlphaFormat,
+    decode: fn([u8; 16]) -> [[u8; 4]; 16],
+    blocks: &[[u8; 16]],
+    blocks_x: usize,
+    (width, height): (usize, usize),
+) -> Vec<(u32, [u8; 4])> {
     let mut texels = Vec::new();
     for y in 0..height {
         for x in 0..width {
-            let decoded = blocks[(y / 4) * blocks_x + x / 4];
-            texels.push(u32::from_le_bytes(decoded[(y % 4) * 4 + x % 4]));
+            let block = blocks[(y / 4) * blocks_x + x / 4];
+            let t = (y % 4) * 4 + x % 4;
+            let word = u32::from_le_bytes(decode(block)[t]);
+            texels.push((word, tolerances(format, block)[t]));
         }
     }
     texels
@@ -106,24 +140,24 @@ fn alpha(word: u32) -> u8 {
     word.to_le_bytes()[3]
 }
 
-/// Returns the largest per-channel difference, failing on any texel above the
-/// tolerance with its index and both values.
-fn assert_close(label: &str, actual: &[u32], expected: &[u32]) -> u8 {
+/// Returns the largest per-channel difference, failing on any channel above
+/// its tolerance with the texel index and both values.
+fn assert_close(label: &str, actual: &[u32], expected: &[(u32, [u8; 4])]) -> u8 {
     assert_eq!(actual.len(), expected.len(), "{label}: texel count");
     let mut worst = 0;
-    for (texel, (&got, &want)) in actual.iter().zip(expected).enumerate() {
-        let diff = got
+    for (texel, (&got, &(want, tolerance))) in actual.iter().zip(expected).enumerate() {
+        for ((g, w), limit) in got
             .to_le_bytes()
-            .iter()
+            .into_iter()
             .zip(want.to_le_bytes())
-            .map(|(g, w)| g.abs_diff(w))
-            .max()
-            .unwrap();
-        assert!(
-            diff <= TOLERANCE,
-            "{label}: texel {texel} got {got:#010x}, want {want:#010x}"
-        );
-        worst = worst.max(diff);
+            .zip(tolerance)
+        {
+            assert!(
+                g.abs_diff(w) <= limit,
+                "{label}: texel {texel} got {got:#010x}, want {want:#010x} (per-channel limit {tolerance:?})"
+            );
+            worst = worst.max(g.abs_diff(w));
+        }
     }
     worst
 }
@@ -155,13 +189,12 @@ fn read_and_compare(
     let gpu = context();
     let mut worst = 0;
     let reads = std::array::from_fn(|layer| {
-        let decoded = layers[layer].map(decode);
         let base = native(gpu.read_bc_alpha_upload(&upload, layer, 0));
-        let expected = reference(&decoded[..4], 2, WIDTH, HEIGHT);
+        let expected = reference(format, decode, &layers[layer][..4], 2, (WIDTH, HEIGHT));
         let label = format!("{format:?} layer {layer}");
         worst = worst.max(assert_close(&format!("{label} mip 0"), &base, &expected));
         let small = native(gpu.read_bc_alpha_upload(&upload, layer, 1));
-        let expected = reference(&decoded[4..], 1, 2, 2);
+        let expected = reference(format, decode, &layers[layer][4..], 1, (2, 2));
         worst = worst.max(assert_close(&format!("{label} mip 1"), &small, &expected));
         [base, small]
     });
@@ -309,8 +342,7 @@ fn read_edge(
     )
     .unwrap();
     let actual = native(context().read_bc_alpha_upload(&upload, 0, 0));
-    let decoded: Vec<_> = blocks.iter().copied().map(decode).collect();
-    let expected = reference(&decoded, width.div_ceil(4), width, height);
+    let expected = reference(format, decode, blocks, width.div_ceil(4), (width, height));
     assert_close(&format!("{format:?} {width}x{height}"), &actual, &expected);
     actual
 }
