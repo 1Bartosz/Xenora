@@ -52,3 +52,10 @@ overlapping an active issue:
 Live agent-queue Actions exercises run only in the maintainer-approved private
 repository `ranveersoni98/xenora-agent-queue-smoke`. Do not enable blocking
 production checks until that smoke evidence is recorded and reviewed.
+
+## Phase II note
+
+Issue #277 holds `scripts/qa/`, `tests/qa/`, `scripts/release/`, `tests/release/` and
+`docs/testing/infrastructure/`. Ledger updates for Phase II commits are recorded in
+`docs/coordination/infrastructure-qa-ledger.md` under the #180 coordination claim until
+#180 closes, then move with the tooling owners.
