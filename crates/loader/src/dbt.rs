@@ -765,6 +765,7 @@ impl DbtEngine {
                             // MOV reg, [RIP + disp32]
                             asm.mov_reg_64(X0, X20);
                             asm.load_imm_64(X1, target_ea);
+                            Self::emit_segment_base(asm, seg_gs, seg_fs);
                             let helper_fn = read_u64_helper as *const () as u64;
                             asm.load_imm_64(X4, helper_fn);
                             asm.blr(X4);
@@ -778,6 +779,7 @@ impl DbtEngine {
                             asm.ldr_uoff_64(X2, X19, (reg_idx as u32) * 8);
                             asm.mov_reg_64(X0, X20);
                             asm.load_imm_64(X1, target_ea);
+                            Self::emit_segment_base(asm, seg_gs, seg_fs);
                             let helper_fn = write_u64_helper as *const () as u64;
                             asm.load_imm_64(X4, helper_fn);
                             asm.blr(X4);
@@ -1477,17 +1479,36 @@ impl DbtEngine {
             }
         }
 
+        Self::emit_segment_base(asm, seg_gs, seg_fs);
+
+        Ok(())
+    }
+
+    /// Add the FS or GS segment base to the effective address held in X1.
+    ///
+    /// In 64-bit mode an FS or GS segment override adds the segment base to
+    /// the effective address, so the linear address is
+    /// `(FS or GS).base + base + (scale * index) + displacement`
+    /// (Intel SDM Volume 3A, section 3.4.4; AMD64 Architecture Programmer's
+    /// Manual Volume 1, section 2.2.3.3).
+    ///
+    /// The base is a runtime guest value, so it is read from the guest CPU
+    /// state rather than folded into the translated address.
+    ///
+    /// When both FS and GS overrides are present the encoding is
+    /// architecturally undefined (Intel SDM Volume 2: "The effect of redundant
+    /// prefixes ... is undefined"), so this uses a fixed local rule of
+    /// preferring GS. The interpreter applies the same rule.
+    fn emit_segment_base(asm: &mut Arm64Assembler, seg_gs: bool, seg_fs: bool) {
         if seg_gs {
-            // Add CpuState.gs_base (offset 16*8 + 8 + 8 = 144) to X1
+            // CpuState.gs_base (offset 16*8 + 8 + 8 = 144) to X1
             asm.ldr_uoff_64(X9, X19, 144);
             asm.add_reg_64(X1, X1, X9);
         } else if seg_fs {
-            // Add CpuState.fs_base (offset 16*8 + 8 + 8 + 8 = 152) to X1
+            // CpuState.fs_base (offset 16*8 + 8 + 8 + 8 = 152) to X1
             asm.ldr_uoff_64(X9, X19, 152);
             asm.add_reg_64(X1, X1, X9);
         }
-
-        Ok(())
     }
 
     fn emit_set_exit_reason(asm: &mut Arm64Assembler, code: u32, next_rip: u64) {
