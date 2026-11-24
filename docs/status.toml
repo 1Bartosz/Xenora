@@ -172,6 +172,30 @@ decoded = true
 llvm = "three-way passed"
 
 [[instruction]]
+form = "s_add_i32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = signed overflow"
+representation = "`8110C109`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_sub_i32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = signed overflow"
+representation = "`8191C110`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
 form = "s_addc_u32"
 encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; adds SCC; SCC = carry-out"
 representation = "`820980FF 7FFFFFFF`"

@@ -20,6 +20,8 @@ VARIANTS = (
     ("S_CMP_EQ_U32", "ENC_SOPC"),
     ("S_ADD_U32", "ENC_SOP2"),
     ("S_SUB_U32", "ENC_SOP2"),
+    ("S_ADD_I32", "ENC_SOP2"),
+    ("S_SUB_I32", "ENC_SOP2"),
     ("S_ADDC_U32", "ENC_SOP2"),
     ("S_SUBB_U32", "ENC_SOP2"),
     ("S_AND_B32", "ENC_SOP2"),
