@@ -809,6 +809,21 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 *slot = Some(value);
                 continue;
             }
+            Instruction::ScalarUnary { op, dst, src } => {
+                let src = read_scalar(src)?;
+                if dst < 8 {
+                    return Err(error("scalar unary would modify a resource descriptor"));
+                }
+                let (value, flag) = op.evaluate(src);
+                let slot = scalars
+                    .get_mut(usize::from(dst))
+                    .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
+                *slot = Some(value);
+                if let Some(flag) = flag {
+                    scc = Some(flag);
+                }
+                continue;
+            }
             Instruction::ScalarAlu {
                 op,
                 dst,
@@ -816,20 +831,22 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 src1,
             } => {
                 let (src0, src1) = (read_scalar(src0)?, read_scalar(src1)?);
-                let carry_in = if op.reads_scc() {
-                    scc.ok_or_else(|| error("carry-in or borrow-in reads uninitialized SCC"))?
+                let scc_in = if op.reads_scc() {
+                    scc.ok_or_else(|| error("SOP2 SCC input reads uninitialized SCC"))?
                 } else {
                     false
                 };
                 if dst < 8 {
                     return Err(error("scalar ALU would modify a resource descriptor"));
                 }
-                let (value, flag) = op.evaluate(src0, src1, carry_in);
+                let (value, flag) = op.evaluate(src0, src1, scc_in);
                 let slot = scalars
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = Some(value);
-                scc = Some(flag);
+                if let Some(flag) = flag {
+                    scc = Some(flag);
+                }
                 continue;
             }
             Instruction::ScalarCompare { op, src0, src1 } => {

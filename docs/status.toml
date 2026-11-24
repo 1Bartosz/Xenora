@@ -136,6 +136,138 @@ decoded = true
 llvm = "three-way passed"
 
 [[instruction]]
+form = "s_not_b32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = ~S0; SCC = D != 0"
+representation = "`BE890708`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_brev_b32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = S0 bit-reversed; SCC unchanged"
+representation = "`BE8A0B08`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_bcnt0_i32_b32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = count of zero bits; SCC = D != 0"
+representation = "`BE8C0D08`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_bcnt1_i32_b32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = count of one bits; SCC = D != 0"
+representation = "`BE8B0F08`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_ff0_i32_b32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = index of the lowest zero bit, or -1; SCC unchanged"
+representation = "`BE8E11FF 0000FFFF`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_ff1_i32_b32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = index of the lowest one bit, or -1; SCC unchanged"
+representation = "`BE8D13FF 00400000`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_flbit_i32_b32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = zeros above the highest one bit, or -1; SCC unchanged"
+representation = "`BE8F1508`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_flbit_i32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = bits above the highest bit differing from the sign, or -1; SCC unchanged"
+representation = "`BE9017FF FFF00000`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_sext_i32_i8"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = S0[7:0] sign-extended; SCC unchanged"
+representation = "`BE911908`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_sext_i32_i16"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = S0[15:0] sign-extended; SCC unchanged"
+representation = "`BE921AFF 00018000`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_abs_i32"
+encoding = "SOP1, normal SGPR destination; normal SGPR, inline integer or literal source; D = |S0| (0x80000000 stays); SCC = D != 0"
+representation = "`BE933412`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
 form = "s_cmp_eq_u32"
 encoding = "Normal SGPR or integer operands, with at most one source selecting a literal"
 representation = "`BF068708`"
@@ -475,6 +607,198 @@ llvm = "three-way passed"
 form = "s_ashr_i32"
 encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = S0 >> S1[4:0], sign fill; SCC = result != 0"
 representation = "`91109F0E`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_min_i32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = S0 if S0 < S1 (signed) else S1; SCC = S0 < S1"
+representation = "`830A0908`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_min_u32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = S0 if S0 < S1 (unsigned) else S1; SCC = S0 < S1"
+representation = "`83988509`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_max_i32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = S0 if S0 > S1 (signed) else S1; SCC = S0 > S1"
+representation = "`84170908`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_max_u32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = S0 if S0 > S1 (unsigned) else S1; SCC = S0 > S1"
+representation = "`848C0908`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_cselect_b32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = SCC ? S0 : S1; reads SCC, SCC unchanged"
+representation = "`850B0809`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_bfm_b32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = ((1 << S0[4:0]) - 1) << S1[4:0]; SCC unchanged"
+representation = "`920D848C`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_mul_i32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = low 32 bits of S0 * S1; SCC unchanged"
+representation = "`930F0908`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_bfe_u32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = S0 >> S1[4:0] masked to S1[22:16] bits; SCC = D != 0"
+representation = "`9390FF08 00080004`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_bfe_i32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = S0 >> S1[4:0] (sign fill) masked to S1[22:16] bits, sign-extended; SCC = D != 0"
+representation = "`9411FF08 00080004`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_absdiff_i32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = |S0 - S1| of the 32-bit difference (0x80000000 stays); SCC = D != 0"
+representation = "`96120809`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_lshl1_add_u32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = (S0 << 1) + S1; SCC = carry out of the exact sum"
+representation = "`970E0908`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_lshl2_add_u32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = (S0 << 2) + S1; SCC = carry out of the exact sum"
+representation = "`97990909`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_lshl3_add_u32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = (S0 << 3) + S1; SCC = carry out of the exact sum"
+representation = "`98130808`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_lshl4_add_u32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = (S0 << 4) + S1; SCC = carry out of the exact sum"
+representation = "`9894D009`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_mul_hi_u32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = high 32 bits of the unsigned product; SCC unchanged"
+representation = "`9A950808`"
+lowering = "resolved scalar state and SCC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_mul_hi_i32"
+encoding = "SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; D = high 32 bits of the signed product; SCC unchanged"
+representation = "`9B160808`"
 lowering = "resolved scalar state and SCC"
 reference = "implemented"
 cpu = "local known-answer test passed"

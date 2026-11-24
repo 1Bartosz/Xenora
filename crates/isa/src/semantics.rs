@@ -49,6 +49,43 @@ pub enum Operation {
     ArithmeticShiftRight,
     /// Compare S0 with S1 under the form's relation; writes only SCC.
     Compare,
+    /// Bitwise complement of S0.
+    Not,
+    /// S0 with its bit order reversed.
+    ReverseBits,
+    /// Number of zero bits in S0.
+    CountZeros,
+    /// Number of one bits in S0.
+    CountOnes,
+    /// Index of the lowest zero bit of S0, or -1 when there is none.
+    FindFirstZero,
+    /// Index of the lowest one bit of S0, or -1 when there is none.
+    FindFirstOne,
+    /// Unsigned: count of zeros above the highest one bit; signed: count of bits
+    /// above the highest bit that differs from the sign bit. -1 when none.
+    FindLastBit,
+    /// Sign-extend the low `source_bits` of S0 to 32 bits.
+    SignExtend,
+    /// Two's-complement absolute value; the most negative value maps to itself.
+    Absolute,
+    /// S0 when it is strictly less than S1, otherwise S1.
+    Minimum,
+    /// S0 when it is strictly greater than S1, otherwise S1.
+    Maximum,
+    /// S0 when SCC is set, otherwise S1.
+    Select,
+    /// `((1 << S0[4:0]) - 1) << S1[4:0]`.
+    BitfieldMask,
+    /// Low 32 bits of the product.
+    Multiply,
+    /// High 32 bits of the 64-bit product.
+    MultiplyHigh,
+    /// The field of S0 at offset S1[4:0] with width S1[22:16]; sign-extended when signed.
+    BitfieldExtract,
+    /// Absolute value of the wrapped 32-bit difference S0 - S1.
+    AbsoluteDifference,
+    /// `(S0 << shift_amount) + S1`.
+    ShiftLeftAdd,
 }
 
 /// How the operands are interpreted. `Bitwise` exactly when the operation is logical.
@@ -62,12 +99,12 @@ pub enum Signedness {
     Bitwise,
 }
 
-/// Extra input consumed by the operation.
+/// Whether the operation reads SCC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CarryIn {
-    /// No carry or borrow input.
+    /// SCC is not read.
     None,
-    /// SCC as carry-in (add) or borrow-in (sub).
+    /// SCC as carry-in (add), borrow-in (sub) or the select condition (select).
     Scc,
 }
 
@@ -86,6 +123,8 @@ pub enum SccEffect {
     Nonzero,
     /// The compare's relation holds for S0 and S1.
     Relation,
+    /// The result is S0 by the strict comparison (min, max): equal operands give 0.
+    SelectedSrc0,
 }
 
 /// What a form writes to VCC or EXEC. Stage A forms leave both unchanged.
@@ -113,6 +152,9 @@ pub enum OperandRule {
     /// SOPC: no destination; SSRC0/SSRC1 as for SOP2 sources (s0-s105, inline
     /// integers -16..64 or one literal word). Everything else is rejected.
     SopcScalar,
+    /// SOP1 unary: SDST is s0-s105; SSRC0 is s0-s105, an inline integer -16..64 or
+    /// a literal word. Everything else is rejected as unsupported.
+    Sop1Sgpr,
 }
 
 /// Evidence a form needs before it counts as verified.
@@ -161,12 +203,16 @@ pub struct FormSemantics {
     pub operation: Operation,
     /// Operand interpretation.
     pub signedness: Signedness,
-    /// Carry or borrow input.
+    /// SCC input.
     pub carry_in: CarryIn,
     /// Operand and result width in bits.
     pub width: u8,
     /// Low bits of S1 used as the shift count by shift operations; 0 otherwise.
     pub shift_count_bits: u8,
+    /// Fixed left shift of S0 for shift-and-add operations (1 to 4); 0 otherwise.
+    pub shift_amount: u8,
+    /// Low bits of S0 that the operation reads: `width`, or 8 or 16 for sign extension.
+    pub source_bits: u8,
     /// The relation tested by compares (S0 on the left); `None` otherwise.
     pub relation: Option<CompareRelation>,
     /// SCC write.

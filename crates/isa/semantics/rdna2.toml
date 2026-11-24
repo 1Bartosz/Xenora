@@ -49,11 +49,11 @@ unsupported = [
 #   family        encoding family; must match the XML base encoding
 #   opcode        XML opcode; must match
 #   variant       Rust enum variant of the typed op
-#   operation     primitive: add | sub | and | or | xor
+#   operation     primitive (closed vocabulary in generate_semantics.py OPERATIONS)
 #   signedness    unsigned | signed | bitwise (bitwise iff a logical operation)
-#   carry_in      none | scc  (scc only for unsigned add/sub)
+#   carry_in      none | scc  (scc for unsigned add/sub carry and the cselect condition)
 #   width         operand and result width in bits
-#   scc           carry_out | borrow | signed_overflow | nonzero
+#   scc           unchanged | carry_out | borrow | signed_overflow | nonzero | relation | selected_src0
 #   vcc, exec     unchanged (stated, not implied)
 #   wave          any | wave32
 #   operands      a key of [operand_rules]
@@ -373,6 +373,317 @@ operands = "sop2_sgpr"
 spec = [{ document = "guide", section = "12.1", page = 104 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
+# ---- SOP2 32-bit integer arithmetic, select and bit-field forms (#215) ----
+# min/max: SCC = S0 chosen by the strict compare (a tie gives S1, SCC 0). cselect
+# reads SCC and writes none. bfm, mul, mul_hi write no SCC (Tables 11, 12, 14).
+# bfe: offset S1[4:0], width S1[22:16]. lshl_add: SCC = carry of (S0 << N) + S1.
+
+[[form]]
+name = "S_MIN_I32"
+family = "SOP2"
+opcode = 6
+variant = "MinI32"
+operation = "min"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "selected_src0"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 102 },
+  { document = "guide", section = "5.4", page = 34 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_MIN_U32"
+family = "SOP2"
+opcode = 7
+variant = "MinU32"
+operation = "min"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+scc = "selected_src0"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 102 },
+  { document = "guide", section = "5.4", page = 34 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_MAX_I32"
+family = "SOP2"
+opcode = 8
+variant = "MaxI32"
+operation = "max"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "selected_src0"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 102 },
+  { document = "guide", section = "5.4", page = 34 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_MAX_U32"
+family = "SOP2"
+opcode = 9
+variant = "MaxU32"
+operation = "max"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+scc = "selected_src0"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 103 },
+  { document = "guide", section = "5.4", page = 34 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_CSELECT_B32"
+family = "SOP2"
+opcode = 10
+variant = "CselectB32"
+operation = "cselect"
+signedness = "bitwise"
+carry_in = "scc"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 103 },
+  { document = "guide", section = "5.5", page = 34 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_BFM_B32"
+family = "SOP2"
+opcode = 36
+variant = "BfmB32"
+operation = "bfm"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 104 },
+  { document = "guide", section = "5.7", page = 36 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_MUL_I32"
+family = "SOP2"
+opcode = 38
+variant = "MulI32"
+operation = "mul"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 105 },
+  { document = "guide", section = "5.4", page = 34 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_BFE_U32"
+family = "SOP2"
+opcode = 39
+variant = "BfeU32"
+operation = "bfe"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 105 },
+  { document = "guide", section = "5.7", page = 36 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_BFE_I32"
+family = "SOP2"
+opcode = 40
+variant = "BfeI32"
+operation = "bfe"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 105 },
+  { document = "guide", section = "5.7", page = 36 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_ABSDIFF_I32"
+family = "SOP2"
+opcode = 44
+variant = "AbsdiffI32"
+operation = "absdiff"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [
+  { document = "guide", section = "12.1", page = 105 },
+  { document = "guide", section = "5.4", page = 34 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_LSHL1_ADD_U32"
+family = "SOP2"
+opcode = 46
+variant = "Lshl1AddU32"
+operation = "lshl_add"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+shift_amount = 1
+scc = "carry_out"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 105 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_LSHL2_ADD_U32"
+family = "SOP2"
+opcode = 47
+variant = "Lshl2AddU32"
+operation = "lshl_add"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+shift_amount = 2
+scc = "carry_out"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 105 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_LSHL3_ADD_U32"
+family = "SOP2"
+opcode = 48
+variant = "Lshl3AddU32"
+operation = "lshl_add"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+shift_amount = 3
+scc = "carry_out"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 106 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_LSHL4_ADD_U32"
+family = "SOP2"
+opcode = 49
+variant = "Lshl4AddU32"
+operation = "lshl_add"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+shift_amount = 4
+scc = "carry_out"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 106 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_MUL_HI_U32"
+family = "SOP2"
+opcode = 53
+variant = "MulHiU32"
+operation = "mul_hi"
+signedness = "unsigned"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 106 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_MUL_HI_I32"
+family = "SOP2"
+opcode = 54
+variant = "MulHiI32"
+operation = "mul_hi"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop2_sgpr"
+spec = [{ document = "guide", section = "12.1", page = 106 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
 # ---- Stage D: SOPC 32-bit integer compares (#215) ----
 # Only SCC is written: SCC = relation(S0, S1), S0 = SSRC0 on the left (guide 12.4).
 
@@ -636,6 +947,242 @@ wave = "any"
 operands = "sopc_scalar"
 spec = [
   { document = "guide", section = "12.4", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+# ---- SOP1 32-bit unary integer forms (#215) ----
+# NOT, BCNT0, BCNT1 and ABS set SCC = (D != 0); the others leave SCC unchanged.
+# Searches that find nothing return -1 (guide 12.3).
+
+[operand_rules.sop1_sgpr]
+family = "SOP1"
+dst = { field = "SDST", class = "sgpr", min = 0, max = 105 }
+src = [{ field = "SSRC0", class = "scalar_source" }]
+max_literals = 1
+unsupported = [
+  "dst_vcc", "dst_exec", "dst_ttmp", "dst_m0", "dst_null",
+  "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_float_inline", "src_special",
+]
+
+[[form]]
+name = "S_NOT_B32"
+family = "SOP1"
+opcode = 7
+variant = "NotB32"
+operation = "not"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_BREV_B32"
+family = "SOP1"
+opcode = 11
+variant = "BrevB32"
+operation = "brev"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_BCNT0_I32_B32"
+family = "SOP1"
+opcode = 13
+variant = "Bcnt0I32B32"
+operation = "bcnt0"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_BCNT1_I32_B32"
+family = "SOP1"
+opcode = 15
+variant = "Bcnt1I32B32"
+operation = "bcnt1"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_FF0_I32_B32"
+family = "SOP1"
+opcode = 17
+variant = "Ff0I32B32"
+operation = "ff0"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_FF1_I32_B32"
+family = "SOP1"
+opcode = 19
+variant = "Ff1I32B32"
+operation = "ff1"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_FLBIT_I32_B32"
+family = "SOP1"
+opcode = 21
+variant = "FlbitI32B32"
+operation = "flbit"
+signedness = "bitwise"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_FLBIT_I32"
+family = "SOP1"
+opcode = 23
+variant = "FlbitI32"
+operation = "flbit"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_SEXT_I32_I8"
+family = "SOP1"
+opcode = 25
+variant = "SextI32I8"
+operation = "sext"
+signedness = "signed"
+carry_in = "none"
+width = 32
+source_bits = 8
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_SEXT_I32_I16"
+family = "SOP1"
+opcode = 26
+variant = "SextI32I16"
+operation = "sext"
+signedness = "signed"
+carry_in = "none"
+width = 32
+source_bits = 16
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
+  { document = "guide", section = "5.3", page = 33 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "S_ABS_I32"
+family = "SOP1"
+opcode = 52
+variant = "AbsI32"
+operation = "abs"
+signedness = "signed"
+carry_in = "none"
+width = 32
+scc = "nonzero"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "any"
+operands = "sop1_sgpr"
+spec = [
+  { document = "guide", section = "12.3", page = 0 },
   { document = "guide", section = "5.3", page = 33 },
 ]
 verify = ["reference", "independent", "metal", "llvm_encoding"]

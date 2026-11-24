@@ -4,10 +4,12 @@ use std::process::{Command, Stdio};
 
 use xenora_decoder::{
     Architecture, CompareRelation, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction,
-    ScalarAluOp, ScalarSource, VectorSource, decode, decode_at,
+    ScalarAluOp, ScalarSource, ScalarUnaryOp, VectorSource, decode, decode_at,
 };
 use xenora_isa::semantics::Signedness;
-use xenora_ref::{BranchCondition, CompareSource, Comparison, Op, ScalarAlu, Source, VectorAlu};
+use xenora_ref::{
+    BranchCondition, CompareSource, Comparison, Op, ScalarAlu, ScalarUnary, Source, VectorAlu,
+};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
 const BITWISE_FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/bitwise-branch.bin");
@@ -349,6 +351,22 @@ fn reference_op(instruction: Instruction) -> Op {
                 ScalarAluOp::LshlB32 => ScalarAlu::ShiftLeft,
                 ScalarAluOp::LshrB32 => ScalarAlu::ShiftRight,
                 ScalarAluOp::AshrI32 => ScalarAlu::ArithmeticShiftRight,
+                ScalarAluOp::MinI32 => ScalarAlu::Minimum { signed: true },
+                ScalarAluOp::MinU32 => ScalarAlu::Minimum { signed: false },
+                ScalarAluOp::MaxI32 => ScalarAlu::Maximum { signed: true },
+                ScalarAluOp::MaxU32 => ScalarAlu::Maximum { signed: false },
+                ScalarAluOp::CselectB32 => ScalarAlu::Select,
+                ScalarAluOp::BfmB32 => ScalarAlu::BitfieldMask,
+                ScalarAluOp::MulI32 => ScalarAlu::Multiply,
+                ScalarAluOp::BfeU32 => ScalarAlu::BitfieldExtract { signed: false },
+                ScalarAluOp::BfeI32 => ScalarAlu::BitfieldExtract { signed: true },
+                ScalarAluOp::AbsdiffI32 => ScalarAlu::AbsoluteDifference,
+                ScalarAluOp::Lshl1AddU32 => ScalarAlu::ShiftLeftAdd(1),
+                ScalarAluOp::Lshl2AddU32 => ScalarAlu::ShiftLeftAdd(2),
+                ScalarAluOp::Lshl3AddU32 => ScalarAlu::ShiftLeftAdd(3),
+                ScalarAluOp::Lshl4AddU32 => ScalarAlu::ShiftLeftAdd(4),
+                ScalarAluOp::MulHiU32 => ScalarAlu::MultiplyHigh { signed: false },
+                ScalarAluOp::MulHiI32 => ScalarAlu::MultiplyHigh { signed: true },
             },
             dst,
             reference_scalar(src0),
@@ -356,6 +374,23 @@ fn reference_op(instruction: Instruction) -> Op {
         ),
         Instruction::AddNoCarryU32 { dst, src0, src1 } => Op::Add(dst, src0, src1),
         Instruction::ScalarMoveB32 { dst, src } => Op::ScalarMove(dst, reference_scalar(src)),
+        Instruction::ScalarUnary { op, dst, src } => Op::ScalarUnary(
+            match op {
+                ScalarUnaryOp::NotB32 => ScalarUnary::Not,
+                ScalarUnaryOp::BrevB32 => ScalarUnary::ReverseBits,
+                ScalarUnaryOp::Bcnt0I32B32 => ScalarUnary::CountZeros,
+                ScalarUnaryOp::Bcnt1I32B32 => ScalarUnary::CountOnes,
+                ScalarUnaryOp::Ff0I32B32 => ScalarUnary::FindFirstZero,
+                ScalarUnaryOp::Ff1I32B32 => ScalarUnary::FindFirstOne,
+                ScalarUnaryOp::FlbitI32B32 => ScalarUnary::FindLastBit,
+                ScalarUnaryOp::FlbitI32 => ScalarUnary::FindLastSignBit,
+                ScalarUnaryOp::SextI32I8 => ScalarUnary::SignExtendByte,
+                ScalarUnaryOp::SextI32I16 => ScalarUnary::SignExtendShort,
+                ScalarUnaryOp::AbsI32 => ScalarUnary::Absolute,
+            },
+            dst,
+            reference_scalar(src),
+        ),
         Instruction::ScalarCompare { op, src0, src1 } => {
             let (src0, src1) = (reference_scalar(src0), reference_scalar(src1));
             // The reference keeps CompareEqual for EQ and uses its VOPC relation
@@ -458,13 +493,15 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/scalar-alu.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-logic.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-compare.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-unary.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-arith.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 61, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 88, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
