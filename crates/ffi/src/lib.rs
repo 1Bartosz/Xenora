@@ -14,7 +14,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
 use xenora_loader::{ExitReason, ImportRegistry, ParsedPe, ProbeConfig, Register, probe_pe_bytes};
-use xenora_metal::NativeCompute;
+use xenora_metal::{MetalRgba8Texture, MetalRgba8TextureDesc, NativeCompute, Rgba8MipLevel};
 use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 pub const XENORA_ABI_VERSION: u32 = 1;
@@ -58,11 +58,35 @@ const MAX_SESSIONS: usize = 64;
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/trusted-runner.exe");
 
+pub const XENORA_NO_RESOURCE: u64 = 0;
+pub const XENORA_RESOURCE_TYPE_TEXTURE_2D: u32 = 1;
+pub const XENORA_RESOURCE_TYPE_BUFFER: u32 = 2;
+const MAX_RESOURCES_PER_SESSION: usize = 256;
+
+#[derive(Clone)]
+struct SendSyncTexture(MetalRgba8Texture);
+// SAFETY: Apple Metal textures are thread-safe native GPU resources.
+unsafe impl Send for SendSyncTexture {}
+unsafe impl Sync for SendSyncTexture {}
+
+pub struct ResourceSlot {
+    pub generation: u32,
+    pub resource_type: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    metal_texture: Option<SendSyncTexture>,
+    pub in_flight: u32,
+    pub retired: bool,
+}
+
 struct Slot {
     /// Odd while live, even while free; starts at 0 so the first handle is never 0.
     generation: u32,
     /// The session's persistent frame loop, if one was started.
     frame_loop: Option<Arc<FrameLoop>>,
+    /// Persistent GPU resources owned by this session (Gate 5, #279).
+    resources: Vec<ResourceSlot>,
 }
 
 static SESSIONS: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
@@ -107,6 +131,7 @@ pub unsafe extern "C" fn xenora_session_create(abi_version: u32, out_session: *m
                 slots.push(Slot {
                     generation: 0,
                     frame_loop: None,
+                    resources: Vec::new(),
                 });
                 slots.len() - 1
             }
@@ -136,6 +161,7 @@ pub extern "C" fn xenora_session_destroy(session: u64) -> i32 {
         let slot = &mut slots[split(session).0];
         slot.generation += 1;
         let running = slot.frame_loop.take();
+        slot.resources.clear();
         drop(slots);
         // Stop and join the guest thread without holding the session table.
         if let Some(running) = running {
@@ -516,6 +542,590 @@ pub unsafe extern "C" fn xenora_session_run_trusted_fixture(
         }
         XENORA_OK
     })
+}
+
+fn get_resource_mut(slot: &mut Slot, resource: u64) -> Result<&mut ResourceSlot, i32> {
+    let (index, generation) = split(resource);
+    let res = slot.resources.get_mut(index).ok_or(XENORA_INVALID_HANDLE)?;
+    if res.generation != generation || generation % 2 == 0 || res.retired {
+        return Err(XENORA_INVALID_HANDLE);
+    }
+    Ok(res)
+}
+
+/// # Safety
+/// `out_resource` must be non-null and valid for one aligned `u64` write.
+/// If `initial_rgba` is non-null, it must point to at least `width * height * 4` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_create_texture(
+    session: u64,
+    width: u32,
+    height: u32,
+    initial_rgba: *const u8,
+    out_resource: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if out_resource.is_null() || width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let total_pixels = match (width as usize).checked_mul(height as usize) {
+            Some(pixels) if pixels <= 16384 * 16384 => pixels,
+            _ => return XENORA_INVALID_ARGUMENT,
+        };
+        let total_bytes = total_pixels * 4;
+
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+
+        let res_idx = match slot
+            .resources
+            .iter()
+            .position(|r| r.generation % 2 == 0 && !r.retired && r.in_flight == 0)
+        {
+            Some(idx) => idx,
+            None if slot.resources.len() < MAX_RESOURCES_PER_SESSION => {
+                slot.resources.push(ResourceSlot {
+                    generation: 0,
+                    resource_type: XENORA_RESOURCE_TYPE_TEXTURE_2D,
+                    width: 0,
+                    height: 0,
+                    pixels: Vec::new(),
+                    metal_texture: None,
+                    in_flight: 0,
+                    retired: false,
+                });
+                slot.resources.len() - 1
+            }
+            None => return XENORA_LIMIT_EXCEEDED,
+        };
+
+        let res = &mut slot.resources[res_idx];
+        let Some(generation) = res.generation.checked_add(1) else {
+            return XENORA_LIMIT_EXCEEDED;
+        };
+        res.generation = generation;
+        res.resource_type = XENORA_RESOURCE_TYPE_TEXTURE_2D;
+        res.width = width;
+        res.height = height;
+        res.in_flight = 0;
+        res.retired = false;
+
+        let mut pixels = vec![0u8; total_bytes];
+        if !initial_rgba.is_null() {
+            // SAFETY: Caller guarantees at least width * height * 4 readable bytes when initial_rgba is non-null.
+            unsafe {
+                std::ptr::copy_nonoverlapping(initial_rgba, pixels.as_mut_ptr(), total_bytes);
+            }
+        }
+
+        res.metal_texture = if let Ok(gpu) = NativeCompute::new() {
+            if let Ok(desc) = MetalRgba8TextureDesc::new(width as usize, height as usize, 1) {
+                let mip = Rgba8MipLevel::new_packed(0, width as usize, height as usize, &pixels);
+                MetalRgba8Texture::upload(gpu.device(), desc, &[mip])
+                    .ok()
+                    .map(SendSyncTexture)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        res.pixels = pixels;
+
+        let handle = (u64::from(generation) << 32) | (res_idx as u64);
+        // SAFETY: checked non-null above.
+        unsafe { out_resource.write(handle) };
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `rgba` must be non-null and valid for `byte_count` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_update_texture(
+    session: u64,
+    resource: u64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    rgba: *const u8,
+    byte_count: u64,
+) -> i32 {
+    guarded(|| {
+        if rgba.is_null() || width == 0 || height == 0 {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let update_pixels = match (width as usize).checked_mul(height as usize) {
+            Some(pixels) => pixels,
+            None => return XENORA_INVALID_ARGUMENT,
+        };
+        let required_bytes = (update_pixels * 4) as u64;
+        if byte_count < required_bytes {
+            return XENORA_INVALID_ARGUMENT;
+        }
+
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        let res = match get_resource_mut(slot, resource) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        if res.resource_type != XENORA_RESOURCE_TYPE_TEXTURE_2D {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        if x.checked_add(width).is_none_or(|end_x| end_x > res.width)
+            || y.checked_add(height).is_none_or(|end_y| end_y > res.height)
+        {
+            return XENORA_INVALID_ARGUMENT;
+        }
+
+        // SAFETY: caller guarantees byte_count readable bytes, and required_bytes <= byte_count.
+        let src_slice = unsafe { std::slice::from_raw_parts(rgba, required_bytes as usize) };
+        for dy in 0..height {
+            let src_start = (dy as usize * width as usize) * 4;
+            let dst_start = (((y + dy) as usize * res.width as usize) + x as usize) * 4;
+            let row_bytes = width as usize * 4;
+            res.pixels[dst_start..dst_start + row_bytes]
+                .copy_from_slice(&src_slice[src_start..src_start + row_bytes]);
+        }
+
+        if let Some(ref tex) = res.metal_texture {
+            let mip =
+                Rgba8MipLevel::new_packed(0, res.width as usize, res.height as usize, &res.pixels);
+            if tex.0.upload_mip(&mip).is_err() {
+                return XENORA_INTERNAL_ERROR;
+            }
+        }
+
+        XENORA_OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_destroy_resource(session: u64, resource: u64) -> i32 {
+    guarded(|| {
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        let res = match get_resource_mut(slot, resource) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        if res.in_flight > 0 {
+            res.retired = true;
+        } else {
+            res.generation += 1;
+            res.metal_texture = None;
+            res.pixels.clear();
+            res.retired = false;
+        }
+
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// Each output pointer must be non-null and valid for one aligned `u32` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_resource_info(
+    session: u64,
+    resource: u64,
+    out_type: *mut u32,
+    out_width: *mut u32,
+    out_height: *mut u32,
+    out_in_flight: *mut u32,
+) -> i32 {
+    guarded(|| {
+        if out_type.is_null()
+            || out_width.is_null()
+            || out_height.is_null()
+            || out_in_flight.is_null()
+        {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        let res = match get_resource_mut(slot, resource) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        // SAFETY: checked non-null above.
+        unsafe {
+            out_type.write(res.resource_type);
+            out_width.write(res.width);
+            out_height.write(res.height);
+            out_in_flight.write(res.in_flight);
+        }
+        XENORA_OK
+    })
+}
+
+const TEXTURE_RENDER_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct VertexOut {
+    float4 position [[position]];
+    float4 uv [[user(param0)]];
+};
+
+vertex VertexOut textured_vs(device const float4 *positions [[buffer(0)]],
+                             device const float4 *uvs [[buffer(1)]],
+                             uint vid [[vertex_id]]) {
+    VertexOut out;
+    out.position = positions[vid];
+    out.uv = uvs[vid];
+    return out;
+}
+
+fragment float4 textured_ps(VertexOut in [[stage_in]],
+                            texture2d<float, access::sample> tex [[texture(0)]],
+                            sampler samp [[sampler(0)]]) {
+    return tex.sample(samp, in.uv.xy);
+}
+"#;
+
+const FULLSCREEN_VERTICES: [[f32; 4]; 3] = [
+    [-1.0, -1.0, 0.5, 1.0],
+    [3.0, -1.0, 0.5, 1.0],
+    [-1.0, 3.0, 0.5, 1.0],
+];
+
+const FULLSCREEN_UVS: [[f32; 4]; 3] = [
+    [0.0, 1.0, 0.0, 1.0],
+    [2.0, 1.0, 0.0, 1.0],
+    [0.0, -1.0, 0.0, 1.0],
+];
+
+/// # Safety
+/// `out_rgba` must be non-null and valid for `capacity` byte writes;
+/// `out_width` and `out_height` must be non-null and valid for one aligned `u32` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_render_textured(
+    session: u64,
+    resource: u64,
+    out_rgba: *mut u8,
+    capacity: u64,
+    out_width: *mut u32,
+    out_height: *mut u32,
+) -> i32 {
+    guarded(|| {
+        if out_rgba.is_null() || out_width.is_null() || out_height.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+
+        let (width, height, metal_tex) = {
+            let Ok(mut slots) = SESSIONS.lock() else {
+                return XENORA_INTERNAL_ERROR;
+            };
+            if !is_live(&slots, session) {
+                return XENORA_INVALID_HANDLE;
+            }
+            let slot = &mut slots[split(session).0];
+            let res = match get_resource_mut(slot, resource) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            if res.resource_type != XENORA_RESOURCE_TYPE_TEXTURE_2D {
+                return XENORA_INVALID_ARGUMENT;
+            }
+            let required_bytes = (res.width as u64) * (res.height as u64) * 4;
+            if capacity < required_bytes {
+                return XENORA_BUFFER_TOO_SMALL;
+            }
+            res.in_flight += 1;
+            (res.width, res.height, res.metal_texture.clone())
+        };
+
+        // Render on Metal outside the session lock
+        let render_result: Result<Vec<u8>, ()> = if let Some(tex) = metal_tex {
+            match NativeCompute::new() {
+                Ok(gpu) => {
+                    match xenora_metal::MetalSampler::new(gpu.device(), Default::default()) {
+                        Ok(sampler) => gpu
+                            .render_rgba8_sampled(
+                                TEXTURE_RENDER_MSL,
+                                ["textured_vs", "textured_ps"],
+                                &FULLSCREEN_VERTICES,
+                                &FULLSCREEN_UVS,
+                                [width as usize, height as usize],
+                                [0, 0, 0, 0],
+                                Some((&tex.0, &sampler)),
+                            )
+                            .map_err(|_| ()),
+                        Err(_) => Err(()),
+                    }
+                }
+                Err(_) => Err(()),
+            }
+        } else {
+            Err(())
+        };
+
+        // Re-lock to decrement in_flight and finalize retirement if marked retired
+        {
+            let Ok(mut slots) = SESSIONS.lock() else {
+                return XENORA_INTERNAL_ERROR;
+            };
+            let (sess_idx, _) = split(session);
+            if let Some(slot) = slots.get_mut(sess_idx) {
+                let (res_idx, _) = split(resource);
+                if let Some(res) = slot.resources.get_mut(res_idx) {
+                    res.in_flight = res.in_flight.saturating_sub(1);
+                    if res.retired && res.in_flight == 0 {
+                        res.generation += 1;
+                        res.retired = false;
+                        res.metal_texture = None;
+                        res.pixels.clear();
+                    }
+                }
+            }
+        }
+
+        let pixels = match render_result {
+            Ok(p) => p,
+            Err(_) => return XENORA_EXECUTION_FAILED,
+        };
+
+        // SAFETY: non-null and capacity checked above.
+        unsafe {
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_rgba, pixels.len());
+            out_width.write(width);
+            out_height.write(height);
+        }
+        XENORA_OK
+    })
+}
+
+const TEXTURED_FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/textured.exe");
+
+const INITIAL_TEXTURE_2X2: [u8; 16] = [
+    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+];
+
+const UPDATED_TEXTURE_2X2: [u8; 16] = [
+    255, 255, 0, 255, 0, 255, 255, 255, 255, 0, 255, 255, 64, 64, 64, 255,
+];
+
+fn run_textured_fixture(session: u64) -> Result<Vec<u8>, String> {
+    let last_frame = Arc::new(Mutex::new(None));
+    let frame_sink = Arc::clone(&last_frame);
+    let mut imports = ImportRegistry::new();
+
+    imports.register("xenora.dll", "texture_create", move |args, _, memory| {
+        let w = args.get(0, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let h = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
+        if w != 2 || h != 2 {
+            return Err(ExitReason::IllegalInstruction(0xfe));
+        }
+        let mut res_handle: u64 = 0;
+        let status = unsafe {
+            xenora_session_create_texture(
+                session,
+                w,
+                h,
+                INITIAL_TEXTURE_2X2.as_ptr(),
+                &mut res_handle,
+            )
+        };
+        if status != XENORA_OK {
+            return Err(ExitReason::IllegalInstruction(0xfd));
+        }
+        Ok(res_handle)
+    });
+
+    let sink = Arc::clone(&frame_sink);
+    imports.register(
+        "xenora.dll",
+        "frame_submit_textured",
+        move |args, _, memory| {
+            let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+            let mut rendered = vec![0u8; 16];
+            let mut rw = 0u32;
+            let mut rh = 0u32;
+            let status = unsafe {
+                xenora_session_render_textured(
+                    session,
+                    handle,
+                    rendered.as_mut_ptr(),
+                    16,
+                    &mut rw,
+                    &mut rh,
+                )
+            };
+            if status != XENORA_OK || rw != 2 || rh != 2 {
+                return Err(ExitReason::IllegalInstruction(0xfc));
+            }
+            if let Ok(mut slot) = sink.lock() {
+                *slot = Some(rendered);
+            }
+            Ok(1)
+        },
+    );
+
+    imports.register("xenora.dll", "texture_update", move |args, _, memory| {
+        let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+        let x = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let y = args.get(2, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let w = args.get(3, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let h = 2u32;
+        let status = unsafe {
+            xenora_session_update_texture(
+                session,
+                handle,
+                x,
+                y,
+                w,
+                h,
+                UPDATED_TEXTURE_2X2.as_ptr(),
+                16,
+            )
+        };
+        if status != XENORA_OK {
+            return Err(ExitReason::IllegalInstruction(0xfb));
+        }
+        Ok(1)
+    });
+
+    imports.register("xenora.dll", "texture_destroy", move |args, _, memory| {
+        let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+        let status = xenora_session_destroy_resource(session, handle);
+        if status != XENORA_OK {
+            return Err(ExitReason::IllegalInstruction(0xfa));
+        }
+        Ok(1)
+    });
+
+    let startup = run_synthetic_startup(
+        TEXTURED_FIXTURE,
+        StartupLayout {
+            image_base: 0x1_4000_0000,
+            stack_top: 0x2_0001_0000,
+            tls_base: 0x3_0000_0000,
+        },
+        imports,
+        100,
+    )
+    .map_err(|e| format!("synthetic startup: {e}"))?;
+
+    if startup.execution.exit_reason != ExitReason::Halt {
+        return Err(format!(
+            "unexpected exit reason: {:?}",
+            startup.execution.exit_reason
+        ));
+    }
+
+    let final_pixels = last_frame
+        .lock()
+        .map_err(|_| "frame lock poisoned")?
+        .take()
+        .ok_or_else(|| "guest halted without rendering a frame".to_string())?;
+
+    if final_pixels != UPDATED_TEXTURE_2X2 {
+        return Err("final read-back frame did not match updated texture".into());
+    }
+
+    Ok(final_pixels)
+}
+
+/// # Safety
+/// `out_rgba` must be non-null and valid for `capacity` byte writes;
+/// `out_width` and `out_height` must be non-null and valid for one aligned `u32` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_run_textured_fixture(
+    session: u64,
+    out_rgba: *mut u8,
+    capacity: u64,
+    out_width: *mut u32,
+    out_height: *mut u32,
+) -> i32 {
+    guarded(|| {
+        if out_rgba.is_null() || out_width.is_null() || out_height.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        if capacity < 16 {
+            return XENORA_BUFFER_TOO_SMALL;
+        }
+        match SESSIONS.lock() {
+            Ok(slots) if is_live(&slots, session) => {}
+            Ok(_) => return XENORA_INVALID_HANDLE,
+            Err(_) => return XENORA_INTERNAL_ERROR,
+        }
+        let Ok(pixels) = run_textured_fixture(session) else {
+            return XENORA_EXECUTION_FAILED;
+        };
+        // SAFETY: non-null and at least 16 bytes, checked above.
+        unsafe {
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_rgba, 16);
+            out_width.write(2);
+            out_height.write(2);
+        }
+        XENORA_OK
+    })
+}
+
+/// Internal test helper for acquiring a resource in-flight reference.
+pub fn test_acquire_resource_in_flight(session: u64, resource: u64) -> Result<(), i32> {
+    let Ok(mut slots) = SESSIONS.lock() else {
+        return Err(XENORA_INTERNAL_ERROR);
+    };
+    if !is_live(&slots, session) {
+        return Err(XENORA_INVALID_HANDLE);
+    }
+    let slot = &mut slots[split(session).0];
+    let res = get_resource_mut(slot, resource)?;
+    res.in_flight += 1;
+    Ok(())
+}
+
+/// Internal test helper for releasing a resource in-flight reference.
+pub fn test_release_resource_in_flight(session: u64, resource: u64) -> Result<(), i32> {
+    let Ok(mut slots) = SESSIONS.lock() else {
+        return Err(XENORA_INTERNAL_ERROR);
+    };
+    if !is_live(&slots, session) {
+        return Err(XENORA_INVALID_HANDLE);
+    }
+    let slot = &mut slots[split(session).0];
+    let (res_idx, res_gen) = split(resource);
+    let res = slot
+        .resources
+        .get_mut(res_idx)
+        .ok_or(XENORA_INVALID_HANDLE)?;
+    if res.generation != res_gen {
+        return Err(XENORA_INVALID_HANDLE);
+    }
+    res.in_flight = res.in_flight.saturating_sub(1);
+    if res.retired && res.in_flight == 0 {
+        res.generation += 1;
+        res.retired = false;
+        res.metal_texture = None;
+        res.pixels.clear();
+    }
+    Ok(())
 }
 
 pub const XENORA_MAX_INSPECT_BYTES: u64 = 256 * 1024 * 1024;
@@ -1002,5 +1612,186 @@ mod tests {
             xenora_session_pause_frame_loop(handle),
             XENORA_INVALID_HANDLE
         );
+    }
+
+    #[test]
+    fn test_resource_management_lifecycle_and_validation() {
+        let _guard = serial();
+        let session = create();
+
+        let mut res = 0u64;
+        let initial = [
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        assert_eq!(
+            unsafe { xenora_session_create_texture(session, 2, 2, initial.as_ptr(), &mut res) },
+            XENORA_OK
+        );
+        assert_ne!(res, XENORA_NO_RESOURCE);
+
+        // Invalid creation parameters
+        let mut dummy = 0u64;
+        assert_eq!(
+            unsafe { xenora_session_create_texture(session, 0, 2, std::ptr::null(), &mut dummy) },
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe {
+                xenora_session_create_texture(session, 2, 2, std::ptr::null(), std::ptr::null_mut())
+            },
+            XENORA_INVALID_ARGUMENT
+        );
+
+        // Query info
+        let (mut r_type, mut r_w, mut r_h, mut r_flight) = (0u32, 0u32, 0u32, 0u32);
+        assert_eq!(
+            unsafe {
+                xenora_session_resource_info(
+                    session,
+                    res,
+                    &mut r_type,
+                    &mut r_w,
+                    &mut r_h,
+                    &mut r_flight,
+                )
+            },
+            XENORA_OK
+        );
+        assert_eq!(r_type, XENORA_RESOURCE_TYPE_TEXTURE_2D);
+        assert_eq!(r_w, 2);
+        assert_eq!(r_h, 2);
+        assert_eq!(r_flight, 0);
+
+        // Subregion update
+        let update_pixel = [128u8, 128u8, 128u8, 255u8];
+        assert_eq!(
+            unsafe {
+                xenora_session_update_texture(session, res, 1, 1, 1, 1, update_pixel.as_ptr(), 4)
+            },
+            XENORA_OK
+        );
+
+        // Out-of-bounds update
+        assert_eq!(
+            unsafe {
+                xenora_session_update_texture(session, res, 2, 0, 1, 1, update_pixel.as_ptr(), 4)
+            },
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe {
+                xenora_session_update_texture(session, res, 0, 0, 2, 2, update_pixel.as_ptr(), 8)
+            },
+            XENORA_INVALID_ARGUMENT
+        );
+
+        // Destroy resource
+        assert_eq!(xenora_session_destroy_resource(session, res), XENORA_OK);
+
+        // Double destroy rejected
+        assert_eq!(
+            xenora_session_destroy_resource(session, res),
+            XENORA_INVALID_HANDLE
+        );
+        // Stale handle queries rejected
+        assert_eq!(
+            unsafe {
+                xenora_session_resource_info(
+                    session,
+                    res,
+                    &mut r_type,
+                    &mut r_w,
+                    &mut r_h,
+                    &mut r_flight,
+                )
+            },
+            XENORA_INVALID_HANDLE
+        );
+        assert_eq!(
+            unsafe {
+                xenora_session_update_texture(session, res, 0, 0, 1, 1, update_pixel.as_ptr(), 4)
+            },
+            XENORA_INVALID_HANDLE
+        );
+
+        // Next allocation reuses slot with incremented generation
+        let mut res2 = 0u64;
+        assert_eq!(
+            unsafe { xenora_session_create_texture(session, 4, 4, std::ptr::null(), &mut res2) },
+            XENORA_OK
+        );
+        assert_eq!(split(res).0, split(res2).0);
+        assert_ne!(split(res).1, split(res2).1);
+
+        xenora_session_destroy(session);
+    }
+
+    #[test]
+    fn test_deferred_resource_retirement_waits_for_in_flight() {
+        let _guard = serial();
+        let session = create();
+
+        let mut res = 0u64;
+        assert_eq!(
+            unsafe { xenora_session_create_texture(session, 2, 2, std::ptr::null(), &mut res) },
+            XENORA_OK
+        );
+
+        // Acquire an in-flight reference
+        assert_eq!(test_acquire_resource_in_flight(session, res), Ok(()));
+
+        let (mut r_type, mut r_w, mut r_h, mut r_flight) = (0u32, 0u32, 0u32, 0u32);
+        assert_eq!(
+            unsafe {
+                xenora_session_resource_info(
+                    session,
+                    res,
+                    &mut r_type,
+                    &mut r_w,
+                    &mut r_h,
+                    &mut r_flight,
+                )
+            },
+            XENORA_OK
+        );
+        assert_eq!(r_flight, 1);
+
+        // Destroy while in flight -> marked retired
+        assert_eq!(xenora_session_destroy_resource(session, res), XENORA_OK);
+
+        // Subsequent user queries see handle as invalid
+        assert_eq!(
+            unsafe {
+                xenora_session_resource_info(
+                    session,
+                    res,
+                    &mut r_type,
+                    &mut r_w,
+                    &mut r_h,
+                    &mut r_flight,
+                )
+            },
+            XENORA_INVALID_HANDLE
+        );
+        assert_eq!(
+            xenora_session_destroy_resource(session, res),
+            XENORA_INVALID_HANDLE
+        );
+
+        // Release in flight -> slot is freed
+        assert_eq!(test_release_resource_in_flight(session, res), Ok(()));
+
+        // Slot can be reused now
+        let mut res_reused = 0u64;
+        assert_eq!(
+            unsafe {
+                xenora_session_create_texture(session, 2, 2, std::ptr::null(), &mut res_reused)
+            },
+            XENORA_OK
+        );
+        assert_eq!(split(res).0, split(res_reused).0);
+        assert!(split(res_reused).1 > split(res).1);
+
+        xenora_session_destroy(session);
     }
 }
