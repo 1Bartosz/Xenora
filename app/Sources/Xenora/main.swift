@@ -176,6 +176,7 @@ struct AudioVfsFrame {
 private enum FixturePlaybackError: Error {
     case invalidPCM
     case noDefaultOutput(OSStatus)
+    case deviceDiscovery(OSStatus)
     case timedOut
 }
 
@@ -203,6 +204,40 @@ private func defaultAudioOutput() throws -> AudioDeviceID {
         throw FixturePlaybackError.noDefaultOutput(status)
     }
     return device
+}
+
+private func audioOutputDevices() throws -> [AudioDeviceID] {
+    let system = AudioObjectID(kAudioObjectSystemObject)
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    let stride = UInt32(MemoryLayout<AudioDeviceID>.stride)
+    var size: UInt32 = 0
+    let sizeStatus = AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size)
+    guard sizeStatus == noErr, size.isMultiple(of: stride) else {
+        throw FixturePlaybackError.deviceDiscovery(sizeStatus)
+    }
+    if size == 0 { return [] }
+    var devices = [AudioDeviceID](repeating: kAudioObjectUnknown, count: Int(size / stride))
+    let readStatus = devices.withUnsafeMutableBytes { bytes in
+        AudioObjectGetPropertyData(system, &address, 0, nil, &size, bytes.baseAddress!)
+    }
+    guard readStatus == noErr, size.isMultiple(of: stride), Int(size / stride) <= devices.count else {
+        throw FixturePlaybackError.deviceDiscovery(readStatus)
+    }
+    return devices.prefix(Int(size / stride)).filter { device in
+        var streams = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var bytes: UInt32 = 0
+        return device != kAudioObjectUnknown
+            && AudioObjectGetPropertyDataSize(device, &streams, 0, nil, &bytes) == noErr
+            && bytes > 0
+    }.sorted()
 }
 
 private func playFixturePCM(_ pcm: [UInt8]) throws -> FixturePlayback {
@@ -678,6 +713,21 @@ if CommandLine.arguments.contains("--smoke-resources") {
 }
 
 // `--smoke-audio-vfs` tests VFS asset loading, PCM audio streaming, and Metal texture presentation.
+if CommandLine.arguments.contains("--list-audio-outputs") {
+    do {
+        let devices = try audioOutputDevices()
+        let defaultDevice = try? defaultAudioOutput()
+        print("audio-outputs: count=\(devices.count)")
+        for device in devices {
+            print("audio-output: id=\(device) default=\(device == defaultDevice)")
+        }
+        exit(0)
+    } catch {
+        print("audio-outputs: \(error)")
+        exit(1)
+    }
+}
+
 if CommandLine.arguments.contains("--smoke-native-audio") {
     let frame = AudioVfsFrame.run(captureAudio: true)
     guard frame.status == XENORA_OK, frame.samples == 256, frame.pcm.count == 512 else {
