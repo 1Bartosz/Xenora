@@ -188,6 +188,7 @@ private enum FixturePlaybackError: Error {
 private struct FixturePlayback {
     let frames: Int
     let buffers: Int
+    let refills: Int
     let outputDevice: AudioDeviceID
     let outputSampleRate: Double
     let outputChannels: AVAudioChannelCount
@@ -246,14 +247,18 @@ private func audioOutputDevices() throws -> [AudioDeviceID] {
     }.sorted()
 }
 
-private func playFixturePCM(_ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil) throws -> FixturePlayback {
+private func playFixturePCM(
+    _ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil, streamingFixture: Bool = false
+) throws -> FixturePlayback {
     // The embedded audio/VFS fixture submits mono 48 kHz S16LE frames.
     guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
           let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) else {
         throw FixturePlaybackError.invalidPCM
     }
-    let frames = pcm.count / 2
-    let framesPerBuffer = 128
+    let sourceFrames = pcm.count / 2
+    let frames = sourceFrames * (streamingFixture ? 32 : 1)
+    let framesPerBuffer = streamingFixture ? 1024 : 128
+    let bufferWindow = 3
     let engine = AVAudioEngine()
     guard let outputUnit = engine.outputNode.audioUnit else {
         throw FixturePlaybackError.outputUnitUnavailable
@@ -290,8 +295,10 @@ private func playFixturePCM(_ pcm: [UInt8], requestedOutput: AudioDeviceID? = ni
     }
     let output = engine.outputNode.outputFormat(forBus: 0)
     let presentationLatency = engine.outputNode.presentationLatency
+    var nextFrame = 0
     var bufferCount = 0
-    for first in stride(from: 0, to: frames, by: framesPerBuffer) {
+    func scheduleNextBuffer() throws {
+        let first = nextFrame
         let count = min(framesPerBuffer, frames - first)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
               let samples = buffer.floatChannelData?[0] else {
@@ -299,7 +306,7 @@ private func playFixturePCM(_ pcm: [UInt8], requestedOutput: AudioDeviceID? = ni
         }
         buffer.frameLength = AVAudioFrameCount(count)
         for offset in 0..<count {
-            let byte = (first + offset) * 2
+            let byte = ((first + offset) % sourceFrames) * 2
             let low = UInt16(pcm[byte])
             let high = UInt16(pcm[byte + 1]) << 8
             samples[offset] = Float(Int16(bitPattern: low | high)) / 32_768
@@ -308,18 +315,28 @@ private func playFixturePCM(_ pcm: [UInt8], requestedOutput: AudioDeviceID? = ni
             played.signal()
         }
         bufferCount += 1
+        nextFrame += count
     }
+    while nextFrame < frames && bufferCount < bufferWindow {
+        try scheduleNextBuffer()
+    }
+    let prequeued = bufferCount
     let start = DispatchTime.now()
     player.play()
     let deadline = start + .seconds(3)
-    for _ in 0..<bufferCount {
+    var completedBuffers = 0
+    while completedBuffers < bufferCount {
         guard played.wait(timeout: deadline) == .success else {
             throw FixturePlaybackError.timedOut
+        }
+        completedBuffers += 1
+        if nextFrame < frames {
+            try scheduleNextBuffer()
         }
     }
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
     return FixturePlayback(
-        frames: frames, buffers: bufferCount, outputDevice: outputDevice,
+        frames: frames, buffers: completedBuffers, refills: bufferCount - prequeued, outputDevice: outputDevice,
         outputSampleRate: output.sampleRate, outputChannels: output.channelCount,
         presentationLatency: presentationLatency, completionElapsed: elapsed
     )
@@ -781,7 +798,8 @@ if CommandLine.arguments.contains("--list-audio-outputs") {
     }
 }
 
-if CommandLine.arguments.contains("--smoke-native-audio") {
+let nativeAudioStreamSmoke = CommandLine.arguments.contains("--smoke-native-audio-stream")
+if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSmoke {
     var requestedOutput: AudioDeviceID?
     if let index = CommandLine.arguments.firstIndex(of: "--audio-output") {
         let values = CommandLine.arguments
@@ -797,9 +815,13 @@ if CommandLine.arguments.contains("--smoke-native-audio") {
         exit(1)
     }
     do {
-        let played = try playFixturePCM(frame.pcm, requestedOutput: requestedOutput)
-        print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
-        exit(played.frames == Int(frame.samples) && played.buffers == 2 && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
+        let played = try playFixturePCM(
+            frame.pcm, requestedOutput: requestedOutput, streamingFixture: nativeAudioStreamSmoke
+        )
+        print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) refills=\(played.refills) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
+        let expected = nativeAudioStreamSmoke ? (8192, 8, 5) : (256, 2, 0)
+        exit((played.frames, played.buffers, played.refills) == expected
+             && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
     } catch {
         print("smoke-native-audio: \(error)")
         exit(1)
