@@ -140,6 +140,14 @@ References include Microsoft's
 [virtual allocation](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc),
 and [virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree) contracts.
 
+### CRT byte strings
+
+The standard registry provides `strlen` and `strnlen` under UCRT and the CRT
+string API set. They count bytes using checked guest memory. The scan stops at
+a null byte or the requested bound for `strnlen`. A scan that would continue
+past 1 MiB reports an unsupported-service fault. See the
+[Microsoft CRT string-length contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/strnlen-strnlen-s).
+
 ### Event signaling
 
 The synthetic runtime supports unnamed manual-reset and auto-reset events

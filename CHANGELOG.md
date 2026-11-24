@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added guest CRT string length services for UCRT and its string API set.
+
 - Added unnamed guest events with manual and automatic reset, signaling, immediate waits, and same-process handle duplication.
 
 - Added same-process duplication of synthetic thread handles with independent closure.

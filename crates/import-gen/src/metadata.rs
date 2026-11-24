@@ -195,6 +195,14 @@ impl MetadataCatalog {
         );
         self.add(
             "ucrtbase.dll",
+            "strnlen",
+            AbiType::U64,
+            vec![("str", AbiType::StringAnsi), ("count", AbiType::U64)],
+            "<string.h>",
+            "Calculates a byte string length up to the supplied bound",
+        );
+        self.add(
+            "ucrtbase.dll",
             "strcmp",
             AbiType::I32,
             vec![("str1", AbiType::StringAnsi), ("str2", AbiType::StringAnsi)],

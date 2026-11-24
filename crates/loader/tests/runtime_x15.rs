@@ -1023,6 +1023,24 @@ fn test_guest_duplicates_thread_handle_through_iat() {
 }
 
 #[test]
+fn test_guest_crt_string_length_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    for module in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {
+        // The fixture seeds the output slot with eight 0xff bytes followed by zeroed stack bytes.
+        for (symbol, address, bound, expected) in [
+            ("strlen", PROCESS_FIXTURE_OUTPUT, 0, 8),
+            ("strlen", PROCESS_FIXTURE_OUTPUT + 8, 0, 0),
+            ("strnlen", PROCESS_FIXTURE_OUTPUT, 3, 3),
+            ("strnlen", PROCESS_FIXTURE_OUTPUT, 12, 8),
+            ("strnlen", PROCESS_FIXTURE_STACK_TOP, 0, 0),
+        ] {
+            let result = call_service_fixture(&state, module, symbol, &[address, bound]);
+            assert_eq!(result.execution.final_state.get(Register::Rax), expected);
+        }
+    }
+}
+
+#[test]
 fn test_guest_event_signaling_through_iat() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let call = |module, symbol, args: &[u64]| {

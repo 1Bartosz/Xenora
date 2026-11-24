@@ -204,6 +204,11 @@ impl SymbolDb {
 
     fn populate_crt_string(&mut self) {
         let m = "api-ms-win-crt-string-l1-1-0.dll";
+        for module in [m, "ucrtbase.dll"] {
+            for symbol in ["strlen", "strnlen"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         for (sym, libc) in &[
             ("isalnum", "isalnum"),
             ("isalpha", "isalpha"),
@@ -226,7 +231,6 @@ impl SymbolDb {
             ("strcmp", "strcmp"),
             ("strcpy", "strcpy"),
             ("strcspn", "strcspn"),
-            ("strlen", "strlen"),
             ("strncat", "strncat"),
             ("strncmp", "strncmp"),
             ("strncpy", "strncpy"),

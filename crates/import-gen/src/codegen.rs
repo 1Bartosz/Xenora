@@ -347,18 +347,6 @@ fn symbol_to_ident_lower(sym: &str) -> String {
 /// Returns a dispatch body for CRT calls with a compatible guest ABI adapter.
 fn crt_dispatch_expr(symbol: &str) -> Option<String> {
     Some(match symbol {
-        "strlen" => r#"// strlen: RCX = guest pointer to null-terminated string
-            let ptr = args.rcx;
-            if ptr == 0 { return Ok(0); }
-            let mut len: u64 = 0;
-            loop {
-                let b = mem.read_u8(ptr + len).map_err(ExitReason::MemoryFault)?;
-                if b == 0 { break; }
-                len += 1;
-                if len > 1_048_576 { break; } // safety cap 1 MiB
-            }
-            Ok(len)"#
-            .to_string(),
         // memset(dst, val, count) -> dst
         "memset" => r#"let dst = args.rcx;
             let val = (args.rdx & 0xFF) as u8;

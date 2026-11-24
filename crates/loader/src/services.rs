@@ -9,6 +9,7 @@
 //! - Virtual memory: `VirtualAlloc`, `VirtualFree`
 //! - Xbox physical memory: `XMemAlloc`, `XMemFree`
 
+mod crt;
 mod events;
 
 use crate::cpu::ExitReason;
@@ -392,6 +393,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     registry.set_status(KERNEL32, "DuplicateHandle", ServiceStatus::Partial);
 
     events::register(registry, &state);
+    crt::register(registry);
 
     // 1. GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *mut FILETIME)
     let s = state.clone();
