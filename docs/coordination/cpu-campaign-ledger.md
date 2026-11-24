@@ -95,10 +95,17 @@ Main `f685ede` (QA tooling) was merged first as `5e7c21b`.
 
 The panic of #270 was reproduced on `5e7c21b` (`range start index 1025 out of range`) and does not occur after this milestone.
 
-## Overlap with upstream (needs coordination)
+## Integration of main `c6a354b`
 
-- #65, #66 and #72 were claimed by another contributor, and #283, #281 and #280 merged into main (`c6a354b`) while this branch was unpublished. Milestones 1 and 2 cover the same ground, so `cpu.rs`, `dbt.rs` and `arm64.rs` now conflict. This branch claims none of those issues.
-- #286 is open for #270, which milestone 5 also fixes. Theirs is published and takes precedence.
+Merged after milestone 5. It carries #280 (#72), #281 (#66) and #283 (#65), published while this branch was not; those issues are not claimed here and the published work takes precedence in authorship.
+
+- Kept: every upstream test, unchanged (`tests/bootstrap.rs` and the three new tests in `dbt.rs`), and the assembler's `sxtb_32` and `sxth_32`, now checked against LLVM.
+- Source: `cpu.rs` and `dbt.rs` keep the shared decoder and lowering, which already cover the merged behaviour.
+- Adopted from upstream: FS and GS together are undefined, and GS applies. This branch used to reject the combination. RIP-relative, negative-displacement and fault-address regressions for both segments were added (11 encodings, both engines); 3 of 3 mutations of the rule caught.
+- Compared: the integer fixture run through both trees in both engines. Upstream supports 142 instruction and engine pairs. They differ only where upstream stores no guest flags in the DBT (#64, #70), reads AH, CH, DH and BH as SPL, BPL, SIL and DIL (#68, including MOVZX and MOVSX in both engines), or writes eight bytes for a 32-bit store.
+- Gates: workspace 474 passed, 0 failed, 22 ignored; formatting, strict Clippy, all generator checks, repository audits, release build, GPU suite, demo and app gates exit 0. GPU: 80 passed, 0 failed, 1 ignored.
+
+#286 is open upstream for #270, which milestone 5 also fixes; theirs is published and takes precedence.
 
 ## Known limitations
 
@@ -118,4 +125,4 @@ The panic of #270 was reproduced on `5e7c21b` (`range start index 1025 out of ra
 
 ## Next task
 
-Integrate main `c6a354b` with its contributor: keep upstream's regression tests, resolve the three source conflicts, and agree how milestones 1 and 2 relate to the merged fixes. Then native CRT memory and string services. Those are not started.
+Agree with the maintainer and the contributor of #280, #281, #283 and #286 how this branch should be offered, before more overlapping work. Then native CRT memory and string services, which are not started.

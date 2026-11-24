@@ -69,12 +69,50 @@ struct GuestFrame {
     }
 }
 
+/// The frame produced by running the textured fixture (Gate 5, #279).
+struct TexturedFrame {
+    let status: Int32
+    let width: Int
+    let height: Int
+    let rgba: [UInt8]
+
+    static func run() -> TexturedFrame {
+        var session: xenora_session = 0
+        var status = xenora_session_create(XENORA_ABI_VERSION, &session)
+        guard status == XENORA_OK else { return TexturedFrame(status: status, width: 0, height: 0, rgba: []) }
+        defer { _ = xenora_session_destroy(session) }
+        var rgba = [UInt8](repeating: 0, count: 16)
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+        status = rgba.withUnsafeMutableBufferPointer { buffer in
+            xenora_session_run_textured_fixture(session, buffer.baseAddress, UInt64(buffer.count), &width, &height)
+        }
+        return TexturedFrame(status: status, width: Int(width), height: Int(height), rgba: status == XENORA_OK ? rgba : [])
+    }
+
+    var image: CGImage? {
+        guard status == XENORA_OK, let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(
+            width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    var summary: String {
+        let pixels = rgba.map(String.init).joined(separator: ",")
+        return "status=\(status) frame=\(width)x\(height) pixels=[\(pixels)]"
+    }
+}
+
 /// Owns the latest fixture run. A class with @Published avoids SwiftUI macros,
 /// which the command-line toolchain does not ship.
 @MainActor
 final class FrameModel: ObservableObject {
     @Published var frame: GuestFrame?
     @Published var running = false
+    @Published var texturedFrame: TexturedFrame?
+    @Published var runningTextured = false
 
     func run() {
         running = true
@@ -82,6 +120,14 @@ final class FrameModel: ObservableObject {
             // The fixture blocks while it executes and renders, so keep it off the main thread.
             frame = await Task.detached { GuestFrame.run() }.value
             running = false
+        }
+    }
+
+    func runTextured() {
+        runningTextured = true
+        Task {
+            texturedFrame = await Task.detached { TexturedFrame.run() }.value
+            runningTextured = false
         }
     }
 }
@@ -359,8 +405,23 @@ struct ContentView: View {
                     Text("Run failed (status \(frame.status)). No frame is shown.")
                         .foregroundStyle(.red)
                 }
-                Button(running ? "Running…" : "Run trusted fixture") { model.run() }
-                .disabled(running || !probe.connected)
+                if let tImage = model.texturedFrame?.image {
+                    Image(decorative: tImage, scale: 1)
+                        .resizable()
+                        .interpolation(.none)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 160)
+                        .accessibilityLabel("Textured guest frame, 2 by 2 pixels")
+                    Text("Textured fixture ran: persistent texture created, dynamically updated, rendered on Metal, and retired.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button(running ? "Running…" : "Run trusted fixture") { model.run() }
+                        .disabled(running || !probe.connected)
+                    Button(model.runningTextured ? "Running…" : "Run textured fixture") { model.runTextured() }
+                        .disabled(model.runningTextured || !probe.connected)
+                }
             }
             Section("Persistent frame loop") {
                 if let image = loop.image {
@@ -439,6 +500,14 @@ if let flag = CommandLine.arguments.firstIndex(of: "--inspect"), flag + 1 < Comm
     print(report.hasSuffix("\n") ? report : report + "\n", terminator: "")
     print("status=\(status)")
     exit(status == Int32(XENORA_OK) ? 0 : 1)
+}
+
+// `--smoke-resources` tests persistent texture lifecycle, dynamic subregion updates, and retirement on Metal.
+if CommandLine.arguments.contains("--smoke-resources") {
+    let frame = TexturedFrame.run()
+    print("smoke-resources: \(frame.summary)")
+    let expected: [UInt8] = [255, 255, 0, 255, 0, 255, 255, 255, 255, 0, 255, 255, 64, 64, 64, 255]
+    exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.rgba == expected ? 0 : 1)
 }
 
 // `--smoke-interactive` runs 60 frames with queued inputs on the Metal device and exits.

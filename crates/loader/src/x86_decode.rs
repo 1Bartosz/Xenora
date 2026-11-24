@@ -231,8 +231,8 @@ impl<E, F: FnMut(u64) -> Result<u8, E>> Cursor<F> {
 /// Decode one instruction at `rip`. `fetch` supplies the byte at an address and
 /// is called only for bytes that belong to the instruction, in order.
 ///
-/// Forms the registry does not declare, LOCK, address-size overrides and
-/// conflicting segment overrides are rejected rather than approximated.
+/// Forms the registry does not declare, LOCK, address-size overrides and an
+/// ignored segment override after FS or GS are rejected rather than approximated.
 pub fn decode<E>(
     rip: u64,
     fetch: impl FnMut(u64) -> Result<u8, E>,
@@ -275,10 +275,11 @@ pub fn decode<E>(
             }
             _ => break,
         };
-        if segment.is_some_and(|previous| previous != selected) {
-            return Err(DecodeError::Unsupported(byte));
+        // FS and GS together are architecturally undefined (Intel SDM Vol. 2,
+        // "Instruction Prefixes"); the local rule is that GS applies.
+        if segment != Some(Segment::Gs) {
+            segment = Some(selected);
         }
-        segment = Some(selected);
         byte = cursor.u8()?;
     }
 

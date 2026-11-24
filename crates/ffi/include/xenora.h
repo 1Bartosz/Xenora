@@ -146,6 +146,85 @@ xenora_status xenora_session_frame_loop_status(
 /* Largest file xenora_inspect_executable accepts, in bytes. */
 #define XENORA_MAX_INSPECT_BYTES 268435456u
 
+/* Opaque persistent GPU resource handle (Gate 5, #279) */
+typedef uint64_t xenora_resource;
+#define XENORA_NO_RESOURCE 0u
+
+enum {
+    XENORA_RESOURCE_TYPE_TEXTURE_2D = 1,
+    XENORA_RESOURCE_TYPE_BUFFER = 2,
+};
+
+/*
+ * Create a persistent RGBA8 2D texture owned by the session.
+ * If `initial_rgba` is non-null, it must point to at least width * height * 4 bytes.
+ */
+xenora_status xenora_session_create_texture(
+    xenora_session session,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t *initial_rgba,
+    xenora_resource *out_resource
+);
+
+/*
+ * Dynamically update a subregion of a persistent texture.
+ */
+xenora_status xenora_session_update_texture(
+    xenora_session session,
+    xenora_resource resource,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t *rgba,
+    uint64_t byte_count
+);
+
+/*
+ * Destroy or retire a persistent resource. If in-flight GPU execution is using
+ * the resource, destruction is deferred until the execution completes.
+ */
+xenora_status xenora_session_destroy_resource(
+    xenora_session session,
+    xenora_resource resource
+);
+
+/*
+ * Query type, dimensions, and in-flight status of a persistent resource.
+ */
+xenora_status xenora_session_resource_info(
+    xenora_session session,
+    xenora_resource resource,
+    uint32_t *out_type,
+    uint32_t *out_width,
+    uint32_t *out_height,
+    uint32_t *out_in_flight
+);
+
+/*
+ * Render a frame using a persistent texture resource.
+ */
+xenora_status xenora_session_render_textured(
+    xenora_session session,
+    xenora_resource resource,
+    uint8_t *out_rgba,
+    uint64_t capacity,
+    uint32_t *out_width,
+    uint32_t *out_height
+);
+
+/*
+ * Run the original textured PE fixture and verify its read-back frame.
+ */
+xenora_status xenora_session_run_textured_fixture(
+    xenora_session session,
+    uint8_t *out_rgba,
+    uint64_t capacity,
+    uint32_t *out_width,
+    uint32_t *out_height
+);
+
 /*
  * Read-only compatibility inspection of a caller-supplied PE file. Nothing in
  * `bytes` is executed: it is parsed and statically disassembled (bounded) only.

@@ -28,6 +28,8 @@ The references in `tests/x86_integer.rs` and `tests/x86_vector.rs` read only LLV
 
 The DBT stores CF, ZF, SF, OF, PF and AF in `CpuState::flags`. It skips the store only when a later instruction in the block overwrites all six before anything can read them, fault or leave the block.
 
+FS and GS overrides together are architecturally undefined; GS applies, in both engines.
+
 ## Vector state
 
 XMM registers live in `CpuState::xmm`, lane 0 in the low bits, and MXCSR in `CpuState::mxcsr`. A mandatory 0x66, F3 or F2 prefix selects a form; the generator rejects an opcode where 0x66 could be both a mandatory prefix and an operand size. A 16-byte memory operand must be aligned unless its form says otherwise, and a violation exits with `GeneralProtection` before any memory access. Non-temporal stores are ordinary stores.
@@ -45,4 +47,4 @@ None of it has been compared with x86 hardware.
 
 ## Rejected on purpose
 
-LOCK, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, FS combined with GS, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, RCL, RCR, SHLD, SHRD, string instructions, MMX, the RCP and RSQRT approximations, SSE3 and later, VEX, atomics and fences. The DBT also refuses raw SYSCALL.
+LOCK, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, RCL, RCR, SHLD, SHRD, string instructions, MMX, the RCP and RSQRT approximations, SSE3 and later, VEX, atomics and fences. The DBT also refuses raw SYSCALL.

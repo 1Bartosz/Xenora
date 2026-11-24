@@ -70,6 +70,10 @@ fn flag_and_byte_operations_match_llvm() {
         ("rev w0, w30", |a| a.rev(0, 30, false), 0x5ac00bc0),
         ("lsr x0, x0, #8", |a| a.lsr_imm_64(0, 0, 8), 0xd348fc00),
         ("lsr x9, x30, #63", |a| a.lsr_imm_64(9, 30, 63), 0xd37fffc9),
+        ("sxtb w9, w10", |a| a.sxtb_32(9, 10), 0x13001d49),
+        ("sxtb w30, w0", |a| a.sxtb_32(30, 0), 0x13001c1e),
+        ("sxth w9, w10", |a| a.sxth_32(9, 10), 0x13003d49),
+        ("sxth w0, w30", |a| a.sxth_32(0, 30), 0x13003fc0),
     ];
     for (text, emit, word) in cases {
         let mut assembler = Arm64Assembler::new();

@@ -1528,6 +1528,92 @@ mod tests {
         assert_eq!(memory.read_u64(STORED_ADDR).unwrap(), STORED_VALUE);
     }
 
+    /// A 32-bit MOVSX destination holds a 32-bit result, so the upper half of
+    /// the register must be cleared.
+    ///
+    /// The encodings are `movsbl eax, bl` (0F BE C3) and
+    /// `movsbq rdx, bl` (48 0F BE D3), as produced by LLVM 23.1.6
+    /// `llvm-mc -show-encoding`. With `bl = 0xFF` the 32-bit destination holds
+    /// 0x00000000ffffffff while the 64-bit destination holds the sign
+    /// extension across all 64 bits.
+    ///
+    /// Per Intel SDM Volume 1, "Address Calculations in 64-Bit Mode": "32-bit
+    /// operands generate a 32-bit result, zero-extended to a 64-bit result in
+    /// the destination general-purpose register."
+    #[test]
+    fn movsx_to_a_32_bit_destination_clears_the_upper_half() {
+        // mov rbx, 0xffffffffffffffff (48 BB <imm64>)
+        // movsbl eax, bl (0F BE C3)
+        // movsbq rdx, bl (48 0F BE D3)
+        let mut code = vec![0x48, 0xBB];
+        code.extend_from_slice(&u64::MAX.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0xBE, 0xC3]);
+        code.extend_from_slice(&[0x48, 0x0F, 0xBE, 0xD3]);
+        code.push(0xF4); // hlt
+
+        let (mut engine, mut cpu, mut memory) = fixture(&code);
+        cpu.set(Register::Rbx, u64::MAX);
+        let result = engine.run(&mut cpu, &mut memory, 16);
+
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        assert_eq!(result.final_state.get(Register::Rax), 0x0000_0000_ffff_ffff);
+        assert_eq!(result.final_state.get(Register::Rdx), 0xffff_ffff_ffff_ffff);
+    }
+
+    /// A 32-bit MOVSX destination from a 16-bit source also holds a 32-bit
+    /// result.
+    ///
+    /// The encodings are `movswl eax, bx` (0F BF C3) and
+    /// `movswq rdx, bx` (48 0F BF D3), as produced by LLVM 23.1.6
+    /// `llvm-mc -show-encoding`.
+    #[test]
+    fn movsx_from_a_word_to_a_32_bit_destination_clears_the_upper_half() {
+        // mov rbx, 0xffffffffffffffff (48 BB <imm64>)
+        // movswl eax, bx (0F BF C3)
+        // movswq rdx, bx (48 0F BF D3)
+        let mut code = vec![0x48, 0xBB];
+        code.extend_from_slice(&u64::MAX.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0xBF, 0xC3]);
+        code.extend_from_slice(&[0x48, 0x0F, 0xBF, 0xD3]);
+        code.push(0xF4); // hlt
+
+        let (mut engine, mut cpu, mut memory) = fixture(&code);
+        cpu.set(Register::Rbx, u64::MAX);
+        let result = engine.run(&mut cpu, &mut memory, 16);
+
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        assert_eq!(result.final_state.get(Register::Rax), 0x0000_0000_ffff_ffff);
+        assert_eq!(result.final_state.get(Register::Rdx), 0xffff_ffff_ffff_ffff);
+    }
+
+    /// The same 32-bit destination rule applies to the memory source forms.
+    ///
+    /// The encodings are `movsbl eax, byte [rdi]` (0F BE 07) and
+    /// `movsbq rdx, byte [rdi]` (48 0F BE 17), as produced by LLVM 23.1.6
+    /// `llvm-mc -show-encoding`.
+    #[test]
+    fn movsx_from_memory_to_a_32_bit_destination_clears_the_upper_half() {
+        // mov rdi, 0x4000 (48 BF <imm64>)
+        // movsbl eax, byte [rdi] (0F BE 07)
+        // movsbq rdx, byte [rdi] (48 0F BE 17)
+        let mut code = vec![0x48, 0xBF];
+        code.extend_from_slice(&0x4000u64.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0xBE, 0x07]);
+        code.extend_from_slice(&[0x48, 0x0F, 0xBE, 0x17]);
+        code.push(0xF4); // hlt
+
+        let (mut engine, mut cpu, mut memory) = fixture(&code);
+        memory
+            .map_region(0x4000, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory.write_u8(0x4000, 0xFF).unwrap();
+        let result = engine.run(&mut cpu, &mut memory, 16);
+
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        assert_eq!(result.final_state.get(Register::Rax), 0x0000_0000_ffff_ffff);
+        assert_eq!(result.final_state.get(Register::Rdx), 0xffff_ffff_ffff_ffff);
+    }
+
     #[test]
     fn indirect_call_target_fault_leaves_guest_stack_unchanged() {
         // call qword ptr [rip + 0x1000]; hlt. The IAT slot is outside the

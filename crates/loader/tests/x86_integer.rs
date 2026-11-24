@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use xenora_loader::cpu::{CpuState, ExitReason, Interpreter, RFlags};
 use xenora_loader::dbt::{DbtEngine, is_native};
-use xenora_loader::memory::{GuestMemory, MemoryPermissions};
+use xenora_loader::memory::{GuestMemory, MemoryError, MemoryPermissions};
 use xenora_loader::x86_decode::decode;
 use xenora_loader::x86_table::{FORMS, Op};
 
@@ -1168,7 +1168,6 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0xF3, 0xC3],             // rep ret
         &[0xF3, 0xA4],             // rep movsb
         &[0x67, 0x8B, 0x06],       // address-size override
-        &[0x64, 0x65, 0x8B, 0x06], // FS then GS
         &[0x64, 0x2E, 0x8B, 0x06], // CS after FS
         &[0x66, 0x50],             // push ax
         &[0x66, 0xE8, 0, 0],       // call rel16
@@ -1344,4 +1343,102 @@ fn flags_survive_when_the_next_flag_writer_is_never_reached() {
         assert!(state.flags.cf && state.flags.sf, "{middle:02X?}");
         assert!(!state.flags.zf && !state.flags.of, "{middle:02X?}");
     }
+}
+
+#[test]
+fn segment_bases_apply_to_every_addressing_form_in_both_engines() {
+    const FS: u64 = 0x1_0000;
+    const GS: u64 = 0x2_0000;
+    // The linear address is the segment base plus the effective address, which
+    // is RIP-relative to the next instruction for ModRM mode 0, rm 101b.
+    let rip_forward = ENTRY + 8 + 0x1000;
+    let rip_back = ENTRY + 8 - 0x400;
+    let cases: &[(&[u8], u64)] = &[
+        (
+            &[0x64, 0x48, 0x8B, 0x05, 0x00, 0x10, 0, 0],
+            FS + rip_forward,
+        ), // mov rax, fs:[rip+0x1000]
+        (
+            &[0x65, 0x48, 0x8B, 0x05, 0x00, 0x10, 0, 0],
+            GS + rip_forward,
+        ),
+        (
+            &[0x64, 0x48, 0x8B, 0x05, 0x00, 0xFC, 0xFF, 0xFF],
+            FS + rip_back,
+        ),
+        (
+            &[0x65, 0x48, 0x8B, 0x05, 0x00, 0xFC, 0xFF, 0xFF],
+            GS + rip_back,
+        ),
+        (
+            &[0x64, 0x48, 0x89, 0x05, 0x00, 0x10, 0, 0],
+            FS + rip_forward,
+        ), // mov fs:[rip+0x1000], rax
+        (
+            &[0x65, 0x48, 0x89, 0x05, 0x00, 0xFC, 0xFF, 0xFF],
+            GS + rip_back,
+        ),
+        (&[0x65, 0x48, 0x8B, 0x43, 0xF8], GS + 0x3000 - 8), // mov rax, gs:[rbx-8]
+        (&[0x64, 0x48, 0x8B, 0x04, 0x8B], FS + 0x3000 + 16), // mov rax, fs:[rbx+rcx*4]
+        (&[0x64, 0x65, 0x48, 0x8B, 0x03], GS + 0x3000),     // FS then GS
+        (&[0x65, 0x64, 0x48, 0x8B, 0x03], GS + 0x3000),     // GS then FS
+        (&[0x64, 0x65, 0x64, 0x48, 0x8B, 0x03], GS + 0x3000),
+    ];
+    for &(code, address) in cases {
+        let opcode = code[code.iter().position(|byte| *byte == 0x48).unwrap() + 1];
+        let store = opcode == 0x89;
+        for native in [false, true] {
+            for mapped in [true, false] {
+                let mut memory = GuestMemory::new();
+                memory
+                    .map_region_with_data(ENTRY, code.len(), MemoryPermissions::READ_EXECUTE, code)
+                    .unwrap();
+                if mapped {
+                    memory
+                        .map_region(address, 8, MemoryPermissions::READ_WRITE)
+                        .unwrap();
+                    memory.write_u64(address, 0x1122_3344_5566_7788).unwrap();
+                }
+                let mut cpu = CpuState::new(ENTRY, 0);
+                (cpu.fs_base, cpu.gs_base) = (FS, GS);
+                cpu.gpr[0] = 0xAABB_CCDD_EEFF_0011;
+                cpu.gpr[1] = 4;
+                cpu.gpr[3] = 0x3000;
+                let before = cpu.clone();
+                let result = if native {
+                    DbtEngine::new(16 * 1024)
+                        .unwrap()
+                        .run(&mut cpu, &mut memory, 1)
+                } else {
+                    Interpreter::new(cpu, &mut memory, 1).run()
+                };
+                if !mapped {
+                    assert_eq!(
+                        result.exit_reason,
+                        ExitReason::MemoryFault(MemoryError::UnmappedAddress(address)),
+                        "{code:02X?}"
+                    );
+                    assert_eq!(result.final_state, before, "{code:02X?}");
+                } else if store {
+                    assert_eq!(
+                        memory.read_u64(address).unwrap(),
+                        before.gpr[0],
+                        "{code:02X?}"
+                    );
+                } else {
+                    assert_eq!(
+                        result.final_state.gpr[0], 0x1122_3344_5566_7788,
+                        "{code:02X?}"
+                    );
+                }
+            }
+        }
+    }
+    // LEA computes the address without a segment base.
+    let (state, _, _) = {
+        let mut machine = Random(23).machine();
+        machine.gpr[3] = 0x3000;
+        run_both(&machine, &[0x65, 0x48, 0x8D, 0x43, 0x10], 1)
+    };
+    assert_eq!(state.gpr[0], 0x3010);
 }
