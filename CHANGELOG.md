@@ -28,7 +28,7 @@ remains unsupported.
   GPU tests cover explicit and interpolated (six- and eight-value) alpha, both colour endpoint
   orders, padded row and slice pitches, two layers and two mips against the CPU decoders and
   hand-derived anchors. On an Apple M5 Pro the native decoder's interpolated values were within
-  1.14 codes of the exact values, so up to two codes from the truncating CPU reference.
+  8/7 (about 1.14) codes of the exact values, so up to two codes from the truncating CPU reference.
   Edge levels of 5×3 (one block row) and 1×1 are covered, invalid payloads (zero extents,
   short, oversized or block-count-mismatched buffers, bad pitches) are rejected before upload,
   and `MetalError::is_capability_unavailable` separates a device without BC support from an
