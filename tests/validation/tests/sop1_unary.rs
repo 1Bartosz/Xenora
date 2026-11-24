@@ -210,13 +210,14 @@ const VALUES: [u32; 24] = [
 ];
 const INPUT: [u32; 2] = [0, u32::MAX];
 
-const COUNTS: [(&str, usize); 6] = [
+const COUNTS: [(&str, usize); 7] = [
     ("sop1 domain", 11 * 24 * 2),
     ("sop1 single bit", 11 * 64 * 2),
     ("sop1 guide example", 39 * 2),
     ("sop1 inline integer", 11 * 81 * 2),
     ("sop1 literal", 11 * 6 * 2),
     ("sop1 aliasing", 11 * 3 * 2 * 2),
+    ("sop1 max register", 11 * 3 * 2),
 ];
 /// Per form: 6 destinations and 15 sources outside the supported subset.
 const REJECTIONS: usize = 11 * (6 + 15);
@@ -341,6 +342,21 @@ fn cases() -> Vec<Case> {
                     value,
                     scc,
                     kept,
+                ));
+            }
+            // The highest SGPR, s105 (0b1101001), as source, destination or both.
+            let value = 0x0000_8001;
+            for (dst, src, init) in [(105, 105, 105), (10, 105, 105), (105, 8, 8)] {
+                let code = program(&[(init, value)], scc, &[sop1(op, dst, src)], dst);
+                let label = format!("s{dst} = op s{src} ({value:#x})");
+                cases.push(case(
+                    (form, name),
+                    "sop1 max register",
+                    label,
+                    code,
+                    value,
+                    scc,
+                    None,
                 ));
             }
         }
