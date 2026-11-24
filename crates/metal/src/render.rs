@@ -7,8 +7,8 @@ use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::sel;
 use objc2_metal::{
     MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction,
-    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLFunction, MTLLoadAction,
-    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
+    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLFunction, MTLIndexType,
+    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
     MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
     MTLShaderValidation, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
     MTLTextureUsage, MTLViewport,
@@ -715,6 +715,312 @@ impl NativeCompute {
         }
         Ok(texture)
     }
+}
+
+const MAX_INDEXED_VERTICES: usize = 1024;
+const MAX_INDICES: usize = 4096;
+
+/// An index buffer of 16- or 32-bit unsigned indices.
+#[derive(Clone, Copy, Debug)]
+pub enum IndexBuffer<'a> {
+    U16(&'a [u16]),
+    U32(&'a [u32]),
+}
+
+impl IndexBuffer<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::U16(indices) => indices.len(),
+            Self::U32(indices) => indices.len(),
+        }
+    }
+
+    fn index(self, position: usize) -> u32 {
+        match self {
+            Self::U16(indices) => u32::from(indices[position]),
+            Self::U32(indices) => indices[position],
+        }
+    }
+
+    fn restart(self) -> u32 {
+        match self {
+            Self::U16(_) => u32::from(u16::MAX),
+            Self::U32(_) => u32::MAX,
+        }
+    }
+
+    fn size(self) -> usize {
+        match self {
+            Self::U16(_) => 2,
+            Self::U32(_) => 4,
+        }
+    }
+
+    /// The indices packed into little-endian words, the last one zero-padded.
+    fn words(self) -> Vec<u32> {
+        match self {
+            Self::U16(indices) => indices
+                .chunks(2)
+                .map(|pair| {
+                    u32::from(pair[0]) | pair.get(1).map_or(0, |&high| u32::from(high) << 16)
+                })
+                .collect(),
+            Self::U32(indices) => indices.to_vec(),
+        }
+    }
+}
+
+/// One indexed triangle-list draw: `index_count` indices from `start_index`,
+/// each fetching vertex `index + base_vertex`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IndexedDraw {
+    pub start_index: usize,
+    pub index_count: usize,
+    pub base_vertex: i32,
+    pub fill: DepthFill,
+}
+
+/// An offscreen pass of up to 16 indexed draws, in order, into a cleared
+/// RGBA8Unorm target without depth attachment.
+#[derive(Clone, Copy, Debug)]
+pub struct IndexedPass<'a> {
+    pub extent: [usize; 2],
+    pub clear_color: [u8; 4],
+    /// Up to 1024 clip-space float4 positions.
+    pub vertices: &'a [[f32; 4]],
+    /// Up to 4096 indices shared by every draw.
+    pub indices: IndexBuffer<'a>,
+    pub draws: &'a [IndexedDraw],
+    /// As [`DepthPass::texture`], for [`DepthFill::Bc1Texture`] draws.
+    pub texture: Option<&'a Bc1Upload<'a>>,
+}
+
+impl NativeCompute {
+    /// Draw an indexed offscreen pass and read back its colour.
+    ///
+    /// Each draw is one native `drawIndexedPrimitives` call on the pass's
+    /// index buffer with the draw's start offset and signed base vertex, so
+    /// Metal itself fetches the vertices. Every fetched vertex is checked
+    /// against the vertex buffer first: out-of-range fetches and raw
+    /// primitive-restart values are rejected, never left to the GPU. Base vertex needs no capability query: the
+    /// Apple family 7 that [`NativeCompute::new`] requires supports it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid extent, too many draws, vertices or
+    /// indices, non-finite positions, an index count that is zero or not a
+    /// multiple of 3, an index range past the buffer, a primitive-restart
+    /// index, a fetched vertex outside the vertex buffer, a textured draw without texture, unavailable BC
+    /// compression (operation `supportsBCTextureCompression`), or Metal setup
+    /// or execution failure.
+    pub fn render_indexed(&self, pass: &IndexedPass<'_>) -> Result<Vec<u8>, MetalError> {
+        let [width, height] = pass.extent;
+        let pixels = width
+            .checked_mul(height)
+            .filter(|&count| (1..=MAX_PIXELS).contains(&count))
+            .ok_or_else(|| MetalError::new("render bounds", "expected 1..=4096 pixels"))?;
+        validate_indexed_pass(pass)?;
+        let bc1 = pass
+            .texture
+            .map(|upload| {
+                let level = upload.subresource(0, 0).map_err(|error| {
+                    MetalError::new("texture subresource", format!("{error:?}"))
+                })?;
+                self.validate_bc_extent(level.width, level.height, "BC1")?;
+                self.new_bc1_texture(&level)
+            })
+            .transpose()?;
+
+        autoreleasepool(|_| {
+            let options = compile_options()?;
+            let library = self.compile_library(DEPTH_SOURCE, &options)?;
+            let vertex = find_function(&library, "depth_vertex")?;
+            let flat = self.depth_pipeline(
+                &vertex,
+                &*find_function(&library, "depth_flat")?,
+                MTLPixelFormat::Invalid,
+            )?;
+            let textured = self.depth_pipeline(
+                &vertex,
+                &*find_function(&library, "depth_textured")?,
+                MTLPixelFormat::Invalid,
+            )?;
+            let color = self.new_target(
+                PIXEL_FORMAT,
+                width,
+                height,
+                MTLStorageMode::Shared,
+                MTLTextureUsage::RenderTarget,
+            )?;
+            let pass_descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
+            // SAFETY: Slot zero is the only color attachment for this pass.
+            let attachment = unsafe {
+                pass_descriptor
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
+            attachment.setTexture(Some(&color));
+            attachment.setLoadAction(MTLLoadAction::Clear);
+            let [red, green, blue, alpha] = pass.clear_color.map(|value| f64::from(value) / 255.0);
+            attachment.setClearColor(MTLClearColor {
+                red,
+                green,
+                blue,
+                alpha,
+            });
+            attachment.setStoreAction(MTLStoreAction::Store);
+            let positions: Vec<u32> = pass
+                .vertices
+                .as_flattened()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect();
+            let positions = self.new_buffer(&positions)?;
+            let indices = self.new_buffer(&pass.indices.words())?;
+            let index_type = match pass.indices {
+                IndexBuffer::U16(_) => MTLIndexType::UInt16,
+                IndexBuffer::U32(_) => MTLIndexType::UInt32,
+            };
+            let command = self.queue.commandBuffer().ok_or_else(|| {
+                MetalError::new("commandBuffer", "render command buffer creation failed")
+            })?;
+            let encoder = command
+                .renderCommandEncoderWithDescriptor(&pass_descriptor)
+                .ok_or_else(|| {
+                    MetalError::new(
+                        "renderCommandEncoderWithDescriptor",
+                        "render encoder creation failed",
+                    )
+                })?;
+            encoder.setViewport(MTLViewport {
+                originX: 0.0,
+                originY: 0.0,
+                width: width as f64,
+                height: height as f64,
+                znear: 0.0,
+                zfar: 1.0,
+            });
+            let extent = [width as f32, height as f32];
+            for draw in pass.draws {
+                // SAFETY: Validation proved that every index the draw reads lies
+                // inside the index buffer, that the offset is a multiple of the
+                // index size, and that every `index + base_vertex` names a float4
+                // of the position buffer, the only memory the vertex stage reads.
+                // Fragment constants are copied by Metal and match the declared
+                // types. The texture, when bound, is a live BC1 texture of this
+                // device; both buffers outlive the command.
+                unsafe {
+                    encoder.setVertexBuffer_offset_atIndex(Some(&positions), 0, 0);
+                    match draw.fill {
+                        DepthFill::Flat(rgba) => {
+                            encoder.setRenderPipelineState(&flat);
+                            let rgba = rgba.map(|value| f32::from(value) / 255.0);
+                            encoder.setFragmentBytes_length_atIndex(
+                                NonNull::from(&rgba).cast(),
+                                size_of_val(&rgba),
+                                0,
+                            );
+                        }
+                        DepthFill::Bc1Texture => {
+                            encoder.setRenderPipelineState(&textured);
+                            encoder.setFragmentTexture_atIndex(bc1.as_deref(), 0);
+                            encoder.setFragmentBytes_length_atIndex(
+                                NonNull::from(&extent).cast(),
+                                size_of_val(&extent),
+                                0,
+                            );
+                        }
+                    }
+                    encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
+                        MTLPrimitiveType::Triangle,
+                        draw.index_count,
+                        index_type,
+                        &indices,
+                        draw.start_index * pass.indices.size(),
+                        1,
+                        draw.base_vertex as isize,
+                        0,
+                    );
+                }
+            }
+            encoder.endEncoding();
+            complete_command(&command)?;
+
+            let mut output = vec![0; pixels * 4];
+            // SAFETY: GPU writes have completed, and the initialized output
+            // allocation fits the entire shared texture with tightly packed rows.
+            unsafe {
+                color.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                    NonNull::from(output.as_mut_slice()).cast(),
+                    width * 4,
+                    whole(width, height),
+                    0,
+                );
+            }
+            Ok(output)
+        })
+    }
+}
+
+fn validate_indexed_pass(pass: &IndexedPass<'_>) -> Result<(), MetalError> {
+    let invalid = |reason: String| Err(MetalError::new("indexed pass", reason));
+    if pass.draws.len() > MAX_DEPTH_DRAWS {
+        return invalid("expected at most 16 draws".to_owned());
+    }
+    if !(1..=MAX_INDEXED_VERTICES).contains(&pass.vertices.len())
+        || !(1..=MAX_INDICES).contains(&pass.indices.len())
+    {
+        return invalid("expected 1..=1024 vertices and 1..=4096 indices".to_owned());
+    }
+    if pass
+        .vertices
+        .as_flattened()
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(MetalError::new(
+            "render input",
+            "expected finite vertex data",
+        ));
+    }
+    for (number, draw) in pass.draws.iter().enumerate() {
+        if draw.index_count == 0 || !draw.index_count.is_multiple_of(3) {
+            return invalid(format!(
+                "draw {number}: index count must be a nonzero multiple of 3"
+            ));
+        }
+        let end = draw
+            .start_index
+            .checked_add(draw.index_count)
+            .filter(|&end| end <= pass.indices.len())
+            .ok_or_else(|| {
+                MetalError::new(
+                    "indexed pass",
+                    format!("draw {number}: index range past the index buffer"),
+                )
+            })?;
+        for position in draw.start_index..end {
+            let index = pass.indices.index(position);
+            // Metal documents 0xFFFF / 0xFFFFFFFF as the primitive-restart value
+            // of indexed draws without defining it for triangle lists, so the
+            // raw value is rejected whatever the base vertex.
+            if index == pass.indices.restart() {
+                return invalid(format!(
+                    "draw {number}: index {position} is the primitive-restart value"
+                ));
+            }
+            let vertex = i64::from(index) + i64::from(draw.base_vertex);
+            if !(0..pass.vertices.len() as i64).contains(&vertex) {
+                return invalid(format!(
+                    "draw {number}: index {position} fetches vertex {vertex} outside the vertex buffer"
+                ));
+            }
+        }
+        if draw.fill == DepthFill::Bc1Texture && pass.texture.is_none() {
+            return invalid("textured draw without texture".to_owned());
+        }
+    }
+    Ok(())
 }
 
 fn validate_depth_pass(pass: &DepthPass<'_>) -> Result<(), MetalError> {
