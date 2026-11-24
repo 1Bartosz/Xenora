@@ -19,9 +19,7 @@ use xenora_loader::pe::ParsedPe;
 use xenora_loader::probe::{ProbeConfig, ProbeReport, probe_pe_bytes};
 use xenora_loader::runtime::{Call, Float32, Float64};
 use xenora_loader::runtime_table::SERVICES;
-use xenora_loader::services::{
-    MAX_THREAD_CONTEXTS, MockClock, ServicesState, ThreadContextError, register_standard_services,
-};
+use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
 
 const BASE: u64 = 0x1_4000_0000;
 const CODE_RVA: u32 = 0x1000;
@@ -122,16 +120,10 @@ fn build(imports: &[(&str, Symbol)]) -> Image {
 }
 
 fn standard(clock: u64) -> (ImportRegistry, Arc<MockClock>) {
-    let (registry, clock, _) = standard_with_state(clock);
-    (registry, clock)
-}
-
-fn standard_with_state(clock: u64) -> (ImportRegistry, Arc<MockClock>, Arc<ServicesState>) {
     let clock = Arc::new(MockClock::new(clock));
-    let state = Arc::new(ServicesState::new(clock.clone()));
     let mut registry = ImportRegistry::new();
-    register_standard_services(&mut registry, state.clone());
-    (registry, clock, state)
+    register_standard_services(&mut registry, Arc::new(ServicesState::new(clock.clone())));
+    (registry, clock)
 }
 
 /// A guest whose image imports every generated service from its own library.
@@ -139,7 +131,7 @@ struct Guest {
     engine: DbtEngine,
     memory: GuestMemory,
     clock: Arc<MockClock>,
-    state: Arc<ServicesState>,
+    teb: u64,
     /// Upper halves and XMM lanes of unrelated arguments hold this pattern.
     xmm: [u128; 4],
 }
@@ -159,7 +151,7 @@ impl Guest {
         memory
             .map_region(STACK, 0x1000, MemoryPermissions::READ_WRITE)
             .unwrap();
-        let (mut registry, clock, state) = standard_with_state(0x01DA_0000_1234_5678);
+        let (mut registry, clock) = standard(0x01DA_0000_1234_5678);
         let bound = registry
             .bind_imports(&pe, &image.bytes, BASE, &mut memory)
             .unwrap();
@@ -170,7 +162,7 @@ impl Guest {
             engine,
             memory,
             clock,
-            state,
+            teb: 0,
             xmm: [0xAAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0123_4567; 4],
         }
     }
@@ -181,6 +173,7 @@ impl Guest {
             .position(|service| service.symbol == symbol)
             .unwrap();
         let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index as u64, STACK_TOP);
+        cpu.gs_base = self.teb;
         for (index, register) in cpu.gpr.iter_mut().enumerate() {
             if index != Register::Rsp as usize {
                 *register = 0x0101_0101_0101_0101 * (index as u64 + 1);
@@ -334,6 +327,234 @@ fn system_time_comes_from_the_injected_clock() {
 }
 
 #[test]
+fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
+    let symbols = [
+        "WSAStartup",
+        "socket",
+        "bind",
+        "connect",
+        "send",
+        "recv",
+        "WSAGetLastError",
+        "WSACleanup",
+        "WSAPoll",
+        "getsockname",
+        "getpeername",
+        "getsockopt",
+        "inet_pton",
+        "inet_ntop",
+        "htons",
+    ];
+    let imports = symbols.map(|symbol| ("ws2_32.dll", Symbol::Name(symbol)));
+    let image = build(&imports);
+    let pe = ParsedPe::parse(&image.bytes).unwrap();
+    let mut memory = pe.load_into_memory(&image.bytes).unwrap().memory;
+    memory
+        .map_region(SCRATCH, 4096, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    memory
+        .map_region(STACK, 4096, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let (mut registry, _) = standard(0);
+    assert_eq!(
+        registry
+            .bind_imports(&pe, &image.bytes, BASE, &mut memory)
+            .unwrap(),
+        symbols.len()
+    );
+    let mut engine = DbtEngine::new(256 * 1024).unwrap();
+    engine.set_import_registry(registry);
+    let mut call = |memory: &mut GuestMemory, symbol, args: &[u64]| {
+        let index = symbols.iter().position(|&name| symbol == name).unwrap() as u64;
+        let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index, STACK_TOP);
+        for (register, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(register, value);
+        }
+        if let Some(&fifth) = args.get(4) {
+            memory.write_u64(STACK_TOP + 32, fifth).unwrap();
+        }
+        let result = engine.run(&mut cpu, memory, 8);
+        assert_eq!(result.exit_reason, ExitReason::Halt, "{symbol}");
+        cpu.get(Register::Rax)
+    };
+    let address = SCRATCH + 0x200;
+    let outgoing = SCRATCH + 0x220;
+    let incoming = SCRATCH + 0x240;
+    let text = SCRATCH + 0x260;
+    let poll = SCRATCH + 0x280;
+    let formatted = SCRATCH + 0x2a0;
+    let address_length = SCRATCH + 0x2b0;
+    let peer_address = SCRATCH + 0x2c0;
+    memory.write_u16(address, 2).unwrap();
+    let port = call(&mut memory, "htons", &[5000]);
+    assert_eq!(port, 0x8813);
+    memory.write_bytes(text, b"127.0.0.1\0").unwrap();
+    assert_eq!(call(&mut memory, "inet_pton", &[2, text, address + 4]), 1);
+    assert_eq!(
+        memory.read_u32(address + 4).unwrap().to_le_bytes(),
+        [127, 0, 0, 1]
+    );
+    memory.write_bytes(text, b"127.0.0.999\0").unwrap();
+    assert_eq!(call(&mut memory, "inet_pton", &[2, text, address + 4]), 0);
+    assert_eq!(
+        memory.read_u32(address + 4).unwrap().to_le_bytes(),
+        [127, 0, 0, 1]
+    );
+    assert_eq!(
+        call(&mut memory, "inet_pton", &[23, text, address + 4]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10047);
+    memory.write_u8(formatted, 0xaa).unwrap();
+    assert_eq!(
+        call(&mut memory, "inet_ntop", &[2, address + 4, formatted, 9]),
+        0
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 87);
+    assert_eq!(memory.read_u8(formatted).unwrap(), 0xaa);
+    assert_eq!(
+        call(&mut memory, "inet_ntop", &[2, address + 4, formatted, 10]),
+        formatted
+    );
+    let mut formatted_address = [0; 10];
+    memory
+        .read_bytes(formatted, &mut formatted_address)
+        .unwrap();
+    assert_eq!(&formatted_address, b"127.0.0.1\0");
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, SCRATCH]), 0);
+    let receiver = call(&mut memory, "socket", &[2, 2, 17]);
+    let sender = call(&mut memory, "socket", &[2, 2, 17]);
+    assert_ne!(receiver, u64::MAX);
+    assert_ne!(sender, u64::MAX);
+    assert_ne!(sender, receiver);
+    for (option, expected) in [(0x1008, 2), (0x2003, 65_507)] {
+        memory.write_u32(address_length, 8).unwrap();
+        assert_eq!(
+            call(
+                &mut memory,
+                "getsockopt",
+                &[sender, 0xffff, option, incoming, address_length]
+            ),
+            0
+        );
+        assert_eq!(memory.read_u32(incoming).unwrap(), expected);
+        assert_eq!(memory.read_u32(address_length).unwrap(), 4);
+    }
+    memory.write_u32(address_length, 3).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "getsockopt",
+            &[sender, 0xffff, 0x1008, incoming, address_length]
+        ),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10014);
+    assert_eq!(memory.read_u32(incoming).unwrap(), 65_507);
+    assert_eq!(call(&mut memory, "bind", &[receiver, address, 16]), 0);
+    memory.write_u32(address_length, 15).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "getsockname",
+            &[receiver, address, address_length]
+        ),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10014);
+    assert_eq!(memory.read_u16(address + 2).unwrap(), 0);
+    memory.write_u32(address_length, 32).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "getsockname",
+            &[receiver, address, address_length]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(address_length).unwrap(), 16);
+    assert_eq!(memory.read_u16(address + 2).unwrap().swap_bytes(), 49152);
+    assert_eq!(call(&mut memory, "connect", &[sender, address, 16]), 0);
+    assert_eq!(
+        call(
+            &mut memory,
+            "getpeername",
+            &[sender, peer_address, address_length]
+        ),
+        0
+    );
+    assert_eq!(
+        memory.read_u64(peer_address).unwrap(),
+        memory.read_u64(address).unwrap()
+    );
+    memory.write_u64(poll, receiver).unwrap();
+    memory.write_u16(poll + 8, 0x0100).unwrap();
+    memory.write_u64(poll + 16, sender).unwrap();
+    memory.write_u16(poll + 24, 0x0010).unwrap();
+    assert_eq!(call(&mut memory, "WSAPoll", &[poll, 2, 0]), 1);
+    assert_eq!(memory.read_u16(poll + 10).unwrap(), 0);
+    assert_eq!(memory.read_u16(poll + 26).unwrap(), 0x0010);
+    memory.write_bytes(outgoing, b"loop").unwrap();
+    for _ in 0..16 {
+        assert_eq!(call(&mut memory, "send", &[sender, outgoing, 4, 0]), 4);
+    }
+    assert_eq!(
+        call(&mut memory, "send", &[sender, outgoing, 4, 0]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10055);
+    assert_eq!(call(&mut memory, "WSAPoll", &[poll, 2, 0]), 1);
+    assert_eq!(memory.read_u16(poll + 10).unwrap(), 0x0100);
+    assert_eq!(memory.read_u16(poll + 26).unwrap(), 0);
+    for _ in 0..16 {
+        assert_eq!(call(&mut memory, "recv", &[receiver, incoming, 4, 0]), 4);
+        let mut received = [0; 4];
+        memory.read_bytes(incoming, &mut received).unwrap();
+        assert_eq!(&received, b"loop");
+        memory.write_u32(incoming, 0).unwrap();
+    }
+    assert_eq!(
+        call(&mut memory, "recv", &[receiver, incoming, 4, 0]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10035);
+    assert_eq!(call(&mut memory, "WSAPoll", &[poll, 2, 0]), 1);
+    assert_eq!(memory.read_u16(poll + 10).unwrap(), 0);
+    assert_eq!(memory.read_u16(poll + 26).unwrap(), 0x0010);
+    let started = std::time::Instant::now();
+    assert_eq!(call(&mut memory, "WSAPoll", &[poll, 1, 10]), 0);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(10));
+    assert_eq!(memory.read_u16(poll + 10).unwrap(), 0);
+    assert_eq!(
+        call(&mut memory, "WSAPoll", &[poll, 1, 1001]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10045);
+    assert_eq!(call(&mut memory, "WSACleanup", &[]), 0);
+}
+
+#[test]
+fn last_error_isolated_across_guest_thread_switches() {
+    let mut guest = Guest::new();
+    guest.teb = 0x10000;
+    guest.call("SetLastError", &[123]);
+    guest.teb = 0x20000;
+    assert_eq!(guest.last_error(), 0);
+    assert_eq!(guest.call("CloseHandle", &[123]), 0);
+    assert_eq!(guest.last_error(), 6);
+    guest.teb = 0x10000;
+    guest.call("GetCurrentProcessId", &[]);
+    assert_eq!(guest.last_error(), 123);
+    guest.call("SetLastError", &[0]);
+    assert_eq!(guest.last_error(), 0);
+    guest.teb = 0x20000;
+    assert_eq!(guest.last_error(), 6);
+}
+
+#[test]
 fn last_error_is_set_by_failures_and_by_the_guest() {
     let mut guest = Guest::new();
     assert_eq!(guest.last_error(), 0);
@@ -347,115 +568,6 @@ fn last_error_is_set_by_failures_and_by_the_guest() {
     );
     guest.call("CloseHandle", &[0x1234]);
     assert_eq!(guest.last_error(), 6);
-}
-
-/// GetLastError is documented as the calling thread's value, kept per thread
-/// so that threads do not overwrite each other's (errhandlingapi.h). These are
-/// modeled contexts switched by the test: no guest thread is scheduled.
-const MAIN_THREAD: u32 = 0x4104;
-const WORKER: u32 = 0x5000;
-const OTHER_WORKER: u32 = 0x5004;
-
-#[test]
-fn last_error_belongs_to_the_thread_context_that_set_it() {
-    let mut guest = Guest::new();
-    assert_eq!(guest.state.current_thread_context(), MAIN_THREAD);
-    guest.call("CloseHandle", &[0x1234]);
-    assert_eq!(guest.last_error(), 6); // ERROR_INVALID_HANDLE
-
-    guest.state.switch_thread_context(WORKER).unwrap();
-    assert_eq!(guest.state.current_thread_context(), WORKER);
-    assert_eq!(guest.last_error(), 0, "a new context starts clean");
-    assert_eq!(guest.call("GetCurrentProcess", &[]), PROCESS);
-    assert_eq!(guest.last_error(), 0, "success leaves it unchanged");
-    assert_eq!(guest.call("VirtualAlloc", &[0, 0, 0x3000, 4]), 0);
-    assert_eq!(guest.last_error(), 87); // ERROR_INVALID_PARAMETER
-
-    guest.state.switch_thread_context(OTHER_WORKER).unwrap();
-    assert_eq!(guest.last_error(), 0);
-    guest.call("SetLastError", &[0xFFFF_FFFF]);
-    assert_eq!(guest.last_error(), 0xFFFF_FFFF);
-    guest.call("SetLastError", &[0]);
-    assert_eq!(guest.last_error(), 0);
-
-    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
-    assert_eq!(guest.last_error(), 6, "untouched by the other contexts");
-    assert_eq!(guest.call("GetCurrentThreadId", &[]), 0x4104);
-    assert_eq!(guest.last_error(), 6);
-    guest.state.switch_thread_context(WORKER).unwrap();
-    assert_eq!(guest.last_error(), 87);
-    guest.state.switch_thread_context(OTHER_WORKER).unwrap();
-    assert_eq!(guest.last_error(), 0, "an explicit zero is kept as set");
-}
-
-#[test]
-fn switching_to_the_running_context_keeps_its_last_error() {
-    let mut guest = Guest::new();
-    guest.call("SetLastError", &[5]);
-    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
-    assert_eq!(guest.last_error(), 5);
-    guest.state.switch_thread_context(WORKER).unwrap();
-    guest.call("SetLastError", &[50]);
-    guest.state.switch_thread_context(WORKER).unwrap();
-    assert_eq!(guest.last_error(), 50);
-    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
-    assert_eq!(guest.last_error(), 5);
-}
-
-#[test]
-fn a_retired_thread_context_starts_clean_when_its_id_is_reused() {
-    let mut guest = Guest::new();
-    guest.state.switch_thread_context(WORKER).unwrap();
-    guest.call("SetLastError", &[998]);
-    assert_eq!(
-        guest.state.retire_thread_context(WORKER),
-        Err(ThreadContextError::Running)
-    );
-    assert_eq!(
-        guest.last_error(),
-        998,
-        "a refused retirement changes nothing"
-    );
-
-    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
-    assert_eq!(guest.state.retire_thread_context(WORKER), Ok(true));
-    assert_eq!(guest.state.retire_thread_context(WORKER), Ok(false));
-    assert_eq!(guest.state.retire_thread_context(OTHER_WORKER), Ok(false));
-    guest.state.switch_thread_context(WORKER).unwrap();
-    assert_eq!(guest.last_error(), 0);
-}
-
-#[test]
-fn thread_contexts_are_bounded_and_a_refused_switch_changes_nothing() {
-    let mut guest = Guest::new();
-    guest.call("SetLastError", &[1]);
-    // The running context holds no parked slot, so the limit is reached once
-    // MAX_THREAD_CONTEXTS others are parked.
-    let first = 0x1_0000;
-    for index in 0..MAX_THREAD_CONTEXTS as u32 {
-        guest.state.switch_thread_context(first + index).unwrap();
-        guest.call("SetLastError", &[u64::from(index) + 2]);
-    }
-    let running = first + MAX_THREAD_CONTEXTS as u32 - 1;
-    assert_eq!(
-        guest.state.switch_thread_context(0x9_0000),
-        Err(ThreadContextError::TooManyContexts)
-    );
-    assert_eq!(guest.state.current_thread_context(), running);
-    assert_eq!(guest.last_error(), MAX_THREAD_CONTEXTS as u64 + 1);
-
-    // A parked context is still reachable, and retiring one frees a slot.
-    guest.state.switch_thread_context(MAIN_THREAD).unwrap();
-    assert_eq!(guest.last_error(), 1);
-    assert_eq!(
-        guest.state.switch_thread_context(0x9_0000),
-        Err(ThreadContextError::TooManyContexts)
-    );
-    assert_eq!(guest.state.retire_thread_context(first), Ok(true));
-    guest.state.switch_thread_context(0x9_0000).unwrap();
-    assert_eq!(guest.last_error(), 0);
-    guest.state.switch_thread_context(first + 1).unwrap();
-    assert_eq!(guest.last_error(), 3);
 }
 
 #[test]
