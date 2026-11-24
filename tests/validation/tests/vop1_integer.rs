@@ -831,7 +831,7 @@ fn other_vop1_opcodes_stay_unsupported() {
 }
 
 #[test]
-#[ignore = "requires a native Metal device with API and shader validation"]
+#[ignore = "requires a native Metal device with API and shader validation, and the translator's VOP1 integer forms (skipped by scripts/test-gpu.sh until then)"]
 fn vop1_integer_forms_match_the_guide_on_native_metal() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
