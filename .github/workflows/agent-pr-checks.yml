@@ -4,6 +4,11 @@ name: Agent PR checks
 # ownership, overlap with other open pull requests, and independent
 # verification. Runs on the base branch only: pull request code is never checked
 # out or executed; changed files come from the API. Not yet run on GitHub.
+#
+# Advisory: problems are reported as a warning and in the run summary, but the
+# check does not fail until a live smoke test and the migration of existing
+# issues are done (docs/coordination/agent-tasks.md). Only a comment starting
+# with /verified starts the verify job; ordinary comments start nothing.
 
 on:
   pull_request_target:
@@ -43,17 +48,21 @@ jobs:
             cat "$RUNNER_TEMP/result.json"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          # 1 means problems were found: advisory for now. Anything else is a failure of the check itself.
+          if [ "$status" -eq 1 ]; then
+            echo "::warning title=Agent PR check (advisory)::problems found; see the run summary"
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
 
   verify:
-    if: github.event_name == 'issue_comment' && github.event.issue.pull_request
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/verified')
     runs-on: ubuntu-24.04-arm
-    # issues: write posts the reply; actions: write re-runs the check after a recorded verification.
+    # issues: write posts the reply.
     permissions:
       contents: read
       issues: write
       pull-requests: read
-      actions: write
     concurrency:
       group: agent-verify-${{ github.event.issue.number }}
       cancel-in-progress: false
@@ -61,7 +70,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Record verification and re-run the check
+      - name: Record verification and check again
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -73,6 +82,21 @@ jobs:
           python3 -m agent_queue gather --repo "$GH_REPO" --pr "$number" > "$RUNNER_TEMP/state.json"
           python3 -m agent_queue decide --event "$RUNNER_TEMP/event.json" --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
           python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/actions.json"
-          sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pr"]["head_sha"])' "$RUNNER_TEMP/state.json")
-          run=$(gh run list --workflow agent-pr-checks.yml --commit "$sha" --event pull_request_target --limit 1 --json databaseId -q '.[0].databaseId // empty')
-          if [ -n "$run" ]; then gh run rerun "$run" || true; fi
+          # Check again only after an accepted verification of the current head: refused, stale,
+          # malformed or unauthorized /verified comments get a reply and nothing else.
+          if ! python3 -m agent_queue should-rerun --actions "$RUNNER_TEMP/actions.json"; then exit 0; fi
+          # pull_request_target runs are recorded against the base branch, not the pull request
+          # head, so the earlier check run cannot be found by head SHA. Evaluate the same check here.
+          status=0
+          python3 -m agent_queue pr-check --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/result.json" || status=$?
+          {
+            echo '## Agent PR check after verification'
+            echo '```json'
+            cat "$RUNNER_TEMP/result.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -eq 1 ]; then
+            echo "::warning title=Agent PR check (advisory)::problems found; see the run summary"
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi

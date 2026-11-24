@@ -27,6 +27,14 @@ def comments(repo, n):
     return ndjson(gh("api", "repos/%s/issues/%d/comments" % (repo, n), "--paginate", "--jq", jq))
 
 
+def recent_comments(repo, since):
+    """Issue and pull request comments updated since `since` (UTC ISO time), oldest first."""
+    jq = ('.[] | {id: .id, user: .user.login, body: .body, created_at: .created_at, '
+          'issue: (.issue_url | split("/") | last | tonumber), pull_request: (.html_url | test("/pull/"))}')
+    return ndjson(gh("api", "repos/%s/issues/comments?sort=created&direction=asc&per_page=100&since=%s" % (repo, since),
+                     "--paginate", "--jq", jq))
+
+
 def open_issues(repo):
     return json.loads(gh("issue", "list", "-R", repo, "--state", "open", "--limit", "500",
                          "--json", "number,title,body,state,labels"))
@@ -46,8 +54,9 @@ def open_prs(repo):
     return [pr_data(repo, n) for n in nums]
 
 
-def gather(repo, with_prs=True, with_comments=True):
-    """State for decide/audit/summary: open tasks plus any dependency issues they name."""
+def gather(repo, with_prs=True, with_comments=True, recent_since=""):
+    """State for decide/audit/summary/replay: open tasks plus any dependency issues they name and,
+    with `recent_since`, every comment since then."""
     from .tasks import parse_task
     issues = {i["number"]: i for i in open_issues(repo)}
     for i in list(issues.values()):
@@ -60,6 +69,8 @@ def gather(repo, with_prs=True, with_comments=True):
                                   if any((l["name"] if isinstance(l, dict) else l) == "agent:claimed" for l in i["labels"])}
     if with_prs:
         state["prs"] = open_prs(repo)
+    if recent_since:
+        state["recent_comments"] = recent_comments(repo, recent_since)
     return state
 
 
