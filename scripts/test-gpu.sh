@@ -35,6 +35,11 @@ cargo test --locked -p xenora-ffi --features gpu-tests --test frame_loop --no-ru
 timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test frame_loop -- \
     --nocapture --test-threads=1
 
+# Interactive guest execution with dynamic input handling and rendering (Gate 4, #276).
+cargo test --locked -p xenora-ffi --features gpu-tests --test interactive --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test interactive -- \
+    --nocapture --test-threads=1
+
 # Native Metal known answers of the independent semantic review, including SOP2 scalar ALU
 # and VOPC compares.
 cargo test --locked -p xenora-semantic-review --no-run

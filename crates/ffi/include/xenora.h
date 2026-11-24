@@ -44,6 +44,26 @@ enum {
 /* Frame id reported when no frame has been completed yet. */
 #define XENORA_NO_FRAME 0xFFFFFFFFu
 
+/* Input snapshot delivered to guest runtime services (Gate 4, #276). */
+typedef struct {
+    uint32_t buttons;
+    int16_t stick_x;
+    int16_t stick_y;
+    int16_t mouse_dx;
+    int16_t mouse_dy;
+    uint8_t mouse_buttons;
+    uint8_t connected;
+    uint16_t reserved;
+} xenora_input_state;
+
+#define XENORA_INPUT_NONE     0u
+#define XENORA_INPUT_RIGHT    (1u << 0)
+#define XENORA_INPUT_LEFT     (1u << 1)
+#define XENORA_INPUT_UP       (1u << 2)
+#define XENORA_INPUT_DOWN     (1u << 3)
+#define XENORA_INPUT_ACTION_A (1u << 4)
+#define XENORA_INPUT_ACTION_B (1u << 5)
+
 /* Size of the frame drawn by the trusted fixture: RGBA8, rows top to bottom. */
 #define XENORA_FIXTURE_FRAME_WIDTH 4u
 #define XENORA_FIXTURE_FRAME_HEIGHT 3u
@@ -91,9 +111,24 @@ xenora_status xenora_session_run_trusted_fixture(
  * second loop on the same session returns XENORA_INVALID_STATE.
  */
 xenora_status xenora_session_start_frame_loop(xenora_session session, uint32_t frame_count);
+xenora_status xenora_session_start_interactive_loop(xenora_session session, uint32_t frame_count);
+xenora_status xenora_session_send_input(xenora_session session, const xenora_input_state *input);
+xenora_status xenora_session_queue_input(xenora_session session, const xenora_input_state *input);
 xenora_status xenora_session_pause_frame_loop(xenora_session session);
 xenora_status xenora_session_resume_frame_loop(xenora_session session);
 xenora_status xenora_session_stop_frame_loop(xenora_session session);
+
+/*
+ * Retrieve a previously completed frame by sequence index (0 <= frame_index < completed).
+ * Used for deterministic replay verification and frame inspection.
+ */
+xenora_status xenora_session_get_recorded_frame(
+    xenora_session session,
+    uint32_t frame_index,
+    uint32_t *out_frame_id,
+    uint8_t *out_rgba,
+    uint64_t capacity
+);
 
 /*
  * Report the loop's state, the number of completed frames, and the latest
