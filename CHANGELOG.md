@@ -9,6 +9,9 @@ exact revision and known limitations.
 Guest execution uses original, purpose-built test programs. Commercial Xbox game execution
 remains unsupported.
 
+### Changed
+- Extended the read-only RDNA2 planning CLI (`python3 -m qa rdna2`) with family/status filters, compact summaries, Codex-ready manifests under `artifacts/`, active-claim exclusion (family claims exclude those families; path-only claims block overlapping permitted files), coverage reconcile against `semantic_coverage` without inflating counts, and inventory diffs. Covered by `tests/qa/test_rdna2_plan.py`; planning only, no GPU production edits.
+
 ### Added
 - Added Phase II infrastructure CLIs under `scripts/qa` and `scripts/release` (#277): read-only RDNA2 expansion planning over live inventories, unified verification profiles with stale-evidence detection, CPU/runtime coverage scans, benchmark regression comparisons that reject incompatible identities, git rename/delete scope collision reports, and release-readiness reports with SBOM/checksum/bundle checks. Covered by `tests/qa` and `tests/release`; advisory until reviewed.
 - Added advisory infrastructure QA helpers under `scripts/qa/` and `scripts/release/` (issue #277): exit-status-preserving orchestration with JSON reports, PR scope/DCO/artifact checks, benchmark percentile analysis over existing samples, environment and repository health diagnostics, ARM64 Mach-O/bundle/codesign helpers, and checksum manifests. Covered by `tests/qa/` and `tests/release/`; checks stay advisory until reviewed.
