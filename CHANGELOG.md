@@ -10,6 +10,7 @@ Guest execution uses original, purpose-built test programs. Commercial Xbox game
 remains unsupported.
 
 ### Changed
+- Resolve the tiled BC1 mip and array layer once per linearization and copy contiguous block runs within each tile row. Partial edge blocks are retained and padding slots are skipped. Closes #349.
 - Relocation reports now build their type histogram once per image, avoiding a tree lookup for every entry. Target checks and fixup order are unchanged; synthetic regressions and an opt-in relocation timing test cover the change (#109).
 - Moved the six supported gfx1030 SOPP compute control forms into the semantic registry, preserving instruction decoding and shader lowering. Part of #215.
 - Moved gfx1030 `s_mov_b32` (SOP1) into the semantic registry, preserving its existing decode domain and shader output. The move operand rule retains explicit VCC and EXEC half destinations. Part of #215.
