@@ -10,7 +10,8 @@
 //!
 //! Scope matches the demo fixtures: scalar move/compare/branch, SOP2 unsigned
 //! and signed add and subtract, add-with-carry, subtract-with-borrow, AND, OR
-//! and XOR, VOP1 move
+//! and XOR, the stage C forms ANDN2, ORN2, NAND, NOR, XNOR, LSHL, LSHR and
+//! ASHR (32-bit), VOP1 move
 //! (including from an SGPR),
 //! VOP2 bitwise, shift, arithmetic-shift and float, VOP3 add-no-carry, MUBUF
 //! load/store and the two waits plus `s_endpgm`. Anything else is a controlled
@@ -50,7 +51,7 @@ enum CmpSrc {
 #[derive(Clone, Copy, Debug)]
 enum Insn {
     SMov(u8, Src),
-    /// SOP2 opcode 0-5, 14, 16 or 18.
+    /// SOP2 opcode 0-5, 14, 16, 18 or an even opcode 20-34.
     SAlu(u32, u8, Src, Src),
     SCmpEq(Src, Src),
     BranchScc0(usize),
@@ -320,6 +321,18 @@ fn scalar_alu(
             let (value, carry) = ripple(a, !b, !borrow);
             (value, !carry)
         }
+        // RDNA 2 ISA guide 12.1: the shifts use only S1[4:0], taken here as
+        // the remainder modulo 32, and scale by a power of two in exact
+        // arithmetic; ASHR is floor division of the signed S0. SCC = D != 0.
+        30 | 32 | 34 => {
+            let scale = 1_i64 << (b % 32);
+            let value = match opcode {
+                30 => (i64::from(a) * scale).rem_euclid(1 << 32),
+                32 => i64::from(a) / scale,
+                _ => i64::from(a as i32).div_euclid(scale).rem_euclid(1 << 32),
+            } as u32;
+            (value, value != 0)
+        }
         _ => {
             let mut value = 0;
             for bit in 0..32 {
@@ -327,7 +340,12 @@ fn scalar_alu(
                 let set = match opcode {
                     14 => x && y,
                     16 => x || y,
-                    _ => x != y,
+                    18 => x != y,
+                    20 => x && !y,
+                    22 => x || !y,
+                    24 => !(x && y),
+                    26 => !(x || y),
+                    _ => x == y,
                 };
                 value |= u32::from(set) << bit;
             }
@@ -795,7 +813,12 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         return Ok((Insn::SMov(dst, src), len));
     }
     // SOP2: ENCODING 0b10 in bits 30-31, OP in bits 23-29, SDST in 16-22.
-    if first >> 30 == 0b10 && matches!((first >> 23) & 0x7f, 0..=5 | 14 | 16 | 18) {
+    if first >> 30 == 0b10
+        && matches!(
+            (first >> 23) & 0x7f,
+            0..=5 | 14 | 16 | 18 | 20 | 22 | 24 | 26 | 28 | 30 | 32 | 34
+        )
+    {
         let dst = ((first >> 16) & 0x7f) as u8;
         if dst > 105 {
             return Err(fail("unsupported SOP2 destination"));
