@@ -32,6 +32,8 @@ struct Image {
     /// File offset of the code, and so the length of the file before it.
     text_offset: u32,
     code: Vec<u8>,
+    /// Base relocation blocks, placed in `.text` 0x100 bytes after the code.
+    relocations: Vec<u8>,
 }
 
 impl Image {
@@ -43,6 +45,7 @@ impl Image {
             data_size: 0x100,
             text_offset: 0x400,
             code: code.to_vec(),
+            relocations: Vec::new(),
         }
     }
 
@@ -55,10 +58,9 @@ impl Image {
         for (i, byte) in pe[0x40..E_LFANEW as usize].iter_mut().enumerate() {
             *byte = (i * 7 + 3) as u8;
         }
-        for (i, byte) in pe[TABLE_END as usize..self.text_offset as usize]
-            .iter_mut()
-            .enumerate()
-        {
+        // The pattern stops after two pages so that a very large header stays cheap.
+        let padding_end = (self.text_offset as usize).min(0x2000);
+        for (i, byte) in pe[TABLE_END as usize..padding_end].iter_mut().enumerate() {
             *byte = (i * 5 + 1) as u8;
         }
         let pe_at = E_LFANEW as usize;
@@ -100,6 +102,14 @@ impl Image {
 
         let at = self.text_offset as usize;
         pe[at..at + self.code.len()].copy_from_slice(&self.code);
+        if !self.relocations.is_empty() {
+            // Data directory 5 is the base relocation table.
+            let directory = OPTIONAL + 112 + 5 * 8;
+            pe[directory..directory + 4].copy_from_slice(&(self.text_rva + 0x100).to_le_bytes());
+            pe[directory + 4..directory + 8]
+                .copy_from_slice(&(self.relocations.len() as u32).to_le_bytes());
+            pe[at + 0x100..at + 0x100 + self.relocations.len()].copy_from_slice(&self.relocations);
+        }
         pe
     }
 }
@@ -306,7 +316,115 @@ fn startup_reports_the_refusal() {
     assert_eq!(error.to_string(), PeError::InvalidHeaderSize.to_string());
     assert_eq!(
         error.to_string(),
-        "SizeOfHeaders is zero, shorter than the section table, longer than the file, or reaches \
-         into a section"
+        "the PE headers cannot be mapped: SizeOfHeaders is zero, shorter than the section table, \
+         longer than the file or reaches into a section, or the bytes do not match the parsed \
+         headers"
+    );
+}
+
+/// One base relocation block: `IMAGE_REL_BASED_DIR64` entries for the given
+/// offsets in the page at `page_rva`, padded to a multiple of four bytes.
+fn dir64_block(page_rva: u32, offsets: &[u16]) -> Vec<u8> {
+    let mut entries: Vec<u16> = offsets.iter().map(|offset| 0xA000 | offset).collect();
+    if entries.len() % 2 == 1 {
+        entries.push(0); // IMAGE_REL_BASED_ABSOLUTE padding
+    }
+    let mut block = page_rva.to_le_bytes().to_vec();
+    block.extend((8 + 2 * entries.len() as u32).to_le_bytes());
+    for entry in entries {
+        block.extend(entry.to_le_bytes());
+    }
+    block
+}
+
+#[test]
+fn a_relocation_aimed_at_image_base_does_not_move_it_twice() {
+    // The image carries two DIR64 entries: one for the `ImageBase` field in the
+    // headers, and one for a pointer in `.text` so the table is seen to apply.
+    let mut code = base_into_rbx(0x2000);
+    code.extend([
+        0x8B, 0x4B, 0x3C, // mov ecx, [rbx + 0x3C]
+        0x48, 0x8B, 0x7C, 0x0B, 0x30, // mov rdi, [rbx + rcx + 0x30]   ImageBase
+        // mov rax, [rip + 0x2A]: the pointer at 0x2040
+        0x48, 0x8B, 0x05, 0x2A, 0x00, 0x00, 0x00, 0xF4, // hlt
+    ]);
+    // The load ends 0x16 bytes into the code, and 0x16 + 0x2A is 0x40.
+    assert_eq!(code.len(), 0x17);
+    code.resize(0x40, 0x90);
+    code.extend((PREFERRED_BASE + 0x2040).to_le_bytes());
+    let mut image = Image::new(&code);
+    image.relocations = dir64_block(0, &[OPTIONAL as u16 + 24]);
+    image.relocations.extend(dir64_block(0x2000, &[0x40]));
+    let bytes = image.build();
+
+    for base in [PREFERRED_BASE, OTHER_BASE] {
+        let result = run(&bytes, base);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt, "{base:#x}");
+        // Nothing is applied when the image is already at its preferred base.
+        let applied = if base == PREFERRED_BASE { 0 } else { 2 };
+        assert_eq!(result.relocations.applied_dir64, applied, "{base:#x}");
+        let cpu = &result.execution.final_state;
+        assert_eq!(cpu.get(Register::Rax), base + 0x2040, "{base:#x}");
+        // Not the preferred base, and not the load base plus the delta again.
+        assert_eq!(cpu.get(Register::Rdi), base, "{base:#x}");
+    }
+}
+
+#[test]
+fn bytes_that_are_not_the_parsed_headers_are_refused() {
+    let bytes = Image::new(&[0xF4]).build();
+    let pe = ParsedPe::parse(&bytes).unwrap();
+    let coff = E_LFANEW as usize + 4;
+    let refused = |change: &dyn Fn(&mut Vec<u8>)| {
+        let mut other = bytes.clone();
+        change(&mut other);
+        pe.load_into_memory(&other).err()
+    };
+    assert_eq!(refused(&|_| {}), None);
+
+    // An optional header declared empty: the section table would start where
+    // the optional header is, and `ImageBase` would be patched inside it.
+    assert_eq!(
+        refused(&|b| b[coff + 16..coff + 18].copy_from_slice(&0u16.to_le_bytes())),
+        Some(PeError::InvalidHeaderSize)
+    );
+    // One byte short of the PE32+ fields the loader relies on.
+    assert_eq!(
+        refused(&|b| b[coff + 16..coff + 18].copy_from_slice(&111u16.to_le_bytes())),
+        Some(PeError::InvalidHeaderSize)
+    );
+    // Not a PE32+ optional header.
+    assert_eq!(
+        refused(&|b| b[OPTIONAL..OPTIONAL + 2].copy_from_slice(&0x010Bu16.to_le_bytes())),
+        Some(PeError::InvalidHeaderSize)
+    );
+    // A different section count, preferred base or header size.
+    assert_eq!(
+        refused(&|b| b[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes())),
+        Some(PeError::InvalidHeaderSize)
+    );
+    assert_eq!(
+        refused(&|b| b[OPTIONAL + 24] ^= 1),
+        Some(PeError::InvalidHeaderSize)
+    );
+    assert_eq!(
+        refused(&|b| b[OPTIONAL + 60..OPTIONAL + 64].copy_from_slice(&0x200u32.to_le_bytes())),
+        Some(PeError::InvalidHeaderSize)
+    );
+}
+
+#[test]
+fn headers_over_the_mapping_budget_are_refused() {
+    // 256 MiB of headers and one more page. The file really is that long, so
+    // only the budget stands between this image and a mapping of that size.
+    const BUDGET: u32 = 256 * 1024 * 1024;
+    let mut image = Image::new(&[0xF4]);
+    image.size_of_headers = BUDGET + 0x1000;
+    image.text_offset = BUDGET + 0x1000;
+    image.text_rva = BUDGET + 0x1000;
+    image.data_rva = BUDGET + 0x2000;
+    assert_eq!(
+        load_error(&image),
+        Some(PeError::SectionMappingError(MemoryError::AllocationFailed))
     );
 }
