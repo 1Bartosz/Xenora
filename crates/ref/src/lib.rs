@@ -55,10 +55,12 @@ pub enum Op {
     ScalarUnary(ScalarUnary, u8, Source),
     /// VOP1 move of a normal SGPR or `vcc_lo` (106) into a VGPR.
     MoveScalar(u8, u8),
-    /// VOPC 16-, 32- or 64-bit integer compare writing the Wave32 mask to
+    /// VOPC 32-bit integer compare writing the Wave32 mask to `vcc_lo`.
+    Compare(Comparison, CompareSource, u8),
+    /// VOPC 16- or 64-bit integer compare writing the Wave32 mask to
     /// `vcc_lo`. For 64-bit forms a `Vector` or `Scalar` source and VSRC1 name
     /// the low register of a pair.
-    Compare(Comparison, CompareWidth, CompareSource, u8),
+    WideCompare(Comparison, CompareWidth, CompareSource, u8),
     /// SOP2 operation writing an SGPR and SCC.
     Scalar(ScalarAlu, u8, Source, Source),
     /// SOPC `s_cmp_eq_{i32,u32}` (opcodes 0 and 6, identical per guide 12.4).
@@ -651,7 +653,12 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 }
                 let (src0, length) =
                     decode_vector_source(*lo, *packed, tail, offset, "unsupported VOPC source")?;
-                (Op::Compare(comparison, width, src0, vsrc1), length)
+                let op = if width == CompareWidth::Word {
+                    Op::Compare(comparison, src0, vsrc1)
+                } else {
+                    Op::WideCompare(comparison, width, src0, vsrc1)
+                };
+                (op, length)
             }
             // VOP2 integer forms (bit 31 = 0): OP bits 25-30, VDST 17-24,
             // VSRC1 9-16, SRC0 0-8.
@@ -1166,7 +1173,16 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                 }
             }
             // RDNA 2 ISA section 3.9: VCC[n] = EXEC[n] & test(n), fully written.
-            Op::Compare(comparison, width, src0, src1) => {
+            Op::Compare(..) | Op::WideCompare(..) => {
+                let (comparison, width, src0, src1) = match op {
+                    Op::Compare(comparison, src0, src1) => {
+                        (comparison, CompareWidth::Word, src0, src1)
+                    }
+                    Op::WideCompare(comparison, width, src0, src1) => {
+                        (comparison, width, src0, src1)
+                    }
+                    _ => unreachable!(),
+                };
                 let mut mask = 0u32;
                 if exec != 0 {
                     // The registers each source occupies: a pair for 64-bit forms.
