@@ -1128,10 +1128,20 @@ fn guest_platform_saves_enforce_quota_and_preserve_existing_data() {
         |symbol, args: &[u64]| call_service_fixture(&state, "xenora_fixture.dll", symbol, args);
     let value = |symbol, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
     let buffer = PROCESS_FIXTURE_STACK_TOP - 0x2000;
+    assert_eq!(value("GetFixturePlatformCapabilities", &[]), 0);
     assert_eq!(value("OpenFixturePlatform", &[]), 1);
+    assert_eq!(value("GetFixturePlatformCapabilities", &[]), 3);
+    let quota = |expected| {
+        let result = call("GetFixtureSaveQuota", &[buffer]);
+        assert_eq!(result.execution.final_state.get(Register::Rax), 1);
+        assert_eq!(result.image.memory.read_u64(buffer).unwrap(), 16 * 1024);
+        assert_eq!(result.image.memory.read_u64(buffer + 8).unwrap(), expected);
+    };
+    quota(0);
     for slot in 1..=4 {
         assert_eq!(value("WriteFixtureSave", &[slot, buffer, 4096]), 1);
     }
+    quota(16 * 1024);
     assert_eq!(value("WriteFixtureSave", &[5, buffer, 1]), 0);
     assert_eq!(
         state.last_error(
@@ -1157,7 +1167,9 @@ fn guest_platform_saves_enforce_quota_and_preserve_existing_data() {
     assert_eq!(read.execution.final_state.get(Register::Rax), 8);
     assert_eq!(read.image.memory.read_u64(buffer).unwrap(), u64::MAX);
     assert_eq!(value("DeleteFixtureSave", &[5]), 1);
+    quota(3 * 4096 + 8);
     assert_eq!(value("WriteFixtureSave", &[6, buffer, 4088]), 1);
+    quota(16 * 1024);
     assert_eq!(value("ReadFixtureSave", &[5, buffer, 4096]), 0);
 }
 

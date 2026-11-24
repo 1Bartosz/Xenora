@@ -17,12 +17,20 @@ const MAX_SAVE_BYTES: usize = 4096;
 const SAVE_QUOTA: usize = 16 * 1024;
 const ERROR_DISK_FULL: u32 = 112;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+const CAP_LOCAL_SETTINGS: u64 = 1 << 0;
+const CAP_LOCAL_SAVES: u64 = 1 << 1;
 
 #[derive(Default)]
 pub(super) struct PlatformFixture {
     active: bool,
     settings: BTreeMap<u32, u64>,
     saves: BTreeMap<u32, Vec<u8>>,
+}
+
+impl PlatformFixture {
+    fn used_save_bytes(&self) -> usize {
+        self.saves.values().map(Vec::len).sum()
+    }
 }
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
@@ -86,9 +94,41 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
     register_saves(registry, state);
+
+    let capabilities = Arc::clone(state);
+    registry.register(
+        MODULE,
+        "GetFixturePlatformCapabilities",
+        move |_, cpu, _| {
+            let platform = capabilities
+                .platform_fixture
+                .lock()
+                .expect("fixture platform");
+            if !platform.active {
+                return capabilities.fail(cpu.gs_base, ERROR_INVALID_STATE, 0);
+            }
+            Ok(CAP_LOCAL_SETTINGS | CAP_LOCAL_SAVES)
+        },
+    );
 }
 
 fn register_saves(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    let quota = Arc::clone(state);
+    registry.register(MODULE, "GetFixtureSaveQuota", move |args, cpu, memory| {
+        let platform = quota.platform_fixture.lock().expect("fixture platform");
+        if !platform.active {
+            return quota.fail(cpu.gs_base, ERROR_INVALID_STATE, 0);
+        }
+        // Both values are byte counts. Write the whole record or leave it untouched.
+        let mut record = [0; 16];
+        record[..8].copy_from_slice(&(SAVE_QUOTA as u64).to_le_bytes());
+        record[8..].copy_from_slice(&(platform.used_save_bytes() as u64).to_le_bytes());
+        if args.rcx == 0 || memory.write_bytes(args.rcx, &record).is_err() {
+            return quota.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+        }
+        Ok(1)
+    });
+
     let save = Arc::clone(state);
     registry.register(MODULE, "WriteFixtureSave", move |args, cpu, memory| {
         let mut platform = save.platform_fixture.lock().expect("fixture platform");
@@ -102,7 +142,7 @@ fn register_saves(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
             return fail(ERROR_INVALID_PARAMETER);
         }
         let previous = platform.saves.get(&slot);
-        let used: usize = platform.saves.values().map(Vec::len).sum();
+        let used = platform.used_save_bytes();
         let size = size as usize;
         if (previous.is_none() && platform.saves.len() == MAX_SAVE_SLOTS)
             || used - previous.map_or(0, Vec::len) + size > SAVE_QUOTA
