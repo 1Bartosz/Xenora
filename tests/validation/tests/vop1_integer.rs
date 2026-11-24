@@ -310,6 +310,9 @@ fn inline_integer(selector: u32) -> u32 {
     }
 }
 
+/// Lane `n`'s input in a bit-position case.
+type Pattern = fn(usize) -> u32;
+
 /// 45 lanes: one full wave and a final wave of 13.
 fn long_lanes() -> Vec<u32> {
     lanes()
@@ -339,7 +342,7 @@ fn unary_cases(cases: &mut Vec<Case>) {
         }
         // Every single-bit position, every single zero, and every run of ones
         // from the MSB and from the LSB: lane n gets the shifted pattern.
-        let patterns: [(&str, fn(usize) -> u32); 4] = [
+        let patterns: [(&str, Pattern); 4] = [
             ("1 << n", |n| 1 << n),
             ("!(1 << n)", |n| !(1 << n)),
             ("-1 << n", |n| u32::MAX << n),
@@ -632,8 +635,10 @@ fn rejections() -> Vec<(String, Vec<u8>, usize)> {
         code.extend(setup);
         code.push(vop1(op, 2, LITERAL));
         all.push((format!("{name} missing literal"), words(&code), offset));
+        // Outside the accepted subset (project policy, not a guide limit):
         // VCC_HI, TTMPs, M0, NULL, EXEC, the reserved and float inline
-        // selectors, DPP8, VCCZ, EXECZ, SCC, SDWA, DPP16 and LDS direct.
+        // selectors, DPP8, VCCZ, EXECZ, SCC, SDWA, DPP16 and 254 (LDS direct
+        // in Table 20, reserved in Table 77).
         for src0 in (107..=127).chain(209..=254) {
             let mut alu = vec![vop1(op, 2, src0)];
             alu.extend(extension(src0));
@@ -761,8 +766,10 @@ fn unsupported_vop1_integer_encodings_are_rejected() {
 #[test]
 fn other_vop1_opcodes_stay_unsupported() {
     // Every VOP1 opcode (0-255) except V_MOV_B32 (1, supported before this
-    // set) and these six. VDST is initialized, so a form that also reads it
-    // fails only on the opcode.
+    // set) and these six must be refused at the ALU word. VDST and SRC0 are
+    // initialized, so a form that reads only those cannot fail on them; other
+    // prerequisites (M0 for the relative moves) are not set up, and the offset
+    // alone does not say why a form was refused.
     let supported = [1, 55, 56, 57, 58, 59, SWAP];
     let mut setup = vmov(3, 7).to_vec();
     setup.extend(vmov(2, 5));
