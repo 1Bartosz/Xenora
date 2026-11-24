@@ -10,11 +10,12 @@ Guest execution uses original, purpose-built test programs. Commercial Xbox game
 remains unsupported.
 
 ### Changed
-- Reuse up to 16 native Metal compute pipelines per context for repeated shader source and entry points. Pending dispatches retain their pipelines through completion, including after eviction. Dispatch profiles report zero library and pipeline setup time when a cached pipeline is reused. Closes #132.
+- Relocation reports now build their type histogram once per image, avoiding a tree lookup for every entry. Target checks and fixup order are unchanged; synthetic regressions and an opt-in relocation timing test cover the change (#109).
 - Moved the six supported gfx1030 SOPP compute control forms into the semantic registry, preserving instruction decoding and shader lowering. Part of #215.
 - Moved gfx1030 `s_mov_b32` (SOP1) into the semantic registry, preserving its existing decode domain and shader output. The move operand rule retains explicit VCC and EXEC half destinations. Part of #215.
 - Moved the six hand-written gfx1030 VOP2 logical and shift forms (`v_and_b32`, `v_or_b32`, `v_xor_b32`, `v_lshlrev_b32`, `v_lshrrev_b32`, `v_ashrrev_i32`, AMD guide section 12.7) into the semantic registry under a new VGPR-only operand rule `vop2_vgpr2`, with no behaviour change: a sweep of 132,608 VOP2, VOP1 and SOP1 words decodes to the same text, length and error before and after, the MSL goldens are unchanged, and the runtime-region allowlist admits exactly the same six forms. The per-lane `VectorBinary` gained `And`, `Or`, `Xor` and the three shifts (count masked to S0[4:0]); 6 hand-written instruction variants and their decoder and lowering arms are gone (17 hand-written forms remain). Part of #215.
 - Added non-blocking Metal compute submission through `submit_words` and `wait`, with completion-aware resource retirement and a sixteen-dispatch in-flight limit. Synchronous calls keep their existing behavior. The benchmark reports the host submission split and compares synchronous and pipelined batches.
+- Reuse up to 16 native Metal compute pipelines per context for repeated shader source and entry points. Pending dispatches retain their pipelines through completion, including after eviction. Dispatch profiles report zero library and pipeline setup time when a cached pipeline is reused. Closes #132.
 - Extended the read-only RDNA2 planning CLI (`python3 -m qa rdna2`) with family/status filters, compact summaries, Codex-ready manifests under `artifacts/`, active-claim exclusion (family claims exclude those families; path-only claims block overlapping permitted files), coverage reconcile against `semantic_coverage` without inflating counts, and inventory diffs. Covered by `tests/qa/test_rdna2_plan.py`; planning only, no GPU production edits.
 
 ### Added
@@ -197,6 +198,7 @@ remains unsupported.
 - Fixed 32-bit guest stores and loads in the native DBT (MOV 89/8B and C7 /0), which accessed eight bytes: stores overwrote the next four guest bytes and accesses at the end of a mapping faulted. RIP-relative operands of byte moves and extensions, which were read as RBP-relative, and LEA with a segment prefix, which added the segment base, are fixed too.
 - Fixed an x86 prefix-length test that read an untracked fuzz artifact and so failed on every fresh checkout; its input is now inline.
 - Fixed agent-queue `apply_actions` crashing on comment-only decisions (claim refusals) by skipping no-op `gh issue edit` calls; accept `summary --now` after the subcommand; grant the audit job `pull-requests: read` so live audits can list open PRs (issue #180).
+- Fixed `scripts/audit/status.py` and the Python embedded in `scripts/audit/claims.sh` reading and writing tracked files in the process locale encoding instead of UTF-8: under an ASCII or cp1252 locale the status check crashed on `docs/claims.toml` or reported a spurious `xenora-progress.svg` difference. Both scripts now pass `encoding="utf-8"`, as the rest of `scripts/` does, the two write sites also pin `newline="\n"` so a Windows host cannot turn tracked LF files into CRLF when it regenerates them, and CI runs the two checks again under a non-UTF-8 locale so the requirement stays enforced.
 
 - Generated CRT adapters now report unsupported calls when the required guest ABI or runtime behavior is missing.
 
