@@ -182,6 +182,8 @@ private enum FixturePlaybackError: Error {
     case outputUnitUnavailable
     case outputRouting(OSStatus)
     case unexpectedOutput(AudioDeviceID)
+    case queueFailure(Int32)
+    case queueShortfall(UInt64)
     case timedOut
 }
 
@@ -189,6 +191,7 @@ private struct FixturePlayback {
     let frames: Int
     let buffers: Int
     let refills: Int
+    let underruns: UInt32
     let outputDevice: AudioDeviceID
     let outputSampleRate: Double
     let outputChannels: AVAudioChannelCount
@@ -259,6 +262,23 @@ private func playFixturePCM(
     let frames = sourceFrames * (streamingFixture ? 32 : 1)
     let framesPerBuffer = streamingFixture ? 1024 : 128
     let bufferWindow = 3
+    var streamSession: xenora_session = 0
+    let producer = DispatchQueue(label: "xenora.fixture.pcm")
+    if streamingFixture {
+        let createStatus = xenora_session_create(XENORA_ABI_VERSION, &streamSession)
+        guard createStatus == XENORA_OK else { throw FixturePlaybackError.queueFailure(createStatus) }
+    }
+    let session = streamSession
+    defer {
+        if session != 0 {
+            producer.sync {}
+            _ = xenora_session_destroy(session)
+        }
+    }
+    if session != 0 {
+        let initStatus = xenora_session_audio_init(session, 48_000, 1, UInt32(XENORA_AUDIO_FORMAT_PCM_S16LE))
+        guard initStatus == XENORA_OK else { throw FixturePlaybackError.queueFailure(initStatus) }
+    }
     let engine = AVAudioEngine()
     guard let outputUnit = engine.outputNode.audioUnit else {
         throw FixturePlaybackError.outputUnitUnavailable
@@ -297,18 +317,46 @@ private func playFixturePCM(
     let presentationLatency = engine.outputNode.presentationLatency
     var nextFrame = 0
     var bufferCount = 0
+    func renderBlock(first: Int, count: Int) throws -> [UInt8] {
+        let firstByte = first * 2
+        let byteCount = count * 2
+        if session == 0 {
+            return Array(pcm[firstByte..<(firstByte + byteCount)])
+        }
+        let submitted = DispatchSemaphore(value: 0)
+        producer.async {
+            let block = (0..<byteCount).map { pcm[(firstByte + $0) % pcm.count] }
+            block.withUnsafeBufferPointer { bytes in
+                _ = xenora_session_audio_submit(session, bytes.baseAddress, UInt64(bytes.count))
+            }
+            submitted.signal()
+        }
+        guard submitted.wait(timeout: .now() + .seconds(1)) == .success else {
+            throw FixturePlaybackError.timedOut
+        }
+        var block = [UInt8](repeating: 0, count: byteCount)
+        var supplied: UInt64 = 0
+        let status = block.withUnsafeMutableBufferPointer { bytes in
+            xenora_session_audio_render(session, bytes.baseAddress, UInt64(bytes.count), &supplied)
+        }
+        guard status == XENORA_OK else { throw FixturePlaybackError.queueFailure(status) }
+        guard supplied == UInt64(byteCount) else { throw FixturePlaybackError.queueShortfall(supplied) }
+        return block
+    }
+
     func scheduleNextBuffer() throws {
         let first = nextFrame
         let count = min(framesPerBuffer, frames - first)
+        let pcmBlock = try renderBlock(first: first, count: count)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
               let samples = buffer.floatChannelData?[0] else {
             throw FixturePlaybackError.invalidPCM
         }
         buffer.frameLength = AVAudioFrameCount(count)
         for offset in 0..<count {
-            let byte = ((first + offset) % sourceFrames) * 2
-            let low = UInt16(pcm[byte])
-            let high = UInt16(pcm[byte + 1]) << 8
+            let byte = offset * 2
+            let low = UInt16(pcmBlock[byte])
+            let high = UInt16(pcmBlock[byte + 1]) << 8
             samples[offset] = Float(Int16(bitPattern: low | high)) / 32_768
         }
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
@@ -335,8 +383,19 @@ private func playFixturePCM(
         }
     }
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+    var underruns: UInt32 = 0
+    if session != 0 {
+        var queued: UInt32 = 0
+        var total: UInt64 = 0
+        let status = xenora_session_audio_status(session, &queued, &underruns, &total)
+        guard status == XENORA_OK else { throw FixturePlaybackError.queueFailure(status) }
+        guard queued == 0, total == UInt64(frames * 2) else {
+            throw FixturePlaybackError.invalidPCM
+        }
+    }
     return FixturePlayback(
-        frames: frames, buffers: completedBuffers, refills: bufferCount - prequeued, outputDevice: outputDevice,
+        frames: frames, buffers: completedBuffers, refills: bufferCount - prequeued,
+        underruns: underruns, outputDevice: outputDevice,
         outputSampleRate: output.sampleRate, outputChannels: output.channelCount,
         presentationLatency: presentationLatency, completionElapsed: elapsed
     )
@@ -818,10 +877,10 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
         let played = try playFixturePCM(
             frame.pcm, requestedOutput: requestedOutput, streamingFixture: nativeAudioStreamSmoke
         )
-        print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) refills=\(played.refills) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
+        print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) refills=\(played.refills) queueUnderruns=\(played.underruns) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
         let expected = nativeAudioStreamSmoke ? (8192, 8, 5) : (256, 2, 0)
         exit((played.frames, played.buffers, played.refills) == expected
-             && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
+             && played.underruns == 0 && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
     } catch {
         print("smoke-native-audio: \(error)")
         exit(1)
