@@ -120,6 +120,10 @@ def decide(event, state, cfg):
             return _reply(n, "Reassign refused: %s is not allowed to work on area:%s." % (quote(target), task["area"]))
         if not (set(task["labels"]) & {"agent:claimed", "agent:ready"}):
             return _reply(n, "Reassign refused: the task is neither ready nor claimed.")
+        # A reassignment creates a claim: the same dependency and file-overlap rules apply.
+        problem = claim_problem(dict(task, labels=task["labels"] + ["agent:ready"]), tasks, cfg, target)
+        if problem:
+            return _reply(n, "Reassign refused: %s" % problem)
         remove = ["agent:ready"] + (["claimed-by:" + holder] if holder else [])
         return [_act(n, ["agent:claimed", "claimed-by:" + target], remove,
                      "Reassigned to %s by %s. New lease starts now.\n%s" % (target, actor, L.grant_marker(n, target)))]

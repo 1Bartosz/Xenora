@@ -120,6 +120,18 @@ class Inert(unittest.TestCase):
         self.assertEqual(one(out)["add_labels"], ["agent:blocked"])
 
 
+class ReassignChecks(unittest.TestCase):
+    def test_reassign_cannot_create_an_overlapping_or_blocked_claim(self):
+        held = issue(1, labels=("agent:claimed", "claimed-by:maint"))
+        a = one(decide(event("maint", "/reassign gpuer", 2), state(held, issue(2)), CFG))
+        self.assertIn("file overlap with claimed task #1", a["comment"])
+        self.assertEqual(a["add_labels"], [])
+        a = one(decide(event("maint", "/reassign gpuer", 2), state(issue(3), issue(2, deps="#3", files="src/gpu/b.rs")), CFG))
+        self.assertIn("open dependencies: #3", a["comment"])
+        a = one(decide(event("maint", "/reassign gpuer", 2), state(held, issue(2, files="src/gpu/b.rs")), CFG))
+        self.assertIn("claimed-by:gpuer", a["add_labels"])
+
+
 class IssueForm(unittest.TestCase):
     def test_rendered_files_field_is_unfenced(self):
         # The issue form renders Files with `render: text`, i.e. inside a ```text fence.
