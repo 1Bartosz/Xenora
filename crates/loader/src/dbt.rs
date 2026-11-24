@@ -11,6 +11,7 @@ use crate::arm64::{
 use crate::cpu::{CpuState, ExecutionResult, ExitReason, Register};
 use crate::jit::{JitError, JitMemory};
 use crate::memory::GuestMemory;
+use crate::x86_decode::MAX_INSTRUCTION_LEN;
 use std::collections::HashMap;
 
 const MAX_BLOCK_INSTRUCTIONS: usize = 16;
@@ -235,9 +236,15 @@ impl DbtEngine {
                 .fetch_instruction_byte(cur_rip)
                 .map_err(ExitReason::MemoryFault)?;
             cur_rip += 1;
+            let mut insn_len = 1usize; // first opcode byte already fetched
 
-            // Handle legacy prefixes: 0x65 (GS), 0x64 (FS)
+            // Handle legacy prefixes: 0x65 (GS), 0x64 (FS). The run is
+            // bounded by the architectural instruction-length limit so an
+            // overlong run is reported as an illegal instruction.
             while b0 == 0x65 || b0 == 0x64 {
+                if insn_len >= MAX_INSTRUCTION_LEN {
+                    return Err(ExitReason::IllegalInstruction(b0));
+                }
                 if b0 == 0x65 {
                     seg_gs = true;
                 } else {
@@ -247,6 +254,7 @@ impl DbtEngine {
                     .fetch_instruction_byte(cur_rip)
                     .map_err(ExitReason::MemoryFault)?;
                 cur_rip += 1;
+                insn_len += 1;
             }
 
             let mut rex_w = false;
@@ -256,6 +264,9 @@ impl DbtEngine {
             let mut op = b0;
 
             if (op & 0xf0) == 0x40 {
+                if insn_len >= MAX_INSTRUCTION_LEN {
+                    return Err(ExitReason::IllegalInstruction(op));
+                }
                 rex_w = (op & 0x08) != 0;
                 rex_r = (op & 0x04) != 0;
                 rex_x = (op & 0x02) != 0;

@@ -14,6 +14,7 @@ use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::MemoryPermissions;
 use crate::pe::{IMAGE_FILE_MACHINE_AMD64, PE32_PLUS_MAGIC, ParsedPe, PeError, PeSection};
 use crate::services::{MockClock, ServicesState, register_standard_services};
+use crate::x86_decode::MAX_INSTRUCTION_LEN;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::Write as _;
@@ -83,10 +84,26 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
     let mut b0 = slice[pc];
     pc += 1;
 
-    // Legacy segment prefixes: 0x65 (GS), 0x64 (FS)
-    while (b0 == 0x65 || b0 == 0x64) && pc < slice.len() {
+    // Legacy segment prefixes: 0x65 (GS), 0x64 (FS). The run is bounded by the
+    // architectural instruction-length limit (15 bytes); a longer run is
+    // reported as an overlong prefix sequence instead of decoding past it.
+    while (b0 == 0x65 || b0 == 0x64) && pc < slice.len() && pc < MAX_INSTRUCTION_LEN {
         b0 = slice[pc];
         pc += 1;
+    }
+    let overlong_prefix_run =
+        pc < slice.len() && (b0 == 0x65 || b0 == 0x64) && pc >= MAX_INSTRUCTION_LEN;
+    if overlong_prefix_run {
+        return Some(CfgDecoded {
+            rva,
+            insn_len: pc,
+            mnemonic: "overlong prefix run".into(),
+            is_dbt: false,
+            is_interp: false,
+            notes: "instruction length exceeds the 15-byte architectural limit".into(),
+            successors: vec![],
+            fall_through: false,
+        });
     }
 
     // Recognize the operand-size override for C7 without changing how the
@@ -466,6 +483,21 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
             mnemonic = format!("opcode_0x{op:02x}");
             notes = "unsupported opcode".to_string();
         }
+    }
+
+    // Architectural instruction-length enforcement: no decoded instruction
+    // may exceed 15 bytes, whatever prefix or opcode path produced it.
+    if pc > MAX_INSTRUCTION_LEN {
+        return Some(CfgDecoded {
+            rva,
+            insn_len: MAX_INSTRUCTION_LEN,
+            mnemonic: "overlong instruction".into(),
+            is_dbt: false,
+            is_interp: false,
+            notes: "instruction length exceeds the 15-byte architectural limit".into(),
+            successors: vec![],
+            fall_through: false,
+        });
     }
 
     Some(CfgDecoded {

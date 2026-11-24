@@ -6,6 +6,7 @@
 //! Never executes guest x86-64 code natively on host ARM64.
 
 use crate::memory::{GuestMemory, MemoryError};
+use crate::x86_decode::MAX_INSTRUCTION_LEN;
 use std::fmt;
 
 /// 64-bit General Purpose Register identifiers in x86-64.
@@ -262,19 +263,29 @@ impl<'a> Interpreter<'a> {
         let mut seg_fs = false;
 
         let mut byte = self.fetch_u8()?;
+        let mut insn_len = 1usize; // first opcode byte already fetched
 
-        // Handle legacy segment prefixes: 0x65 (GS), 0x64 (FS)
+        // Handle legacy segment prefixes: 0x65 (GS), 0x64 (FS). The run is
+        // bounded by the architectural instruction-length limit so an overlong
+        // prefix run is reported as an illegal instruction.
         while byte == 0x65 || byte == 0x64 {
+            if insn_len >= MAX_INSTRUCTION_LEN {
+                return Err(ExitReason::IllegalInstruction(byte));
+            }
             if byte == 0x65 {
                 seg_gs = true;
             } else {
                 seg_fs = true;
             }
             byte = self.fetch_u8()?;
+            insn_len += 1;
         }
 
         // Handle REX prefix (0x40 - 0x4F)
         if (byte & 0xF0) == 0x40 {
+            if insn_len >= MAX_INSTRUCTION_LEN {
+                return Err(ExitReason::IllegalInstruction(byte));
+            }
             rex_w = (byte & 0x08) != 0;
             rex_r = (byte & 0x04) != 0;
             rex_b = (byte & 0x01) != 0;
