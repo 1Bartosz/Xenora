@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added default guest heap reallocation with data preservation and an in-place-only option.
+
 - Added the synthetic default process heap with allocation, size queries, and release.
 
 - Added Win64 signatures for wide-string length and comparison and overlapping byte moves to the import catalog.

@@ -85,6 +85,8 @@ impl fmt::Display for MemoryError {
 
 impl std::error::Error for MemoryError {}
 
+const MAX_DYNAMIC_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AllocationKind {
     ImageOrStatic,
@@ -210,14 +212,8 @@ impl GuestMemory {
         allocation: AllocationKind,
     ) -> Result<u64, MemoryError> {
         // Bound retained host storage independently for each allocation kind.
-        const MAX_VIRTUAL_BYTES: usize = 64 * 1024 * 1024;
-        let allocated: usize = self
-            .regions
-            .iter()
-            .filter(|region| region.allocation == allocation)
-            .map(|region| region.data.len())
-            .sum();
-        if size > MAX_VIRTUAL_BYTES - allocated
+        let allocated = self.dynamic_bytes(allocation);
+        if size > MAX_DYNAMIC_BYTES - allocated
             || (allocation == AllocationKind::Heap
                 && self
                     .regions
@@ -229,24 +225,84 @@ impl GuestMemory {
             return Err(MemoryError::AllocationFailed);
         }
 
-        let mut base = requested_base;
-        if base == 0 {
-            base = 0x0000_0003_0000_0000;
-            for region in &self.regions {
-                let end = base.checked_add(size as u64).ok_or(MemoryError::Overflow)?;
-                if end <= region.base {
-                    break;
-                }
-                let region_end = region.base + region.data.len() as u64;
-                if base < region_end {
-                    base = region_end
-                        .checked_next_multiple_of(ALLOCATION_GRANULARITY)
-                        .ok_or(MemoryError::Overflow)?;
-                }
-            }
-        }
+        let base = if requested_base == 0 {
+            self.find_dynamic_base(size)?
+        } else {
+            requested_base
+        };
         self.insert_region(base, size, permissions, &[], allocation)?;
         Ok(base)
+    }
+
+    fn dynamic_bytes(&self, allocation: AllocationKind) -> usize {
+        self.regions
+            .iter()
+            .filter(|region| region.allocation == allocation)
+            .map(|region| region.data.len())
+            .sum()
+    }
+
+    fn find_dynamic_base(&self, size: usize) -> Result<u64, MemoryError> {
+        let mut base = 0x0000_0003_0000_0000u64;
+        for region in &self.regions {
+            let end = base.checked_add(size as u64).ok_or(MemoryError::Overflow)?;
+            if end <= region.base {
+                return Ok(base);
+            }
+            let region_end = region.base + region.data.len() as u64;
+            if base < region_end {
+                base = region_end
+                    .checked_next_multiple_of(ALLOCATION_GRANULARITY)
+                    .ok_or(MemoryError::Overflow)?;
+            }
+        }
+        base.checked_add(size as u64).ok_or(MemoryError::Overflow)?;
+        Ok(base)
+    }
+
+    pub(crate) fn resize_heap_allocation(
+        &mut self,
+        base: u64,
+        size: usize,
+        in_place_only: bool,
+    ) -> Result<u64, MemoryError> {
+        let index = self
+            .regions
+            .iter()
+            .position(|region| region.base == base && region.allocation == AllocationKind::Heap)
+            .ok_or(MemoryError::UnmappedAddress(base))?;
+        let previous = self.regions[index].data.len();
+        let other_bytes = self.dynamic_bytes(AllocationKind::Heap) - previous;
+        if size > MAX_DYNAMIC_BYTES - other_bytes {
+            return Err(MemoryError::AllocationFailed);
+        }
+
+        let boundary = self
+            .regions
+            .get(index + 1)
+            .map_or(u64::MAX, |next| next.base);
+        let destination = if (size as u64) <= boundary - base {
+            base
+        } else if in_place_only {
+            return Err(MemoryError::AllocationFailed);
+        } else {
+            self.find_dynamic_base(size)?
+        };
+
+        let region = &mut self.regions[index];
+        region
+            .data
+            .try_reserve_exact(size.saturating_sub(previous))
+            .map_err(|_| MemoryError::AllocationFailed)?;
+        region.data.resize(size, 0);
+        if size < previous {
+            region.data.shrink_to_fit();
+        }
+        if destination != base {
+            region.base = destination;
+            self.regions.sort_by_key(|region| region.base);
+        }
+        Ok(destination)
     }
 
     pub(crate) fn release_virtual_allocation(&mut self, base: u64) -> bool {
@@ -413,5 +469,33 @@ impl GuestMemory {
     /// Write a 16-bit little-endian integer to guest memory.
     pub fn write_u16(&mut self, address: u64, value: u16) -> Result<(), MemoryError> {
         self.write_bytes(address, &value.to_le_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heap_resize_moves_only_when_allowed_and_preserves_bytes() {
+        let mut memory = GuestMemory::new();
+        let base = memory.map_heap_allocation(19).unwrap();
+        let neighbor = memory.map_heap_allocation(1).unwrap();
+        memory.write_u8(base, 0xab).unwrap();
+        memory.write_u8(neighbor, 0xcd).unwrap();
+        let growth = (neighbor - base) as usize + 1;
+        assert_eq!(
+            memory.resize_heap_allocation(base, growth, true),
+            Err(MemoryError::AllocationFailed)
+        );
+        assert_eq!(memory.heap_allocation_size(base), Some(19));
+        let moved = memory.resize_heap_allocation(base, growth, false).unwrap();
+        assert_ne!(moved, base);
+        assert_eq!(memory.read_u8(moved), Ok(0xab));
+        assert_eq!(memory.read_u8(neighbor), Ok(0xcd));
+        assert_eq!(memory.read_u8(moved + growth as u64 - 1), Ok(0));
+        assert_eq!(memory.heap_allocation_size(base), None);
+        assert_eq!(memory.resize_heap_allocation(moved, 1, true), Ok(moved));
+        assert_eq!(memory.heap_allocation_size(moved), Some(1));
     }
 }

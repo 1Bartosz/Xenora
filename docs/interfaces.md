@@ -165,8 +165,9 @@ bytes, and moves preserve the original source bytes when ranges overlap.
 synthetic heap. Allocations are at least 16-byte aligned and zero initialized.
 A zero-size request allocates one byte. The heap is bounded to 64 MiB and
 4096 live allocations. Heap and virtual allocations have distinct ownership.
-Private heaps, reallocation, and flags other than `HEAP_ZERO_MEMORY` on
-allocation remain unsupported. See the [Windows heap API reference](https://learn.microsoft.com/windows/win32/api/heapapi/).
+`HeapReAlloc` preserves the retained bytes and zeroes newly added bytes.
+It can move a block unless `HEAP_REALLOC_IN_PLACE_ONLY` is set. Failed
+resizes preserve the original block. Private heaps remain unsupported. See the [Windows heap API reference](https://learn.microsoft.com/windows/win32/api/heapapi/).
 
 ### Event signaling
 

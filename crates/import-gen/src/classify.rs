@@ -678,7 +678,13 @@ impl SymbolDb {
 
     fn populate_win32_kernel(&mut self) {
         for module in ["kernel32.dll", "api-ms-win-core-heap-l1-1-0.dll"] {
-            for symbol in ["GetProcessHeap", "HeapAlloc", "HeapSize", "HeapFree"] {
+            for symbol in [
+                "GetProcessHeap",
+                "HeapAlloc",
+                "HeapReAlloc",
+                "HeapSize",
+                "HeapFree",
+            ] {
                 self.ins(module, symbol, Classification::StandardService);
             }
         }

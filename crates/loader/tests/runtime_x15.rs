@@ -1203,7 +1203,7 @@ fn test_guest_process_heap_through_iat() {
         .get(Register::Rax);
     assert_ne!(heap, 0);
 
-    let allocate = |size, followup| {
+    let allocate = |size, followup, resize: u64| {
         let mut code = vec![0x48, 0x83, 0xec, 0x28];
         for (register, value) in [
             ([0x48, 0xb9], heap),
@@ -1220,6 +1220,12 @@ fn test_guest_process_heap_through_iat() {
         code.extend_from_slice(&heap.to_le_bytes());
         code.extend_from_slice(&[0x48, 0xba]); // dwFlags = 0
         code.extend_from_slice(&0u64.to_le_bytes());
+        if followup == "HeapReAlloc" {
+            // Write a sentinel into the allocation, then pass the new size in R9.
+            code.extend_from_slice(&[0x48, 0xc7, 0x00, 0x78, 0x56, 0x34, 0x12]);
+            code.extend_from_slice(&[0x49, 0xb9]);
+            code.extend_from_slice(&resize.to_le_bytes());
+        }
         append_import_call(&mut code, 0x21a0);
         code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
 
@@ -1246,7 +1252,7 @@ fn test_guest_process_heap_through_iat() {
         result
     };
 
-    let allocated = allocate(19, "HeapSize");
+    let allocated = allocate(19, "HeapSize", 0);
     let address = allocated.execution.final_state.get(Register::Rbx);
     assert_ne!(address, 0);
     assert_eq!(address % 16, 0);
@@ -1259,7 +1265,7 @@ fn test_guest_process_heap_through_iat() {
         .unwrap();
     assert_eq!(bytes, [0; 19]);
 
-    let freed = allocate(19, "HeapFree");
+    let freed = allocate(19, "HeapFree", 0);
     assert_eq!(freed.execution.final_state.get(Register::Rax), 1);
     assert!(
         freed
@@ -1269,9 +1275,21 @@ fn test_guest_process_heap_through_iat() {
             .is_err()
     );
 
-    let oversized = allocate(64 * 1024 * 1024 + 1, "HeapSize");
+    let oversized = allocate(64 * 1024 * 1024 + 1, "HeapSize", 0);
     assert_eq!(oversized.execution.final_state.get(Register::Rbx), 0);
     assert_eq!(oversized.execution.final_state.get(Register::Rax), u64::MAX);
+
+    let grown = allocate(19, "HeapReAlloc", 32);
+    let base = grown.execution.final_state.get(Register::Rbx);
+    assert_eq!(grown.execution.final_state.get(Register::Rax), base);
+    assert_eq!(grown.image.memory.read_u64(base).unwrap(), 0x1234_5678);
+    assert_eq!(grown.image.memory.read_u8(base + 31).unwrap(), 0);
+
+    let rejected = allocate(19, "HeapReAlloc", 64 * 1024 * 1024 + 1);
+    let base = rejected.execution.final_state.get(Register::Rbx);
+    assert_eq!(rejected.execution.final_state.get(Register::Rax), 0);
+    assert_eq!(rejected.image.memory.read_u64(base).unwrap(), 0x1234_5678);
+    assert!(rejected.image.memory.read_u8(base + 19).is_err());
 }
 
 #[test]
