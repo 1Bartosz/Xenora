@@ -267,7 +267,18 @@ xenora_status xenora_session_audio_read(
 );
 
 /*
- * Query current audio queue status: queued bytes, underruns, total submitted.
+ * Fill one playback block with whole frames, padding a shortfall with silence.
+ * out_source_bytes reports how much PCM was supplied before padding.
+ */
+xenora_status xenora_session_audio_render(
+    xenora_session session,
+    uint8_t *out_pcm,
+    uint64_t byte_count,
+    uint64_t *out_source_bytes
+);
+
+/*
+ * Query queued bytes, render calls that ran short, and total bytes submitted.
  */
 xenora_status xenora_session_audio_status(
     xenora_session session,

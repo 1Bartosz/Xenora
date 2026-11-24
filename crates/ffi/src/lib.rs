@@ -143,7 +143,6 @@ impl AudioSubsystem {
         for b in processed_bytes {
             if self.queue.len() >= self.max_capacity_bytes {
                 self.queue.pop_front();
-                self.underruns = self.underruns.saturating_add(1);
             }
             self.queue.push_back(b);
         }
@@ -156,6 +155,15 @@ impl AudioSubsystem {
             *b = self.queue.pop_front().unwrap_or(0);
         }
         count
+    }
+
+    fn render(&mut self, out: &mut [u8]) -> usize {
+        let supplied = self.read(out);
+        if supplied < out.len() {
+            out[supplied..].fill(0);
+            self.underruns = self.underruns.saturating_add(1);
+        }
+        supplied
     }
 }
 
@@ -1395,6 +1403,42 @@ pub unsafe extern "C" fn xenora_session_audio_read(
     })
 }
 
+/// Fill an aligned PCM playback block. Missing frames are replaced with silence.
+///
+/// # Safety
+/// `out_pcm` must point to `byte_count` writable bytes and `out_source_bytes`
+/// must be valid for one aligned `u64` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_audio_render(
+    session: u64,
+    out_pcm: *mut u8,
+    byte_count: u64,
+    out_source_bytes: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if out_pcm.is_null()
+            || out_source_bytes.is_null()
+            || !(1..=256 * 1024).contains(&byte_count)
+        {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let audio = &mut slots[split(session).0].audio;
+        if !(byte_count as usize).is_multiple_of(audio.frame_bytes()) {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let output = unsafe { std::slice::from_raw_parts_mut(out_pcm, byte_count as usize) };
+        let supplied = audio.render(output);
+        unsafe { out_source_bytes.write(supplied as u64) };
+        XENORA_OK
+    })
+}
+
 /// # Safety
 /// Each output pointer must be non-null and valid for one aligned write.
 #[unsafe(no_mangle)]
@@ -2536,6 +2580,58 @@ mod tests {
         assert_eq!(split(res).0, split(res_reused).0);
         assert!(split(res_reused).1 > split(res).1);
 
+        xenora_session_destroy(session);
+    }
+
+    #[test]
+    fn audio_render_pads_missing_frames_and_counts_only_render_shortfalls() {
+        let _guard = serial();
+        let session = create();
+        assert_eq!(
+            xenora_session_audio_init(session, 48000, 2, XENORA_AUDIO_FORMAT_PCM_S16LE),
+            XENORA_OK
+        );
+        let frame = [1, 2, 3, 4];
+        assert_eq!(
+            unsafe { xenora_session_audio_submit(session, frame.as_ptr(), 4) },
+            XENORA_OK
+        );
+        let mut output = [0xaa; 8];
+        let mut supplied = 99;
+        assert_eq!(
+            unsafe { xenora_session_audio_render(session, output.as_mut_ptr(), 7, &mut supplied) },
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(output, [0xaa; 8]);
+        assert_eq!(supplied, 99);
+        assert_eq!(
+            unsafe { xenora_session_audio_render(session, output.as_mut_ptr(), 8, &mut supplied) },
+            XENORA_OK
+        );
+        assert_eq!(supplied, 4);
+        assert_eq!(output, [1, 2, 3, 4, 0, 0, 0, 0]);
+        assert_eq!(
+            unsafe { xenora_session_audio_render(session, output.as_mut_ptr(), 8, &mut supplied) },
+            XENORA_OK
+        );
+        assert_eq!(supplied, 0);
+        assert_eq!(output, [0; 8]);
+        let overflow = vec![0; 256 * 1024 + 4];
+        assert_eq!(
+            unsafe {
+                xenora_session_audio_submit(session, overflow.as_ptr(), overflow.len() as u64)
+            },
+            XENORA_OK
+        );
+        let (mut queued, mut underruns, mut total) = (0, 0, 0);
+        assert_eq!(
+            unsafe {
+                xenora_session_audio_status(session, &mut queued, &mut underruns, &mut total)
+            },
+            XENORA_OK
+        );
+        assert_eq!(queued, 256 * 1024);
+        assert_eq!(underruns, 2);
         xenora_session_destroy(session);
     }
 
