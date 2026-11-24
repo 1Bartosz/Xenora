@@ -10,7 +10,7 @@ pub use graphics::{PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 pub use xenora_decoder::Architecture;
 use xenora_decoder::{
     DecodeError, DecodedInstruction, Instruction, ScalarSource, ScalarUnaryOp, VectorAluOp,
-    VectorAluVop3Op, VectorBinary, VectorCompareOp, VectorSource,
+    VectorAluVop3Op, VectorBinary, VectorCompareOp, VectorLowering, VectorSource, VectorVcc,
 };
 
 /// SGPR index of `vcc_lo`.
@@ -98,6 +98,17 @@ enum Op {
         inactive: Value,
     },
     Store(Value),
+    VccArithmetic {
+        primitive: VectorVcc,
+        left: Value,
+        right: Value,
+        mask: Value,
+        flag: bool,
+    },
+    CarryMask {
+        flag: Value,
+        exec: u32,
+    },
     ScalarBranch {
         target: usize,
         taken: bool,
@@ -135,6 +146,10 @@ impl Op {
             Self::Store(value) => vec![value],
             Self::LaneMask { src0, src1, .. } => vec![src0, src1],
             Self::RuntimeBranch { mask, .. } => vec![mask],
+            Self::VccArithmetic {
+                left, right, mask, ..
+            } => vec![left, right, mask],
+            Self::CarryMask { flag, .. } => vec![flag],
             Self::JoinVccz {
                 mask,
                 fallthrough,
@@ -178,8 +193,32 @@ impl Op {
                 name(fallthrough),
                 name(taken)
             ),
+            Self::VccArithmetic {
+                primitive,
+                left,
+                right,
+                mask,
+                flag,
+            } => {
+                let (left, right) = (name(left), name(right));
+                let bit = format!("(({} >> {lane}) & 1u)", name(mask));
+                // Guide 12.7: widen the carry/borrow check before adding the input bit.
+                match (primitive, flag) {
+                    (VectorVcc::Select, false) => format!("{bit} != 0u ? {right} : {left}"),
+                    (VectorVcc::AddCarry, false) => format!("{left} + {right} + {bit}"),
+                    (VectorVcc::AddCarry, true) => {
+                        format!("uint((ulong({left}) + ulong({right}) + {bit}) >> 32u)")
+                    }
+                    (VectorVcc::SubtractBorrow, false) => format!("{left} - {right} - {bit}"),
+                    (VectorVcc::SubtractBorrow, true) => {
+                        format!("uint(ulong({right}) + {bit} > ulong({left}))")
+                    }
+                    _ => unreachable!("not a VCC arithmetic operation"),
+                }
+            }
             Self::Store(_)
             | Self::ScalarBranch { .. }
+            | Self::CarryMask { .. }
             | Self::LaneMask { .. }
             | Self::RuntimeBranch { .. } => unreachable!("not a per-thread expression"),
         }
@@ -401,7 +440,7 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
     let mut ir = String::new();
     let has_mask = operations
         .iter()
-        .any(|(_, operation)| matches!(operation, Op::LaneMask { .. }));
+        .any(|(_, operation)| matches!(operation, Op::LaneMask { .. } | Op::CarryMask { .. }));
     let grid = if has_mask {
         ",\n    uint grid [[threads_per_grid]]"
     } else {
@@ -423,8 +462,8 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
     for (index, &(offset, operation)) in operations.iter().enumerate() {
         let dest = Value(index);
         uniform.push(match operation {
-            Op::Constant(_) | Op::LaneMask { .. } => true,
-            Op::Load | Op::MergeLanes { .. } => false,
+            Op::Constant(_) | Op::LaneMask { .. } | Op::CarryMask { .. } => true,
+            Op::Load | Op::MergeLanes { .. } | Op::VccArithmetic { .. } => false,
             _ => operation.operands().iter().all(|value| uniform[value.0]),
         });
         let thread = |value: Value| value.to_string();
@@ -474,6 +513,38 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
                 format!("{dest} = join.vccz {mask}, {fallthrough}, {taken}"),
                 format!("uint {dest} = {};", operation.expression(&thread, "", "")),
             ),
+            Op::VccArithmetic {
+                primitive,
+                left,
+                right,
+                mask,
+                flag,
+            } => (
+                format!(
+                    "{dest} = vcc.{primitive:?}{suffix} {left}, {right}, {mask}",
+                    suffix = if flag { ".flag" } else { "" }
+                ),
+                format!(
+                    "uint {dest} = {};",
+                    operation.expression(&thread, "", "(index & 31u)")
+                ),
+            ),
+            Op::CarryMask { flag, exec } => {
+                let _ = writeln!(
+                    ir,
+                    "{offset:04x}: {dest} = wave.carry {flag} exec=0x{exec:08x}"
+                );
+                emit_lane_mask(
+                    &mut msl,
+                    &operations,
+                    &uniform,
+                    index,
+                    exec,
+                    vec![flag],
+                    |name| name(flag),
+                );
+                continue;
+            }
             Op::LaneMask {
                 op,
                 src0,
@@ -485,7 +556,28 @@ pub fn compile(architecture: Architecture, bytes: &[u8]) -> Result<CompiledShade
                     "{offset:04x}: {dest} = wave.mask {} {src0}, {src1} exec=0x{exec:08x}",
                     op.assembly_name()
                 );
-                emit_lane_mask(&mut msl, &operations, &uniform, index, op, src0, src1, exec);
+                let inputs = if matches!(
+                    op.relation(),
+                    xenora_decoder::CompareRelation::False | xenora_decoder::CompareRelation::True
+                ) {
+                    Vec::new()
+                } else {
+                    vec![src0, src1]
+                };
+                emit_lane_mask(
+                    &mut msl,
+                    &operations,
+                    &uniform,
+                    index,
+                    exec,
+                    inputs,
+                    |name| {
+                        format!(
+                            "({}) ? 1u : 0u",
+                            compare_expression(op, &name(src0), &name(src1))
+                        )
+                    },
+                );
                 continue;
             }
             Op::Store(value) => (
@@ -515,21 +607,11 @@ fn emit_lane_mask(
     operations: &[(usize, Op)],
     uniform: &[bool],
     index: usize,
-    op: VectorCompareOp,
-    src0: Value,
-    src1: Value,
     exec: u32,
+    mut pending: Vec<Value>,
+    predicate: impl FnOnce(&dyn Fn(Value) -> String) -> String,
 ) {
     let mut cone = vec![false; index];
-    // F and T do not depend on the operands, so their lanes compute none.
-    let mut pending = if matches!(
-        op.relation(),
-        xenora_decoder::CompareRelation::False | xenora_decoder::CompareRelation::True
-    ) {
-        Vec::new()
-    } else {
-        vec![src0, src1]
-    };
     while let Some(value) = pending.pop() {
         if uniform[value.0] || cone[value.0] {
             continue;
@@ -561,8 +643,8 @@ fn emit_lane_mask(
     }
     let _ = writeln!(
         msl,
-        "        uint pass = ({}) ? 1u : 0u;\n        {dest} |= ((0x{exec:08x}u >> lane) & pass) << lane;\n    }}",
-        compare_expression(op, &name(src0), &name(src1))
+        "        uint pass = {};\n        {dest} |= ((0x{exec:08x}u >> lane) & pass) << lane;\n    }}",
+        predicate(&name)
     );
 }
 
@@ -729,6 +811,13 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         // Scalar instructions and waits still execute when all lanes are inactive.
         if exec == 0 {
             match instruction.instruction {
+                Instruction::VectorAlu { op, .. } if op.writes_vcc() => {
+                    // Guide 3.9: inactive lanes contribute zero to carry-out.
+                    lane_vcc = None;
+                    scalars[VCC_LO] = Some(0);
+                    scalars[VCC_HI] = None;
+                    continue;
+                }
                 Instruction::MoveB32 { .. }
                 | Instruction::VectorAluVop3 { .. }
                 | Instruction::VectorAddF32 { .. }
@@ -843,10 +932,10 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 } else {
                     (read(src0)?, read(src1)?)
                 };
-                (
-                    Some(dst),
-                    Op::Binary(Binary::Vector(op.lowering()), left, right),
-                )
+                let VectorLowering::Binary(binary) = op.lowering() else {
+                    return Err(error("VOP3 with a lane condition is unsupported"));
+                };
+                (Some(dst), Op::Binary(Binary::Vector(binary), left, right))
             }
             Instruction::ScalarUnary {
                 op: op @ ScalarUnaryOp::MovB32,
@@ -1064,10 +1153,51 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 } else {
                     (src0, src1)
                 };
-                (
-                    Some(dst),
-                    Op::Binary(Binary::Vector(op.lowering()), left, right),
-                )
+                match op.lowering() {
+                    VectorLowering::Binary(binary) => {
+                        (Some(dst), Op::Binary(Binary::Vector(binary), left, right))
+                    }
+                    VectorLowering::Vcc(primitive) => {
+                        let mask = match (lane_vcc, scalars[VCC_LO]) {
+                            (Some(mask), _) => mask,
+                            (None, Some(bits)) => {
+                                constant(&mut operations, &mut facts, offset, bits)
+                            }
+                            (None, None) => {
+                                return Err(error("vector ALU reads uninitialized VCC_LO"));
+                            }
+                        };
+                        if op.writes_vcc() {
+                            let flag = Value(operations.len());
+                            operations.push((
+                                offset,
+                                Op::VccArithmetic {
+                                    primitive,
+                                    left,
+                                    right,
+                                    mask,
+                                    flag: true,
+                                },
+                            ));
+                            facts.push(KnownBits::UNKNOWN);
+                            lane_vcc = Some(Value(operations.len()));
+                            operations.push((offset, Op::CarryMask { flag, exec }));
+                            facts.push(KnownBits::UNKNOWN);
+                            scalars[VCC_LO] = None;
+                            scalars[VCC_HI] = None;
+                        }
+                        (
+                            Some(dst),
+                            Op::VccArithmetic {
+                                primitive,
+                                left,
+                                right,
+                                mask,
+                                flag: false,
+                            },
+                        )
+                    }
+                }
             }
             Instruction::VectorAddF32 { dst, src0, src1 } => (
                 Some(dst),
