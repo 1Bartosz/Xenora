@@ -231,6 +231,8 @@ flowchart TD
 
 Xenora's host execution environment is native ARM64. The guest architecture being interpreted is x86-64.
 
+The native graphics pipeline runs translated vertex and pixel stages, the indexed-draw and blend passes and the depth pass into offscreen Metal targets, with GPU readback compared against independent CPU references.
+
 The project does not currently provide a general-purpose x86-64 dynamic recompiler or a complete Xbox operating-system implementation.
 
 See [Interface Contracts](docs/interfaces.md) for the documented execution and resource boundaries.
