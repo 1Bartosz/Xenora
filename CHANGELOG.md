@@ -10,6 +10,7 @@ Guest execution uses original, purpose-built test programs. Commercial Xbox game
 remains unsupported.
 
 ### Changed
+- The ARM64 assembler loads 64-bit constants with the fewest MOVZ or MOVN plus MOVK instructions (#92). It no longer emits MOVK for zero halfwords and starts from MOVN when more halfwords are 0xFFFF than zero, so small negative values take one instruction instead of four. On Apple M5 the DBT benchmark emits 245,168 instead of 290,184 native bytes for its 626 blocks (-15.5%) and the 1,048 integer fixture instructions 128,724 instead of 145,732 (-11.7%); benchmark run times did not change measurably. New tests check the sequences against LLVM encodings and execute 1,056 of them on the host through the JIT.
 - Resolve the tiled BC1 mip and array layer once per linearization and copy contiguous block runs within each tile row. Partial edge blocks are retained and padding slots are skipped. Closes #349.
 - Relocation reports now build their type histogram once per image, avoiding a tree lookup for every entry. Target checks and fixup order are unchanged; synthetic regressions and an opt-in relocation timing test cover the change (#109).
 - Moved the six supported gfx1030 SOPP compute control forms into the semantic registry, preserving instruction decoding and shader lowering. Part of #215.
