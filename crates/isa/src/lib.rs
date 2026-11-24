@@ -2,7 +2,10 @@
 
 use std::fmt;
 
+pub mod meta;
 mod rdna2;
+#[rustfmt::skip]
+mod rdna2_meta;
 pub use rdna2::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_BRANCH, S_CBRANCH_EXECZ,
     S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32, S_WAITCNT, S_WAITCNT_VSCNT,
