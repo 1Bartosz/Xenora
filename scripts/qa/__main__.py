@@ -53,6 +53,11 @@ from .rdna2_plan import (
     write_json,
 )
 from .coverage_history import historical_report, snapshot_inventory, write_snapshot
+from .cpu_inventory import (
+    build_inventory as build_cpu_inventory,
+    compact_inventory as compact_cpu_inventory,
+    dumps_inventory as dumps_cpu_inventory,
+)
 from .stale_branch import classify_sync, format_sync_reports
 from .verify import dumps_evidence, evidence_is_stale, load_evidence, run_profile
 
@@ -117,9 +122,14 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--before", default="", help="JSON inventory for diff")
     r.add_argument("--after", default="", help="JSON inventory for diff")
 
-    cpu = sub.add_parser("cpu-coverage", help="read-only CPU/runtime coverage scan")
+    cpu = sub.add_parser("cpu-coverage", help="legacy heuristic CPU/runtime coverage scan")
     cpu.add_argument("--blockers", action="store_true")
     cpu.add_argument("--compare", default="", help="previous JSON report path")
+
+    cinv = sub.add_parser("cpu-inventory", help="authoritative x86 inventory from instructions.toml")
+    cinv.add_argument("--compact", action="store_true")
+    cinv.add_argument("--forms", action="store_true", help="include expanded form records in JSON")
+    cinv.add_argument("--out", default="", help="write JSON (prefer artifacts/)")
 
     ver = sub.add_parser("verify", help="run a verification profile")
     ver.add_argument("profile", choices=("quick", "cpu", "gpu", "app", "full", "release"))
@@ -318,6 +328,20 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(blocker_manifest(report), indent=2, sort_keys=True))
             return 0
         print(dumps_cpu(report), end="")
+        return 0
+
+    if args.command == "cpu-inventory":
+        inv = build_cpu_inventory(root)
+        payload = inv.to_dict()
+        if not args.forms:
+            payload.pop("forms", None)
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if args.compact or args.out:
+            print(compact_cpu_inventory(inv), end="")
+        else:
+            print(dumps_cpu_inventory(inv, include_forms=args.forms), end="")
         return 0
 
     if args.command == "verify":
