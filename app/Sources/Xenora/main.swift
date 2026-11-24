@@ -182,6 +182,7 @@ private enum FixturePlaybackError: Error {
 
 private struct FixturePlayback {
     let frames: Int
+    let buffers: Int
     let outputDevice: AudioDeviceID
     let outputSampleRate: Double
     let outputChannels: AVAudioChannelCount
@@ -243,17 +244,11 @@ private func audioOutputDevices() throws -> [AudioDeviceID] {
 private func playFixturePCM(_ pcm: [UInt8]) throws -> FixturePlayback {
     // The embedded audio/VFS fixture submits mono 48 kHz S16LE frames.
     guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
-          let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1),
-          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(pcm.count / 2)),
-          let samples = buffer.floatChannelData?[0] else {
+          let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) else {
         throw FixturePlaybackError.invalidPCM
     }
-    buffer.frameLength = buffer.frameCapacity
-    for frame in 0..<Int(buffer.frameLength) {
-        let low = UInt16(pcm[frame * 2])
-        let high = UInt16(pcm[frame * 2 + 1]) << 8
-        samples[frame] = Float(Int16(bitPattern: low | high)) / 32_768
-    }
+    let frames = pcm.count / 2
+    let framesPerBuffer = 128
     let outputDevice = try defaultAudioOutput()
     let engine = AVAudioEngine()
     let player = AVAudioPlayerNode()
@@ -268,17 +263,36 @@ private func playFixturePCM(_ pcm: [UInt8]) throws -> FixturePlayback {
     try engine.start()
     let output = engine.outputNode.outputFormat(forBus: 0)
     let presentationLatency = engine.outputNode.presentationLatency
-    player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
-        played.signal()
+    var bufferCount = 0
+    for first in stride(from: 0, to: frames, by: framesPerBuffer) {
+        let count = min(framesPerBuffer, frames - first)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
+              let samples = buffer.floatChannelData?[0] else {
+            throw FixturePlaybackError.invalidPCM
+        }
+        buffer.frameLength = AVAudioFrameCount(count)
+        for offset in 0..<count {
+            let byte = (first + offset) * 2
+            let low = UInt16(pcm[byte])
+            let high = UInt16(pcm[byte + 1]) << 8
+            samples[offset] = Float(Int16(bitPattern: low | high)) / 32_768
+        }
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+            played.signal()
+        }
+        bufferCount += 1
     }
     let start = DispatchTime.now()
     player.play()
-    guard played.wait(timeout: .now() + .seconds(3)) == .success else {
-        throw FixturePlaybackError.timedOut
+    let deadline = start + .seconds(3)
+    for _ in 0..<bufferCount {
+        guard played.wait(timeout: deadline) == .success else {
+            throw FixturePlaybackError.timedOut
+        }
     }
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
     return FixturePlayback(
-        frames: Int(buffer.frameLength), outputDevice: outputDevice,
+        frames: frames, buffers: bufferCount, outputDevice: outputDevice,
         outputSampleRate: output.sampleRate, outputChannels: output.channelCount,
         presentationLatency: presentationLatency, completionElapsed: elapsed
     )
@@ -736,8 +750,8 @@ if CommandLine.arguments.contains("--smoke-native-audio") {
     }
     do {
         let played = try playFixturePCM(frame.pcm)
-        print("smoke-native-audio: playedBackFrames=\(played.frames) defaultDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
-        exit(played.frames == Int(frame.samples) && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
+        print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) defaultDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
+        exit(played.frames == Int(frame.samples) && played.buffers == 2 && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
     } catch {
         print("smoke-native-audio: \(error)")
         exit(1)
