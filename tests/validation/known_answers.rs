@@ -777,6 +777,9 @@ mod review {
     const SCALAR_UNARY_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-unary.bin");
     // Hand-derived in fixtures/rdna2/scalar-unary.s from the guide's 12.3 pseudocode.
     const SCALAR_UNARY_KEY: u32 = 0x0f00_80f5;
+    const SCALAR_ARITH_FIXTURE: &[u8] = include_bytes!("../../fixtures/rdna2/scalar-arith.bin");
+    // Hand-derived in fixtures/rdna2/scalar-arith.s from the guide's 12.1 pseudocode.
+    const SCALAR_ARITH_KEY: u32 = 0x8115_7dfe;
     // SOP2 opcodes of the supported subset (RDNA 2 XML opcode table).
     const SOP2_OPCODES: [u32; 9] = [0, 1, 2, 3, 4, 5, 14, 16, 18];
     const SCALAR_VALUES: [u32; 10] = [
@@ -920,6 +923,25 @@ mod review {
             .position(|word| word == [0x80, 0x34, 0x94, 0xbe])
             .unwrap();
         set[at] = 0x81;
+        verify(&set, &input, Some(&[0; 5]));
+    }
+
+    #[test]
+    fn scalar_arith_fixture_chains_registry_arithmetic_forms() {
+        let input = [0, 1, u32::MAX, SCALAR_ARITH_KEY, 0x1234_5678];
+        let expected: Vec<_> = input.iter().map(|word| word ^ SCALAR_ARITH_KEY).collect();
+        verify(SCALAR_ARITH_FIXTURE, &input, Some(&expected));
+        let compiled = compile(Architecture::Gfx1030, SCALAR_ARITH_FIXTURE).unwrap();
+        assert!(compiled.disassembly.contains("s_lshl2_add_u32 s25, s9, s9"));
+        // SCC stays clear across the CSELECT and MUL_HI that follow
+        // s_lshl2_add_u32 s25, s9, s9: with s_lshl2_add_u32 s25, s9, -1 instead,
+        // 20 + 0xffffffff carries, SCC = 1 and v2 = 0.
+        let mut set = SCALAR_ARITH_FIXTURE.to_vec();
+        let at = set
+            .windows(4)
+            .position(|word| word == [0x09, 0x09, 0x99, 0x97])
+            .unwrap();
+        set[at + 1] = 0xc1;
         verify(&set, &input, Some(&[0; 5]));
     }
 
@@ -1149,6 +1171,8 @@ mod review {
         assert_eq!(run(SCALAR_COMPARE_FIXTURE, &input), compares);
         let unary: Vec<_> = input.iter().map(|word| word ^ SCALAR_UNARY_KEY).collect();
         assert_eq!(run(SCALAR_UNARY_FIXTURE, &input), unary);
+        let arith: Vec<_> = input.iter().map(|word| word ^ SCALAR_ARITH_KEY).collect();
+        assert_eq!(run(SCALAR_ARITH_FIXTURE, &input), arith);
         let mut vectors = sop2_vectors();
         vectors.extend(sop2_operand_cases());
         vectors.extend(signed_immediate_overflows());
@@ -1157,7 +1181,7 @@ mod review {
         }
         eprintln!(
             "{} SOP2 programs matched on native Metal",
-            vectors.len() + 4
+            vectors.len() + 5
         );
     }
 

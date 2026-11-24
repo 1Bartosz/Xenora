@@ -351,6 +351,22 @@ fn reference_op(instruction: Instruction) -> Op {
                 ScalarAluOp::LshlB32 => ScalarAlu::ShiftLeft,
                 ScalarAluOp::LshrB32 => ScalarAlu::ShiftRight,
                 ScalarAluOp::AshrI32 => ScalarAlu::ArithmeticShiftRight,
+                ScalarAluOp::MinI32 => ScalarAlu::Minimum { signed: true },
+                ScalarAluOp::MinU32 => ScalarAlu::Minimum { signed: false },
+                ScalarAluOp::MaxI32 => ScalarAlu::Maximum { signed: true },
+                ScalarAluOp::MaxU32 => ScalarAlu::Maximum { signed: false },
+                ScalarAluOp::CselectB32 => ScalarAlu::Select,
+                ScalarAluOp::BfmB32 => ScalarAlu::BitfieldMask,
+                ScalarAluOp::MulI32 => ScalarAlu::Multiply,
+                ScalarAluOp::BfeU32 => ScalarAlu::BitfieldExtract { signed: false },
+                ScalarAluOp::BfeI32 => ScalarAlu::BitfieldExtract { signed: true },
+                ScalarAluOp::AbsdiffI32 => ScalarAlu::AbsoluteDifference,
+                ScalarAluOp::Lshl1AddU32 => ScalarAlu::ShiftLeftAdd(1),
+                ScalarAluOp::Lshl2AddU32 => ScalarAlu::ShiftLeftAdd(2),
+                ScalarAluOp::Lshl3AddU32 => ScalarAlu::ShiftLeftAdd(3),
+                ScalarAluOp::Lshl4AddU32 => ScalarAlu::ShiftLeftAdd(4),
+                ScalarAluOp::MulHiU32 => ScalarAlu::MultiplyHigh { signed: false },
+                ScalarAluOp::MulHiI32 => ScalarAlu::MultiplyHigh { signed: true },
             },
             dst,
             reference_scalar(src0),
@@ -478,13 +494,14 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/scalar-logic.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-unary.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-arith.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 72, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 88, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()

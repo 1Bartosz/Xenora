@@ -32,13 +32,14 @@ U32 = "FMT_NUM_U32"
 I32 = "FMT_NUM_I32"
 
 
-def _operands(data_format, scc_in=False, src1_format=None):
+def _operands(data_format, scc_in=False, src1_format=None, scc_out=True):
     rows = [
         ["SDST", data_format, "OPR_SDST", 32, False, True, False, True],
         ["SSRC0", data_format, "OPR_SSRC_NOLDS", 32, True, False, False, True],
         ["SSRC1", src1_format or data_format, "OPR_SSRC_NOLDS", 32, True, False, False, True],
-        ["", "FMT_NUM_B1", "OPR_SSRC_SPECIAL_SCC", 1, False, True, True, True],
     ]
+    if scc_out:
+        rows.append(["", "FMT_NUM_B1", "OPR_SSRC_SPECIAL_SCC", 1, False, True, True, True])
     if scc_in:
         rows.append(["", "FMT_NUM_B1", "OPR_SSRC_SPECIAL_SCC", 1, True, False, True, True])
     return rows
@@ -54,7 +55,9 @@ def snapshot():
             ["OP", [[23, 7]]], ["ENCODING", [[30, 2]]],
         ],
         "identifier_mask": 0xFF800000,
-        "identifiers": [sop2_base | (op << 23) for op in (0, 2, 4, 14, 34)],
+        "identifiers": [
+            sop2_base | (op << 23) for op in (0, 2, 4, 6, 10, 14, 34, 38, 40, 47, 53)
+        ],
     }
     variants = {}
     for name, opcode, operands in (
@@ -64,6 +67,13 @@ def snapshot():
         ("S_AND_B32", 14, _operands(U32)),
         # The XML gives S_ASHR_I32 a signed S0 and an unsigned shift count.
         ("S_ASHR_I32", 34, _operands(I32, src1_format=U32)),
+        # Values copied from the AMD XML snapshot for the arithmetic fixture.
+        ("S_MIN_I32", 6, _operands(I32)),
+        ("S_CSELECT_B32", 10, _operands("FMT_NUM_B32", scc_in=True, scc_out=False)),
+        ("S_MUL_I32", 38, _operands(I32, scc_out=False)),
+        ("S_BFE_I32", 40, _operands(I32, src1_format=U32)),
+        ("S_LSHL2_ADD_U32", 47, _operands(U32)),
+        ("S_MUL_HI_U32", 53, _operands(U32, scc_out=False)),
     ):
         variants[(name, "ENC_SOP2")] = {
             "instruction": name, "encoding": "ENC_SOP2", "opcode": opcode, "operands": operands,
@@ -142,6 +152,22 @@ def unaries():
         unary("S_NOT_B32", 7, "NotB32", "not", "bitwise", "nonzero"),
         unary("S_BREV_B32", 11, "BrevB32", "brev", "bitwise", "unchanged"),
         unary("S_SEXT_I32_I8", 25, "SextI32I8", "sext", "signed", "unchanged", source_bits=8),
+    ]
+    return reg
+
+
+def ariths():
+    reg = registry()
+    reg["form"] += [
+        _form("S_MIN_I32", 6, "MinI32", "min", "signed", "selected_src0"),
+        _form("S_CSELECT_B32", 10, "CselectB32", "cselect", "bitwise", "unchanged", carry_in="scc"),
+        _form("S_MUL_I32", 38, "MulI32", "mul", "signed", "unchanged"),
+        _form("S_BFE_I32", 40, "BfeI32", "bfe", "signed", "nonzero"),
+        dict(
+            _form("S_LSHL2_ADD_U32", 47, "Lshl2AddU32", "lshl_add", "unsigned", "carry_out"),
+            shift_amount=2,
+        ),
+        _form("S_MUL_HI_U32", 53, "MulHiU32", "mul_hi", "unsigned", "unchanged"),
     ]
     return reg
 
@@ -246,8 +272,8 @@ class Validate(unittest.TestCase):
 
     def test_rejects_unknown_operation(self):
         reg = registry()
-        form(reg, "S_ADD_U32")["operation"] = "mul"
-        self.rejects(reg, "S_ADD_U32: unknown operation 'mul'")
+        form(reg, "S_ADD_U32")["operation"] = "fma"
+        self.rejects(reg, "S_ADD_U32: unknown operation 'fma'")
 
     def test_rejects_unknown_scc_effect(self):
         reg = registry()
@@ -326,8 +352,8 @@ class Validate(unittest.TestCase):
 
     def test_rejects_form_absent_from_the_xml(self):
         reg = registry()
-        reg["form"].append(_form("S_MUL_I32", 38, "MulI32", "add", "signed", "signed_overflow"))
-        self.rejects(reg, "S_MUL_I32: no default ENC_SOP2 variant in the XML snapshot")
+        reg["form"].append(_form("S_ABSDIFF_I32", 44, "AbsdiffI32", "absdiff", "signed", "nonzero"))
+        self.rejects(reg, "S_ABSDIFF_I32: no default ENC_SOP2 variant in the XML snapshot")
 
     # ---- duplicates ----
 
@@ -395,14 +421,14 @@ class Validate(unittest.TestCase):
     def test_rejects_a_signed_shift_count_in_the_xml(self):
         snap = snapshot()
         snap["variants"][("S_ASHR_I32", "ENC_SOP2")]["operands"] = _operands(I32)
-        self.rejects(registry(), "S_ASHR_I32: shift count SSRC1 has XML format FMT_NUM_I32", snap)
+        self.rejects(registry(), "S_ASHR_I32: control operand SSRC1 has XML format FMT_NUM_I32", snap)
 
     def test_rejects_a_float_shift_count_in_the_xml(self):
         snap = snapshot()
         snap["variants"][("S_ASHR_I32", "ENC_SOP2")]["operands"] = _operands(
             I32, src1_format="FMT_NUM_F32"
         )
-        self.rejects(registry(), "S_ASHR_I32: shift count SSRC1 has XML format FMT_NUM_F32", snap)
+        self.rejects(registry(), "S_ASHR_I32: control operand SSRC1 has XML format FMT_NUM_F32", snap)
 
     def test_rejects_a_float_source_format(self):
         snap = snapshot()
@@ -421,7 +447,7 @@ class Validate(unittest.TestCase):
 
     def test_renders_the_declared_count_mask(self):
         self.assertIn(
-            "Self::AshrI32 => primitive::ashr_nonzero_i32(src0, src1 & 0x1f),",
+            "let (value, scc) = primitive::ashr_nonzero_i32(src0, src1 & 0x1f);",
             gen.render(registry(), snapshot()),
         )
 
@@ -461,6 +487,77 @@ class Validate(unittest.TestCase):
         self.assertIn("Self::BrevB32 => (primitive::brev_b32(src), None),", text)
         self.assertIn("Self::SextI32I8 => (primitive::sext_i32(src, 8), None),", text)
         self.assertIn("let (value, scc) = primitive::not_nonzero_b32(src);", text)
+
+    def test_accepts_ariths(self):
+        self.assertEqual(self.errors(ariths()), [])
+
+    def test_rejects_min_with_a_nonzero_scc(self):
+        reg = ariths()
+        form(reg, "S_MIN_I32")["scc"] = "nonzero"
+        self.rejects(reg, "S_MIN_I32: scc nonzero contradicts min/signed (requires selected_src0)")
+
+    def test_rejects_a_select_that_does_not_read_scc(self):
+        reg = ariths()
+        form(reg, "S_CSELECT_B32")["carry_in"] = "none"
+        self.rejects(reg, "S_CSELECT_B32: operation cselect reads SCC (requires carry_in scc)")
+        self.rejects(reg, "S_CSELECT_B32: carry_in none contradicts the XML SCC input")
+
+    def test_rejects_a_select_that_writes_scc(self):
+        reg = ariths()
+        form(reg, "S_CSELECT_B32")["scc"] = "nonzero"
+        self.rejects(reg, "S_CSELECT_B32: scc nonzero contradicts cselect/bitwise (requires unchanged)")
+        self.rejects(reg, "S_CSELECT_B32: scc nonzero contradicts the XML SCC output")
+
+    def test_rejects_a_typed_select(self):
+        reg = ariths()
+        form(reg, "S_CSELECT_B32")["signedness"] = "unsigned"
+        self.rejects(reg, "S_CSELECT_B32: signedness unsigned contradicts operation cselect")
+
+    def test_rejects_a_multiply_that_writes_scc(self):
+        reg = ariths()
+        form(reg, "S_MUL_I32")["scc"] = "signed_overflow"
+        self.rejects(reg, "S_MUL_I32: scc signed_overflow contradicts mul/signed (requires unchanged)")
+
+    def test_rejects_a_bitwise_multiply(self):
+        reg = ariths()
+        form(reg, "S_MUL_HI_U32")["signedness"] = "bitwise"
+        self.rejects(reg, "S_MUL_HI_U32: signedness bitwise contradicts operation mul_hi")
+
+    def test_rejects_a_signed_bfe_descriptor_in_the_xml(self):
+        snap = snapshot()
+        snap["variants"][("S_BFE_I32", "ENC_SOP2")]["operands"] = _operands(I32)
+        self.rejects(ariths(), "S_BFE_I32: control operand SSRC1 has XML format FMT_NUM_I32", snap)
+
+    def test_rejects_a_signed_bfe_data_operand_in_the_xml(self):
+        snap = snapshot()
+        snap["variants"][("S_BFE_I32", "ENC_SOP2")]["operands"] = _operands(U32)
+        self.rejects(ariths(), "S_BFE_I32: signedness signed contradicts XML format FMT_NUM_U32", snap)
+
+    def test_rejects_shift_add_without_or_with_a_wrong_amount(self):
+        for amount, shown in ((None, "None"), (0, "0"), (5, "5"), (True, "True"), ("2", "'2'")):
+            with self.subTest(amount=amount):
+                reg = ariths()
+                if amount is None:
+                    del form(reg, "S_LSHL2_ADD_U32")["shift_amount"]
+                else:
+                    form(reg, "S_LSHL2_ADD_U32")["shift_amount"] = amount
+                self.rejects(reg, f"S_LSHL2_ADD_U32: shift_amount must be one of [1, 2, 3, 4], got {shown}")
+
+    def test_rejects_a_shift_amount_on_another_operation(self):
+        reg = ariths()
+        form(reg, "S_MIN_I32")["shift_amount"] = 1
+        self.rejects(reg, "S_MIN_I32: shift_amount on a non-lshl_add operation")
+
+    def test_renders_alu_scc_as_optional_and_the_declared_data(self):
+        text = gen.render(ariths(), snapshot())
+        self.assertIn("Self::CselectB32 => (primitive::cselect_b32(src0, src1, scc_in), None),", text)
+        self.assertIn("Self::MulHiU32 => (primitive::mul_hi_u32(src0, src1), None),", text)
+        self.assertIn("let (value, scc) = primitive::lshl_add_carry_u32(src0, src1, 2);", text)
+        self.assertIn("let (value, scc) = primitive::min_i32(src0, src1);", text)
+        self.assertIn("Self::CselectB32 => true,", text.split("fn reads_scc", 1)[1].split("}", 1)[0])
+        self.assertIn("Self::CselectB32 => false,", text.split("fn writes_scc", 1)[1].split("}", 1)[0])
+        self.assertIn("shift_amount: 2,", text)
+        self.assertIn("scc: SccEffect::SelectedSrc0,", text)
 
     def test_accepts_compares(self):
         self.assertEqual(self.errors(compares()), [])

@@ -1,7 +1,9 @@
 # SOP2 scalar ALU subset
 
-Xenora decodes and executes seventeen gfx1030 SOP2 forms. Each takes 32-bit
-operands, writes a normal SGPR (s0-s105) and sets SCC.
+Xenora decodes and executes thirty-three gfx1030 SOP2 forms. Each takes 32-bit
+operands and writes a normal SGPR (s0-s105). The seventeen below set SCC; the
+sixteen in [Arithmetic, select and bit-field forms](#arithmetic-select-and-bit-field-forms)
+set it or leave it as the guide says.
 
 | Form | D | SCC |
 | --- | --- | --- |
@@ -68,11 +70,11 @@ the registry.
 
 ## Not supported
 
-- Every other SOP2 form, including the 64-bit bitwise forms.
+- Every other SOP2 form, including the 64-bit bitwise forms and `s_cselect_b64`.
 - Destinations other than s0-s105 (VCC, EXEC, TTMP and M0).
 - Sources other than normal SGPRs, inline integers and one literal.
 - Both sources selecting a literal.
-- ADDC or SUBB before SCC is set.
+- ADDC, SUBB or CSELECT before SCC is set.
 - Writes to the fixture's resource descriptors s0-s7.
 
 ## How it runs
@@ -118,6 +120,45 @@ runs on all three and on native Metal.
 and the aliasing and immediate cases on native Metal with API and shader
 validation. `scripts/test-gpu.sh` runs it. This is local evidence from one
 Apple M5 Pro; independent acceptance is pending.
+
+## Arithmetic, select and bit-field forms
+
+Sixteen more 32-bit SOP2 forms are declared in the registry with the same
+operand rule (`sop2_sgpr`), each one TOML entry over a shared primitive:
+
+| Form | D | SCC |
+| --- | --- | --- |
+| `s_min_i32`, `s_min_u32` | S0 if S0 < S1 (signed or unsigned), else S1 | S0 < S1 |
+| `s_max_i32`, `s_max_u32` | S0 if S0 > S1, else S1 | S0 > S1 |
+| `s_cselect_b32` | SCC ? S0 : S1 | read, not written |
+| `s_bfm_b32` | ((1 << S0[4:0]) - 1) << S1[4:0] | unchanged |
+| `s_mul_i32` | low 32 bits of S0 * S1 | unchanged |
+| `s_mul_hi_u32`, `s_mul_hi_i32` | high 32 bits of the unsigned or signed 64-bit product | unchanged |
+| `s_bfe_u32` | (S0 >> S1[4:0]) masked to S1[22:16] bits | D != 0 |
+| `s_bfe_i32` | (S0 >> S1[4:0], sign fill) masked to S1[22:16] bits, sign-extended from the field's top bit | D != 0 |
+| `s_absdiff_i32` | \|S0 - S1\| of the wrapped 32-bit difference (0x80000000 stays) | D != 0 |
+| `s_lshl1_add_u32` to `s_lshl4_add_u32` | (S0 << N) + S1, N = 1 to 4 | carry out of the exact sum, counting bits shifted out of S0 |
+
+These follow the guide's 12.1 pseudocode and Tables 11, 12 and 14 (pages
+34-36). Min and max compare strictly, so equal operands give S1 and SCC = 0.
+The guide leaves two C-like operators open; Xenora reads them as exact
+arithmetic: a BFE width of 32 to 127 keeps every shifted bit, and a width of 0
+gives 0. These are guide readings, not hardware evidence. CSELECT is refused
+when SCC has not been set, as ADDC and SUBB are.
+
+The registry gained the vocabulary for them: the operations above, a
+`selected_src0` SCC effect for min and max, `carry_in = "scc"` for the select
+condition, and a declared `shift_amount` (1 to 4) for the shift-and-add forms.
+The generated `ScalarAluOp::evaluate` now returns `(u32, Option<bool>)`, with
+`None` for forms that leave SCC unchanged.
+
+`tests/validation/tests/sop2_arith.rs` checks 21,070 cases, with expected values
+derived from the guide (including its ABSDIFF examples) separately from the
+registry, on both CPU interpreters and, through the translator, on native
+Metal; its 593 rejected programs are checked on the CPU interpreters and the
+compiler. `fixtures/rdna2/scalar-arith.s` (LLVM-assembled, expected input ^
+0x81157dfe) chains all sixteen, including a min tie and CSELECT on both SCC
+values, and shows SCC surviving the forms that do not write it.
 
 ## SOPC compares
 

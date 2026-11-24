@@ -216,7 +216,8 @@ pub enum Instruction {
         dst: u8,
         src: ScalarSource,
     },
-    /// SOP2 32-bit integer operation writing a normal SGPR (s0-s105) and SCC.
+    /// SOP2 32-bit integer operation writing a normal SGPR (s0-s105) and, for
+    /// most operations, SCC; `s_cselect_b32` also reads SCC.
     ScalarAlu {
         op: ScalarAluOp,
         dst: u8,
