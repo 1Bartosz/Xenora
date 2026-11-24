@@ -1,64 +1,41 @@
 # Xenora CPU/Runtime Expansion Campaign — Progress Ledger
 
-Starting commit: `3ff9ddd` (321 tests, baseline).
-Current commit (branch `feat/cpu-runtime-expansion`): `bfd14e4`.
-Main at `7e09c9c`.
+Evidence below is local to the named host unless stated. Nothing here is independently reviewed yet.
 
-## New substantive commits (5)
+## Continuation checkpoint
 
-1. `a953ba9` — fix(cpu): enforce bounded prefix and architectural instruction length in probe, interpreter and DBT (#69)
-2. `bc629f5` — merge origin/main (typed Prefixes struct, completes #62)
-3. `9cd6f43` — fix(cpu): bound interpreter segment prefix run by the architectural instruction length
-4. `7e09c9c` — feat(cpu): implement MOVSX/MOVSXD (0x63) semantics in the interpreter (#117)
-5. `bfd14e4` — feat(dbt): implement native ARM64 MOVSXD register lowering
+- Continuation branch base: `0836936` (tip of `feat/cpu-runtime-expansion`), merged with main `d22f046` (#272, #273, #274) as `56febbb`. The merge had no conflicts.
+- All recorded checkpoints (`a953ba9`, `9cd6f43`, `7e09c9c`, `bfd14e4`, `0836936`) exist upstream. The earlier session's uncommitted MOVSX patch was not available and was not used.
+- Host: Apple M5 Pro, macOS, Rust 1.100.0, Apple clang 17.0.0. No Homebrew LLVM, `llvm-mc` or full Xcode.
+- Baseline of the merge: `cargo test --locked --workspace --no-fail-fast` exited 101 with 392 passed, 1 failed, 21 ignored. The failure (`probe_fuzz_harness_minimized_artifact`) also occurs on `0836936`: the test read an untracked file.
 
-## Verification ledger (all exit codes real)
+## Corrections to earlier entries
 
-- `cargo fmt --all -- --check` → 0
-- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` → 0
-- `cargo test --locked --workspace` → 0; 381 passed, 0 failed
+- The earlier claim of 381 passed and 0 failed did not hold for a fresh checkout (see above).
+- The SXTW encoding recorded as verified was wrong for most source registers.
+- #65, #66 and #117 were marked complete prematurely. They stay open until reviewed against their own acceptance criteria.
 
-## Completed batches
+## Milestones
 
-- Phase A #1: Native ARM64 MOVSXD register lowering (DBT, `SXTW`, llvm-mc-verified encoding)
-- #69: Bounded x86 prefix decoding across probe/interpreter/DBT (fuzzer crash minimized and fixed)
-- #62: Typed Prefixes architecture integrated
-- #117: MOVSX/MOVSXD interpreter semantics (interpreter + DBT)
+| # | Commit subject | Scope | Evidence |
+| --- | --- | --- | --- |
+| 1 | cpu: correct the sign- and zero-extension family | MOVZX/MOVSX/MOVSXD, MOV-immediate regressions, SXTW, 32-bit access width, RIP-relative and LEA addressing, self-contained prefix test | `tests/movsxd.rs`: 9 tests over 93 LLVM-assembled register forms and 32 MOV immediates, each run by the interpreter and as native translated code; 16 of 16 targeted mutations caught |
 
-## Remaining implementation batches (order follows the campaign plan)
+Encodings: `clang -target x86_64-apple-macos -c` and `clang -target arm64-apple-macos -c`, read back with `objdump -d`.
 
-Phase A: MOVSXD memory operands (#2); REX.X SIB index semantics (#63 — claimed by Swastickc);
-MOVSX destination widths (#65), MOVZX/MOVSX interpreter-DBT parity (#66); RIP-relative addressing
-verification (#67); high-byte registers (#68); architectural flags across blocks (#70); parity
-flag (#71); FS/GS segment overrides (#72); LEA (#73).
+## Known defects, not yet fixed
 
-Phase B (codegen): metadata registry + generator (validate/generate/--check modes),
-generated dispatch for representative instructions, encoding/ambiguity verification,
-deterministic coverage reporting.
+- The DBT keeps guest flags only in host NZCV: they do not survive helper calls or block boundaries, and register ADD/SUB/XOR set none (#70).
+- JB/JAE/JBE/JA use ARM carry polarity, which is inverted for x86 subtraction (#64).
+- The probe marks several forms as interpreter-supported that the interpreter rejects (NOP, most Jcc, FF group).
+- Combined FS and GS prefixes: precedence is unverified (#72).
 
-Phase C (expansion): 16-bit operand forms (#118), CMP/TEST memory (#119), memory ALU (#120),
-ADC/SBB (#195), shifts/rotates (#121), MUL/DIV/IDIV (#122), CMOVcc/SETcc (#123),
-bit scans/POPCNT, XMM state (#124), SSE2 NEON lowering (#30 in plan).
+## Pending acceptance
 
-Phase D (runtime): import-gen metadata, ABI adapters, CRT memory/string/math ops,
-heap/TLS/clock/filesystem/sync services (#31–#44), workloads and coverage (#45).
+- Two independent reviews required by `AGENTS.md`: not performed.
+- Issues touched here have not been claimed on GitHub.
+- LLVM AMDGPU fixture gates, native GPU gates, app bundle and fuzz campaigns: not run on this host.
 
-## Independent reviews
+## Next task
 
-Not completed (per policy, reported honestly): no independent reviewer runs were available in
-this session; batches were reviewed by the implementer and verified by focused + workspace
-regression tests.
-
-## Known limitations
-
-- `cpu_decode` fuzz: smoke run after the prefix fix; the 150 s run's crash
-  (`crash-9c788e52…`, minimized to `[0x65×12, 0x73, 0x65×4]`) was reproduced at unit level and
-  fixed by the general >15-byte enforcement in `decode_one`. Full 600 s historical campaigns not re-run.
-- DBT support for opcodes other than the current set is still narrow (no memory-operand
-  MOVSXD in DBT yet).
-- No performance benchmarks recorded in this ledger (CPU correctness batches).
-
-## Next implementation target
-
-Phase A #2: MOVSXD memory operands in the interpreter (`crates/loader/src/cpu.rs`), then
-Phase A #3 (REX.X SIB index semantics, unclaimed), then Phase B codegen infrastructure.
+Store guest flags architecturally in the DBT and correct unsigned conditions (#64, #70), then the shared decoder and instruction registry.

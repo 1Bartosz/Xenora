@@ -188,9 +188,19 @@ impl Arm64Assembler {
         self.emit(0x93403c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
     }
 
+    /// LSR (immediate, 64-bit): LSR Xd, Xn, #shift (UBFM Xd, Xn, #shift, #63)
+    pub fn lsr_imm_64(&mut self, xd: u8, xn: u8, shift: u8) {
+        self.emit(
+            0xd340fc00
+                | ((u32::from(shift) & 0x3f) << 16)
+                | ((u32::from(xn) & 0x1f) << 5)
+                | (u32::from(xd) & 0x1f),
+        );
+    }
+
     /// SXTW (64-bit/sign-extended): SXTW Xd, Wn (SBFM Xd, Xn, #0, #31)
     pub fn sxtw_64(&mut self, xd: u8, wn: u8) {
-        self.emit(0x93407d00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
+        self.emit(0x93407c00 | ((wn as u32 & 0x1f) << 5) | (xd as u32 & 0x1f));
     }
 
     /// ADD (extended/shifted register, 32-bit): ADD Wd, Wn, Wm

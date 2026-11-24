@@ -104,11 +104,11 @@ fn probe_fuzz_harness_minimized_artifact() {
     const TEXT_RVA: u32 = 0x1000;
     const SECTION_ALIGNMENT: u32 = 0x1000;
 
-    let artifact = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fuzz/artifacts/cpu_decode/minimized-from-b4261444396b93e1f29ab2560eb9ee1b181581ba"
-    ))
-    .expect("artifact exists");
+    // Minimized `cpu_decode` input recorded in the campaign ledger, kept inline
+    // because `fuzz/artifacts/` is not tracked.
+    let mut artifact = vec![0x65u8; 12];
+    artifact.push(0x73);
+    artifact.extend([0x65; 4]);
 
     let mut header = [0u8; HEADER_LEN];
     let mut write_field = |offset: usize, bytes: &[u8]| {
@@ -154,7 +154,7 @@ fn probe_fuzz_harness_minimized_artifact() {
 #[test]
 fn probe_minimized_overlong_prefix_run_input() {
     // Minimized crash artifact found by the `cpu_decode` fuzz target:
-    // 12x GS + 0x73 (BTS) + 4x GS = 17 bytes, which the fuzz invariant
+    // 12x GS + 0x73 (JAE rel8) + 4x GS = 17 bytes, which the fuzz invariant
     // flags as a decoded instruction longer than 15 bytes.
     let mut code = vec![0x65; 12];
     code.push(0x73);

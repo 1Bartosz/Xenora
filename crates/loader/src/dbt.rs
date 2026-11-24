@@ -231,6 +231,7 @@ impl DbtEngine {
             let insn_rip = cur_rip;
             let mut seg_gs = false;
             let mut seg_fs = false;
+            let mut operand_size = false;
 
             let mut b0 = memory
                 .fetch_instruction_byte(cur_rip)
@@ -238,17 +239,17 @@ impl DbtEngine {
             cur_rip += 1;
             let mut insn_len = 1usize; // first opcode byte already fetched
 
-            // Handle legacy prefixes: 0x65 (GS), 0x64 (FS). The run is
-            // bounded by the architectural instruction-length limit so an
-            // overlong run is reported as an illegal instruction.
-            while b0 == 0x65 || b0 == 0x64 {
+            // Handle legacy prefixes: 0x65 (GS), 0x64 (FS), 0x66 (operand size).
+            // The run is bounded by the architectural instruction-length limit
+            // so an overlong run is reported as an illegal instruction.
+            while matches!(b0, 0x64..=0x66) {
                 if insn_len >= MAX_INSTRUCTION_LEN {
                     return Err(ExitReason::IllegalInstruction(b0));
                 }
-                if b0 == 0x65 {
-                    seg_gs = true;
-                } else {
-                    seg_fs = true;
+                match b0 {
+                    0x65 => seg_gs = true,
+                    0x64 => seg_fs = true,
+                    _ => operand_size = true,
                 }
                 b0 = memory
                     .fetch_instruction_byte(cur_rip)
@@ -257,6 +258,7 @@ impl DbtEngine {
                 insn_len += 1;
             }
 
+            let mut rex = false;
             let mut rex_w = false;
             let mut rex_r = false;
             let mut rex_x = false;
@@ -267,6 +269,7 @@ impl DbtEngine {
                 if insn_len >= MAX_INSTRUCTION_LEN {
                     return Err(ExitReason::IllegalInstruction(op));
                 }
+                rex = true;
                 rex_w = (op & 0x08) != 0;
                 rex_r = (op & 0x04) != 0;
                 rex_x = (op & 0x02) != 0;
@@ -275,6 +278,12 @@ impl DbtEngine {
                     .fetch_instruction_byte(cur_rip)
                     .map_err(ExitReason::MemoryFault)?;
                 cur_rip += 1;
+            }
+
+            // 16-bit operand sizes are translated only for the extension family
+            // (0F B6/B7/BE/BF); every other form is rejected.
+            if operand_size && op != 0x0F {
+                return Err(ExitReason::IllegalInstruction(0x66));
             }
 
             match op {
@@ -338,7 +347,7 @@ impl DbtEngine {
                             asm.mov_reg_64(X0, X20);
                             asm.load_imm_64(X1, target_ea);
                             asm.load_imm_64(X2, imm_val);
-                            let helper_fn = write_u64_helper as *const () as u64;
+                            let helper_fn = store_helper(rex_w);
                             asm.load_imm_64(X4, helper_fn);
                             asm.blr(X4);
                             emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
@@ -362,7 +371,7 @@ impl DbtEngine {
                             asm.ldr_uoff_64(X1, X19, (reg_idx as u32) * 8); // target EA in X1
                             asm.mov_reg_64(X0, X20);
                             asm.load_imm_64(X2, imm_val);
-                            let helper_fn = write_u64_helper as *const () as u64;
+                            let helper_fn = store_helper(rex_w);
                             asm.load_imm_64(X4, helper_fn);
                             asm.blr(X4);
                             emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
@@ -495,25 +504,42 @@ impl DbtEngine {
                     asm.str_uoff_64(X9, X19, (dst as u32) * 8);
                 }
 
-                // MOVSXD r/m32, r (0x63 with REX.W): sign-extend the source
-                // register word into the destination via the native SXTW.
+                // MOVSXD r, r/m32 (0x63)
                 0x63 => {
                     insn_count += 1;
                     let modrm = memory
                         .fetch_instruction_byte(cur_rip)
                         .map_err(ExitReason::MemoryFault)?;
                     cur_rip += 1;
-                    if (modrm >> 6) != 3 {
-                        return Err(ExitReason::IllegalInstruction(op));
+                    let mode = (modrm >> 6) & 3;
+                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
+                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+                    if mode == 3 {
+                        asm.ldr_uoff_64(X0, X19, u32::from(rm_idx) * 8);
+                    } else {
+                        Self::emit_effective_address(
+                            asm,
+                            memory,
+                            &mut cur_rip,
+                            modrm,
+                            mode,
+                            rm_idx,
+                            rex_x,
+                            rex_b,
+                            seg_gs,
+                            seg_fs,
+                        )?;
+                        asm.mov_reg_64(X0, X20);
+                        asm.load_imm_64(X4, load_helper(false));
+                        asm.blr(X4);
+                        emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
                     }
-                    let dst_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                    let src_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-                    asm.ldr_uoff_64(X10, X19, (src_idx as u32) * 8);
-                    asm.sxtw_64(X9, X10);
-                    if !rex_w {
-                        asm.mov_reg_32(X9, X9); // zero extend
+                    if rex_w {
+                        asm.sxtw_64(X9, X0);
+                    } else {
+                        asm.mov_reg_32(X9, X0);
                     }
-                    asm.str_uoff_64(X9, X19, (dst_idx as u32) * 8);
+                    asm.str_uoff_64(X9, X19, u32::from(reg_idx) * 8);
                 }
 
                 // Imm8 group (0x83): ADD/SUB reg, imm8
@@ -781,40 +807,6 @@ impl DbtEngine {
                             asm.mov_reg_32(X9, X9); // zero-extend to 64-bit
                         }
                         asm.str_uoff_64(X9, X19, (dst as u32) * 8);
-                    } else if mode == 0 && (modrm & 7) == 5 {
-                        // RIP-relative: [RIP + disp32]
-                        let mut disp_bytes = [0u8; 4];
-                        for b in &mut disp_bytes {
-                            *b = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                        }
-                        let disp32 = i32::from_le_bytes(disp_bytes) as i64;
-                        let target_ea = ((cur_rip as i64) + disp32) as u64;
-
-                        if op == 0x8B {
-                            // MOV reg, [RIP + disp32]
-                            asm.mov_reg_64(X0, X20);
-                            asm.load_imm_64(X1, target_ea);
-                            let helper_fn = read_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                            if !rex_w {
-                                asm.mov_reg_32(X0, X0);
-                            }
-                            asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                        } else {
-                            // MOV [RIP + disp32], reg
-                            asm.ldr_uoff_64(X2, X19, (reg_idx as u32) * 8);
-                            asm.mov_reg_64(X0, X20);
-                            asm.load_imm_64(X1, target_ea);
-                            let helper_fn = write_u64_helper as *const () as u64;
-                            asm.load_imm_64(X4, helper_fn);
-                            asm.blr(X4);
-                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                        }
                     } else {
                         // Memory operand with complete SIB addressing, RIP-relative or displacement
                         Self::emit_effective_address(
@@ -834,14 +826,14 @@ impl DbtEngine {
                             // MOV [EA], reg: load reg into X2 and call write_u64_helper(ctx: X0, addr: X1, val: X2)
                             asm.ldr_uoff_64(X2, X19, (reg_idx as u32) * 8);
                             asm.mov_reg_64(X0, X20);
-                            let helper_fn = write_u64_helper as *const () as u64;
+                            let helper_fn = store_helper(rex_w);
                             asm.load_imm_64(X4, helper_fn);
                             asm.blr(X4);
                             emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
                         } else {
                             // MOV reg, [EA]: call read_u64_helper(ctx: X0, addr: X1) -> X0
                             asm.mov_reg_64(X0, X20);
-                            let helper_fn = read_u64_helper as *const () as u64;
+                            let helper_fn = load_helper(rex_w);
                             asm.load_imm_64(X4, helper_fn);
                             asm.blr(X4);
                             emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
@@ -853,7 +845,7 @@ impl DbtEngine {
                     }
                 }
 
-                // LEA reg, [EA] (0x8D)
+                // LEA reg, [EA] (0x8D): the address itself, without a segment base
                 0x8D => {
                     insn_count += 1;
                     let modrm = memory
@@ -866,42 +858,23 @@ impl DbtEngine {
                     if mode == 3 {
                         return Err(ExitReason::IllegalInstruction(op));
                     }
-
-                    if mode == 0 && (modrm & 7) == 5 {
-                        // RIP-relative LEA: [RIP + disp32]
-                        let mut disp_bytes = [0u8; 4];
-                        for b in &mut disp_bytes {
-                            *b = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                        }
-                        let disp32 = i32::from_le_bytes(disp_bytes) as i64;
-                        let target_ea = ((cur_rip as i64) + disp32) as u64;
-                        asm.load_imm_64(X9, target_ea);
-                        if !rex_w {
-                            asm.mov_reg_32(X9, X9);
-                        }
-                        asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                    } else {
-                        Self::emit_effective_address(
-                            asm,
-                            memory,
-                            &mut cur_rip,
-                            modrm,
-                            mode,
-                            rm_idx,
-                            rex_x,
-                            rex_b,
-                            seg_gs,
-                            seg_fs,
-                        )?;
-                        asm.mov_reg_64(X9, X1);
-                        if !rex_w {
-                            asm.mov_reg_32(X9, X9);
-                        }
-                        asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
+                    Self::emit_effective_address(
+                        asm,
+                        memory,
+                        &mut cur_rip,
+                        modrm,
+                        mode,
+                        rm_idx,
+                        rex_x,
+                        rex_b,
+                        false,
+                        false,
+                    )?;
+                    asm.mov_reg_64(X9, X1);
+                    if !rex_w {
+                        asm.mov_reg_32(X9, X9);
                     }
+                    asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
                 }
 
                 // Group 5: CALL/JMP indirect (0xFF)
@@ -1120,6 +1093,9 @@ impl DbtEngine {
                         .map_err(ExitReason::MemoryFault)?;
                     cur_rip += 1;
 
+                    if operand_size && !matches!(op2, 0xB6 | 0xB7 | 0xBE | 0xBF) {
+                        return Err(ExitReason::IllegalInstruction(0x66));
+                    }
                     match op2 {
                         // BSWAP r32/r64: the register is encoded in the opcode.
                         0xC8..=0xCF => {
@@ -1188,8 +1164,8 @@ impl DbtEngine {
                             break;
                         }
 
-                        // MOVZX r32/r64, r/m8 (0x0F 0xB6)
-                        0xB6 => {
+                        // MOVZX (B6/B7) and MOVSX (BE/BF) r, r/m8 or r/m16
+                        0xB6 | 0xB7 | 0xBE | 0xBF => {
                             insn_count += 1;
                             let modrm = memory
                                 .fetch_instruction_byte(cur_rip)
@@ -1198,11 +1174,18 @@ impl DbtEngine {
                             let mode = (modrm >> 6) & 3;
                             let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
                             let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+                            let byte_source = op2 & 1 == 0;
 
                             if mode == 3 {
-                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
-                                asm.uxtb_32(X9, X9);
-                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
+                                if byte_source && !rex && rm_idx >= 4 {
+                                    // AH, CH, DH and BH exist only without REX.
+                                    // Load the second byte of the parent register.
+                                    let parent = u32::from(rm_idx - 4) * 8;
+                                    asm.ldr_uoff_64(X0, X19, parent);
+                                    asm.lsr_imm_64(X0, X0, 8);
+                                } else {
+                                    asm.ldr_uoff_64(X0, X19, u32::from(rm_idx) * 8);
+                                }
                             } else {
                                 Self::emit_effective_address(
                                     asm,
@@ -1217,127 +1200,36 @@ impl DbtEngine {
                                     seg_fs,
                                 )?;
                                 asm.mov_reg_64(X0, X20);
-                                let helper_fn = read_u8_helper as *const () as u64;
+                                let helper_fn = if byte_source {
+                                    read_u8_helper as *const () as u64
+                                } else {
+                                    read_u16_helper as *const () as u64
+                                };
                                 asm.load_imm_64(X4, helper_fn);
                                 asm.blr(X4);
                                 emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                                asm.uxtb_32(X0, X0);
-                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
                             }
-                        }
 
-                        // MOVZX r32/r64, r/m16 (0x0F 0xB7)
-                        0xB7 => {
-                            insn_count += 1;
-                            let modrm = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            let mode = (modrm >> 6) & 3;
-                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                            if mode == 3 {
-                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
+                            match op2 {
+                                0xB6 => asm.uxtb_32(X9, X0),
+                                0xB7 => asm.uxth_32(X9, X0),
+                                0xBE => asm.sxtb_64(X9, X0),
+                                _ => asm.sxth_64(X9, X0),
+                            }
+                            let offset = u32::from(reg_idx) * 8;
+                            if rex_w {
+                                // REX.W takes precedence over 0x66.
+                            } else if operand_size {
+                                // A 16-bit write preserves bits 63:16.
                                 asm.uxth_32(X9, X9);
-                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
+                                asm.ldr_uoff_64(X10, X19, offset);
+                                asm.load_imm_64(X2, !0xFFFFu64);
+                                asm.and_reg_64(X10, X10, X2);
+                                asm.orr_reg_64(X9, X10, X9);
                             } else {
-                                Self::emit_effective_address(
-                                    asm,
-                                    memory,
-                                    &mut cur_rip,
-                                    modrm,
-                                    mode,
-                                    rm_idx,
-                                    rex_x,
-                                    rex_b,
-                                    seg_gs,
-                                    seg_fs,
-                                )?;
-                                asm.mov_reg_64(X0, X20);
-                                let helper_fn = read_u16_helper as *const () as u64;
-                                asm.load_imm_64(X4, helper_fn);
-                                asm.blr(X4);
-                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                                asm.uxth_32(X0, X0);
-                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
+                                asm.mov_reg_32(X9, X9);
                             }
-                        }
-
-                        // MOVSX r64, r/m8 (0x0F 0xBE)
-                        0xBE => {
-                            insn_count += 1;
-                            let modrm = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            let mode = (modrm >> 6) & 3;
-                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                            if mode == 3 {
-                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
-                                asm.sxtb_64(X9, X9);
-                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                            } else {
-                                Self::emit_effective_address(
-                                    asm,
-                                    memory,
-                                    &mut cur_rip,
-                                    modrm,
-                                    mode,
-                                    rm_idx,
-                                    rex_x,
-                                    rex_b,
-                                    seg_gs,
-                                    seg_fs,
-                                )?;
-                                asm.mov_reg_64(X0, X20);
-                                let helper_fn = read_u8_helper as *const () as u64;
-                                asm.load_imm_64(X4, helper_fn);
-                                asm.blr(X4);
-                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                                asm.sxtb_64(X0, X0);
-                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                            }
-                        }
-
-                        // MOVSX r64, r/m16 (0x0F 0xBF)
-                        0xBF => {
-                            insn_count += 1;
-                            let modrm = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            let mode = (modrm >> 6) & 3;
-                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
-
-                            if mode == 3 {
-                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
-                                asm.sxth_64(X9, X9);
-                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
-                            } else {
-                                Self::emit_effective_address(
-                                    asm,
-                                    memory,
-                                    &mut cur_rip,
-                                    modrm,
-                                    mode,
-                                    rm_idx,
-                                    rex_x,
-                                    rex_b,
-                                    seg_gs,
-                                    seg_fs,
-                                )?;
-                                asm.mov_reg_64(X0, X20);
-                                let helper_fn = read_u16_helper as *const () as u64;
-                                asm.load_imm_64(X4, helper_fn);
-                                asm.blr(X4);
-                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
-                                asm.sxth_64(X0, X0);
-                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
-                            }
+                            asm.str_uoff_64(X9, X19, offset);
                         }
 
                         _ => return Err(ExitReason::IllegalInstruction(op2)),
@@ -1395,7 +1287,10 @@ impl DbtEngine {
         seg_gs: bool,
         seg_fs: bool,
     ) -> Result<(), ExitReason> {
-        let (base_reg, index_scale) = if (modrm & 7) == 4 {
+        let rip_relative = mode == 0 && (modrm & 7) == 5;
+        let (base_reg, index_scale) = if rip_relative {
+            (None, None)
+        } else if (modrm & 7) == 4 {
             let sib = memory
                 .fetch_instruction_byte(*cur_rip)
                 .map_err(ExitReason::MemoryFault)?;
@@ -1425,7 +1320,7 @@ impl DbtEngine {
 
         let disp: i64 = match mode {
             0 => {
-                if (modrm & 7) == 4 && (base_reg.is_none()) {
+                if base_reg.is_none() {
                     let mut d_bytes = [0u8; 4];
                     for b in &mut d_bytes {
                         *b = memory
@@ -1458,8 +1353,12 @@ impl DbtEngine {
             _ => 0i64,
         };
 
-        // Emit computation of base + index*scale + disp into X1
-        if let Some(base) = base_reg {
+        // Emit computation of base + index*scale + disp into X1. A RIP-relative
+        // address is based on the end of the displacement, which is the end of
+        // the instruction for every caller (none has a trailing immediate).
+        if rip_relative {
+            asm.load_imm_64(X1, *cur_rip);
+        } else if let Some(base) = base_reg {
             asm.ldr_uoff_64(X1, X19, (base as u32) * 8);
         } else {
             asm.mov_reg_64(X1, XZR);
@@ -1569,6 +1468,54 @@ extern "C" fn read_u64_helper(ctx: *mut BlockContext, addr: u64) -> u64 {
         let mem = &*(*ctx).memory_ptr;
         match mem.read_u64(addr) {
             Ok(v) => v,
+            Err(e) => {
+                (*ctx).faulted = 1;
+                (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
+                0
+            }
+        }
+    }
+}
+
+/// Host address of the store helper for a 64-bit or 32-bit guest operand.
+fn store_helper(wide: bool) -> u64 {
+    if wide {
+        write_u64_helper as *const () as u64
+    } else {
+        write_u32_helper as *const () as u64
+    }
+}
+
+/// Host address of the load helper for a 64-bit or 32-bit guest operand.
+fn load_helper(wide: bool) -> u64 {
+    if wide {
+        read_u64_helper as *const () as u64
+    } else {
+        read_u32_helper as *const () as u64
+    }
+}
+
+extern "C" fn write_u32_helper(ctx: *mut BlockContext, addr: u64, val: u64) {
+    unsafe {
+        if (*ctx).exit_reason.is_some() {
+            return;
+        }
+        let mem = &mut *(*ctx).memory_ptr;
+        if let Err(e) = mem.write_u32(addr, val as u32) {
+            (*ctx).faulted = 1;
+            (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
+        }
+    }
+}
+
+extern "C" fn read_u32_helper(ctx: *mut BlockContext, addr: u64) -> u64 {
+    unsafe {
+        if (*ctx).exit_reason.is_some() {
+            return 0;
+        }
+        let mem = &*(*ctx).memory_ptr;
+        match mem.read_u32(addr) {
+            Ok(v) => u64::from(v),
             Err(e) => {
                 (*ctx).faulted = 1;
                 (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));

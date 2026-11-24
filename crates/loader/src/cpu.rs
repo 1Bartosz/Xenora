@@ -61,6 +61,10 @@ impl Register {
 /// of a list of independent booleans.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Prefixes {
+    /// A REX prefix is present, so byte registers 4-7 are SPL/BPL/SIL/DIL.
+    rex: bool,
+    /// The operand-size override prefix (0x66) is present.
+    operand_size: bool,
     /// REX.W: 64-bit operand size.
     rex_w: bool,
     /// REX.R: extends the ModRM `reg` field to R8-R15.
@@ -443,17 +447,17 @@ impl<'a> Interpreter<'a> {
         let mut byte = self.fetch_u8()?;
         let mut insn_len = 1usize; // first opcode byte already fetched
 
-        // Handle legacy segment prefixes: 0x65 (GS), 0x64 (FS). The run is
-        // bounded by the architectural instruction-length limit so an
-        // overlong prefix run is reported as an illegal instruction.
-        while byte == 0x65 || byte == 0x64 {
+        // Handle legacy prefixes: 0x65 (GS), 0x64 (FS), 0x66 (operand size).
+        // The run is bounded by the architectural instruction-length limit so
+        // an overlong prefix run is reported as an illegal instruction.
+        while matches!(byte, 0x64..=0x66) {
             if insn_len >= MAX_INSTRUCTION_LEN {
                 return Err(ExitReason::IllegalInstruction(byte));
             }
-            if byte == 0x65 {
-                prefixes.seg_gs = true;
-            } else {
-                prefixes.seg_fs = true;
+            match byte {
+                0x65 => prefixes.seg_gs = true,
+                0x64 => prefixes.seg_fs = true,
+                _ => prefixes.operand_size = true,
             }
             byte = self.fetch_u8()?;
             insn_len += 1;
@@ -464,6 +468,7 @@ impl<'a> Interpreter<'a> {
             if insn_len >= MAX_INSTRUCTION_LEN {
                 return Err(ExitReason::IllegalInstruction(byte));
             }
+            prefixes.rex = true;
             prefixes.rex_w = (byte & 0x08) != 0;
             prefixes.rex_r = (byte & 0x04) != 0;
             prefixes.rex_x = (byte & 0x02) != 0;
@@ -471,11 +476,24 @@ impl<'a> Interpreter<'a> {
             byte = self.fetch_u8()?;
         }
 
+        // 16-bit operand sizes are implemented only for the extension family
+        // (0F B6/B7/BE/BF); every other form is rejected rather than executed
+        // at the wrong width.
+        if prefixes.operand_size && byte != 0x0F {
+            return Err(ExitReason::IllegalInstruction(0x66));
+        }
+
         match byte {
             // HLT: Halt execution
             0xF4 => Ok(Some(ExitReason::Halt)),
 
             0x0F => match self.fetch_u8()? {
+                // MOVZX (B6/B7) and MOVSX (BE/BF) r, r/m8 or r/m16.
+                op @ (0xB6 | 0xB7 | 0xBE | 0xBF) => {
+                    self.execute_extend(op, &prefixes)?;
+                    Ok(None)
+                }
+                _ if prefixes.operand_size => Err(ExitReason::IllegalInstruction(0x66)),
                 0x05 => Ok(Some(ExitReason::Syscall(self.cpu.get(Register::Rax)))),
                 op @ 0xC8..=0xCF => {
                     let reg = Register::from_index((op & 7) | (u8::from(prefixes.rex_b) << 3));
@@ -577,24 +595,26 @@ impl<'a> Interpreter<'a> {
                 Ok(None)
             }
 
-            // MOVSX r/m, r (0x63): sign-extend the source into the
-            // destination register. With REX.W this is MOVSXD r64, r/m32.
+            // MOVSXD r, r/m32 (0x63). Without REX.W it is a 32-bit move whose
+            // destination is zero-extended like any 32-bit register write.
             0x63 => {
                 let modrm = self.fetch_u8()?;
-                if (modrm >> 6) != 3 {
-                    return Err(ExitReason::IllegalInstruction(byte));
-                }
-                let src_idx = (modrm & 7) + if prefixes.rex_b { 8 } else { 0 };
-                let dst_idx = ((modrm >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 };
-                let src32 = self.cpu.get(Register::from_index(src_idx)) as u32;
-                let dst = Register::from_index(dst_idx);
-                if prefixes.rex_w {
-                    // MOVSXD r64, r/m32: sign-extend the 32-bit source into 64 bits.
-                    self.cpu.set(dst, src32 as i32 as u64);
+                let value = if modrm >> 6 == 3 {
+                    let index = (modrm & 7) | (u8::from(prefixes.rex_b) << 3);
+                    self.cpu.get(Register::from_index(index)) as u32
                 } else {
-                    // MOVSX r32, r/m32: writing a 32-bit register zeroes the upper half.
-                    self.cpu.set(dst, u64::from(src32 as i32 as u32));
-                }
+                    let address = self.effective_address(modrm, &prefixes)?;
+                    self.memory
+                        .read_u32(address)
+                        .map_err(ExitReason::MemoryFault)?
+                };
+                let dst = ((modrm >> 3) & 7) | (u8::from(prefixes.rex_r) << 3);
+                let extended = if prefixes.rex_w {
+                    value as i32 as u64
+                } else {
+                    u64::from(value)
+                };
+                self.cpu.set(Register::from_index(dst), extended);
                 Ok(None)
             }
 
@@ -754,43 +774,12 @@ impl<'a> Interpreter<'a> {
         Ok((Register::from_index(reg_idx), Register::from_index(rm_idx)))
     }
 
-    fn execute_mov_rm(
-        &mut self,
-        modrm: u8,
-        prefixes: &Prefixes,
-        is_load: bool,
-    ) -> Result<Option<ExitReason>, ExitReason> {
-        let mode = (modrm >> 6) & 3;
-        let reg_idx = ((modrm >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 };
-        let rm_idx = (modrm & 7) + if prefixes.rex_b { 8 } else { 0 };
-        let reg = Register::from_index(reg_idx);
-
-        if mode == 3 {
-            // Register-to-register move
-            let rm = Register::from_index(rm_idx);
-            if is_load {
-                let val = self.cpu.get(rm);
-                self.cpu.set(
-                    reg,
-                    if prefixes.rex_w {
-                        val
-                    } else {
-                        val as u32 as u64
-                    },
-                );
-            } else {
-                let val = self.cpu.get(reg);
-                self.cpu.set(
-                    rm,
-                    if prefixes.rex_w {
-                        val
-                    } else {
-                        val as u32 as u64
-                    },
-                );
-            }
-            return Ok(None);
-        }
+    /// Compute the address of a memory operand (ModRM mode 0-2), consuming its
+    /// SIB byte and displacement. A RIP-relative operand is based on the address
+    /// after the displacement, so the caller's form must have no immediate.
+    fn effective_address(&mut self, modrm: u8, prefixes: &Prefixes) -> Result<u64, ExitReason> {
+        let mode = modrm >> 6;
+        let rm_idx = (modrm & 7) | (u8::from(prefixes.rex_b) << 3);
 
         // Memory operand [rm + disp] or SIB
         let (base_val, disp): (u64, i64) = if (rm_idx & 7) == 4 {
@@ -853,9 +842,9 @@ impl<'a> Interpreter<'a> {
         };
 
         let mut effective_addr = if mode == 0 && (rm_idx & 7) == 5 {
-            (self.cpu.rip as i64 + disp) as u64
+            self.cpu.rip.wrapping_add_signed(disp)
         } else {
-            (base_val as i64 + disp) as u64
+            base_val.wrapping_add_signed(disp)
         };
 
         if prefixes.seg_gs {
@@ -863,6 +852,87 @@ impl<'a> Interpreter<'a> {
         } else if prefixes.seg_fs {
             effective_addr = effective_addr.wrapping_add(self.cpu.fs_base);
         }
+
+        Ok(effective_addr)
+    }
+
+    /// Execute MOVZX (0F B6/B7) or MOVSX (0F BE/BF). Flags are unchanged.
+    fn execute_extend(&mut self, op: u8, prefixes: &Prefixes) -> Result<(), ExitReason> {
+        let modrm = self.fetch_u8()?;
+        let byte_source = op & 1 == 0;
+        let raw = if modrm >> 6 == 3 {
+            let rm = modrm & 7;
+            if byte_source && !prefixes.rex && rm >= 4 {
+                // AH, CH, DH and BH exist only without a REX prefix.
+                (self.cpu.gpr[usize::from(rm - 4)] >> 8) & 0xFF
+            } else {
+                let index = usize::from(rm | (u8::from(prefixes.rex_b) << 3));
+                self.cpu.gpr[index] & if byte_source { 0xFF } else { 0xFFFF }
+            }
+        } else {
+            let address = self.effective_address(modrm, prefixes)?;
+            if byte_source {
+                self.memory.read_u8(address).map(u64::from)
+            } else {
+                self.memory.read_u16(address).map(u64::from)
+            }
+            .map_err(ExitReason::MemoryFault)?
+        };
+        let value = match op {
+            0xBE => raw as u8 as i8 as u64,
+            0xBF => raw as u16 as i16 as u64,
+            _ => raw,
+        };
+        let dst = usize::from(((modrm >> 3) & 7) | (u8::from(prefixes.rex_r) << 3));
+        self.cpu.gpr[dst] = if prefixes.rex_w {
+            value // REX.W takes precedence over the operand-size override.
+        } else if prefixes.operand_size {
+            (self.cpu.gpr[dst] & !0xFFFF) | (value & 0xFFFF)
+        } else {
+            u64::from(value as u32)
+        };
+        Ok(())
+    }
+
+    fn execute_mov_rm(
+        &mut self,
+        modrm: u8,
+        prefixes: &Prefixes,
+        is_load: bool,
+    ) -> Result<Option<ExitReason>, ExitReason> {
+        let mode = (modrm >> 6) & 3;
+        let reg_idx = ((modrm >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 };
+        let rm_idx = (modrm & 7) + if prefixes.rex_b { 8 } else { 0 };
+        let reg = Register::from_index(reg_idx);
+
+        if mode == 3 {
+            // Register-to-register move
+            let rm = Register::from_index(rm_idx);
+            if is_load {
+                let val = self.cpu.get(rm);
+                self.cpu.set(
+                    reg,
+                    if prefixes.rex_w {
+                        val
+                    } else {
+                        val as u32 as u64
+                    },
+                );
+            } else {
+                let val = self.cpu.get(reg);
+                self.cpu.set(
+                    rm,
+                    if prefixes.rex_w {
+                        val
+                    } else {
+                        val as u32 as u64
+                    },
+                );
+            }
+            return Ok(None);
+        }
+
+        let effective_addr = self.effective_address(modrm, prefixes)?;
 
         if is_load {
             // Load from memory to reg

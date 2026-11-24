@@ -68,6 +68,26 @@ struct CfgDecoded {
     fall_through: bool,
 }
 
+/// Consume a ModRM byte with its SIB byte and displacement, returning the
+/// ModRM byte and the offset just past the operand, or `None` if truncated.
+fn modrm_operand(slice: &[u8], pc: usize) -> Option<(u8, usize)> {
+    let modrm = *slice.get(pc)?;
+    let mode = modrm >> 6;
+    let mut end = pc + 1;
+    let mut base = modrm & 7;
+    if mode != 3 && base == 4 {
+        base = slice.get(end)? & 7;
+        end += 1;
+    }
+    end += match mode {
+        1 => 1,
+        2 => 4,
+        0 if base == 5 => 4,
+        _ => 0,
+    };
+    (end <= slice.len()).then_some((modrm, end))
+}
+
 /// Decode a single x86-64 instruction from a file-mapped byte slice.
 ///
 /// `slice`  — file bytes beginning at the instruction's raw file offset.
@@ -106,10 +126,18 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
         });
     }
 
-    // Recognize the operand-size override for C7 without changing how the
-    // probe classifies prefixes on unrelated opcodes.
-    let operand_override =
-        b0 == 0x66 && matches!(slice.get(pc..), Some([0xc7, ..] | [0x40..=0x4f, 0xc7, ..]));
+    // Recognize the operand-size override for C7 and the extension family
+    // without changing how the probe classifies prefixes on unrelated opcodes.
+    let operand_override = b0 == 0x66
+        && matches!(
+            slice.get(pc..),
+            Some(
+                [0xc7, ..]
+                    | [0x40..=0x4f, 0xc7, ..]
+                    | [0x0f, 0xb6 | 0xb7 | 0xbe | 0xbf, ..]
+                    | [0x40..=0x4f, 0x0f, 0xb6 | 0xb7 | 0xbe | 0xbf, ..]
+            )
+        );
     if operand_override {
         b0 = slice[pc];
         pc += 1;
@@ -271,6 +299,20 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 }
             }
         }
+        // MOVSXD r, r/m32
+        0x63 => {
+            if let Some((modrm, end)) = modrm_operand(slice, pc) {
+                pc = end;
+                let width = if rex_w { 64 } else { 32 };
+                mnemonic = format!("movsxd r{width}, r/m32 (modrm 0x{modrm:02x})");
+                is_dbt = true;
+                is_interp = true;
+            } else {
+                pc = slice.len();
+                mnemonic = "truncated movsxd".into();
+                fall_through = false;
+            }
+        }
         0x83 => {
             if pc + 1 < slice.len() {
                 let modrm = slice[pc];
@@ -420,6 +462,29 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                             let jcc_rva = (rva as i64 + insn_len + rel32 as i64) as u32;
                             successors.push(jcc_rva);
                             // fall_through = true
+                        }
+                    }
+                    // MOVZX/MOVSX r, r/m8 or r/m16
+                    0xB6 | 0xB7 | 0xBE | 0xBF => {
+                        if let Some((modrm, end)) = modrm_operand(slice, pc) {
+                            pc = end;
+                            let name = if op2 < 0xB8 { "movzx" } else { "movsx" };
+                            let source = if op2 & 1 == 0 { 8 } else { 16 };
+                            let width = if rex_w {
+                                64
+                            } else if operand_override {
+                                16
+                            } else {
+                                32
+                            };
+                            mnemonic =
+                                format!("{name} r{width}, r/m{source} (modrm 0x{modrm:02x})");
+                            is_dbt = true;
+                            is_interp = true;
+                        } else {
+                            pc = slice.len();
+                            mnemonic = "truncated extension".into();
+                            fall_through = false;
                         }
                     }
                     _ => {
