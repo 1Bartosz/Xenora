@@ -13,7 +13,10 @@ pub mod sampler;
 pub mod texture_pipeline;
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-pub use compute::{GuestBuffer, GuestBufferView, MetalError, NativeCompute, RunProfile};
+pub use compute::{
+    DepthCompare, DepthDraw, DepthFill, DepthOutput, DepthPass, DepthState, GuestBuffer,
+    GuestBufferView, MetalError, NativeCompute, RunProfile,
+};
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 pub use sampler::MetalSampler;
