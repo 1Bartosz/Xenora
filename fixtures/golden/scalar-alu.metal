@@ -8,6 +8,8 @@ kernel void xenora_compute(
     uint t2 = 0x7ffffffeu;
     uint t3 = 0xfffffff0u;
     uint t4 = t2 ^ t3;
-    uint t5 = t0 ^ t4;
-    output[index] = t5;
+    uint t5 = 0x80000000u;
+    uint t6 = t4 ^ t5;
+    uint t7 = t0 ^ t6;
+    output[index] = t7;
 }

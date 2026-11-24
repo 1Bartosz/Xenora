@@ -85,6 +85,9 @@ pub enum ScalarAlu {
     Subtract,
     AddWithCarry,
     SubtractWithBorrow,
+    /// SCC = signed overflow (RDNA 2 ISA guide 12.1).
+    AddSigned,
+    SubtractSigned,
     And,
     Or,
     Xor,
@@ -231,15 +234,17 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 left,
                 right,
                 low,
-                high @ (0x80 | 0x82 | 0x87 | 0x88 | 0x89),
+                high @ (0x80..=0x82 | 0x87 | 0x88 | 0x89),
                 tail @ ..,
             ] if (*left, *right) != (255, 255)
                 && low & 0x7f <= 105
-                && (low & 0x80 == 0 || matches!(high, 0x80 | 0x82)) =>
+                && (low & 0x80 == 0 || matches!(high, 0x80..=0x82)) =>
             {
                 let kind = match (high, low >> 7) {
                     (0x80, 0) => ScalarAlu::Add,
                     (0x80, _) => ScalarAlu::Subtract,
+                    (0x81, 0) => ScalarAlu::AddSigned,
+                    (0x81, _) => ScalarAlu::SubtractSigned,
                     (0x82, 0) => ScalarAlu::AddWithCarry,
                     (0x82, _) => ScalarAlu::SubtractWithBorrow,
                     (0x87, _) => ScalarAlu::And,
@@ -545,6 +550,16 @@ fn execute_lane(
                     ScalarAlu::Subtract | ScalarAlu::SubtractWithBorrow => {
                         let difference = lhs - rhs - carry;
                         (difference, difference < 0)
+                    }
+                    // The exact signed result must fit in i32, else SCC = overflow.
+                    ScalarAlu::AddSigned | ScalarAlu::SubtractSigned => {
+                        let signed = |value: i64| i64::from(value as u32 as i32);
+                        let exact = if kind == ScalarAlu::AddSigned {
+                            signed(lhs) + signed(rhs)
+                        } else {
+                            signed(lhs) - signed(rhs)
+                        };
+                        (exact, i32::try_from(exact).is_err())
                     }
                     ScalarAlu::And | ScalarAlu::Or | ScalarAlu::Xor => {
                         let bits = match kind {

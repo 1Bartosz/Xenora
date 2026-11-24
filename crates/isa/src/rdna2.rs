@@ -60,6 +60,16 @@ pub const S_SUB_U32: Opcode = Opcode {
     bits: 0x80800000,
     bytes: 4,
 };
+pub const S_ADD_I32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x81000000,
+    bytes: 4,
+};
+pub const S_SUB_I32: Opcode = Opcode {
+    mask: 0xff800000,
+    bits: 0x81800000,
+    bytes: 4,
+};
 pub const S_ADDC_U32: Opcode = Opcode {
     mask: 0xff800000,
     bits: 0x82000000,

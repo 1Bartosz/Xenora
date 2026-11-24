@@ -7,11 +7,11 @@ pub use xenora_isa::{
     VectorSource,
 };
 use xenora_isa::{
-    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_U32, S_ADDC_U32, S_AND_B32,
-    S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM, S_MOV_B32,
-    S_OR_B32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32, V_ADD_F32,
-    V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32, V_LSHLREV_B32,
-    V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
+    BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_ADD_I32, S_ADD_U32, S_ADDC_U32,
+    S_AND_B32, S_BRANCH, S_CBRANCH_EXECZ, S_CBRANCH_SCC0, S_CBRANCH_VCCZ, S_CMP_EQ_U32, S_ENDPGM,
+    S_MOV_B32, S_OR_B32, S_SUB_I32, S_SUB_U32, S_SUBB_U32, S_WAITCNT, S_WAITCNT_VSCNT, S_XOR_B32,
+    V_ADD_F32, V_ADD_NC_U32, V_AND_B32, V_ASHRREV_I32, V_INTERP_P1_F32, V_INTERP_P2_F32,
+    V_LSHLREV_B32, V_LSHRREV_B32, V_MOV_B32, V_MUL_F32, V_OR_B32, V_XOR_B32,
 };
 
 use xenora_isa::meta::EncodingFamily;
@@ -19,11 +19,12 @@ use xenora_isa::meta::EncodingFamily;
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
 /// operand combination. Operand restrictions are listed in docs/status.toml;
 /// every other form in [`xenora_isa::meta::FORMS`] is rejected as unsupported.
-pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 32] = [
+pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 34] = [
     ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
     ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
     ("EXP", EncodingFamily::Exp),
     ("IMAGE_SAMPLE_LZ", EncodingFamily::Mimg),
+    ("S_ADD_I32", EncodingFamily::Sop2),
     ("S_ADD_U32", EncodingFamily::Sop2),
     ("S_ADDC_U32", EncodingFamily::Sop2),
     ("S_AND_B32", EncodingFamily::Sop2),
@@ -35,6 +36,7 @@ pub const SEMANTIC_FORMS: [(&str, EncodingFamily); 32] = [
     ("S_ENDPGM", EncodingFamily::Sopp),
     ("S_MOV_B32", EncodingFamily::Sop1),
     ("S_OR_B32", EncodingFamily::Sop2),
+    ("S_SUB_I32", EncodingFamily::Sop2),
     ("S_SUB_U32", EncodingFamily::Sop2),
     ("S_SUBB_U32", EncodingFamily::Sop2),
     ("S_WAITCNT", EncodingFamily::Sopp),
@@ -350,6 +352,8 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     for (opcode, op) in [
         (S_ADD_U32, ScalarAluOp::AddU32),
         (S_SUB_U32, ScalarAluOp::SubU32),
+        (S_ADD_I32, ScalarAluOp::AddI32),
+        (S_SUB_I32, ScalarAluOp::SubI32),
         (S_ADDC_U32, ScalarAluOp::AddcU32),
         (S_SUBB_U32, ScalarAluOp::SubbU32),
         (S_AND_B32, ScalarAluOp::AndB32),
@@ -469,8 +473,7 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
 }
 
 /// SOP2: SSRC0 in bits 0-7, SSRC1 in bits 8-15, SDST in bits 16-22.
-/// Other SOP2 opcodes, including S_ADD_I32 and S_SUB_I32 whose SCC rule is
-/// not pinned by the sources in docs/shaders/scalar-alu.md, stay unsupported.
+/// Other SOP2 opcodes stay unsupported.
 fn scalar_alu(
     op: ScalarAluOp,
     first: u32,
