@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+//! Synthetic interpreter and DBT timings.
+//!
+//! The benchmark target disables Cargo's test harness. To run the percentile
+//! unit tests, build with
+//! `cargo rustc --locked -p xenora-loader --bench dbt_bench --message-format=json -- --test`
+//! and run the executable named by the benchmark's compiler-artifact message.
+
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 use xenora_loader::cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, Register};
@@ -182,6 +189,7 @@ fn main() {
     println!(
         "Percentiles describe this synthetic workload on this host; tail estimates vary with sample count."
     );
+    println!("Even sample counts use the midpoint of the two middle values for the median.");
     report("Interpreter", &mut interpreter);
     report("Cold DBT", &mut cold);
     report("Warm DBT", &mut warm);
