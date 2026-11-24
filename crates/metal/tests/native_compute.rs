@@ -1,5 +1,9 @@
 use xenora_metal::NativeCompute;
 
+#[path = "native/depth.rs"]
+mod depth;
+#[path = "support/depth_cases.rs"]
+mod depth_cases;
 #[path = "native/guest_buffer.rs"]
 mod guest_buffer;
 #[path = "native/offscreen.rs"]
