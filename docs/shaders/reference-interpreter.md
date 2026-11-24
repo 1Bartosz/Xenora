@@ -1,6 +1,6 @@
 # Independent gfx1030 CPU reference
 
-`xenora_ref::execute` reads raw little-endian code bytes and input words without dependencies on the production ISA crate, the compiler or Metal. It accepts at most 1024 instruction bytes and 4096 input words. The synthetic ABI gives every invocation its own input and output word. The indexed load and store forms need no host address arithmetic, and V0 is reserved for that indexing. The reference accepts uniform forward branches driven by scalar register state. Cross-lane register access and wave-mask changes are outside the subset. Floating-point arithmetic is restricted to positive normal inputs and exact normal results.
+`xenora_ref::execute` reads raw little-endian code bytes and input words without dependencies on the production ISA crate, the compiler or Metal. It accepts at most 1024 instruction bytes and 4096 input words. The synthetic ABI gives every invocation its own input and output word. The indexed load and store forms need no host address arithmetic, and V0 is reserved for that indexing. Dispatch indices form Wave32 waves of 32 consecutive invocations, executed in lockstep with shared scalar state. The reference accepts uniform forward branches driven by scalar register state or by a compare mask in VCC_LO. Cross-lane register access other than compare masks, and EXEC derived from lane data, are outside the subset. Floating-point arithmetic is restricted to positive normal inputs and exact normal results.
 
 | AMD RDNA 2 ISA guide instruction | Reference operation |
 |---|---|
@@ -10,6 +10,7 @@
 | VOP3 `V_ADD_NC_U32` | Read two vector registers and add modulo 2^32. No implicit carry or flag update. |
 | SOP1 `S_MOV_B32`, SOPC `S_CMP_EQ_U32` | Copy 32 bits into a scalar register or compare two operands and set SCC. Descriptor SGPRs are reserved. |
 | SOP2 `S_ADD_U32`, `S_SUB_U32`, `S_ADD_I32`, `S_SUB_I32`, `S_ADDC_U32`, `S_SUBB_U32`, `S_AND_B32`, `S_OR_B32`, `S_XOR_B32` | Exact integer result reduced modulo 2^32; SCC is the carry-out, the borrow, signed overflow (the exact signed result does not fit in i32), or a nonzero bitwise result, and ADDC/SUBB consume SCC ([SOP2 scalar ALU](scalar-alu.md)). Descriptor SGPRs are reserved. |
+| VOPC `V_CMP_{LT,EQ,LE,GT,NE,GE}_{I32,U32}` | Compare widened 64-bit values per active lane. VCC_LO gets EXEC & the test results and is fully written, so empty EXEC gives 0. A later `S_CBRANCH_VCCZ` on such a mask checks the skipped code statically ([VOPC integer compares](vector-compare.md)). |
 | SOPP `S_BRANCH`, `S_CBRANCH_SCC0` | Use a signed dword displacement from the next instruction (CLAIM-RDNA2-SOPP-BRANCH-DISPLACEMENT). Require a nonnegative word displacement to a decoded instruction boundary, including for untaken edges. |
 | VOP2 `V_AND_B32`, `V_XOR_B32` | Apply the bitwise operator to two VGPRs. |
 | VOP2 `V_ADD_F32`, `V_MUL_F32` | Require exact binary32 results by checking the inputs and the wider intermediate. Multiplication of the significands fits in binary64. Addition must also recover the smaller operand by subtracting the larger. |

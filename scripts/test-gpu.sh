@@ -25,6 +25,7 @@ cargo test --locked -p xenora-loader --features gpu-tests --test graphics_d3d12 
 timeout 30s cargo test --locked -p xenora-loader --features gpu-tests --test graphics_d3d12 -- \
     --nocapture --test-threads=1
 
-# Native Metal known answers of the independent semantic review, including SOP2 scalar ALU.
+# Native Metal known answers of the independent semantic review, including SOP2 scalar ALU
+# and VOPC compares.
 cargo test --locked -p xenora-semantic-review --no-run
 timeout 60s cargo test --locked -p xenora-semantic-review -- --ignored --nocapture --test-threads=1
