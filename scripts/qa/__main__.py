@@ -44,6 +44,8 @@ from .rdna2_plan import (
     plan_batches,
     summarize_inventory,
 )
+from .coverage_history import historical_report, snapshot_inventory, write_snapshot
+from .stale_branch import classify_sync, format_sync_reports
 from .verify import dumps_evidence, evidence_is_stale, load_evidence, run_profile
 
 
@@ -105,6 +107,19 @@ def main(argv: list[str] | None = None) -> int:
     ver.add_argument("--check-stale", default="", help="existing evidence JSON to staleness-check")
 
     env = sub.add_parser("env", help="environment diagnostics from live commands")
+
+    hist = sub.add_parser("rdna2-history", help="write or diff RDNA2 coverage snapshots")
+    hist.add_argument("action", choices=("write", "diff"))
+    hist.add_argument("--path", default="")
+    hist.add_argument("--before", default="")
+    hist.add_argument("--after", default="")
+    hist.add_argument("--revision", default="")
+
+    br = sub.add_parser("branch-sync", help="classify ahead/behind/diverged branch state")
+    br.add_argument("--branch", required=True)
+    br.add_argument("--upstream", required=True)
+    br.add_argument("--ahead", type=int, required=True)
+    br.add_argument("--behind", type=int, required=True)
 
     args = p.parse_args(argv)
     root = _root()
@@ -253,6 +268,29 @@ def main(argv: list[str] | None = None) -> int:
         report = summarize_env(findings)
         print(format_report(report), end="")
         return 0 if report.ok else 1
+
+    if args.command == "rdna2-history":
+        if args.action == "write":
+            rev = args.revision or subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True
+            ).strip()
+            path = Path(args.path or "artifacts/rdna2-coverage.json")
+            write_snapshot(path, snapshot_inventory(root), revision=rev)
+            print(path)
+            return 0
+        report = historical_report(Path(args.before), Path(args.after))
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "branch-sync":
+        report = classify_sync(
+            branch=args.branch,
+            upstream=args.upstream,
+            ahead=args.ahead,
+            behind=args.behind,
+        )
+        print(format_sync_reports([report]), end="")
+        return 1 if report.stale or report.diverged else 0
 
     return 2
 
