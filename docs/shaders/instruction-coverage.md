@@ -24,6 +24,8 @@ The wider LLVM operand matrix exercises decoding only. ABI means application bin
 | `s_cmp_eq_u32` | Normal SGPR or integer operands, with at most one source selecting a literal | `BF068708` | yes | yes | three-way passed | resolved SCC | implemented | fixture verified | fixture verified |
 | `s_add_u32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = carry-out | `80088308` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
 | `s_sub_u32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = borrow | `808A8180` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_add_i32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = signed overflow | `8110C109` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
+| `s_sub_i32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = signed overflow | `8191C110` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
 | `s_addc_u32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; adds SCC; SCC = carry-out | `820980FF 7FFFFFFF` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
 | `s_subb_u32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; subtracts SCC; SCC = borrow | `828B0809` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
 | `s_and_b32` | SOP2, normal SGPR destination; normal SGPR, inline integer or literal sources with at most one literal; SCC = result != 0 | `870D090C` | yes | yes | three-way passed | resolved scalar state and SCC | implemented | local known-answer test passed | local Apple M5 readback passed; acceptance pending |
@@ -46,11 +48,11 @@ The wider LLVM operand matrix exercises decoding only. ABI means application bin
 ## Automated three-way comparison
 
 LLVM 23.1.6, the production decoder and the independent reference decoder
-matched 452 instructions across nine streams: the seven synthetic fixtures,
+matched 458 instructions across nine streams: the seven synthetic fixtures,
 a high-register sequence and an operand matrix assembled by LLVM.
 The harness checks byte offsets, widths, encoded bytes from LLVM, mnemonic
 and operands, and the typed reference operation against the production
-operation. It covers all 28 forms in this document.
+operation. It covers all 30 forms in this document.
 
 The matrix checks the 81 inline integer selectors in VOP1, SOP1, SOPC and
 SOP2, forced literals that could otherwise be inline, literal selection in
@@ -59,7 +61,7 @@ operands, and zero and nonzero forward branch displacements. The decoder
 trace exposes MUBUF operands independently of the synthetic execution ABI,
 which still requires the original index and resource bindings.
 
-Five malformed LLVM probes produced diagnostics, and 27 valid encodings
+Five malformed LLVM probes produced diagnostics, and 25 valid encodings
 or disassemblable branch sequences were deliberately rejected by both Xenora
 decoders. Both Xenora decoders also reject all 37 interior truncation offsets
 in the add fixture and every case in the unsupported-encoding list.

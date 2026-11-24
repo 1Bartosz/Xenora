@@ -9,7 +9,7 @@
 | VOP1 `V_MOV_B32` | Read a register, inline integer or literal. Copy all 32 bits. |
 | VOP3 `V_ADD_NC_U32` | Read two vector registers and add modulo 2^32. No implicit carry or flag update. |
 | SOP1 `S_MOV_B32`, SOPC `S_CMP_EQ_U32` | Copy 32 bits into a scalar register or compare two operands and set SCC. Descriptor SGPRs are reserved. |
-| SOP2 `S_ADD_U32`, `S_SUB_U32`, `S_ADDC_U32`, `S_SUBB_U32`, `S_AND_B32`, `S_OR_B32`, `S_XOR_B32` | Exact integer result reduced modulo 2^32; SCC is the carry-out, the borrow, or a nonzero bitwise result, and ADDC/SUBB consume SCC ([SOP2 scalar ALU](scalar-alu.md)). Descriptor SGPRs are reserved. |
+| SOP2 `S_ADD_U32`, `S_SUB_U32`, `S_ADD_I32`, `S_SUB_I32`, `S_ADDC_U32`, `S_SUBB_U32`, `S_AND_B32`, `S_OR_B32`, `S_XOR_B32` | Exact integer result reduced modulo 2^32; SCC is the carry-out, the borrow, signed overflow (the exact signed result does not fit in i32), or a nonzero bitwise result, and ADDC/SUBB consume SCC ([SOP2 scalar ALU](scalar-alu.md)). Descriptor SGPRs are reserved. |
 | SOPP `S_BRANCH`, `S_CBRANCH_SCC0` | Use a signed dword displacement from the next instruction (CLAIM-RDNA2-SOPP-BRANCH-DISPLACEMENT). Require a nonnegative word displacement to a decoded instruction boundary, including for untaken edges. |
 | VOP2 `V_AND_B32`, `V_XOR_B32` | Apply the bitwise operator to two VGPRs. |
 | VOP2 `V_ADD_F32`, `V_MUL_F32` | Require exact binary32 results by checking the inputs and the wider intermediate. Multiplication of the significands fits in binary64. Addition must also recover the smaller operand by subtracting the larger. |
