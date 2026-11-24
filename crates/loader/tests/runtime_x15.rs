@@ -1122,6 +1122,46 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn guest_platform_saves_enforce_quota_and_preserve_existing_data() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call =
+        |symbol, args: &[u64]| call_service_fixture(&state, "xenora_fixture.dll", symbol, args);
+    let value = |symbol, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    let buffer = PROCESS_FIXTURE_STACK_TOP - 0x2000;
+    assert_eq!(value("OpenFixturePlatform", &[]), 1);
+    for slot in 1..=4 {
+        assert_eq!(value("WriteFixtureSave", &[slot, buffer, 4096]), 1);
+    }
+    assert_eq!(value("WriteFixtureSave", &[5, buffer, 1]), 0);
+    assert_eq!(
+        state.last_error(
+            call("WriteFixtureSave", &[5, buffer, 1])
+                .execution
+                .final_state
+                .gs_base
+        ),
+        112
+    );
+    assert_eq!(
+        value("WriteFixtureSave", &[1, PROCESS_FIXTURE_OUTPUT, 8]),
+        1
+    );
+    assert_eq!(value("WriteFixtureSave", &[5, buffer, 4088]), 1);
+    assert_eq!(value("WriteFixtureSave", &[1, 0, 8]), 0);
+    assert_eq!(value("CloseFixturePlatform", &[]), 1);
+    assert_eq!(value("OpenFixturePlatform", &[]), 1);
+    let short = call("ReadFixtureSave", &[1, buffer, 7]);
+    assert_eq!(short.execution.final_state.get(Register::Rax), 0);
+    assert_eq!(short.image.memory.read_u64(buffer).unwrap(), 0);
+    let read = call("ReadFixtureSave", &[1, buffer, 8]);
+    assert_eq!(read.execution.final_state.get(Register::Rax), 8);
+    assert_eq!(read.image.memory.read_u64(buffer).unwrap(), u64::MAX);
+    assert_eq!(value("DeleteFixtureSave", &[5]), 1);
+    assert_eq!(value("WriteFixtureSave", &[6, buffer, 4088]), 1);
+    assert_eq!(value("ReadFixtureSave", &[5, buffer, 4096]), 0);
+}
+
+#[test]
 fn guest_platform_settings_follow_lifecycle_and_process_boundaries() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let call =
