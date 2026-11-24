@@ -35,7 +35,7 @@ def main(argv):
     p.add_argument("--now", default="", help="UTC time YYYY-MM-DDTHH:MM:SSZ (tests)")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("gather"); s.add_argument("--repo", required=True); s.add_argument("--no-prs", action="store_true"); s.add_argument("--pr", type=int, default=0)
-    s.add_argument("--recent-commands", action="store_true", help="include comments from the last lease_hours for replay")
+    s.add_argument("--recent-commands", action="store_true", help="include comments from the last 2 x lease_hours for replay")
     s = sub.add_parser("replay"); s.add_argument("--state", required=True)
     s = sub.add_parser("decide"); s.add_argument("--event", required=True); s.add_argument("--state", required=True)
     s = sub.add_parser("should-rerun"); s.add_argument("--actions", required=True)
@@ -70,7 +70,7 @@ def main(argv):
     elif a.cmd == "gather":
         since = ""
         if a.recent_commands:
-            since = (_now(a.now) - timedelta(hours=cfg["lease_hours"])).strftime("%Y-%m-%dT%H:%M:%SZ")
+            since = (_now(a.now) - timedelta(hours=replay.window_hours(cfg))).strftime("%Y-%m-%dT%H:%M:%SZ")
         st = ghio.gather(a.repo, with_prs=not a.no_prs, recent_since=since)
         if a.pr:
             st["pr"] = ghio.pr_data(a.repo, a.pr)

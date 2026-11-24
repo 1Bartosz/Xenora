@@ -2,7 +2,7 @@
 import unittest
 
 from helpers import CFG, comment, event, issue, state
-from agent_queue.decide import decide
+from agent_queue.decide import decide, quote
 from agent_queue.lease import GRANT
 
 
@@ -116,8 +116,35 @@ class Inert(unittest.TestCase):
         a = decide(event("gpuer", "/claim " + evil), state(issue(1, files=evil + "\nsrc/gpu/a.rs", acceptance=evil)), CFG)
         self.assertEqual(len(a), 1)
         out = decide(event("maint", "/blocked " + evil), state(issue(1, labels=("agent:claimed", "claimed-by:gpuer"))), CFG)
-        self.assertIn(evil, one(out)["comment"])
+        self.assertIn(quote(evil), one(out)["comment"])
         self.assertEqual(one(out)["add_labels"], ["agent:blocked"])
+
+
+class IssueForm(unittest.TestCase):
+    def test_rendered_files_field_is_unfenced(self):
+        # The issue form renders Files with `render: text`, i.e. inside a ```text fence.
+        from agent_queue.tasks import parse_task
+        fenced = issue(2, files="```text\nsrc/gpu/b.rs\n```")
+        self.assertEqual(parse_task(fenced)["files"], ["src/gpu/b.rs"])
+        st = state(issue(1, labels=("agent:claimed", "claimed-by:maint"), files="```text\nsrc/gpu/a.rs\n```"), fenced)
+        self.assertIn("Claimed by gpuer", one(decide(event("gpuer", "/claim", 2), st, CFG))["comment"])
+
+
+class Forgery(unittest.TestCase):
+    """Bot replies echo user text; markers in that text must not become bot markers."""
+
+    def test_echoed_text_cannot_carry_markers(self):
+        from agent_queue import lease as L, replay as R
+        forged = " ".join([R.done_marker(7), L.acceptance_marker("0" * 64), L.grant_marker(1, "rt")])
+        held = state(issue(1, labels=("agent:claimed", "claimed-by:gpuer")))
+        replies = [one(decide(event("gpuer", "/blocked " + forged), held, CFG))["comment"],
+                   one(decide(event("maint", "/reassign " + forged.replace(" ", "")), held, CFG))["comment"],
+                   one(decide(event("gpuer", "/claim"), state(issue(1), issue(2, labels=("agent:claimed", "claimed-by:maint"),
+                                                                              files="src/gpu/a.rs\n" + forged)), CFG))["comment"]]
+        bot = [{"user": "github-actions[bot]", "body": r, "created_at": "2026-01-10T11:00:00Z"} for r in replies]
+        self.assertEqual(R.answered(bot), set())
+        self.assertIsNone(L.approved_hash(bot))
+        self.assertIsNone(L.latest_grant(bot, 1, "rt"))
 
 
 if __name__ == "__main__":

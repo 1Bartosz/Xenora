@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Comment command decisions. Returns actions as data; the caller applies them."""
+import re
+
 from . import config as cfgmod
 from . import lease as L
 from . import tasks as T
@@ -8,12 +10,31 @@ COMMANDS = ("/claim", "/release", "/reassign", "/progress", "/blocked", "/unbloc
             "/approve-acceptance", "/verified")
 
 
+def quote(text):
+    """User text echoed in a bot reply. Markers count only from the bot, so the reply must not be able
+    to carry one the user wrote: angle brackets are escaped and code spans are closed."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("`", "'")
+
+
 def parse_command(body):
     first = (body or "").strip().split("\n", 1)[0].strip()
     parts = first.split(None, 1)
     if not parts or parts[0] not in COMMANDS:
         return None, ""
     return parts[0], (parts[1].strip() if len(parts) > 1 else "")
+
+
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def verified_sha(body):
+    """The SHA of a well-formed `/verified <40-hex sha>` first line, else "". A short prefix is
+    refused: a pushed commit with the same short prefix is cheap to make."""
+    cmd, arg = parse_command(body)
+    parts = arg.split()
+    if cmd != "/verified" or len(parts) != 1 or not FULL_SHA.fullmatch(parts[0]):
+        return ""
+    return parts[0]
 
 
 def _act(issue, add=(), remove=(), comment=""):
@@ -53,7 +74,7 @@ def claim_problem(task, tasks, cfg, actor):
             continue
         hit = sets_overlap(task["files"], other["files"])
         if hit:
-            return "file overlap with claimed task #%d (`%s` vs `%s`)." % (other["number"], hit[0], hit[1])
+            return "file overlap with claimed task #%d (`%s` vs `%s`)." % (other["number"], quote(hit[0]), quote(hit[1]))
     return ""
 
 
@@ -96,7 +117,7 @@ def decide(event, state, cfg):
         if not target:
             return _reply(n, "Usage: /reassign <login>")
         if not cfgmod.may_work_on(cfg, target, task["area"]):
-            return _reply(n, "Reassign refused: %s is not allowed to work on area:%s." % (target, task["area"]))
+            return _reply(n, "Reassign refused: %s is not allowed to work on area:%s." % (quote(target), task["area"]))
         if not (set(task["labels"]) & {"agent:claimed", "agent:ready"}):
             return _reply(n, "Reassign refused: the task is neither ready nor claimed.")
         remove = ["agent:ready"] + (["claimed-by:" + holder] if holder else [])
@@ -115,7 +136,7 @@ def decide(event, state, cfg):
             return _reply(n, "Only the holder or a maintainer can mark a task blocked.")
         if not arg:
             return _reply(n, "Usage: /blocked <reason>")
-        return [_act(n, ["agent:blocked"], [], "Blocked by %s: %s" % (actor, arg))]
+        return [_act(n, ["agent:blocked"], [], "Blocked by %s: %s" % (actor, quote(arg)))]
 
     if cmd == "/unblock":
         if actor != holder and not maint:
@@ -138,7 +159,7 @@ def _verified(event, state, cfg, arg):
     if event.get("kind") != "pr":
         return []
     pr = state.get("pr") or {}
-    sha = arg.split()[0] if arg else ""
+    sha = verified_sha(event.get("body"))
     head = pr.get("head_sha", "")
     if actor == pr.get("author"):
         return _reply(n, "Verification refused: the pull request author cannot verify it.")
@@ -148,8 +169,8 @@ def _verified(event, state, cfg, arg):
             return _reply(n, "Verification refused: %s holds the linked task #%d." % (actor, issue))
     if not cfgmod.is_verifier(cfg, actor):
         return _reply(n, "%s may not verify: only maintainers and qa contributors can." % actor)
-    if len(sha) < 7 or not head.startswith(sha):
-        return _reply(n, "Verification refused: `%s` is not the current head %s." % (sha or "(none)", head[:12]))
+    if not sha or sha != head:
+        return _reply(n, "Verification refused: `%s` is not the full current head %s." % (quote(sha) or "(none)", head))
     # Only an accepted verification of the current head re-runs the pull request check.
     return [dict(_act(n, comment="Verification of %s recorded for %s." % (head[:12], actor)), rerun_check=True)]
 

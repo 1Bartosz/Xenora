@@ -52,7 +52,9 @@ done
    GitHub keeps at most one waiting run in a concurrency group and cancels it when a newer one
    queues, so each run decides every command of the last `lease_hours` that has no bot reply yet,
    oldest first; a comment listed twice is decided once. A command whose own run was cancelled is answered by the run that replaced it, or at
-   the latest by the hourly audit. Each reply carries a marker naming the comment it answers.
+   the latest by the hourly audit. Each reply carries a marker naming the comment it answers. A
+   command left unanswered for more than `lease_hours` (the workflow did not run) gets a "Not
+   decided" reply instead and must be posted again; one older than twice that is no longer read.
 4. `scripts/agent-queue.sh start <n>` creates branch `task/<n>-<slug>` from `upstream/main` in a
    separate worktree `../xenora-task-<n>` (`--here` uses the current clean checkout instead).
 5. Keep the lease alive with `scripts/agent-queue.sh progress <n> "what changed"`. A claim lapses
@@ -60,13 +62,13 @@ done
    linked pull request. Other people's comments never renew it. A lapsed task returns to the queue.
 6. Open the pull request with `Closes #<n>` and a DCO sign-off (`git commit -s`).
 7. A different person (not the author, not the task holder) who is a maintainer or has `qa`
-   comments `/verified <head sha>` after running the acceptance command. A new push changes the
+   comments `/verified <full 40-character head sha>` after running the acceptance command. A new push changes the
    head and invalidates the verification.
 
 ## Commands (issue comments)
 
 A command must start the comment. Comments that do not start with `/` (on an issue) or with
-`/verified` (on a pull request) start no workflow run.
+`/verified` (on a pull request) start no job: GitHub records a skipped run and nothing else happens.
 
 | Command | Who | Effect |
 | --- | --- | --- |
@@ -76,7 +78,7 @@ A command must start the comment. Comments that do not start with `/` (on an iss
 | `/progress <text>` | holder | Renew the lease (text required) |
 | `/blocked <reason>`, `/unblock` | holder or maintainer | Set or clear `agent:blocked` |
 | `/approve-acceptance` | maintainer | Authorise the acceptance command as currently written |
-| `/verified <sha>` (on a pull request) | maintainer or `qa`, not author, not holder | Independent verification of the current head |
+| `/verified <40-character sha>` (on a pull request) | maintainer or `qa`, not author, not holder | Independent verification of the current head |
 
 Labels: `area:<x>`, `priority:<critical|high|medium|low>`, `agent:ready|claimed|blocked|invalid|conflict`,
 `claimed-by:<login>`. An hourly audit lapses stale claims, marks tasks with missing dependencies or
@@ -89,9 +91,12 @@ machine-readable summary (counts and lists per area, priority and state).
 `agent-pr-checks` fails a pull request when: it has no `Closes #N` for a claimed task; the task is held
 by someone else; it changes files outside the task's patterns; it changes a file that another open
 pull request also changes; the claim has lapsed without a push; or no eligible `/verified <current
-head sha>` exists. After an accepted `/verified` (an eligible verifier, the current head) the check is re-run
-automatically. Refused, stale, malformed or unauthorized `/verified` comments get a reply and
-nothing else, and other pull request comments start no run.
+head sha>` exists. The SHA must be the full 40 characters and the only argument: a commit with the
+same short prefix is cheap to make. After an accepted `/verified` (an eligible verifier, the current
+head) the verify job evaluates the same check again and writes it to its run summary; the earlier
+check run is not re-run, since `pull_request_target` runs are recorded against the base branch and
+cannot be found by the pull request head. Refused, stale, malformed or unauthorized `/verified`
+comments get a reply and nothing else, and other pull request comments start no job.
 
 The check is advisory for now: a failure is shown as a warning and in the run summary, and the job
 still succeeds. It becomes blocking (fail on problems, then a required check) only after a live smoke
@@ -120,6 +125,7 @@ sync report that shows upstream touching your files is the signal to re-read the
   one only when a maintainer's `/approve-acceptance` marker (posted by the bot) matches a hash of
   the current text; editing the issue body invalidates the approval. Read the command before running it.
 - Markers (grant, approval, answered command) count only when posted by the Actions bot, so they cannot be forged in a comment.
+  User text that a bot reply echoes (a `/blocked` reason, a login, a file pattern) has its angle brackets and backticks escaped, so a reply cannot carry a marker the user wrote.
 - Workflows declare empty top-level permissions and grant each job only what it needs; actions are
   pinned by commit SHA. Pull request checks run on the base branch (`pull_request_target`), never
   check out or run pull request code and read changed files through the API.

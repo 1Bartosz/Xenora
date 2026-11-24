@@ -89,9 +89,12 @@ class Workflows(unittest.TestCase):
 
     def test_rerun_needs_an_accepted_verification(self):
         text = self.job("agent-pr-checks.yml", "verify")
-        gate = text.index("agent_queue should-rerun")
-        self.assertLess(gate, text.index("gh run rerun"))
         self.assertIn('if ! python3 -m agent_queue should-rerun --actions "$RUNNER_TEMP/actions.json"; then exit 0; fi', text)
+        self.assertLess(text.index("agent_queue should-rerun"), text.index("agent_queue pr-check"))
+        # The check is evaluated in this job: pull_request_target runs cannot be found by head SHA.
+        self.assertNotIn("gh run", text)
+        self.assertNotIn("actions: write", text)
+        self.assertIn("::warning title=Agent PR check (advisory)::", text)
 
     def test_should_rerun_exit_codes(self):
         with tempfile.TemporaryDirectory() as d:

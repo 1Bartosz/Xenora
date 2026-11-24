@@ -136,8 +136,16 @@ class Replay(unittest.TestCase):
             cmd(1, "gpuer", "looks good to me", 1),
             cmd(2, "gpuer", "/claim", 1, pr=True),
             cmd(3, "maint", "/verified abcdef1", 1),
-            cmd(4, "gpuer", "/claim", 1, "2026-01-09T11:00:00Z"),  # older than lease_hours
         ]), [])
+
+    def test_commands_older_than_the_lease_are_answered_as_expired(self):
+        actions = self.run_replay([cmd(4, "gpuer", "/claim", 1, "2026-01-09T11:00:00Z"),
+                                   cmd(5, "gpuer", "just a remark", 1, "2026-01-09T11:00:00Z")])
+        self.assertEqual(len(actions), 1)
+        self.assertEqual((actions[0]["issue"], actions[0]["add_labels"]), (1, []))
+        self.assertIn("Not decided", actions[0]["comment"])
+        self.assertIn(R.done_marker(4), actions[0]["comment"])
+        self.assertEqual(R.window_hours(CFG), 48)
 
     def test_state_is_not_modified(self):
         st = queue_state([cmd(1, "gpuer", "/claim", 1)])

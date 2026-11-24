@@ -11,7 +11,7 @@ import re
 from datetime import timedelta
 
 from . import lease as L
-from .decide import decide
+from .decide import decide, parse_command
 from .tasks import label_names, parse_time
 
 DONE = re.compile(r"<!-- agent-queue:done comment=(\d+) -->")
@@ -34,18 +34,29 @@ def _apply(state, action):
             i["labels"] = [{"name": n} for n in names]
 
 
+def window_hours(cfg):
+    """How far back `gather --recent-commands` reads: one lease to decide, one more to expire."""
+    return 2 * cfg["lease_hours"]
+
+
 def replay(state, cfg, now, bots=L.BOT):
-    """Actions for every unanswered command in state["recent_comments"] created within the lease."""
+    """Actions for every unanswered command in state["recent_comments"]: decided if created within
+    the lease, else answered as expired so that no request goes silently unanswered."""
     state = copy.deepcopy(state)
     since = now - timedelta(hours=cfg["lease_hours"])
     comments = state.get("recent_comments", [])
     done = answered(comments, bots)
     out = []
     for c in sorted(comments, key=lambda c: (parse_time(c["created_at"]), c["id"])):
-        if (c.get("pull_request") or c["id"] in done or c["user"] in bots
-                or parse_time(c["created_at"]) < since):
+        if c.get("pull_request") or c["id"] in done or c["user"] in bots:
             continue
         done.add(c["id"])  # a comment listed twice is decided once
+        if parse_time(c["created_at"]) < since:
+            if parse_command(c["body"])[0]:
+                out.append({"issue": c["issue"], "add_labels": [], "remove_labels": [], "comment":
+                            "Not decided: no queue run answered this command within %s hours. Post it again if it still applies.\n%s"
+                            % (cfg["lease_hours"], done_marker(c["id"]))})
+            continue
         actions = decide({"kind": "issue", "number": c["issue"], "actor": c["user"], "body": c["body"]}, state, cfg)
         if not actions:
             continue

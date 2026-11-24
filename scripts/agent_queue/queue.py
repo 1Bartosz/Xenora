@@ -3,7 +3,7 @@
 from . import config as cfgmod
 from . import lease as L
 from . import tasks as T
-from .decide import task_index
+from .decide import quote, task_index
 from .patterns import sets_overlap
 
 
@@ -50,7 +50,7 @@ def audit(state, cfg, now):
                 for x, y in ((a, b), (b, a)):
                     if "agent:conflict" not in x["labels"] and x["number"] not in lapsed_nums:
                         actions.append({"issue": x["number"], "add_labels": ["agent:conflict"], "remove_labels": [],
-                                        "comment": "File overlap with claimed task #%d (`%s` vs `%s`). A maintainer must resolve it." % (y["number"], hit[0], hit[1])})
+                                        "comment": "File overlap with claimed task #%d (`%s` vs `%s`). A maintainer must resolve it." % (y["number"], quote(hit[0]), quote(hit[1]))})
     for t in sorted(tasks.values(), key=lambda x: x["number"]):
         if t["state"] != "OPEN" or "agent:ready" not in t["labels"]:
             continue

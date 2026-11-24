@@ -24,6 +24,8 @@ def _lines(text):
     res = []
     for line in text.splitlines():
         line = line.strip()
+        if line.startswith("```"):
+            continue  # issue forms wrap `render:` fields in a code fence
         if line.startswith(("- ", "* ")):
             line = line[2:].strip()
         line = line.strip("`").strip()
