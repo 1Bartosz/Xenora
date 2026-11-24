@@ -391,9 +391,12 @@ def load_registry(path=REGISTRY):
         raise RegistryError(f"{path.name}: a family file is included twice")
     rules = registry.setdefault("operand_rules", {})
     forms = registry.setdefault("form", [])
-    directory = (path.parent / path.stem).resolve()
     if (path.parent / path.stem).is_symlink():
         raise RegistryError(f"{path.name}: the family directory {path.stem}/ is a link")
+    try:
+        directory = (path.parent / path.stem).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise RegistryError(f"{path.name}: the family directory {path.stem}/ cannot be read: {error}")
     identities = set()
     for include in includes:
         part_path = path.parent / include
@@ -526,9 +529,7 @@ def _check_xml(form, rule, snapshot, errors):
         errors.append(f"{label}: scc {form['scc']} contradicts the XML SCC output")
     if rule is None:
         return
-    if not isinstance(rule.get("src"), list) or not all(
-        isinstance(src, dict) and isinstance(src.get("field"), str) for src in rule["src"]
-    ) or ("dst" in rule and not (isinstance(rule["dst"], dict) and "field" in rule["dst"])):
+    if not _well_formed(rule):
         return  # the rule check already reported the malformed shape
     fields = [(rule["dst"]["field"], False)] if "dst" in rule else []
     fields += [(src["field"], True) for src in rule["src"]]
