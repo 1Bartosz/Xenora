@@ -1,8 +1,8 @@
 //! Ties the generated semantic registry tables to the independent XML metadata table.
 
 use xenora_isa::meta::{EncodingFamily, FORMS as META_FORMS};
-use xenora_isa::semantics::{CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, SCHEMA};
-use xenora_isa::{ScalarAluOp, ScalarCompareOp};
+use xenora_isa::semantics::{CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, SCHEMA, SccEffect};
+use xenora_isa::{ScalarAluOp, ScalarCompareOp, ScalarUnaryOp};
 
 #[test]
 fn generated_tables_match_the_schema_and_the_metadata_forms() {
@@ -69,5 +69,19 @@ fn scalar_compare_dispatch_selects_exactly_the_registry_sopc_forms() {
     }
     dispatch_selects_exactly(EncodingFamily::Sopc, |word| {
         ScalarCompareOp::from_word(word).map(|op| op.semantics().name)
+    });
+}
+
+#[test]
+fn scalar_unary_dispatch_selects_exactly_the_registry_sop1_forms() {
+    for op in ScalarUnaryOp::ALL {
+        let row = op.semantics();
+        assert_eq!(row.family, EncodingFamily::Sop1);
+        assert_eq!(row.name.to_ascii_lowercase(), op.mnemonic());
+        assert_eq!(op.writes_scc(), row.scc != SccEffect::Unchanged);
+    }
+    // s_mov_b32 (opcode 3) stays hand-written, so it must not be dispatched here.
+    dispatch_selects_exactly(EncodingFamily::Sop1, |word| {
+        ScalarUnaryOp::from_word(word).map(|op| op.semantics().name)
     });
 }

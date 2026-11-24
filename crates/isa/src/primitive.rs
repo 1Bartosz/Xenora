@@ -148,3 +148,69 @@ pub const fn lt_u32(a: u32, b: u32) -> bool {
 pub const fn le_u32(a: u32, b: u32) -> bool {
     a <= b
 }
+
+/// `!a` and whether the result is nonzero.
+pub const fn not_nonzero_b32(a: u32) -> (u32, bool) {
+    let value = !a;
+    (value, value != 0)
+}
+
+/// `a` with bit `i` moved to bit `31 - i`.
+pub const fn brev_b32(a: u32) -> u32 {
+    a.reverse_bits()
+}
+
+/// Number of zero bits and whether that count is nonzero.
+pub const fn bcnt0_nonzero_b32(a: u32) -> (u32, bool) {
+    let value = a.count_zeros();
+    (value, value != 0)
+}
+
+/// Number of one bits and whether that count is nonzero.
+pub const fn bcnt1_nonzero_b32(a: u32) -> (u32, bool) {
+    let value = a.count_ones();
+    (value, value != 0)
+}
+
+/// Index of the lowest zero bit, or `0xffffffff` (-1) when every bit is one.
+pub const fn ff0_b32(a: u32) -> u32 {
+    if a == u32::MAX {
+        u32::MAX
+    } else {
+        a.trailing_ones()
+    }
+}
+
+/// Index of the lowest one bit, or `0xffffffff` (-1) when every bit is zero.
+pub const fn ff1_b32(a: u32) -> u32 {
+    if a == 0 { u32::MAX } else { a.trailing_zeros() }
+}
+
+/// Zeros above the highest one bit, or `0xffffffff` (-1) when `a` is zero.
+pub const fn flbit_b32(a: u32) -> u32 {
+    if a == 0 { u32::MAX } else { a.leading_zeros() }
+}
+
+/// Bits above the highest bit that differs from the sign bit, or `0xffffffff`
+/// (-1) when every bit equals the sign bit (`a` is 0 or -1).
+pub const fn flbit_i32(a: u32) -> u32 {
+    let differing = if a >> 31 == 0 { a } else { !a };
+    if differing == 0 {
+        u32::MAX
+    } else {
+        differing.leading_zeros()
+    }
+}
+
+/// The low `bits` of `a` sign-extended to 32 bits; `bits` is 8 or 16.
+pub const fn sext_i32(a: u32, bits: u32) -> u32 {
+    let shift = 32 - bits;
+    (((a << shift) as i32) >> shift) as u32
+}
+
+/// Two's-complement absolute value (wrapping, so `0x80000000` stays) and
+/// whether the result is nonzero.
+pub const fn abs_nonzero_i32(a: u32) -> (u32, bool) {
+    let value = (a as i32).wrapping_abs() as u32;
+    (value, value != 0)
+}

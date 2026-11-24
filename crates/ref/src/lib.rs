@@ -51,6 +51,8 @@ pub enum Op {
     Move(u8, Source),
     Add(u8, u8, u8),
     ScalarMove(u8, Source),
+    /// SOP1 unary operation writing an SGPR (s0-s105), and SCC for some.
+    ScalarUnary(ScalarUnary, u8, Source),
     /// VOP1 move of a normal SGPR or `vcc_lo` (106) into a VGPR.
     MoveScalar(u8, u8),
     /// VOPC 32-bit integer compare writing the Wave32 mask to `vcc_lo`.
@@ -162,6 +164,34 @@ pub enum ScalarAlu {
     ShiftRight,
     /// D = signext(S0) >> S1[4:0], SCC = (D != 0).
     ArithmeticShiftRight,
+}
+
+/// SOP1 unary operations decoded by the reference interpreter (RDNA 2 ISA
+/// guide 12.3; SCC per Tables 12 and 14).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScalarUnary {
+    /// D = ~S0, SCC = (D != 0).
+    Not,
+    /// D[31:0] = S0[0:31].
+    ReverseBits,
+    /// D = number of zero bits, SCC = (D != 0).
+    CountZeros,
+    /// D = number of one bits, SCC = (D != 0).
+    CountOnes,
+    /// D = index of the lowest zero bit, or -1.
+    FindFirstZero,
+    /// D = index of the lowest one bit, or -1.
+    FindFirstOne,
+    /// D = number of zeros above the highest one bit, or -1 for 0.
+    FindLastBit,
+    /// D = number of leading bits equal to the sign bit, or -1 for 0 and -1.
+    FindLastSignBit,
+    /// D = signext(S0[7:0]).
+    SignExtendByte,
+    /// D = signext(S0[15:0]).
+    SignExtendShort,
+    /// D = |S0| (0x80000000 stays), SCC = (D != 0).
+    Absolute,
 }
 
 /// VOP2 operations decoded by the reference interpreter.
@@ -296,6 +326,31 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
             ] => {
                 let (source, length) = decode_scalar(*source, tail, offset)?;
                 (Op::ScalarMove(destination & 0x7f, source), length)
+            }
+            // SOP1: ENCODING 0b10_1111101 in bits 23-31, SDST in 16-22 (s0-s105
+            // only), OP in 8-15.
+            [
+                source,
+                op @ (7 | 11 | 13 | 15 | 17 | 19 | 21 | 23 | 25 | 26 | 52),
+                destination @ 0x80..=0xe9,
+                0xbe,
+                tail @ ..,
+            ] => {
+                let kind = match op {
+                    7 => ScalarUnary::Not,
+                    11 => ScalarUnary::ReverseBits,
+                    13 => ScalarUnary::CountZeros,
+                    15 => ScalarUnary::CountOnes,
+                    17 => ScalarUnary::FindFirstZero,
+                    19 => ScalarUnary::FindFirstOne,
+                    21 => ScalarUnary::FindLastBit,
+                    23 => ScalarUnary::FindLastSignBit,
+                    25 => ScalarUnary::SignExtendByte,
+                    26 => ScalarUnary::SignExtendShort,
+                    _ => ScalarUnary::Absolute,
+                };
+                let (source, length) = decode_scalar(*source, tail, offset)?;
+                (Op::ScalarUnary(kind, destination & 0x7f, source), length)
             }
             // SOPC: ENCODING 0b10_1111110 in bits 23-31, OP in 16-22 (guide
             // 13.1.4); 0-5 signed and 6-11 unsigned EQ, LG, GT, GE, LT, LE.
@@ -693,6 +748,44 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                     lane_derived_vcc = false;
                 }
                 scalars[usize::from(dst)] = Some(value);
+            }
+            Op::ScalarUnary(kind, dst, src) => {
+                if dst < 8 {
+                    return Err(error(offset, "write to a reserved resource SGPR"));
+                }
+                let value = read_scalar(src)?;
+                // -1 (all ones) when no bit is found.
+                let found = |index: u32| if index == 32 { u32::MAX } else { index };
+                let result = match kind {
+                    ScalarUnary::Not => !value,
+                    ScalarUnary::ReverseBits => value.reverse_bits(),
+                    ScalarUnary::CountZeros => value.count_zeros(),
+                    ScalarUnary::CountOnes => value.count_ones(),
+                    ScalarUnary::FindFirstZero => found(value.trailing_ones()),
+                    ScalarUnary::FindFirstOne => found(value.trailing_zeros()),
+                    ScalarUnary::FindLastBit => found(value.leading_zeros()),
+                    ScalarUnary::FindLastSignBit => {
+                        let same = if value >> 31 == 1 {
+                            value.leading_ones()
+                        } else {
+                            value.leading_zeros()
+                        };
+                        found(same)
+                    }
+                    ScalarUnary::SignExtendByte => value as u8 as i8 as i32 as u32,
+                    ScalarUnary::SignExtendShort => value as u16 as i16 as i32 as u32,
+                    ScalarUnary::Absolute => (value as i32).wrapping_abs() as u32,
+                };
+                scalars[usize::from(dst)] = Some(result);
+                if matches!(
+                    kind,
+                    ScalarUnary::Not
+                        | ScalarUnary::CountZeros
+                        | ScalarUnary::CountOnes
+                        | ScalarUnary::Absolute
+                ) {
+                    scc = Some(result != 0);
+                }
             }
             Op::CompareEqual(lhs, rhs) => {
                 scc = Some(read_scalar(lhs)? == read_scalar(rhs)?);

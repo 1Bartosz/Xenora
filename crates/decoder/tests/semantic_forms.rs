@@ -49,3 +49,11 @@ fn declared_semantic_forms_are_exactly_those_decoded_from_fixtures() {
         );
     }
 }
+
+#[test]
+fn registry_forms_do_not_duplicate_hand_written_forms() {
+    // A form declared in the semantic registry and also decoded by hand-written
+    // code would have two implementations; the hand-written one would win.
+    let unique: BTreeSet<_> = SEMANTIC_FORMS.into_iter().collect();
+    assert_eq!(unique.len(), SEMANTIC_FORMS.len());
+}

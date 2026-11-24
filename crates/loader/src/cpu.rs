@@ -6,7 +6,6 @@
 //! Never executes guest x86-64 code natively on host ARM64.
 
 use crate::memory::{GuestMemory, MemoryError};
-use crate::x86_decode::MAX_INSTRUCTION_LEN;
 use std::fmt;
 
 /// 64-bit General Purpose Register identifiers in x86-64.
@@ -52,6 +51,25 @@ impl Register {
             _ => unreachable!(),
         }
     }
+}
+
+/// Instruction prefixes decoded ahead of an opcode.
+///
+/// The interpreter decodes these once per instruction and passes them to the
+/// helpers that need them, so prefix state travels as one typed value instead
+/// of a list of independent booleans.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Prefixes {
+    /// REX.W: 64-bit operand size.
+    rex_w: bool,
+    /// REX.R: extends the ModRM `reg` field to R8-R15.
+    rex_r: bool,
+    /// REX.B: extends the ModRM `rm` field to R8-R15.
+    rex_b: bool,
+    /// The GS segment override prefix (0x65) is present.
+    seg_gs: bool,
+    /// The FS segment override prefix (0x64) is present.
+    seg_fs: bool,
 }
 
 /// RFLAGS status bits tracked during guest execution.
@@ -151,6 +169,167 @@ mod layout_tests {
         }
         assert_eq!(base + 16 * 8, std::ptr::addr_of!(cpu.rip) as usize);
         assert_eq!(base + 16 * 8 + 8, std::ptr::addr_of!(cpu.flags) as usize);
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::{CpuState, ExitReason, Interpreter, Register};
+    use crate::memory::{GuestMemory, MemoryPermissions};
+
+    const CODE_BASE: u64 = 0x1000;
+    const CODE_SIZE: usize = 0x1000;
+    const STACK_BASE: u64 = 0x8000_0000;
+    const STACK_SIZE: usize = 0x10000;
+    const FS_BASE: u64 = 0x9000;
+    const GS_BASE: u64 = 0xA000;
+
+    /// A guest memory image with executable code, a stack and distinct FS and
+    /// GS bases.
+    fn memory_with_code(code: &[u8]) -> GuestMemory {
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region_with_data(
+                CODE_BASE,
+                CODE_SIZE,
+                MemoryPermissions::READ_WRITE_EXECUTE,
+                code,
+            )
+            .expect("code region");
+        memory
+            .map_region(STACK_BASE, STACK_SIZE, MemoryPermissions::READ_WRITE)
+            .expect("stack region");
+        // The segment bases are distinct so a swapped prefix is visible.
+        memory
+            .map_region(FS_BASE, 0x1000, MemoryPermissions::READ_WRITE)
+            .expect("fs region");
+        memory
+            .map_region(GS_BASE, 0x1000, MemoryPermissions::READ_WRITE)
+            .expect("gs region");
+        memory
+    }
+
+    /// Run `code` on the interpreter and return the final state and exit reason.
+    fn run(code: &[u8]) -> (CpuState, ExitReason) {
+        let mut memory = memory_with_code(code);
+        let cpu = CpuState::new(CODE_BASE, STACK_BASE + 0x8000);
+        let mut interp = Interpreter::new(cpu, &mut memory, 64);
+        let result = interp.run();
+        (result.final_state, result.exit_reason)
+    }
+
+    /// `mov r8, imm64`: 49 B8 <imm64>.
+    fn mov_r8_imm64(value: u64) -> Vec<u8> {
+        let mut code = vec![0x49, 0xB8];
+        code.extend_from_slice(&value.to_le_bytes());
+        code
+    }
+
+    /// `mov rbx, imm64`: 48 BB <imm64>.
+    fn mov_rbx_imm64(value: u64) -> Vec<u8> {
+        let mut code = vec![0x48, 0xBB];
+        code.extend_from_slice(&value.to_le_bytes());
+        code
+    }
+
+    /// `mov rax, imm64`: 48 B8 <imm64>.
+    fn mov_rax_imm64(value: u64) -> Vec<u8> {
+        let mut code = vec![0x48, 0xB8];
+        code.extend_from_slice(&value.to_le_bytes());
+        code
+    }
+
+    /// REX.B extends the ModRM `rm` field, so `rm=0` selects r8.
+    ///
+    /// Encoding 49 89 D8 is `mov r8, rbx`.
+    #[test]
+    fn rex_b_extends_the_rm_field_to_r8() {
+        let mut code = mov_rbx_imm64(0x1122_3344_5566_7788);
+        code.extend_from_slice(&[0x49, 0x89, 0xD8]); // mov r8, rbx
+        code.push(0xF4); // hlt
+
+        let (state, reason) = run(&code);
+        assert_eq!(reason, ExitReason::Halt);
+        assert_eq!(state.get(Register::Rbx), 0x1122_3344_5566_7788);
+        assert_eq!(state.get(Register::R8), 0x1122_3344_5566_7788);
+        // No prefix in this encoding selects r9.
+        assert_eq!(state.get(Register::R9), 0);
+    }
+
+    /// REX.R extends the ModRM `reg` field, so `reg=0` selects r8.
+    ///
+    /// Encoding 4C 89 C3 is `mov rbx, r8`.
+    #[test]
+    fn rex_r_extends_the_reg_field_to_r8() {
+        let mut code = mov_r8_imm64(0x1122_3344_5566_7788);
+        code.extend_from_slice(&[0x4C, 0x89, 0xC3]); // mov rbx, r8
+        code.push(0xF4); // hlt
+
+        let (state, reason) = run(&code);
+        assert_eq!(reason, ExitReason::Halt);
+        assert_eq!(state.get(Register::R8), 0x1122_3344_5566_7788);
+        assert_eq!(state.get(Register::Rbx), 0x1122_3344_5566_7788);
+        // No prefix in this encoding selects r9.
+        assert_eq!(state.get(Register::R9), 0);
+    }
+
+    /// REX.R and REX.B extend independent fields, so the destination r9 and
+    /// the source r12 are chosen by different prefix bits.
+    ///
+    /// Encoding 4D 89 E1 is `mov r9, r12`.
+    #[test]
+    fn rex_r_and_rex_b_extend_independent_fields() {
+        let mut code = mov_r8_imm64(0x1122_3344_5566_7788);
+        code.extend_from_slice(&[0x4D, 0x89, 0xE1]); // mov r9, r12
+        code.push(0xF4); // hlt
+
+        let (state, reason) = run(&code);
+        assert_eq!(reason, ExitReason::Halt);
+        // r9 receives r12, which is zero here, and not the value in r8.
+        assert_eq!(state.get(Register::R9), 0);
+        assert_eq!(state.get(Register::R12), 0);
+        assert_eq!(state.get(Register::R8), 0x1122_3344_5566_7788);
+    }
+
+    /// Without REX.W the move is 32-bit wide, so the destination keeps only the
+    /// low half of the source and its upper half is cleared.
+    ///
+    /// Encoding 89 D8 is `mov eax, ebx`.
+    #[test]
+    fn a_move_without_rex_w_is_32_bit_wide() {
+        let mut code = mov_rbx_imm64(0x1122_3344_5566_7788);
+        code.extend_from_slice(&[0x89, 0xD8]); // mov eax, ebx
+        code.push(0xF4); // hlt
+
+        let (state, reason) = run(&code);
+        assert_eq!(reason, ExitReason::Halt);
+        // Only the low 32 bits of ebx survive, and rax's upper half is cleared.
+        assert_eq!(state.get(Register::Rax), 0x5566_7788);
+        assert_eq!(state.get(Register::Rbx), 0x1122_3344_5566_7788);
+    }
+
+    /// The FS segment override adds the FS base to the effective address.
+    ///
+    /// Encoding 64 48 89 04 25 08 00 00 00 is `mov fs:[0x8], rax`.
+    #[test]
+    fn the_fs_prefix_adds_the_fs_base() {
+        let mut code = mov_rax_imm64(0x1122_3344_5566_7788);
+        code.extend_from_slice(&[0x64, 0x48, 0x89, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00]);
+        code.push(0xF4); // hlt
+
+        let mut memory = memory_with_code(&code);
+        let mut cpu = CpuState::new(CODE_BASE, STACK_BASE + 0x8000);
+        cpu.fs_base = FS_BASE;
+        cpu.gs_base = GS_BASE;
+        let mut interp = Interpreter::new(cpu, &mut memory, 64);
+        let result = interp.run();
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        assert_eq!(
+            memory.read_u64(FS_BASE + 0x8).expect("fs read"),
+            0x1122_3344_5566_7788
+        );
+        // The GS base is untouched: the GS-prefixed store did not happen.
+        assert_eq!(memory.read_u64(GS_BASE + 0x8).expect("gs read"), 0);
     }
 }
 
@@ -256,39 +435,25 @@ impl<'a> Interpreter<'a> {
     }
 
     fn execute_instruction(&mut self) -> Result<Option<ExitReason>, ExitReason> {
-        let mut rex_w = false;
-        let mut rex_r = false;
-        let mut rex_b = false;
-        let mut seg_gs = false;
-        let mut seg_fs = false;
+        let mut prefixes = Prefixes::default();
 
         let mut byte = self.fetch_u8()?;
-        let mut insn_len = 1usize; // first opcode byte already fetched
 
-        // Handle legacy segment prefixes: 0x65 (GS), 0x64 (FS). The run is
-        // bounded by the architectural instruction-length limit so an overlong
-        // prefix run is reported as an illegal instruction.
+        // Handle legacy segment prefixes: 0x65 (GS), 0x64 (FS)
         while byte == 0x65 || byte == 0x64 {
-            if insn_len >= MAX_INSTRUCTION_LEN {
-                return Err(ExitReason::IllegalInstruction(byte));
-            }
             if byte == 0x65 {
-                seg_gs = true;
+                prefixes.seg_gs = true;
             } else {
-                seg_fs = true;
+                prefixes.seg_fs = true;
             }
             byte = self.fetch_u8()?;
-            insn_len += 1;
         }
 
         // Handle REX prefix (0x40 - 0x4F)
         if (byte & 0xF0) == 0x40 {
-            if insn_len >= MAX_INSTRUCTION_LEN {
-                return Err(ExitReason::IllegalInstruction(byte));
-            }
-            rex_w = (byte & 0x08) != 0;
-            rex_r = (byte & 0x04) != 0;
-            rex_b = (byte & 0x01) != 0;
+            prefixes.rex_w = (byte & 0x08) != 0;
+            prefixes.rex_r = (byte & 0x04) != 0;
+            prefixes.rex_b = (byte & 0x01) != 0;
             byte = self.fetch_u8()?;
         }
 
@@ -299,9 +464,9 @@ impl<'a> Interpreter<'a> {
             0x0F => match self.fetch_u8()? {
                 0x05 => Ok(Some(ExitReason::Syscall(self.cpu.get(Register::Rax)))),
                 op @ 0xC8..=0xCF => {
-                    let reg = Register::from_index((op & 7) | (u8::from(rex_b) << 3));
+                    let reg = Register::from_index((op & 7) | (u8::from(prefixes.rex_b) << 3));
                     let value = self.cpu.get(reg);
-                    let reversed = if rex_w {
+                    let reversed = if prefixes.rex_w {
                         value.swap_bytes()
                     } else {
                         u64::from((value as u32).swap_bytes())
@@ -314,9 +479,9 @@ impl<'a> Interpreter<'a> {
 
             // MOV r32, imm32 (0xB8 + reg) or MOV r64, imm64 with REX.W
             0xB8..=0xBF => {
-                let reg_idx = (byte - 0xB8) + if rex_b { 8 } else { 0 };
+                let reg_idx = (byte - 0xB8) + if prefixes.rex_b { 8 } else { 0 };
                 let reg = Register::from_index(reg_idx);
-                if rex_w {
+                if prefixes.rex_w {
                     let imm = self.fetch_u64()?;
                     self.cpu.set(reg, imm);
                 } else {
@@ -329,28 +494,28 @@ impl<'a> Interpreter<'a> {
             // XOR r/m, reg (0x31) or XOR reg, r/m (0x33)
             0x31 | 0x33 => {
                 let modrm = self.fetch_u8()?;
-                let (reg, rm) = self.decode_modrm_reg_reg(modrm, rex_r, rex_b)?;
+                let (reg, rm) = self.decode_modrm_reg_reg(modrm, &prefixes)?;
                 let (src, dst) = if byte == 0x31 { (reg, rm) } else { (rm, reg) };
                 let val1 = self.cpu.get(dst);
                 let val2 = self.cpu.get(src);
-                let res = if rex_w {
+                let res = if prefixes.rex_w {
                     val1 ^ val2
                 } else {
                     (val1 as u32 ^ val2 as u32) as u64
                 };
                 self.cpu.set(dst, res);
-                self.update_flags_logic(res, rex_w);
+                self.update_flags_logic(res, prefixes.rex_w);
                 Ok(None)
             }
 
             // ADD r/m, reg (0x01) or ADD reg, r/m (0x03)
             0x01 | 0x03 => {
                 let modrm = self.fetch_u8()?;
-                let (reg, rm) = self.decode_modrm_reg_reg(modrm, rex_r, rex_b)?;
+                let (reg, rm) = self.decode_modrm_reg_reg(modrm, &prefixes)?;
                 let (src, dst) = if byte == 0x01 { (reg, rm) } else { (rm, reg) };
                 let val1 = self.cpu.get(dst);
                 let val2 = self.cpu.get(src);
-                let (res, flags) = if rex_w {
+                let (res, flags) = if prefixes.rex_w {
                     add64(val1, val2)
                 } else {
                     let (r, f) = add32(val1 as u32, val2 as u32);
@@ -364,11 +529,11 @@ impl<'a> Interpreter<'a> {
             // SUB r/m, reg (0x29) or SUB reg, r/m (0x2B)
             0x29 | 0x2B => {
                 let modrm = self.fetch_u8()?;
-                let (reg, rm) = self.decode_modrm_reg_reg(modrm, rex_r, rex_b)?;
+                let (reg, rm) = self.decode_modrm_reg_reg(modrm, &prefixes)?;
                 let (src, dst) = if byte == 0x29 { (reg, rm) } else { (rm, reg) };
                 let val1 = self.cpu.get(dst);
                 let val2 = self.cpu.get(src);
-                let (res, flags) = if rex_w {
+                let (res, flags) = if prefixes.rex_w {
                     sub64(val1, val2)
                 } else {
                     let (r, f) = sub32(val1 as u32, val2 as u32);
@@ -382,13 +547,13 @@ impl<'a> Interpreter<'a> {
             // CMP reg, r/m (0x3B) or CMP r/m, reg (0x39)
             0x39 | 0x3B => {
                 let modrm = self.fetch_u8()?;
-                let (reg, rm) = self.decode_modrm_reg_reg(modrm, rex_r, rex_b)?;
+                let (reg, rm) = self.decode_modrm_reg_reg(modrm, &prefixes)?;
                 let (v1, v2) = if byte == 0x39 {
                     (self.cpu.get(rm), self.cpu.get(reg))
                 } else {
                     (self.cpu.get(reg), self.cpu.get(rm))
                 };
-                let (_, flags) = if rex_w {
+                let (_, flags) = if prefixes.rex_w {
                     sub64(v1, v2)
                 } else {
                     let (r, f) = sub32(v1 as u32, v2 as u32);
@@ -402,7 +567,7 @@ impl<'a> Interpreter<'a> {
             0x83 => {
                 let modrm = self.fetch_u8()?;
                 let op = (modrm >> 3) & 7;
-                let (reg, rm) = self.decode_modrm_reg_reg(modrm, rex_r, rex_b)?;
+                let (reg, rm) = self.decode_modrm_reg_reg(modrm, &prefixes)?;
                 let imm8 = self.fetch_i8()? as i64;
                 let imm = imm8 as u64;
 
@@ -410,7 +575,7 @@ impl<'a> Interpreter<'a> {
                 match op {
                     0 => {
                         // ADD
-                        let (res, flags) = if rex_w {
+                        let (res, flags) = if prefixes.rex_w {
                             add64(val, imm)
                         } else {
                             let (r, f) = add32(val as u32, imm as u32);
@@ -421,7 +586,7 @@ impl<'a> Interpreter<'a> {
                     }
                     5 => {
                         // SUB
-                        let (res, flags) = if rex_w {
+                        let (res, flags) = if prefixes.rex_w {
                             sub64(val, imm)
                         } else {
                             let (r, f) = sub32(val as u32, imm as u32);
@@ -432,7 +597,7 @@ impl<'a> Interpreter<'a> {
                     }
                     7 => {
                         // CMP
-                        let (_, flags) = if rex_w {
+                        let (_, flags) = if prefixes.rex_w {
                             sub64(val, imm)
                         } else {
                             let (r, f) = sub32(val as u32, imm as u32);
@@ -449,7 +614,7 @@ impl<'a> Interpreter<'a> {
             // MOV r/m, reg (0x89) or MOV reg, r/m (0x8B)
             0x89 | 0x8B => {
                 let modrm = self.fetch_u8()?;
-                self.execute_mov_rm(modrm, rex_w, rex_r, rex_b, byte == 0x8B, seg_gs, seg_fs)
+                self.execute_mov_rm(modrm, &prefixes, byte == 0x8B)
             }
 
             // JMP rel8 (0xEB)
@@ -503,7 +668,7 @@ impl<'a> Interpreter<'a> {
 
             // PUSH reg (0x50..=0x57)
             0x50..=0x57 => {
-                let reg_idx = (byte - 0x50) + if rex_b { 8 } else { 0 };
+                let reg_idx = (byte - 0x50) + if prefixes.rex_b { 8 } else { 0 };
                 let reg = Register::from_index(reg_idx);
                 let val = self.cpu.get(reg);
                 self.push_u64(val)?;
@@ -512,7 +677,7 @@ impl<'a> Interpreter<'a> {
 
             // POP reg (0x58..=0x5F)
             0x58..=0x5F => {
-                let reg_idx = (byte - 0x58) + if rex_b { 8 } else { 0 };
+                let reg_idx = (byte - 0x58) + if prefixes.rex_b { 8 } else { 0 };
                 let reg = Register::from_index(reg_idx);
                 let val = self.pop_u64()?;
                 self.cpu.set(reg, val);
@@ -543,32 +708,26 @@ impl<'a> Interpreter<'a> {
     fn decode_modrm_reg_reg(
         &self,
         modrm: u8,
-        rex_r: bool,
-        rex_b: bool,
+        prefixes: &Prefixes,
     ) -> Result<(Register, Register), ExitReason> {
         let mode = (modrm >> 6) & 3;
         if mode != 3 {
             return Err(ExitReason::IllegalInstruction(modrm));
         }
-        let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-        let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+        let reg_idx = ((modrm >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 };
+        let rm_idx = (modrm & 7) + if prefixes.rex_b { 8 } else { 0 };
         Ok((Register::from_index(reg_idx), Register::from_index(rm_idx)))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn execute_mov_rm(
         &mut self,
         modrm: u8,
-        rex_w: bool,
-        rex_r: bool,
-        rex_b: bool,
+        prefixes: &Prefixes,
         is_load: bool,
-        seg_gs: bool,
-        seg_fs: bool,
     ) -> Result<Option<ExitReason>, ExitReason> {
         let mode = (modrm >> 6) & 3;
-        let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
-        let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+        let reg_idx = ((modrm >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 };
+        let rm_idx = (modrm & 7) + if prefixes.rex_b { 8 } else { 0 };
         let reg = Register::from_index(reg_idx);
 
         if mode == 3 {
@@ -576,12 +735,24 @@ impl<'a> Interpreter<'a> {
             let rm = Register::from_index(rm_idx);
             if is_load {
                 let val = self.cpu.get(rm);
-                self.cpu
-                    .set(reg, if rex_w { val } else { val as u32 as u64 });
+                self.cpu.set(
+                    reg,
+                    if prefixes.rex_w {
+                        val
+                    } else {
+                        val as u32 as u64
+                    },
+                );
             } else {
                 let val = self.cpu.get(reg);
-                self.cpu
-                    .set(rm, if rex_w { val } else { val as u32 as u64 });
+                self.cpu.set(
+                    rm,
+                    if prefixes.rex_w {
+                        val
+                    } else {
+                        val as u32 as u64
+                    },
+                );
             }
             return Ok(None);
         }
@@ -591,8 +762,8 @@ impl<'a> Interpreter<'a> {
             // SIB byte follows ModR/M
             let sib = self.fetch_u8()?;
             let scale_shift = (sib >> 6) & 3;
-            let index_raw = ((sib >> 3) & 7) + if rex_r { 8 } else { 0 }; // SIB.index can use REX.X; here index_raw
-            let base_raw = (sib & 7) + if rex_b { 8 } else { 0 };
+            let index_raw = ((sib >> 3) & 7) + if prefixes.rex_r { 8 } else { 0 }; // SIB.index can use REX.X; here index_raw
+            let base_raw = (sib & 7) + if prefixes.rex_b { 8 } else { 0 };
 
             let base_v = if mode == 0 && (sib & 7) == 5 {
                 // disp32 with no base register
@@ -648,15 +819,15 @@ impl<'a> Interpreter<'a> {
             (base_val as i64 + disp) as u64
         };
 
-        if seg_gs {
+        if prefixes.seg_gs {
             effective_addr = effective_addr.wrapping_add(self.cpu.gs_base);
-        } else if seg_fs {
+        } else if prefixes.seg_fs {
             effective_addr = effective_addr.wrapping_add(self.cpu.fs_base);
         }
 
         if is_load {
             // Load from memory to reg
-            if rex_w {
+            if prefixes.rex_w {
                 let val = self
                     .memory
                     .read_u64(effective_addr)
@@ -672,7 +843,7 @@ impl<'a> Interpreter<'a> {
         } else {
             // Store from reg to memory
             let val = self.cpu.get(reg);
-            if rex_w {
+            if prefixes.rex_w {
                 self.memory
                     .write_u64(effective_addr, val)
                     .map_err(ExitReason::MemoryFault)?;
