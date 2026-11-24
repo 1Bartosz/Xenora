@@ -58,6 +58,11 @@ from .cpu_inventory import (
     compact_inventory as compact_cpu_inventory,
     dumps_inventory as dumps_cpu_inventory,
 )
+from .runtime_inventory import (
+    build_runtime_inventory,
+    compact_runtime,
+    dumps_runtime,
+)
 from .stale_branch import classify_sync, format_sync_reports
 from .verify import dumps_evidence, evidence_is_stale, load_evidence, run_profile
 
@@ -130,6 +135,10 @@ def main(argv: list[str] | None = None) -> int:
     cinv.add_argument("--compact", action="store_true")
     cinv.add_argument("--forms", action="store_true", help="include expanded form records in JSON")
     cinv.add_argument("--out", default="", help="write JSON (prefer artifacts/)")
+
+    rinv = sub.add_parser("runtime-inventory", help="typed runtime services from services.txt")
+    rinv.add_argument("--compact", action="store_true")
+    rinv.add_argument("--out", default="")
 
     ver = sub.add_parser("verify", help="run a verification profile")
     ver.add_argument("profile", choices=("quick", "cpu", "gpu", "app", "full", "release"))
@@ -342,6 +351,18 @@ def main(argv: list[str] | None = None) -> int:
             print(compact_cpu_inventory(inv), end="")
         else:
             print(dumps_cpu_inventory(inv, include_forms=args.forms), end="")
+        return 0
+
+    if args.command == "runtime-inventory":
+        inv = build_runtime_inventory(root)
+        payload = inv.to_dict()
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if args.compact or args.out:
+            print(compact_runtime(inv), end="")
+        else:
+            print(dumps_runtime(inv), end="")
         return 0
 
     if args.command == "verify":
