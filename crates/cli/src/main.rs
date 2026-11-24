@@ -422,6 +422,7 @@ fn run_imports_sync(
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
     use xenora_loader::ImportRegistry;
+    use xenora_loader::import_table::ImportName;
     use xenora_loader::imports::ServiceStatus;
     use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
 
@@ -446,7 +447,11 @@ fn run_imports_sync(
     let mut total = 0usize;
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
 
-    for line in csv_text.lines().skip(1) {
+    let mut lines = csv_text.lines();
+    let has_import_kind = lines
+        .next()
+        .is_some_and(|header| header.ends_with(",import_kind"));
+    for line in lines {
         // Format: "module","symbol",0xRVA,category,registered,status,is_alias,"canonical",priority,cluster
         // We re-query the live registry rather than trusting cached status.
         let fields: Vec<&str> = line.splitn(10, ',').collect();
@@ -459,7 +464,15 @@ fn run_imports_sync(
             continue;
         }
 
-        let binding = registry.binding(&module, &symbol);
+        let name = if has_import_kind && line.ends_with(",ordinal") {
+            let Some(ordinal) = symbol.strip_prefix("Ordinal#").and_then(|n| n.parse().ok()) else {
+                continue;
+            };
+            ImportName::Ordinal(ordinal)
+        } else {
+            ImportName::Name(symbol.clone())
+        };
+        let binding = registry.resolve(&module, &name);
         let is_registered = binding.is_some();
         let status = binding.map(|b| b.status);
 
