@@ -20,8 +20,21 @@ pub use rdna2::{
 };
 pub use semantics_gen::{
     ScalarAluOp, ScalarCompareOp, ScalarImmediateCompareOp, ScalarImmediateOp, ScalarUnaryOp,
-    VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorSwapOp, VectorUnaryOp,
+    SoppControlOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorCompareVop3Op,
+    VectorSwapOp, VectorUnaryOp,
 };
+
+impl VectorAluOp {
+    /// Whether this encoding takes a per-lane VCC_LO bit.
+    pub fn reads_vcc(self) -> bool {
+        self.semantics().carry_in == semantics::CarryIn::Vcc
+    }
+
+    /// Whether this encoding replaces the Wave32 VCC_LO mask.
+    pub fn writes_vcc(self) -> bool {
+        self.semantics().vcc == semantics::MaskEffect::LaneMask
+    }
+}
 
 /// SGPR index of `vcc_lo`, the Wave32 vector condition code.
 pub const VCC_LO: u8 = 106;
@@ -215,6 +228,14 @@ pub enum Instruction {
         src0: VectorSource,
         src1: u8,
     },
+    /// VOP3A 32-bit integer compare writing a Wave32 mask to s0-s105 or `vcc_lo`.
+    /// Both sources are VGPR indices.
+    VectorCompareVop3 {
+        op: VectorCompareVop3Op,
+        sdst: u8,
+        src0: u8,
+        src1: u8,
+    },
     /// VOP2 32-bit per-lane integer operation from the semantic registry.
     /// `src0` is a VGPR, `s0-s105`, `vcc_lo`, an inline integer or a literal;
     /// `src1` is a VGPR. Inactive lanes keep `dst`.
@@ -297,6 +318,7 @@ impl Instruction {
             Self::ScalarImmediate { op, .. } => op.mnemonic(),
             Self::ScalarImmediateCompare { op, .. } => op.mnemonic(),
             Self::VectorCompare { op, .. } => op.assembly_name(),
+            Self::VectorCompareVop3 { op, .. } => op.assembly_name(),
             Self::VectorAlu { op, .. } => op.assembly_name(),
             Self::BranchSccZero { .. } => "s_cbranch_scc0",
             Self::BranchExecZero { .. } => "s_cbranch_execz",
@@ -381,10 +403,24 @@ impl fmt::Display for Instruction {
             Self::VectorCompare { src0, src1, .. } => {
                 write!(formatter, " vcc_lo, {src0}, v{src1}")
             }
+            Self::VectorCompareVop3 {
+                sdst, src0, src1, ..
+            } => write!(formatter, " {}, v{src0}, v{src1}", ScalarDestination(sdst)),
             Self::VectorAlu {
-                dst, src0, src1, ..
+                op,
+                dst,
+                src0,
+                src1,
             } => {
-                write!(formatter, " v{dst}, {src0}, v{src1}")
+                write!(formatter, " v{dst}, ")?;
+                if op.writes_vcc() {
+                    write!(formatter, "vcc_lo, ")?;
+                }
+                write!(formatter, "{src0}, v{src1}")?;
+                if op.reads_vcc() {
+                    write!(formatter, ", vcc_lo")?;
+                }
+                Ok(())
             }
             Self::Branch { target }
             | Self::BranchSccZero { target }

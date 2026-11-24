@@ -22,6 +22,8 @@ const RDX: usize = Register::Rdx as usize;
 const RBX: usize = Register::Rbx as usize;
 const RSP: usize = Register::Rsp as usize;
 const RBP: usize = Register::Rbp as usize;
+const RSI: usize = Register::Rsi as usize;
+const RDI: usize = Register::Rdi as usize;
 
 /// Value mask of an operand of `size` bytes.
 fn mask(size: u8) -> u64 {
@@ -239,6 +241,25 @@ fn shift(op: Op, value: u64, count: u64, size: u8, old: RFlags) -> Option<(u64, 
             flags.cf = signed >> (count - 1) & 1 != 0;
             (signed >> count) as u64
         }
+        Op::Rcl | Op::Rcr => {
+            // The carry flag is one more bit above the operand, so the rotation
+            // is over `bits + 1` positions and the count is reduced modulo that.
+            let width = bits + 1;
+            let ring = wide | u128::from(old.cf) << bits;
+            let by = count % width;
+            let left = if op == Op::Rcl {
+                by
+            } else {
+                (width - by) % width
+            };
+            let rotated = if left == 0 {
+                ring
+            } else {
+                ring << left | ring >> (width - left)
+            };
+            flags.cf = rotated >> bits & 1 != 0;
+            rotated as u64
+        }
         _ => {
             let by = count % bits;
             let left = if op == Op::Rol {
@@ -266,7 +287,7 @@ fn shift(op: Op, value: u64, count: u64, size: u8, old: RFlags) -> Option<(u64, 
     // OF is defined only for a count of one.
     if count == 1 {
         flags.of = match op {
-            Op::Shl | Op::Rol => (result & top != 0) != flags.cf,
+            Op::Shl | Op::Rol | Op::Rcl => (result & top != 0) != flags.cf,
             Op::Shr => value & top != 0,
             Op::Sar => false,
             _ => (result & top != 0) != (result & (top >> 1) != 0),
@@ -352,6 +373,8 @@ pub fn execute(
             Encoding::OpRegImm => write_reg(cpu, insn.reg, size, insn.imm),
             _ => write_rm(cpu, memory, insn, insn.imm & mask(size))?,
         },
+        // A non-temporal store is an ordinary store: there is no cache to bypass.
+        Op::Movnti => write_rm(cpu, memory, insn, read_reg(cpu, insn.reg, size))?,
         Op::Movzx => {
             let value = read_rm(cpu, memory, insn)?;
             write_reg(cpu, insn.reg, size, value);
@@ -364,6 +387,14 @@ pub fn execute(
             if let Some(operand) = insn.memory() {
                 write_reg(cpu, insn.reg, size, offset(cpu, &operand));
             }
+        }
+        Op::Xchg if insn.encoding == Encoding::OpReg => {
+            // The accumulator with the register in the opcode, never itself:
+            // 90 without REX.B is NOP.
+            let rax = accumulator(RAX);
+            let (a, b) = (read_reg(cpu, rax, size), read_reg(cpu, insn.reg, size));
+            write_reg(cpu, rax, size, b);
+            write_reg(cpu, insn.reg, size, a);
         }
         Op::Xchg => {
             let (a, b) = operands(cpu, memory, insn)?;
@@ -417,7 +448,7 @@ pub fn execute(
                 if negative { mask(size) } else { 0 },
             );
         }
-        Op::Rol | Op::Ror | Op::Shl | Op::Shr | Op::Sar => {
+        Op::Rol | Op::Ror | Op::Rcl | Op::Rcr | Op::Shl | Op::Shr | Op::Sar => {
             let (a, count) = operands(cpu, memory, insn)?;
             match shift(insn.op, a, count, size, cpu.flags) {
                 Some((value, flags)) => {
@@ -574,6 +605,10 @@ pub fn execute(
             cpu.gpr[RSP] = sp.wrapping_add(8).wrapping_add(insn.imm);
         }
         Op::Nop => {}
+        // Every load and store of an instruction completes before the next
+        // instruction starts, on one host thread, so guest accesses are already
+        // totally ordered and a fence has nothing further to enforce.
+        Op::Lfence | Op::Mfence | Op::Sfence => {}
         Op::Cpuid => {
             // The leaf is EAX and the subleaf ECX. Each result is a 32-bit
             // register write, so the upper halves are cleared.
@@ -582,6 +617,37 @@ pub fn execute(
                 cpu.gpr[register] = u64::from(value);
             }
         }
+        Op::Movs | Op::Stos => {
+            // One element per execution. A REP form with elements left keeps
+            // RIP on itself, so every element is a step of its own: it counts
+            // against the step budget, and a fault keeps the elements already
+            // done, with RSI, RDI and RCX at the element that faulted.
+            if !(insn.rep && cpu.gpr[RCX] == 0) {
+                let value = if insn.op == Op::Movs {
+                    read_rm(cpu, memory, insn)?
+                } else {
+                    cpu.gpr[RAX] & mask(size)
+                };
+                write_mem(memory, cpu.gpr[RDI], size, value)?;
+                let step = if cpu.df {
+                    u64::from(size).wrapping_neg()
+                } else {
+                    u64::from(size)
+                };
+                if insn.op == Op::Movs {
+                    cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
+                }
+                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                if insn.rep {
+                    cpu.gpr[RCX] -= 1;
+                    if cpu.gpr[RCX] != 0 {
+                        next = insn.rip;
+                    }
+                }
+            }
+        }
+        Op::Cld => cpu.df = false,
+        Op::Std => cpu.df = true,
         Op::Clc => cpu.flags.cf = false,
         Op::Stc => cpu.flags.cf = true,
         Op::Cmc => cpu.flags.cf = !cpu.flags.cf,

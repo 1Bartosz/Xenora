@@ -397,7 +397,7 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             write(m, places[0], (1u128 << bits) - 1 - a);
             Outcome::Done(none)
         }
-        "shl" | "shr" | "sar" | "rol" | "ror" => {
+        "shl" | "shr" | "sar" | "rol" | "ror" | "rcl" | "rcr" => {
             let count = match rest.split(", ").nth(1) {
                 Some("cl") => u32::from(m.gpr[1] as u8),
                 _ => read(m, places[1], 8) as u32,
@@ -405,13 +405,22 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             let start = read(m, places[0], bits);
             let mut value = start;
             let top = 1u128 << (bits - 1);
-            let mut carry = m.flags.cf;
-            for _ in 0..count {
+            let carry_in = m.flags.cf;
+            let mut carry = carry_in;
+            // RCL and RCR rotate through CF, so `bits + 1` steps come round again.
+            let steps = if matches!(name, "rcl" | "rcr") {
+                count % (bits + 1)
+            } else {
+                count
+            };
+            for _ in 0..steps {
                 // One step at a time, as the SDM loop does.
                 let (high, low) = (bit(value, bits - 1), bit(value, 0));
                 (value, carry) = match name {
                     "shl" => (truncate(value * 2, bits), high),
                     "rol" => (truncate(value * 2, bits) + u128::from(high), high),
+                    "rcl" => (truncate(value * 2, bits) + u128::from(carry), high),
+                    "rcr" => (value / 2 + if carry { top } else { 0 }, low),
                     "shr" => (value / 2, low),
                     "sar" => (value / 2 + if high { top } else { 0 }, low),
                     _ => (value / 2 + if low { top } else { 0 }, low),
@@ -424,7 +433,8 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                 let (msb, next) = (bit(value, bits - 1), bit(value, bits - 2));
                 if count == 1 {
                     m.flags.of = match name {
-                        "shl" | "rol" => msb != carry,
+                        "shl" | "rol" | "rcl" => msb != carry,
+                        "rcr" => bit(start, bits - 1) != carry_in,
                         "shr" => bit(start, bits - 1),
                         "sar" => false,
                         _ => msb != next,
@@ -627,7 +637,8 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                 ..none
             })
         }
-        "mov" | "movabs" => {
+        // MOVNTI stores like MOV; the non-temporal hint changes no result.
+        "mov" | "movabs" | "movnti" => {
             let value = read(m, places[1], bits);
             write(m, places[0], value);
             Outcome::Done(none)
@@ -728,7 +739,8 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             m.flags.cf = !m.flags.cf;
             Outcome::Done(none)
         }
-        "nop" | "pause" => Outcome::Done(none),
+        // The fences order memory accesses and compute nothing.
+        "nop" | "pause" | "lfence" | "mfence" | "sfence" => Outcome::Done(none),
         "cpuid" => {
             // Xenora's guest CPUID contract, restated: the vendor "Xenora guest"
             // and the four features whose every instruction exists, CMOV and
@@ -977,7 +989,9 @@ fn every_declared_form_is_executed_by_a_fixture() {
         .unwrap_or_else(|error| panic!("{line}: {error:?}"));
         seen.insert(usize::from(insn.form));
     }
-    // Control flow and exits are covered by the tests below.
+    // Control flow and exits are covered by the tests below. String
+    // instructions and the direction flag need their own memory layout and
+    // are covered form by form in `tests/cpu_rep.rs`.
     let separate = [
         Op::Ldmxcsr,
         Op::Jcc,
@@ -986,6 +1000,10 @@ fn every_declared_form_is_executed_by_a_fixture() {
         Op::Ret,
         Op::Hlt,
         Op::Syscall,
+        Op::Movs,
+        Op::Stos,
+        Op::Cld,
+        Op::Std,
     ];
     let mut missing: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (index, form) in FORMS.iter().enumerate() {
@@ -1208,17 +1226,21 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0xF0, 0x01, 0x0E],       // lock add [rsi], ecx
         &[0xF2, 0x90],             // repne nop
         &[0xF3, 0xC3],             // rep ret
-        &[0xF3, 0xA4],             // rep movsb
+        &[0xF2, 0xA4],             // repne movsb
+        &[0xF3, 0xA6],             // repe cmpsb
         &[0x67, 0x8B, 0x06],       // address-size override
         &[0x64, 0x2E, 0x8B, 0x06], // CS after FS
         &[0x66, 0x50],             // push ax
         &[0x66, 0xE8, 0, 0],       // call rel16
         &[0x66, 0x0F, 0xC9],       // bswap cx (undefined)
         &[0x66, 0x63, 0xC1],       // 16-bit movsxd
-        &[0x41, 0x90],             // xchg r8, rax
+        &[0xF3, 0x41, 0x90],       // F3 on xchg r8, rax
         &[0x8D, 0xC0],             // lea with a register operand
+        &[0x0F, 0xAE, 0x2E],       // 0F AE /5 with a memory operand
+        &[0x0F, 0xAE, 0x36],       // 0F AE /6 with a memory operand
+        &[0x0F, 0xC3, 0xC1],       // movnti with a register destination
+        &[0x66, 0x0F, 0xC3, 0x06], // 66 with movnti
         &[0x0F, 0xA3, 0x06],       // bt [rsi], eax
-        &[0xC0, 0xD0, 0x01],       // rcl al, 1
         &[0xC6, 0xC8, 0x01],       // C6 /1
         &[0xFF, 0xF8],             // FF /7
         &[0xFE, 0xD0],             // FE /2

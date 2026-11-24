@@ -47,7 +47,7 @@ pub enum Operation {
     LogicalShiftRight,
     /// Shift S0 right by the masked count in S1, filling with its sign bit.
     ArithmeticShiftRight,
-    /// Compare S0 with S1 under the form's relation; writes only SCC.
+    /// Compare S0 with S1 under the form's relation, producing SCC or a lane mask.
     Compare,
     /// Bitwise complement of S0.
     Not,
@@ -94,6 +94,18 @@ pub enum Operation {
     Move,
     /// SOPK: SDST receives the sign-extended SIMM16 when SCC is set.
     ConditionalMove,
+    /// Terminate the program.
+    EndProgram,
+    /// Unconditional PC-relative branch.
+    Branch,
+    /// Branch when SCC is clear.
+    BranchSccZero,
+    /// Branch when VCC is zero.
+    BranchVccZero,
+    /// Branch when EXEC is zero.
+    BranchExecZero,
+    /// Complete an outstanding vector load.
+    WaitLoad,
     /// Swap the two old per-lane VGPR values (guide 12.8).
     Swap,
 }
@@ -165,13 +177,35 @@ pub enum Signedness {
     Bitwise,
 }
 
-/// Whether the operation reads SCC.
+/// Per-lane VOP2 operation selected by the semantic registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VectorLowering {
+    /// Two explicit operands, with no implicit lane input.
+    Binary(VectorBinary),
+    /// Two explicit operands and the lane's VCC bit.
+    Vcc(VectorVcc),
+}
+
+/// VOP2 primitives with an implicit per-lane VCC input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VectorVcc {
+    /// Choose S1 when the VCC bit is set, otherwise S0.
+    Select,
+    /// Unsigned addition with carry-in and carry-out.
+    AddCarry,
+    /// Unsigned subtraction with borrow-in and borrow-out.
+    SubtractBorrow,
+}
+
+/// Implicit condition or carry input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CarryIn {
-    /// SCC is not read.
+    /// No implicit condition or carry input.
     None,
     /// SCC as carry-in (add), borrow-in (sub) or the select condition (select).
     Scc,
+    /// Per-lane Wave32 VCC_LO bit.
+    Vcc,
 }
 
 /// What a form writes to SCC.
@@ -193,7 +227,7 @@ pub enum SccEffect {
     SelectedSrc0,
 }
 
-/// What a form writes to VCC or EXEC.
+/// Where a form writes its lane mask, if any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaskEffect {
     /// Not written.
@@ -202,6 +236,8 @@ pub enum MaskEffect {
     /// exists) & test(lane n), fully written; `VCC_HI` has no known value after
     /// it (docs/shaders/vector-compare.md section 3).
     LaneMask,
+    /// Wave32 VOP3A compare mask written to SDST, which may be `vcc_lo`.
+    SdstLaneMask,
 }
 
 /// Wave-size restriction.
@@ -235,6 +271,12 @@ pub enum OperandRule {
     /// SOPK integer compare: SDST (s0-s105) is the left operand, SIMM16 the right
     /// (sign-extended for `_i32`, zero-extended for `_u32`); only SCC is written.
     SopkCompare,
+    /// SOPP termination with zero in the reserved immediate field.
+    SoppEnd,
+    /// SOPP branch with a signed dword displacement from the next instruction.
+    SoppBranch,
+    /// SOPP wait with exactly vmcnt(0) and the other counters disabled.
+    SoppWait,
     /// VOPC vector compare: the destination is `vcc_lo` (Wave32); SRC0 is a VGPR,
     /// s0-s105, `vcc_lo`, an inline integer -16..64 or a literal word; VSRC1 is a
     /// VGPR. Everything else is rejected as unsupported.
@@ -242,14 +284,21 @@ pub enum OperandRule {
     /// Wave32 VOPC with a VGPR pair, even normal SGPR pair or inline integer
     /// as SRC0 and a VGPR pair as VSRC1. The destination is `vcc_lo`.
     VopcVccPair,
+    /// VOPC with low-half operands and no literal selector.
+    VopcVccHalf,
     /// VOP3 encoding of a VOP2 vector form: VDST is v0-v255, SRC0 and SRC1 are
     /// VGPRs, no input or output modifiers, SRC2 unused. Everything else is
     /// rejected as unsupported.
     Vop3Vgpr2,
+    /// VOP3A compare: VDST encodes s0-s105 or `vcc_lo`; SRC0 and SRC1 are
+    /// VGPRs, SRC2 is unused and all modifiers are clear.
+    Vop3CmpVgpr2,
     /// VOP2 vector: VDST is v0-v255; SRC0 is a VGPR, s0-s105, `vcc_lo`, an inline
     /// integer -16..64 or a literal word; VSRC1 is a VGPR. Everything else is
     /// rejected as unsupported.
     Vop2Vgpr,
+    /// VOP2 general SRC0 and VGPR VSRC1 with an implicit VCC_LO input.
+    Vop2Vcc,
     /// VOP2 vector, VGPR sources only: VDST is v0-v255; SRC0 and VSRC1 are VGPRs.
     /// Everything else (SGPR, inline, literal SRC0) is rejected as unsupported.
     Vop2Vgpr2,
@@ -321,7 +370,7 @@ pub struct FormSemantics {
     pub relation: Option<CompareRelation>,
     /// SCC write.
     pub scc: SccEffect,
-    /// VCC write.
+    /// Implicit VCC write or explicit scalar destination for a compare mask.
     pub vcc: MaskEffect,
     /// EXEC write.
     pub exec: MaskEffect,

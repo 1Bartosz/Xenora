@@ -26,6 +26,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [SOP2 scalar ALU](shaders/scalar-alu.md) — Supported scalar add, subtract and bitwise forms, their SCC rules and sources.
 - [Semantic registry](shaders/semantic-registry.md) — How to add an instruction form: registry fields, validation, generation and the independence rule.
 - [VOP1 vector unary and swap](shaders/vector-unary.md) — Wave32 integer bit operations, register exchange, and operand limits.
+- [VOP2 select and carry](shaders/vector-vcc.md) — Wave32 lane selection, carry and borrow through the vector condition code.
 - [VOPC integer compares](shaders/vector-compare.md) — Wave32 compare forms, the VCC/EXEC contract, runtime `s_cbranch_vccz` and the Metal mapping.
 - [Metal Shading Language generation](shaders/msl.md) and [independent CPU reference](shaders/reference-interpreter.md) — Translation rules and separate CPU execution models.
 
@@ -39,7 +40,10 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 
 ## Testing, validation, and benchmarks
 
+- [Testing and acceptance index](testing/README.md) — Entry point for test procedures, evidence and review records.
+- [AMD RDNA2 desktop GPU (gfx1030) form acceptance](testing/shader-form-acceptance.md) — Independence, command, log and promotion rules for fixture-verified instruction forms.
 - [Engineering progress](progress.md) — Verification commands, metric definitions, and open release gates.
+- [CPU test runtime and shard selection](testing/cpu-coverage.md) — Measured CPU gate cost and deterministic test-target shards.
 - [Test inventory comparison](testing/test-inventory.md) — Detect missing or newly ignored Cargo tests across commits.
 - [Persistent resource and translated rendering acceptance](testing/x9-acceptance.md) — Pinned upstream tests, native ARM64 results and unsupported cases.
 - [Baseline acceptance](testing/phase-02-baseline.md), [Phase 01 assurance](testing/phase01-assurance.md), and [independent reviews](testing/review-log.md) — Candidate-specific results and release findings.

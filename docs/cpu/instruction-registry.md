@@ -40,8 +40,9 @@ XMM registers live in `CpuState::xmm`, lane 0 in the low bits, and MXCSR in `Cpu
 
 - a denormal dividend over zero raises divide-by-zero only, not also denormal-operand;
 - flush-to-zero also flushes a tiny result that is exact, raising underflow and precision;
-- DAZ applies before conversion to an integer;
-- an unmasked overflow also records precision.
+- DAZ applies before conversion to an integer.
+
+An unmasked overflow records precision only when rounding with an unbounded exponent is inexact (Intel SDM Vol. 1, D.4.2.3, Table D-16). The known-answer cases in `tests/cpu_known_answers.rs` assert this.
 
 None of it has been compared with x86 hardware.
 
@@ -59,6 +60,26 @@ These rules hold for both engines and are what a guest scheduler has to preserve
 
 The SDM cases for these forms in `tests/cpu_known_answers.rs` were written before this implementation, by another contributor. `tests/x86_atomic.rs` adds the LOCK rules, both compare outcomes at every width, unaligned operands and faults. None of it has been compared with x86 hardware, and nothing here establishes multi-thread behaviour.
 
+## Memory ordering and fences
+
+Guest memory accesses are totally ordered today. Each engine runs one guest instruction at a time on one host thread, and every load and store of an instruction completes before the next instruction starts. There is no store buffer and nothing is reordered, so a load always sees the latest earlier store. That is stronger than the ordering the Intel SDM (Vol. 3A, "Memory Ordering") gives a real processor, where a store may sit in a buffer while later loads from other locations run.
+
+MFENCE, LFENCE and SFENCE (`0F AE` with a register ModRM byte and digit 6, 5 or 7; the SDM states that the r/m field is ignored) are therefore accepted and change no register, flag or memory. They have nothing left to enforce. Non-temporal stores are ordinary stores, so SFENCE has no weakly ordered store to wait for either. The memory forms that share those digits, the XSAVE family and CLFLUSH, stay rejected.
+
+This holds only while guest threads do not run on several host threads. ARM64 orders memory more weakly than x86, so an engine that ran guest threads in parallel would have to restore x86's ordering for ordinary accesses and give the fences a real effect. Nothing here provides or tests that. `tests/cpu_known_answers.rs` holds the single-thread cases: a store, a fence and a later load in program order, and no change to any other state. None of it has been compared with x86 hardware.
+
+## String instructions
+
+MOVS and STOS exist for 8-, 16-, 32- and 64-bit elements, alone and with REP (F3), together with the direction flag and CLD and STD. `CpuState::df` holds the flag. It is not one of the six status flags the registry tracks.
+
+- **One element per step.** A REP form moves one element, decrements RCX and, while RCX is not zero, leaves RIP on the instruction. Each element is a step of its own in both engines and counts against the step budget, so a repeat cannot outrun the budget and can stop part-way and resume. A zero count touches no memory and no register. Without REP, RCX is not read. Step counts therefore count elements, not instructions, for a REP form.
+- **Direction.** RSI and RDI move up by the element size when the flag is clear and down when it is set. Each element is read whole and then written, so overlapping ranges behave as that order dictates.
+- **Faults.** An element completes or changes nothing. A fault keeps the elements already done, leaves RSI, RDI and RCX at the element that faulted, and leaves RIP on the instruction.
+- **Segments.** An FS or GS override applies to the MOVS source. The destination, and STOS as a whole, take no override.
+- **Lowering.** The DBT runs these forms on the shared semantics, one helper call per element, and a string instruction ends its translated block. There is no bulk-copy path, so large copies are slow.
+
+The SDM cases for these forms in `tests/cpu_known_answers.rs` were written before this implementation, by another contributor. `tests/cpu_rep.rs` adds a byte-array model over every form, direction and count, the step accounting, faults and the segment rule. None of it has been compared with x86 hardware.
+
 ## Guest CPUID
 
 CPUID (`0F A2`) returns a fixed table that never reads the host. It describes a synthetic processor: the vendor string is `Xenora guest`, not Intel's or AMD's, and leaf 1 reports no family, model or stepping.
@@ -73,7 +94,7 @@ CPUID (`0F A2`) returns a fixed table that never reads the host. It describes a 
 
 A feature bit is set only when every instruction of that feature is implemented. That is stricter than "some of it works", and it has consequences:
 
-- SSE and SSE2 are not reported, although most of their instructions exist, because parts are still rejected: RSQRTPS and MFENCE, for example. BMI1 is not reported although TZCNT exists, because ANDN does not. The x87 FPU, MMX, FXSAVE, CMPXCHG8B, the time-stamp counter, LAHF and SYSRET are absent too.
+- SSE and SSE2 are not reported, although most of their instructions exist, because parts are still rejected: RSQRTPS and MASKMOVDQU, for example. BMI1 is not reported although TZCNT exists, because ANDN does not. The x87 FPU, MMX, FXSAVE, CMPXCHG8B, the time-stamp counter, LAHF and SYSRET are absent too.
 - The table is therefore truthful about Xenora, not plausible as hardware: every real 64-bit processor reports the FPU and SSE2. A guest that tests a bit before using a feature avoids it; a guest that assumes SSE2 because it runs in 64-bit mode still gets every form that exists and an illegal-instruction exit for one that does not.
 - A leaf that is not listed returns zeros, whatever the subleaf. Intel processors answer a leaf above the highest basic one with that leaf's data instead; software is expected to read the highest leaf first.
 
@@ -83,4 +104,4 @@ A feature bit is set only when every instruction of that feature is implemented.
 
 ## Rejected on purpose
 
-LOCK except as described above, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, RCL, RCR, SHLD, SHRD, string instructions, MMX, the RCP and RSQRT approximations, SSE3 and later, VEX, CMPXCHG8B, CMPXCHG16B and fences. The DBT also refuses raw SYSCALL.
+LOCK except as described above, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, SHLD, SHRD, LODS, CMPS, SCAS, REPE and REPNE, MMX, the RCP and RSQRT approximations, SSE3 and later, VEX, CMPXCHG8B and CMPXCHG16B. The DBT also refuses raw SYSCALL.

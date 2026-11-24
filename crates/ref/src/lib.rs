@@ -57,6 +57,8 @@ pub enum Op {
     MoveScalar(u8, u8),
     /// VOPC 32-bit integer compare writing the Wave32 mask to `vcc_lo`.
     Compare(Comparison, CompareSource, u8),
+    /// VOP3A integer compare writing a Wave32 mask to SDST.
+    CompareVop3(u8, Comparison, CompareSource, u8),
     /// VOPC 16- or 64-bit integer compare writing the Wave32 mask to
     /// `vcc_lo`. For 64-bit forms a `Vector` or `Scalar` source and VSRC1 name
     /// the low register of a pair.
@@ -76,7 +78,7 @@ pub enum Op {
     },
     Vector(VectorAlu, u8, u8, u8),
     /// VOP2 32-bit integer form: VDST, SRC0 (VGPR, SGPR, `vcc_lo`, inline
-    /// integer or literal) and VSRC1. Writes neither VCC nor SCC.
+    /// integer or literal) and VSRC1, with implicit VCC for select/carry forms.
     VectorInteger(VectorInteger, u8, CompareSource, u8),
     /// VOP1 32-bit integer or bit form: VDST and SRC0 (VGPR, SGPR, `vcc_lo`,
     /// inline integer or literal). Writes neither VCC nor SCC.
@@ -187,6 +189,8 @@ pub enum BranchCondition {
     SccZero,
     /// Take the branch when the low half of VCC is clear.
     VccZero,
+    /// Take the branch when the low half of VCC is nonzero.
+    VccNonzero,
     /// Take the branch when the low half of EXEC is clear.
     ExecZero,
 }
@@ -317,6 +321,12 @@ pub enum VectorAlu {
 /// section 12.7). None has a carry-in or carry-out.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VectorInteger {
+    /// 1: select S1 when the lane's VCC bit is set.
+    Select,
+    /// 40: unsigned add with carry input and output.
+    AddCarry,
+    /// 41 / 42: unsigned subtract with borrow input and output.
+    SubtractBorrow { reversed: bool },
     /// 9 / 11: D = low 32 bits of S0[23:0] * S1[23:0], sign-extended from
     /// bit 23 when `signed`.
     Multiply24 { signed: bool },
@@ -340,6 +350,11 @@ impl VectorInteger {
     /// Opcode bits 30-25 of the VOP2 word.
     fn from_opcode(opcode: u8) -> Option<Self> {
         Some(match opcode {
+            1 => Self::Select,
+            40 => Self::AddCarry,
+            41 | 42 => Self::SubtractBorrow {
+                reversed: opcode == 42,
+            },
             9 => Self::Multiply24 { signed: true },
             10 => Self::MultiplyHigh24 { signed: true },
             11 => Self::Multiply24 { signed: false },
@@ -354,6 +369,34 @@ impl VectorInteger {
             39 => Self::SubtractReverse,
             _ => return None,
         })
+    }
+
+    fn reads_vcc(self) -> bool {
+        matches!(
+            self,
+            Self::Select | Self::AddCarry | Self::SubtractBorrow { .. }
+        )
+    }
+
+    fn writes_vcc(self) -> bool {
+        matches!(self, Self::AddCarry | Self::SubtractBorrow { .. })
+    }
+
+    // Guide 12.7: carry/borrow is determined from the exact mathematical result.
+    fn apply_vcc(self, a: u32, b: u32, bit: u32) -> (u32, bool) {
+        match self {
+            Self::Select => (if bit == 0 { a } else { b }, false),
+            Self::AddCarry => {
+                let exact = u64::from(a) + u64::from(b) + u64::from(bit);
+                (exact as u32, exact > u64::from(u32::MAX))
+            }
+            Self::SubtractBorrow { reversed } => {
+                let (minuend, subtrahend) = if reversed { (b, a) } else { (a, b) };
+                let exact = i64::from(minuend) - i64::from(subtrahend) - i64::from(bit);
+                (exact as u32, exact < 0)
+            }
+            _ => unreachable!("VOP2 operation does not read VCC"),
+        }
     }
 
     /// D for S0 = `a`, S1 = `b`, from exact i64 arithmetic reduced modulo 2^32.
@@ -393,6 +436,9 @@ impl VectorInteger {
             Self::Add => a.wrapping_add(b),
             Self::Subtract => a.wrapping_sub(b),
             Self::SubtractReverse => b.wrapping_sub(a),
+            Self::Select | Self::AddCarry | Self::SubtractBorrow { .. } => {
+                unreachable!("VOP2 operation requires VCC")
+            }
         }
     }
 }
@@ -677,7 +723,13 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                     left_length.max(right_length),
                 )
             }
-            [lo, hi, opcode @ (0x82 | 0x84 | 0x86 | 0x88), 0xbf, ..] => {
+            [
+                lo,
+                hi,
+                opcode @ (0x82 | 0x84 | 0x86 | 0x87 | 0x88),
+                0xbf,
+                ..,
+            ] => {
                 let words = i16::from_le_bytes([*lo, *hi]);
                 let words = usize::try_from(words).map_err(|_| error(offset, "backward branch"))?;
                 (
@@ -686,6 +738,7 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                         condition: match opcode {
                             0x84 => BranchCondition::SccZero,
                             0x86 => BranchCondition::VccZero,
+                            0x87 => BranchCondition::VccNonzero,
                             0x88 => BranchCondition::ExecZero,
                             _ => BranchCondition::Always,
                         },
@@ -713,9 +766,50 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 let src1 = (second >> 1) | ((third & 1) << 7);
                 (Op::Vector(kind, dst, *first, src1), 4)
             }
-            [dst, 0, 0x25, 0xd5, lo, middle, hi @ 2..=3, 0x02, ..] if middle & 1 == 1 => {
+            // Guide §§12.7.1, 12.9.1, 12.12 and 13.3.4: VOP3A extends
+            // VOP2 by 0x100 and preserves the VOPC opcode. This subset
+            // fixes unused SRC2 to inline 0 and excludes FP ABS/NEG/OMOD,
+            // halfword OP_SEL, and CLAMP (integer saturation or FP compare
+            // exceptions, §6.5).
+            [
+                dst,
+                0,
+                op,
+                tag @ (0xd4 | 0xd5),
+                lo,
+                middle,
+                hi @ 2..=3,
+                0x02,
+                ..,
+            ] if middle & 1 != 0 => {
+                let src0 = CompareSource::Vector(*lo);
                 let src1 = (middle >> 1) | ((hi & 1) << 7);
-                (Op::Add(*dst, *lo, src1), 8)
+                match tag {
+                    0xd4 if matches!(op, 128..=135 | 192..=199) && *dst <= 106 => (
+                        Op::CompareVop3(
+                            *dst,
+                            Comparison {
+                                offset: op & 7,
+                                signed: *op < 192,
+                            },
+                            src0,
+                            src1,
+                        ),
+                        8,
+                    ),
+                    0xd5 if *op == 37 => (Op::Add(*dst, *lo, src1), 8),
+                    0xd5 => (
+                        Op::VectorInteger(
+                            VectorInteger::from_opcode(*op)
+                                .ok_or_else(|| error(offset, "unsupported VOP3 opcode"))?,
+                            *dst,
+                            src0,
+                            src1,
+                        ),
+                        8,
+                    ),
+                    _ => return Err(error(offset, "unsupported VOP3 opcode or destination")),
+                }
             }
             // VOPC (bits 31-25 = 0b0111110): SRC0 bits 0-8, VSRC1 bits 9-16, OP bits 17-24.
             [lo, packed, upper, tag @ 0x7c..=0x7d, tail @ ..]
@@ -1087,13 +1181,33 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                     }
                     check(src1)?;
                 }
+                let incoming = if exec != 0 && kind.reads_vcc() {
+                    read_scalar(Source::Register(VCC_LO as u8))?
+                } else {
+                    0
+                };
+                let mut outgoing = 0;
                 for lane in (0..lanes).filter(|&lane| executes(lane)) {
                     let s0 = match src0 {
                         CompareSource::Vector(register) => read(lane, register)?,
                         CompareSource::Scalar(register) => read_scalar(Source::Register(register))?,
                         CompareSource::Immediate(bits) => bits,
                     };
-                    results[lane] = Some((dst, kind.apply(s0, read(lane, src1)?)));
+                    let s1 = read(lane, src1)?;
+                    let value = if kind.reads_vcc() {
+                        let (value, carry) = kind.apply_vcc(s0, s1, (incoming >> lane) & 1);
+                        outgoing |= u32::from(carry) << lane;
+                        value
+                    } else {
+                        kind.apply(s0, s1)
+                    };
+                    results[lane] = Some((dst, value));
+                }
+                // Guide 3.9: only executing lanes can contribute a carry.
+                if kind.writes_vcc() {
+                    scalars[VCC_LO] = Some(outgoing);
+                    scalars[VCC_HI] = None;
+                    lane_derived_vcc = exec != 0;
                 }
             }
             Op::VectorUnary(kind, dst, src0) => {
@@ -1372,13 +1486,16 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                 }
             }
             // RDNA 2 ISA section 3.9: VCC[n] = EXEC[n] & test(n), fully written.
-            Op::Compare(..) | Op::WideCompare(..) => {
-                let (comparison, width, src0, src1) = match op {
+            Op::Compare(..) | Op::WideCompare(..) | Op::CompareVop3(..) => {
+                let (dst, comparison, width, src0, src1) = match op {
                     Op::Compare(comparison, src0, src1) => {
-                        (comparison, CompareWidth::Word, src0, src1)
+                        (VCC_LO, comparison, CompareWidth::Word, src0, src1)
+                    }
+                    Op::CompareVop3(dst, comparison, src0, src1) => {
+                        (usize::from(dst), comparison, CompareWidth::Word, src0, src1)
                     }
                     Op::WideCompare(comparison, width, src0, src1) => {
-                        (comparison, width, src0, src1)
+                        (VCC_LO, comparison, width, src0, src1)
                     }
                     _ => unreachable!(),
                 };
@@ -1439,18 +1556,24 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                         }
                     }
                 }
-                scalars[VCC_LO] = Some(mask);
-                scalars[VCC_HI] = None;
-                lane_derived_vcc = exec != 0;
+                scalars[dst] = Some(mask);
+                if dst == VCC_LO {
+                    scalars[VCC_HI] = None;
+                    lane_derived_vcc = exec != 0;
+                }
             }
             Op::Branch {
                 target: destination,
                 condition,
             } => {
-                if condition == BranchCondition::VccZero && scalars[VCC_LO].is_none() {
+                let tests_vcc = matches!(
+                    condition,
+                    BranchCondition::VccZero | BranchCondition::VccNonzero
+                );
+                if tests_vcc && scalars[VCC_LO].is_none() {
                     return Err(error(offset, "branch with uninitialized VCC_LO"));
                 }
-                if condition == BranchCondition::VccZero && lane_derived_vcc {
+                if tests_vcc && lane_derived_vcc {
                     check_runtime_region(
                         &program[position + 1..],
                         destination,
@@ -1467,6 +1590,7 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                         !scc.ok_or_else(|| error(offset, "branch with uninitialized SCC"))?
                     }
                     BranchCondition::VccZero => scalars[VCC_LO] == Some(0),
+                    BranchCondition::VccNonzero => scalars[VCC_LO] != Some(0),
                     BranchCondition::ExecZero => exec == 0,
                 };
                 if take_branch {

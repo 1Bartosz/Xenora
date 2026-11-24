@@ -66,6 +66,8 @@ pub enum Entry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
     None,
+    /// A string instruction: source `[RSI]`, destination `[RDI]`, REP allowed.
+    String,
     RmReg,
     RegRm,
     RegRmImm,
@@ -172,6 +174,8 @@ pub struct Insn {
     /// Carries a LOCK prefix. Set only for a lockable form with a memory
     /// destination.
     pub lock: bool,
+    /// A string instruction carrying a REP prefix.
+    pub rep: bool,
 }
 
 impl Insn {
@@ -233,6 +237,15 @@ impl<E, F: FnMut(u64) -> Result<u8, E>> Cursor<F> {
     }
 }
 
+/// Whether `byte` is a legacy prefix: an operand-size, address-size, segment,
+/// LOCK or repeat prefix (Intel SDM Vol. 2A, 2.1.1).
+fn is_legacy_prefix(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
+    )
+}
+
 /// Decode one instruction at `rip`. `fetch` supplies the byte at an address and
 /// is called only for bytes that belong to the instruction, in order.
 ///
@@ -254,9 +267,22 @@ pub fn decode<E>(
     let mut repne = false;
     let mut lock = false;
     let mut segment = None;
+    let mut rex = 0;
     let mut byte = cursor.u8()?;
     loop {
         let selected = match byte {
+            // REX applies only immediately before the opcode. One that is
+            // followed by a legacy prefix is ignored (Intel SDM Vol. 2A, 2.2.1).
+            0x40..=0x4F => {
+                let next = cursor.u8()?;
+                if !is_legacy_prefix(next) {
+                    rex = byte;
+                    byte = next;
+                    break;
+                }
+                byte = next;
+                continue;
+            }
             0x64 => Segment::Fs,
             0x65 => Segment::Gs,
             0x66 => {
@@ -295,10 +321,6 @@ pub fn decode<E>(
         byte = cursor.u8()?;
     }
 
-    let rex = if byte & 0xF0 == 0x40 { byte } else { 0 };
-    if rex != 0 {
-        byte = cursor.u8()?;
-    }
     let (rex_w, rex_r, rex_x, rex_b) =
         (rex & 8 != 0, (rex & 4) << 1, (rex & 2) << 2, (rex & 1) << 3);
 
@@ -310,8 +332,12 @@ pub fn decode<E>(
     let opcode = if two_byte { cursor.u8()? } else { byte };
     let slot = usize::from(opcode);
     let table = if !two_byte {
-        // Only PAUSE (F3 90) has a meaning here for F3 on a one-byte opcode.
-        if repne || (rep && opcode != 0x90) {
+        // On a one-byte opcode F3 is PAUSE (F3 90) or REP on a string form.
+        let string = matches!(
+            ONE_BYTE[slot],
+            Entry::Form(index) if FORMS[usize::from(index)].encoding == Encoding::String
+        );
+        if repne || (rep && opcode != 0x90 && !string) {
             return Err(DecodeError::Unsupported(if rep { 0xF3 } else { 0xF2 }));
         }
         &ONE_BYTE
@@ -337,9 +363,24 @@ pub fn decode<E>(
             GROUPS[usize::from(index)][usize::from((modrm >> 3) & 7)]
         }
     };
-    let form = FORMS
+    let mut form = FORMS
         .get(usize::from(form_index))
         .ok_or(DecodeError::Unsupported(opcode))?;
+    let mut form_index = form_index;
+    if form.no_rex_b && rex_b != 0 {
+        // 90 is NOP only without REX.B. With it the byte exchanges r8 with the
+        // accumulator, as the first register of the 91..97 row would (Intel
+        // SDM Vol. 2B, "NOP" and "XCHG").
+        match ONE_BYTE[slot + 1] {
+            Entry::Form(index)
+                if !two_byte && !rep && FORMS[usize::from(index)].encoding == Encoding::OpReg =>
+            {
+                form_index = index;
+                form = &FORMS[usize::from(index)];
+            }
+            _ => return Err(DecodeError::Unsupported(opcode)),
+        }
+    }
     if form.has_modrm && matches!(entry, Entry::Form(_)) {
         modrm = cursor.u8()?;
     }
@@ -360,10 +401,6 @@ pub fn decode<E>(
     if operand_size && !takes_operand_size && !overridden {
         return Err(DecodeError::Unsupported(0x66));
     }
-    if form.no_rex_b && rex_b != 0 {
-        return Err(DecodeError::Unsupported(opcode));
-    }
-
     let rm_size = if form.source != 0 { form.source } else { size };
     let register = |field: u8, extension: u8, width: u8| {
         if width == 1 && rex == 0 && field >= 4 {
@@ -424,6 +461,15 @@ pub fn decode<E>(
         }
     } else if matches!(form.encoding, Encoding::OpReg | Encoding::OpRegImm) {
         reg = register(opcode & 7, rex_b, size);
+    } else if form.encoding == Encoding::String {
+        // The source is DS:[RSI], which FS or GS may override. The destination
+        // ES:[RDI] takes no override.
+        rm = Some(RmOperand::Mem(MemOperand {
+            base: Some(6),
+            index: None,
+            disp: 0,
+            segment,
+        }));
     }
     // LOCK is an invalid opcode unless the instruction is lockable and its
     // destination is memory (Intel SDM Vol. 2, "LOCK").
@@ -467,6 +513,7 @@ pub fn decode<E>(
         imm,
         condition: opcode & 0xF,
         lock,
+        rep: rep && form.encoding == Encoding::String,
     })
 }
 

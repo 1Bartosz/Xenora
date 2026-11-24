@@ -77,16 +77,16 @@ using this ABI; there is no Wave64 entry point to reject.
 
 ### 2a. 16-bit and 64-bit compares
 
-The reference (`crates/ref`) and the second interpreter
-(`tests/validation/independent_ref.rs`) also accept the `_e32` forms
-`v_cmp_{lt,eq,le,gt,ne,ge}_{i16,u16}` (opcodes 137-142, 169-174) and
-`v_cmp_{f,lt,eq,le,gt,ne,ge,t}_{i64,u64}` (160-167, 224-231). The decoder and
-translator support the 64-bit forms through the `vopc_vcc_pair` operand rule.
-The 16-bit forms are available only in the interpreters.
+The decoder, translator and both reference interpreters accept the `_e32`
+forms `v_cmp_{lt,eq,le,gt,ne,ge}_{i16,u16}` (opcodes 137–142, 169–174) and
+`v_cmp_{f,lt,eq,le,gt,ne,ge,t}_{i64,u64}` (160–167, 224–231). The registry
+uses `vopc_vcc_half` for the 16-bit forms and `vopc_vcc_pair` for the 64-bit
+forms.
 
 - 16-bit forms read bits 15:0 of each 32-bit source and ignore bits 31:16
   (an inference from guide 6.2, 6.2.5 and 6.8: only SDWA selects a half).
-  There is no literal source.
+  SRC0 accepts a VGPR, a known SGPR, `vcc_lo` or an inline integer
+  (for example, −1 supplies `0xffff`). VSRC1 is a VGPR. Literals are rejected.
 - 64-bit forms read a pair: v[n:n+1] with n <= 254, an even-aligned
   s[2k:2k+1] with k <= 52 (3.6.3), or an inline integer, which is
   sign-extended to 64 bits (-1 is all ones, also for `_u64`; a reading of
@@ -122,7 +122,7 @@ this wave (all 32 except in a final partial wave, see 7). As an unsigned
 ## 4. Rejected (controlled translation/reference error, never a silent no-op)
 
 - V_CMPX_* (writes EXEC: divergent execution; needs its own contract).
-- The VOP3 encoding of any compare (arbitrary SGPR destination, modifiers).
+- VOP3A compares outside the integer subset in section 11.
 - SDWA and DPP forms; float compares; v_cmp_class.
 - 16-bit compares in the decoder and translator (the reference interpreters
   accept the subset in 2a).
@@ -254,13 +254,14 @@ run in `vopc_f_t_match_the_guide_on_native_metal`.
 
 The 16-bit and 64-bit oracle (`tests/validation/tests/vopc_wide.rs`) checks
 6,212 cases on both reference interpreters, plus 1,208 rejections and 13
-neighbouring opcodes. CPU tests check compilation of the 4,640 64-bit cases
-and rejection of out-of-contract 64-bit operands and all 12 16-bit forms.
-The LLVM-assembled `fixtures/rdna2/vector-compare-64.s` covers all sixteen
-64-bit opcodes in the decoder's fixture inventory.
-`scripts/test-gpu.sh` includes `vopc64_match_the_guide_on_native_metal` and
-skips `vopc16_match_the_guide_on_native_metal`. On a local Apple M5 under API and
-shader validation, all 4,640 64-bit cases (3,818 programs) agree; acceptance is pending. Deliberately broken copies of both
+neighbouring opcodes. CPU tests check compilation of 1,572 16-bit and 4,640
+64-bit cases, plus compiler rejection of out-of-contract programs. LLVM
+assembled `vector-compare-16.s` and `vector-compare-64.s` cover all 28 opcodes
+in the decoder's fixture inventory. The native Metal gate runs both
+`vopc16_match_the_guide_on_native_metal` and
+`vopc64_match_the_guide_on_native_metal`. On a local Apple M5 with API and
+shader validation, all 4,640 64-bit cases (3,818 programs) agree with the
+oracle. On a local Apple M5 under API and shader validation, all 1,572 16-bit cases (1,420 programs) agree; independent acceptance is pending. Deliberately broken copies of both
 interpreters (16-bit reads of 32 bits, swapped pair halves, zero-extended
 inline integers, flipped signedness, reads under empty EXEC and others) each
 fail it.
@@ -274,13 +275,11 @@ swapped signedness, without the EXEC mask, without the absent-lane bound
 (shader validation aborts on the out-of-range read) or with an inverted join.
 
 The 32-bit readback evidence is local agreement with a specification-derived
-reference on Apple M5 Pro. The 64-bit compiler evidence is CPU-only.
-There is no RDNA 2 or Xbox hardware evidence.
+reference on Apple M5 Pro. There is no RDNA 2 or Xbox hardware evidence.
 
 ## 10. Limitations
 
-- Wave32 only. No `v_cmpx`, VOP3, SDWA, DPP or float compares. The 16-bit
-  compares are available only in the reference interpreters (2a).
+- Wave32 only. No `v_cmpx`, SDWA, DPP or float compares. VOP3 encodings cover the 32-bit compares only.
 - A lane-derived VCC_LO cannot reach EXEC or any scalar instruction, so there
   is no divergent execution. That needs its own contract.
 - The skipped region of a runtime `s_cbranch_vccz` holds only integer vector
@@ -289,3 +288,38 @@ There is no RDNA 2 or Xbox hardware evidence.
 - Each thread recomputes up to 32 lanes per compare. The cost grows with the
   compare's dependency chain. That is fine for fixtures, and no performance is
   claimed.
+
+## 11. VOP3A encoding (`_e64`)
+
+All sixteen 32-bit signed and unsigned compares in section 2 also have a 64-bit
+VOP3A encoding. The pinned AMD XML supplies each opcode. Bits 7:0 of the first
+word are the scalar destination selector (SDST), in the field named VDST.
+Selectors 0–105 name scalar general-purpose registers (SGPRs), and 106 names
+`vcc_lo`. All other destinations are rejected. Both SRC0 and SRC1 must name
+vector general-purpose registers (VGPRs), and the unused SRC2 must be the
+assembler's inline-zero selector (128). ABS, OP_SEL, CLAMP, OMOD and NEG must
+be clear. The guide describes CLAMP on compares as enabling floating-point
+exception signaling (§6.5, p. 48 and §12.9.1, p. 162).
+
+The AMD guide's compare-specific text (§3.9, pp. 19–20 and §13.3.3, p. 252)
+specifies an SGPR destination for this encoding. The generic VDST label in
+§12.9.1 (p. 162) and §13.3.4 Table 82 (pp. 257–258) describes the VOP3A field
+as a VGPR destination. The pinned XML identifies VDST for these compares as
+`OPR_SREG`, with the Wave64 pair described by `FMT_NUM_M64`. The Wave32 write
+occupies one 32-bit SGPR. The guide defines 32 work-items in §2.1 (pp. 7–8),
+32-bit SGPRs in §3.1 Table 2 (p. 12) and one compare result bit per lane in
+§12.9 (p. 150). Wave64 stays unsupported.
+
+LLVM 23 `llvm-mc` for gfx1030 with `+wavefrontsize32` assembles
+`v_cmp_eq_u32_e64 s4, v1, v2` as bytes `04 00 c2 d4 01 05 02 02`.
+Selecting `vcc_lo` changes the first byte to `6a`. The decoder tests cover
+the assembler's words for all sixteen forms. This is encoding evidence.
+
+The compare replaces all 32 bits of SDST with the lane mask from section 3,
+including zero bits for inactive and absent lanes. It leaves SCC and EXEC
+unchanged. VCC is written only when SDST selects `vcc_lo`, which uses the
+same lowering and consumers as the VOPC form, including `s_cbranch_vccz`.
+Every other SDST is tracked as a runtime-only SGPR result, including under
+empty EXEC. Translation rejects later reads of that result, including reads
+through resource descriptors. The runtime branch region rules in section 6
+also apply here.
