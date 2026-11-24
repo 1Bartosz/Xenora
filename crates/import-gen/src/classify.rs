@@ -765,32 +765,23 @@ impl SymbolDb {
 
     fn populate_win32_synch(&mut self) {
         let m = "api-ms-win-core-synch-l1-1-0.dll";
-        self.win32_stub(
-            m,
-            "WaitForSingleObject",
-            false,
-            "WaitForSingleObject — stub returning WAIT_OBJECT_0",
-        );
+        for module in [m, "kernel32.dll"] {
+            for symbol in [
+                "CreateEventA",
+                "CreateEventW",
+                "SetEvent",
+                "ResetEvent",
+                "WaitForSingleObject",
+            ] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         self.win32_stub(
             m,
             "WaitForSingleObjectEx",
             false,
             "WaitForSingleObjectEx — stub",
         );
-        self.win32_stub(
-            m,
-            "CreateEventA",
-            true,
-            "CreateEvent — stub returning fake handle",
-        );
-        self.win32_stub(
-            m,
-            "CreateEventW",
-            true,
-            "CreateEvent wide — stub returning fake handle",
-        );
-        self.win32_stub(m, "SetEvent", false, "SetEvent — no-op stub");
-        self.win32_stub(m, "ResetEvent", false, "ResetEvent — no-op stub");
         self.win32_stub(m, "CreateMutexA", true, "CreateMutex — stub");
         self.win32_stub(m, "CreateMutexW", true, "CreateMutex wide — stub");
         self.win32_stub(m, "ReleaseMutex", false, "ReleaseMutex — stub");

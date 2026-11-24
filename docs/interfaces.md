@@ -140,6 +140,21 @@ References include Microsoft's
 [virtual allocation](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc),
 and [virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree) contracts.
 
+### Event signaling
+
+The synthetic runtime supports unnamed manual-reset and auto-reset events
+created with default security attributes. `SetEvent` signals an event,
+`ResetEvent` clears it, and `CloseHandle` invalidates the handle.
+`WaitForSingleObject` consumes an auto-reset signal once, leaves a manual-reset
+signal set, and reports `WAIT_TIMEOUT` when a zero-timeout poll finds no signal.
+A wait that would block returns `WAIT_FAILED` with `ERROR_NOT_SUPPORTED`.
+Thread and event handles are distinct types in the same bounded table.
+Event duplicates share signal state and keep the event alive independently.
+A duplicate can retain or reduce its rights. Waiting requires synchronize
+access, and setting or resetting requires modify-state access.
+
+See Microsoft's [event object documentation](https://learn.microsoft.com/windows/win32/sync/event-objects).
+
 ## Synthetic tiled textures
 
 The texture crate reads original fixtures in an array-layer-major layout. Each

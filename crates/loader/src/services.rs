@@ -9,6 +9,8 @@
 //! - Virtual memory: `VirtualAlloc`, `VirtualFree`
 //! - Xbox physical memory: `XMemAlloc`, `XMemFree`
 
+mod events;
+
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions};
@@ -29,7 +31,7 @@ const THREAD_QUERY_RIGHTS: u32 = 0x0040 | 0x0800;
 const THREAD_SET_RIGHTS: u32 = 0x0020 | 0x0400;
 const THREAD_SUPPORTED_RIGHTS: u32 = THREAD_QUERY_RIGHTS | THREAD_SET_RIGHTS | 0x0010_0000;
 const THREAD_PRIORITY_ERROR_RETURN: u64 = 0x7fff_ffff;
-const MAX_THREAD_HANDLES: usize = 1024;
+const MAX_OBJECT_HANDLES: usize = 1024;
 const DUPLICATE_SAME_ACCESS: u32 = 2;
 const HANDLE_API: &str = "api-ms-win-core-handle-l1-1-0.dll";
 const PAGE_SIZE: u64 = 4096;
@@ -111,22 +113,30 @@ impl Clock for SystemClock {
     }
 }
 
-#[derive(Default)]
-struct ThreadState {
-    priority: i32,
-    last_handle: u64,
-    handles: BTreeMap<u64, u32>,
+enum GuestObject {
+    Thread(u32),
+    Event {
+        state: Arc<Mutex<events::Event>>,
+        access: u32,
+    },
 }
 
-impl ThreadState {
+#[derive(Default)]
+struct ObjectState {
+    priority: i32,
+    last_handle: u64,
+    handles: BTreeMap<u64, GuestObject>,
+}
+
+impl ObjectState {
     fn next_handle(&self) -> Option<u64> {
         self.last_handle
             .checked_add(4)
-            .filter(|_| self.handles.len() < MAX_THREAD_HANDLES)
+            .filter(|_| self.handles.len() < MAX_OBJECT_HANDLES)
     }
 
-    fn insert_handle(&mut self, handle: u64, access: u32) {
-        self.handles.insert(handle, access);
+    fn insert_handle(&mut self, handle: u64, object: GuestObject) {
+        self.handles.insert(handle, object);
         self.last_handle = handle;
     }
 
@@ -135,9 +145,9 @@ impl ThreadState {
             return Ok(());
         }
         match self.handles.get(&handle) {
-            Some(access) if access & required != 0 => Ok(()),
-            Some(_) => Err(ERROR_ACCESS_DENIED),
-            None => Err(ERROR_INVALID_HANDLE),
+            Some(GuestObject::Thread(access)) if access & required != 0 => Ok(()),
+            Some(GuestObject::Thread(_)) => Err(ERROR_ACCESS_DENIED),
+            _ => Err(ERROR_INVALID_HANDLE),
         }
     }
 }
@@ -149,7 +159,7 @@ pub struct ServicesState {
     pub process_id: u32,
     priority_boost_disabled: AtomicBool,
     pub thread_id: u32,
-    thread: Mutex<ThreadState>,
+    objects: Mutex<ObjectState>,
     pub last_error: AtomicU32,
     pub next_alloc_addr: AtomicU64,
     pub graphics: Arc<Mutex<crate::graphics::GraphicsContext>>,
@@ -163,7 +173,7 @@ impl ServicesState {
             priority_boost_disabled: AtomicBool::new(false),
             process_id: 0x4100, // Synthetic process ID
             thread_id: 0x4104,  // Synthetic main thread ID
-            thread: Mutex::new(ThreadState::default()),
+            objects: Mutex::new(ObjectState::default()),
             last_error: AtomicU32::new(0),
             next_alloc_addr: AtomicU64::new(0x0000_0002_0000_0000), // 8GB guest heap
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),
@@ -258,18 +268,18 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         if inherit != 0 || access & !THREAD_SUPPORTED_RIGHTS != 0 {
             return s.fail(ERROR_NOT_SUPPORTED, 0);
         }
-        let mut thread = s.thread.lock().expect("guest thread state");
+        let mut thread = s.objects.lock().expect("guest object state");
         let Some(handle) = thread.next_handle() else {
             return s.fail(ERROR_NOT_ENOUGH_MEMORY, 0);
         };
-        thread.insert_handle(handle, access);
+        thread.insert_handle(handle, GuestObject::Thread(access));
         Ok(handle)
     });
 
     let s = state.clone();
     registry.register(KERNEL32, "GetThreadPriority", move |args, _, mem| {
         let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        let thread = s.thread.lock().expect("guest thread state");
+        let thread = s.objects.lock().expect("guest object state");
         if let Err(error) = thread.check_access(handle, THREAD_QUERY_RIGHTS) {
             return s.fail(error, THREAD_PRIORITY_ERROR_RETURN);
         }
@@ -280,7 +290,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     registry.register(KERNEL32, "SetThreadPriority", move |args, _, mem| {
         let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
         let priority = args.get(1, mem).map_err(ExitReason::MemoryFault)? as i32;
-        let mut thread = s.thread.lock().expect("guest thread state");
+        let mut thread = s.objects.lock().expect("guest object state");
         if let Err(error) = thread.check_access(handle, THREAD_SET_RIGHTS) {
             return s.fail(error, 0);
         }
@@ -297,7 +307,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     let s = state.clone();
     registry.register(KERNEL32, "GetThreadId", move |args, _, mem| {
         let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
-        let thread = s.thread.lock().expect("guest thread state");
+        let thread = s.objects.lock().expect("guest object state");
         if let Err(error) = thread.check_access(handle, THREAD_QUERY_RIGHTS) {
             return s.fail(error, 0);
         }
@@ -318,9 +328,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     registry.register(KERNEL32, "CloseHandle", move |args, _, mem| {
         let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
         if matches!(handle, CURRENT_PROCESS | CURRENT_THREAD)
-            || s.thread
+            || s.objects
                 .lock()
-                .expect("guest thread state")
+                .expect("guest object state")
                 .handles
                 .remove(&handle)
                 .is_some()
@@ -348,13 +358,15 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         if inherit != 0 || options & !DUPLICATE_SAME_ACCESS != 0 || source == CURRENT_PROCESS {
             return s.fail(ERROR_NOT_SUPPORTED, 0);
         }
-        let mut thread = s.thread.lock().expect("guest thread state");
-        let granted = if source == CURRENT_THREAD {
-            THREAD_SUPPORTED_RIGHTS
-        } else if let Some(&rights) = thread.handles.get(&source) {
-            rights
+        let mut thread = s.objects.lock().expect("guest object state");
+        let (granted, event) = if source == CURRENT_THREAD {
+            (THREAD_SUPPORTED_RIGHTS, None)
         } else {
-            return s.fail(ERROR_INVALID_HANDLE, 0);
+            match thread.handles.get(&source) {
+                Some(GuestObject::Thread(rights)) => (*rights, None),
+                Some(GuestObject::Event { state, access }) => (*access, Some(Arc::clone(state))),
+                None => return s.fail(ERROR_INVALID_HANDLE, 0),
+            }
         };
         let access = if options & DUPLICATE_SAME_ACCESS != 0 {
             granted
@@ -369,11 +381,17 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         if output == 0 || mem.write_u64(output, handle).is_err() {
             return s.fail(ERROR_NOACCESS, 0);
         }
-        thread.insert_handle(handle, access);
+        let object = match event {
+            Some(state) => GuestObject::Event { state, access },
+            None => GuestObject::Thread(access),
+        };
+        thread.insert_handle(handle, object);
         Ok(1)
     });
     registry.alias(HANDLE_API, KERNEL32, "DuplicateHandle");
     registry.set_status(KERNEL32, "DuplicateHandle", ServiceStatus::Partial);
+
+    events::register(registry, &state);
 
     // 1. GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *mut FILETIME)
     let s = state.clone();

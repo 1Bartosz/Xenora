@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added unnamed guest events with manual and automatic reset, signaling, immediate waits, and same-process handle duplication.
+
 - Added same-process duplication of synthetic thread handles with independent closure.
 - Added a rights-checked `GetThreadId` query for handles to the synthetic guest thread.
 - Added 32-bit and 64-bit millisecond uptime queries for synthetic Windows guests.

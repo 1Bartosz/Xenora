@@ -1023,6 +1023,77 @@ fn test_guest_duplicates_thread_handle_through_iat() {
 }
 
 #[test]
+fn test_guest_event_signaling_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call = |module, symbol, args: &[u64]| {
+        call_service_fixture(&state, module, symbol, args)
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let kernel = "kernel32.dll";
+    let synch = "api-ms-win-core-synch-l1-1-0.dll";
+    let wait = |handle, timeout| call(synch, "WaitForSingleObject", &[handle, timeout]);
+    let error = || call(kernel, "GetLastError", &[]);
+
+    let manual = call(synch, "CreateEventW", &[0, 1, 0, 0]);
+    let auto = call(kernel, "CreateEventA", &[0, 0, 1, 0]);
+    assert_ne!(manual, 0);
+    assert_ne!(auto, 0);
+    assert_ne!(manual, auto);
+    assert_eq!(wait(manual, 0), 258);
+    assert_eq!(wait(manual, 1), u32::MAX as u64);
+    assert_eq!(error(), 50);
+    assert_eq!(call(synch, "SetEvent", &[manual]), 1);
+    assert_eq!(wait(manual, u32::MAX as u64), 0);
+    assert_eq!(wait(manual, 0), 0);
+    assert_eq!(call(synch, "ResetEvent", &[manual]), 1);
+    assert_eq!(wait(manual, 0), 258);
+    assert_eq!(wait(auto, 0), 0);
+    assert_eq!(wait(auto, 0), 258);
+    assert_eq!(call(synch, "SetEvent", &[auto]), 1);
+    assert_eq!(call(synch, "SetEvent", &[auto]), 1);
+    assert_eq!(wait(auto, 0), 0);
+    assert_eq!(wait(auto, 0), 258);
+
+    assert_eq!(call(kernel, "GetThreadId", &[auto]), 0);
+    assert_eq!(error(), 6);
+    let thread = call(kernel, "GetCurrentThread", &[]);
+    assert_eq!(call(synch, "SetEvent", &[thread]), 0);
+    assert_eq!(error(), 6);
+    assert_eq!(call(kernel, "CloseHandle", &[manual]), 1);
+    assert_eq!(wait(manual, 0), u32::MAX as u64);
+    assert_eq!(error(), 6);
+    assert_eq!(call(kernel, "CreateEventW", &[0, 0, 0, 1]), 0);
+    assert_eq!(error(), 50);
+    let copy = call_service_fixture(
+        &state,
+        kernel,
+        "DuplicateHandle",
+        &[
+            u64::MAX,
+            auto,
+            u64::MAX,
+            PROCESS_FIXTURE_OUTPUT,
+            0x10_0000,
+            0,
+            0,
+        ],
+    );
+    assert_eq!(copy.execution.final_state.get(Register::Rax), 1);
+    let copy = copy.image.memory.read_u64(PROCESS_FIXTURE_OUTPUT).unwrap();
+    assert_eq!(call(synch, "SetEvent", &[copy]), 0);
+    assert_eq!(error(), 5);
+    assert_eq!(call(synch, "SetEvent", &[auto]), 1);
+    assert_eq!(wait(copy, 0), 0);
+    assert_eq!(wait(auto, 0), 258);
+    assert_eq!(call(synch, "SetEvent", &[auto]), 1);
+    assert_eq!(call(kernel, "CloseHandle", &[auto]), 1);
+    assert_eq!(wait(copy, 0), 0);
+    assert_eq!(call(kernel, "CloseHandle", &[copy]), 1);
+}
+
+#[test]
 fn test_virtual_allocation_release_through_iat() {
     const IMAGE: u64 = 0x140000000;
     const HEAP: u64 = 0x8_0000_0000;
