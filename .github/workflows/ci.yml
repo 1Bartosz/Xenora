@@ -46,6 +46,8 @@ jobs:
         run: |
           PYTHONPATH=scripts python3 -m unittest discover -s tests/agent_queue
           sh -n scripts/agent-queue.sh scripts/agent-sync.sh
+      - name: Test pull request template check
+        run: PYTHONPATH=scripts python3 -m unittest discover -s tests/pr_template
       - name: Check formatting and lint
         run: |
           cargo fmt --all -- --check
