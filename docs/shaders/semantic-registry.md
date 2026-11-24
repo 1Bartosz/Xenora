@@ -51,10 +51,11 @@ error.
 | `family` | Encoding family; must match the XML base encoding | e.g. `SOP2` |
 | `opcode` | Opcode; must match the XML | non-negative integer |
 | `variant` | Rust enum variant of the typed operation | CamelCase, e.g. `AddU32` |
-| `operation` | The primitive the form uses | `add`, `sub`, `and`, `or`, `xor` |
-| `signedness` | How operands are read | `unsigned`, `signed`, `bitwise` (`bitwise` exactly for `and`, `or`, `xor`) |
+| `operation` | The primitive the form uses | `add`, `sub`, `and`, `or`, `xor`, `andn2`, `orn2`, `nand`, `nor`, `xnor`, `lshl`, `lshr`, `ashr` |
+| `signedness` | How operands are read | `unsigned`, `signed`, `bitwise` (always `bitwise` for the logical operations, never for `add` and `sub`; shifts take their primitive's signedness) |
 | `carry_in` | Whether the form reads SCC as carry-in or borrow-in | `none`, `scc` (`scc` only for unsigned `add` and `sub`) |
 | `width` | Operand and result width in bits | `32` |
+| `shift_count_bits` | Shifts only: the low bits of S1 used as the count. The generator masks S1 with it, and the XML must list S1 as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
 | `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `unchanged` |
 | `vcc`, `exec` | Effect on VCC and EXEC, stated rather than implied | `unchanged` |
 | `wave` | Wave sizes the form is valid in | `any` (`wave32` is in the vocabulary but rejected until the decoder can enforce it) |
@@ -71,7 +72,10 @@ fixes the `scc` value:
 | `sub` / `unsigned` | `borrow` | `sub_borrow_u32` | allowed |
 | `add` / `signed` | `signed_overflow` | `add_overflow_i32` | no |
 | `sub` / `signed` | `signed_overflow` | `sub_overflow_i32` | no |
-| `and`, `or`, `xor` / `bitwise` | `nonzero` | `and_nonzero_b32`, `or_nonzero_b32`, `xor_nonzero_b32` | no |
+| `and`, `or`, `xor`, `andn2`, `orn2`, `nand`, `nor`, `xnor` / `bitwise` | `nonzero` | `and_nonzero_b32`, `or_nonzero_b32`, `xor_nonzero_b32`, `andn2_nonzero_b32`, `orn2_nonzero_b32`, `nand_nonzero_b32`, `nor_nonzero_b32`, `xnor_nonzero_b32` | no |
+| `lshl` / `bitwise` | `nonzero` | `lshl_nonzero_b32` | no |
+| `lshr` / `unsigned` | `nonzero` | `lshr_nonzero_b32` | no |
+| `ashr` / `signed` | `nonzero` | `ashr_nonzero_i32` | no |
 
 Behaviour is chosen only from these declared fields, never from the mnemonic.
 
