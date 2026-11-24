@@ -19,12 +19,14 @@ use xenora_metal::NativeCompute;
 use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/frame-loop.exe");
+const INTERACTIVE_FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/interactive.exe");
 pub const WIDTH: usize = 4;
 pub const HEIGHT: usize = 3;
 pub const FRAME_BYTES: usize = WIDTH * HEIGHT * 4;
 pub const MAX_FRAMES: u32 = 100_000;
 /// Guest instructions per loop iteration (mov, call, inc, test, jnz) plus slack.
 const STEPS_PER_FRAME: usize = 8;
+const STEPS_PER_INTERACTIVE_FRAME: usize = 24;
 /// `x9-constant-ps.s` exports (1, 0, 0, 1): opaque red. Everything else is the clear colour.
 const RED: [u8; 4] = [255, 0, 0, 255];
 const CLEAR: [u8; 4] = [19, 43, 93, 251];
@@ -35,13 +37,30 @@ pub const FINISHED: u32 = 3;
 pub const STOPPED: u32 = 4;
 pub const FAILED: u32 = 5;
 
+#[derive(Default, Copy, Clone)]
+#[repr(C)]
+pub struct InputState {
+    pub buttons: u32,
+    pub stick_x: i16,
+    pub stick_y: i16,
+    pub mouse_dx: i16,
+    pub mouse_dy: i16,
+    pub mouse_buttons: u8,
+    pub connected: u8,
+    pub reserved: u16,
+}
+
 #[derive(Default)]
 struct State {
     status: u32,
     paused: bool,
     stop: bool,
+    interactive: bool,
     limit: u32,
     completed: u32,
+    input: InputState,
+    input_queue: std::collections::VecDeque<InputState>,
+    recorded_frames: Vec<(u32, Vec<u8>)>,
     /// Every `frame_submit` call the guest made, including the one answered with 0.
     calls: u64,
     latest: Option<(u32, Vec<u8>)>,
@@ -67,12 +86,13 @@ impl FrameLoop {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub fn start(limit: u32) -> Arc<Self> {
+    pub fn start(limit: u32, interactive: bool) -> Arc<Self> {
         let shared = Arc::new(Self::default());
         {
             let mut state = shared.lock();
             state.status = RUNNING;
             state.limit = limit;
+            state.interactive = interactive;
         }
         let guest = Arc::clone(&shared);
         let handle = std::thread::Builder::new()
@@ -108,6 +128,21 @@ impl FrameLoop {
         if let Some(handle) = self.thread.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = handle.join();
         }
+    }
+
+    pub fn send_input(&self, input: InputState) {
+        let mut state = self.lock();
+        state.input = input;
+    }
+
+    pub fn queue_input(&self, input: InputState) {
+        let mut state = self.lock();
+        state.input_queue.push_back(input);
+    }
+
+    pub fn get_recorded_frame(&self, index: usize) -> Option<(u32, Vec<u8>)> {
+        let state = self.lock();
+        state.recorded_frames.get(index).cloned()
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -148,28 +183,56 @@ impl FrameLoop {
                 .submit(index)
                 .ok_or(ExitReason::IllegalInstruction(0xff))
         });
+        if self.lock().interactive {
+            let shared_poll = Arc::clone(self);
+            imports.register("xenora.dll", "input_poll", move |_args, _, _memory| {
+                let mut state = shared_poll.lock();
+                let input = state.input_queue.pop_front().unwrap_or(state.input);
+                let cmd = if input.buttons & crate::XENORA_INPUT_RIGHT != 0 {
+                    1u64
+                } else if input.buttons & crate::XENORA_INPUT_LEFT != 0 {
+                    2u64
+                } else {
+                    0u64
+                };
+                Ok(cmd)
+            });
+        }
         let limit = self.lock().limit as usize;
+        let is_interactive = self.lock().interactive;
+        let fixture_bytes = if is_interactive {
+            INTERACTIVE_FIXTURE
+        } else {
+            FIXTURE
+        };
+        let steps_per_frame = if is_interactive {
+            STEPS_PER_INTERACTIVE_FRAME
+        } else {
+            STEPS_PER_FRAME
+        };
         let startup = run_synthetic_startup(
-            FIXTURE,
+            fixture_bytes,
             StartupLayout {
                 image_base: 0x1_4000_0000,
                 stack_top: 0x2_0001_0000,
                 tls_base: 0x3_0000_0000,
             },
             imports,
-            (limit + 1) * STEPS_PER_FRAME + 16,
+            (limit + 1) * steps_per_frame + 32,
         )
         .map_err(|e| format!("startup: {e}"));
         GPU.with(|slot| slot.borrow_mut().take());
         let startup = startup?;
         let calls = self.lock().calls;
         let rbx = startup.execution.final_state.get(Register::Rbx);
-        // The guest increments RBX after every call, so it must equal the calls we served.
-        if startup.execution.exit_reason != ExitReason::Halt || rbx != calls {
+        if startup.execution.exit_reason != ExitReason::Halt {
             return Err(format!(
-                "guest ended with {:?}, rbx={rbx}, calls={calls}",
+                "guest ended with {:?}",
                 startup.execution.exit_reason
             ));
+        }
+        if !is_interactive && rbx != calls {
+            return Err(format!("guest ended with rbx={rbx}, calls={calls}"));
         }
         Ok(())
     }
@@ -185,14 +248,21 @@ impl FrameLoop {
         if state.stop || state.completed >= state.limit {
             return Some(0);
         }
-        if index != u64::from(state.completed) {
+        if state.interactive {
+            if index >= WIDTH as u64 {
+                return None; // column must be inside 0..WIDTH
+            }
+        } else if index != u64::from(state.completed) {
             return None; // frame identities must arrive in order
         }
         drop(state);
         let pixels = render(index as u32)?;
         let mut state = self.lock();
         state.completed += 1;
-        state.latest = Some((index as u32, pixels));
+        state.latest = Some((index as u32, pixels.clone()));
+        if state.interactive {
+            state.recorded_frames.push((index as u32, pixels));
+        }
         Some(u64::from(state.completed < state.limit && !state.stop))
     }
 }

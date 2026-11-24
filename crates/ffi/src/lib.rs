@@ -39,6 +39,16 @@ pub const XENORA_LOOP_FAILED: u32 = frame_loop::FAILED;
 pub const XENORA_FRAME_LOOP_MAX_FRAMES: u32 = frame_loop::MAX_FRAMES;
 pub const XENORA_NO_FRAME: u32 = u32::MAX;
 
+pub const XENORA_INPUT_NONE: u32 = 0;
+pub const XENORA_INPUT_RIGHT: u32 = 1 << 0;
+pub const XENORA_INPUT_LEFT: u32 = 1 << 1;
+pub const XENORA_INPUT_UP: u32 = 1 << 2;
+pub const XENORA_INPUT_DOWN: u32 = 1 << 3;
+pub const XENORA_INPUT_ACTION_A: u32 = 1 << 4;
+pub const XENORA_INPUT_ACTION_B: u32 = 1 << 5;
+
+pub use frame_loop::InputState as xenora_input_state;
+
 pub const XENORA_FIXTURE_FRAME_WIDTH: u32 = 4;
 pub const XENORA_FIXTURE_FRAME_HEIGHT: u32 = 3;
 const FRAME_BYTES: usize = (XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4) as usize;
@@ -160,8 +170,75 @@ pub extern "C" fn xenora_session_start_frame_loop(session: u64, frame_count: u32
         if slot.frame_loop.is_some() {
             return XENORA_INVALID_STATE;
         }
-        slot.frame_loop = Some(FrameLoop::start(frame_count));
+        slot.frame_loop = Some(FrameLoop::start(frame_count, false));
         XENORA_OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenora_session_start_interactive_loop(session: u64, frame_count: u32) -> i32 {
+    guarded(|| {
+        if !(1..=XENORA_FRAME_LOOP_MAX_FRAMES).contains(&frame_count) {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let Ok(mut slots) = SESSIONS.lock() else {
+            return XENORA_INTERNAL_ERROR;
+        };
+        if !is_live(&slots, session) {
+            return XENORA_INVALID_HANDLE;
+        }
+        let slot = &mut slots[split(session).0];
+        if slot.frame_loop.is_some() {
+            return XENORA_INVALID_STATE;
+        }
+        slot.frame_loop = Some(FrameLoop::start(frame_count, true));
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `input` must be a valid pointer to an initialized `xenora_input_state`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_send_input(
+    session: u64,
+    input: *const frame_loop::InputState,
+) -> i32 {
+    guarded(|| {
+        if input.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let input_val = unsafe { *input };
+        match session_loop(session) {
+            Ok(Some(running)) => {
+                running.send_input(input_val);
+                XENORA_OK
+            }
+            Ok(None) => XENORA_INVALID_STATE,
+            Err(status) => status,
+        }
+    })
+}
+
+/// # Safety
+/// `input` must be a valid pointer to an initialized `xenora_input_state`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_queue_input(
+    session: u64,
+    input: *const frame_loop::InputState,
+) -> i32 {
+    guarded(|| {
+        if input.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let input_val = unsafe { *input };
+        match session_loop(session) {
+            Ok(Some(running)) => {
+                running.queue_input(input_val);
+                XENORA_OK
+            }
+            Ok(None) => XENORA_INVALID_STATE,
+            Err(status) => status,
+        }
     })
 }
 
@@ -244,6 +321,41 @@ pub unsafe extern "C" fn xenora_session_frame_loop_status(
                 }
                 None => out_frame_id.write(XENORA_NO_FRAME),
             }
+        }
+        XENORA_OK
+    })
+}
+
+/// # Safety
+/// `out_frame_id` must be valid for one aligned write; `out_rgba` must be valid
+/// for `capacity` byte writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_get_recorded_frame(
+    session: u64,
+    frame_index: u32,
+    out_frame_id: *mut u32,
+    out_rgba: *mut u8,
+    capacity: u64,
+) -> i32 {
+    guarded(|| {
+        if out_frame_id.is_null() || out_rgba.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        if capacity < frame_loop::FRAME_BYTES as u64 {
+            return XENORA_BUFFER_TOO_SMALL;
+        }
+        let running = match session_loop(session) {
+            Ok(Some(running)) => running,
+            Ok(None) => return XENORA_INVALID_STATE,
+            Err(status) => return status,
+        };
+        let Some((id, pixels)) = running.get_recorded_frame(frame_index as usize) else {
+            return XENORA_INVALID_ARGUMENT;
+        };
+        // SAFETY: checked non-null and capacity >= FRAME_BYTES
+        unsafe {
+            out_frame_id.write(id);
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), out_rgba, frame_loop::FRAME_BYTES);
         }
         XENORA_OK
     })
@@ -601,6 +713,13 @@ mod tests {
             "XENORA_FRAME_LOOP_MAX_FRAMES {XENORA_FRAME_LOOP_MAX_FRAMES}u"
         )));
         assert!(header.contains("XENORA_NO_FRAME 0xFFFFFFFFu"));
+        assert!(header.contains("XENORA_INPUT_NONE     0u"));
+        assert!(header.contains("XENORA_INPUT_RIGHT    (1u << 0)"));
+        assert!(header.contains("XENORA_INPUT_LEFT     (1u << 1)"));
+        assert!(header.contains("XENORA_INPUT_UP       (1u << 2)"));
+        assert!(header.contains("XENORA_INPUT_DOWN     (1u << 3)"));
+        assert!(header.contains("XENORA_INPUT_ACTION_A (1u << 4)"));
+        assert!(header.contains("XENORA_INPUT_ACTION_B (1u << 5)"));
     }
 
     #[test]
@@ -818,8 +937,37 @@ mod tests {
             XENORA_INVALID_ARGUMENT
         );
         assert_eq!(
+            xenora_session_start_interactive_loop(handle, 0),
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
             xenora_session_start_frame_loop(handle, XENORA_FRAME_LOOP_MAX_FRAMES + 1),
             XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            xenora_session_start_interactive_loop(handle, XENORA_FRAME_LOOP_MAX_FRAMES + 1),
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { xenora_session_send_input(handle, std::ptr::null()) },
+            XENORA_INVALID_ARGUMENT
+        );
+        let dummy_input = xenora_input_state::default();
+        assert_eq!(
+            unsafe { xenora_session_send_input(handle, &dummy_input) },
+            XENORA_INVALID_STATE
+        );
+        assert_eq!(
+            unsafe { xenora_session_queue_input(handle, &dummy_input) },
+            XENORA_INVALID_STATE
+        );
+        let mut rec_id = 0u32;
+        let mut rec_rgba = [0u8; 48];
+        assert_eq!(
+            unsafe {
+                xenora_session_get_recorded_frame(handle, 0, &mut rec_id, rec_rgba.as_mut_ptr(), 48)
+            },
+            XENORA_INVALID_STATE
         );
         assert_eq!(
             xenora_session_pause_frame_loop(handle),

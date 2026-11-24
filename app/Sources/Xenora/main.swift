@@ -86,7 +86,7 @@ final class FrameModel: ObservableObject {
     }
 }
 
-/// Persistent guest rendering model (Gate 3, #266).
+/// Persistent guest rendering model (Gate 3, #266; Gate 4, #276).
 @MainActor
 final class FrameLoopModel: ObservableObject {
     @Published var state: UInt32 = UInt32(XENORA_LOOP_NONE)
@@ -94,6 +94,7 @@ final class FrameLoopModel: ObservableObject {
     @Published var frameId: UInt32 = XENORA_NO_FRAME
     @Published var image: CGImage?
     @Published var errorMessage: String?
+    @Published var isInteractive: Bool = false
 
     private var session: xenora_session = 0
     private var pollTask: Task<Void, Never>?
@@ -144,11 +145,55 @@ final class FrameLoopModel: ObservableObject {
             session = 0
             return
         }
+        isInteractive = false
         state = UInt32(XENORA_LOOP_RUNNING)
         completed = 0
         frameId = XENORA_NO_FRAME
         image = nil
         startPolling()
+    }
+
+    func startInteractive(frameCount: UInt32 = 300) {
+        errorMessage = nil
+        if session != 0 {
+            _ = xenora_session_destroy(session)
+            session = 0
+        }
+        var newSession: xenora_session = 0
+        let createStatus = xenora_session_create(XENORA_ABI_VERSION, &newSession)
+        guard createStatus == XENORA_OK else {
+            errorMessage = "Failed to create session (status \(createStatus))"
+            return
+        }
+        session = newSession
+        let startStatus = xenora_session_start_interactive_loop(session, frameCount)
+        guard startStatus == XENORA_OK else {
+            errorMessage = "Failed to start interactive loop (status \(startStatus))"
+            _ = xenora_session_destroy(session)
+            session = 0
+            return
+        }
+        isInteractive = true
+        state = UInt32(XENORA_LOOP_RUNNING)
+        completed = 0
+        frameId = XENORA_NO_FRAME
+        image = nil
+        startPolling()
+    }
+
+    func sendInput(buttons: UInt32) {
+        guard session != 0 else { return }
+        var input = xenora_input_state(
+            buttons: buttons,
+            stick_x: 0,
+            stick_y: 0,
+            mouse_dx: 0,
+            mouse_dy: 0,
+            mouse_buttons: 0,
+            connected: 1,
+            reserved: 0
+        )
+        _ = xenora_session_send_input(session, &input)
     }
 
     func pause() {
@@ -338,6 +383,8 @@ struct ContentView: View {
                 HStack {
                     Button("Start 300 frames") { loop.start(frameCount: 300) }
                         .disabled(!loop.canStart || !probe.connected)
+                    Button("Interactive (300 frames)") { loop.startInteractive(frameCount: 300) }
+                        .disabled(!loop.canStart || !probe.connected)
                     Button("Pause") { loop.pause() }
                         .disabled(!loop.isRunning)
                     Button("Resume") { loop.resume() }
@@ -345,12 +392,22 @@ struct ContentView: View {
                     Button("Stop") { loop.stop() }
                         .disabled(!loop.isRunning && !loop.isPaused)
                 }
+                if loop.isInteractive && (loop.isRunning || loop.isPaused) {
+                    HStack {
+                        Button("◀ Left") { loop.sendInput(buttons: UInt32(XENORA_INPUT_LEFT)) }
+                        Button("▶ Right") { loop.sendInput(buttons: UInt32(XENORA_INPUT_RIGHT)) }
+                        Button("Release") { loop.sendInput(buttons: UInt32(XENORA_INPUT_NONE)) }
+                    }
+                    Text("Interactive guest: steer the rendered strip across columns 0..3 with Left/Right.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             LabeledContent("Runtime", value: probe.connected ? "Connected" : "Unavailable (status \(probe.status))")
             LabeledContent("Interface version", value: "\(probe.abiVersion)")
             LabeledContent("Trusted fixture sections", value: "\(probe.sections)")
             LabeledContent("Trusted fixture entry RVA", value: String(format: "0x%X", probe.entryRVA))
-            Text("Only the bundled trusted fixture and frame-loop guest can run. Presentation uses read-back Metal frames. Arbitrary executables and input are not available yet.")
+            Text("Only the bundled trusted fixtures (single-frame, frame-loop, and interactive guest) can run. Presentation uses read-back Metal frames. Arbitrary executables are not available yet.")
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
@@ -382,6 +439,44 @@ if let flag = CommandLine.arguments.firstIndex(of: "--inspect"), flag + 1 < Comm
     print(report.hasSuffix("\n") ? report : report + "\n", terminator: "")
     print("status=\(status)")
     exit(status == Int32(XENORA_OK) ? 0 : 1)
+}
+
+// `--smoke-interactive` runs 60 frames with queued inputs on the Metal device and exits.
+if CommandLine.arguments.contains("--smoke-interactive") {
+    var session: xenora_session = 0
+    guard xenora_session_create(XENORA_ABI_VERSION, &session) == XENORA_OK else {
+        print("failed to create session")
+        exit(1)
+    }
+    defer { _ = xenora_session_destroy(session) }
+    guard xenora_session_start_interactive_loop(session, 60) == XENORA_OK else {
+        print("failed to start interactive loop")
+        exit(1)
+    }
+    for f in 0..<60 {
+        let btn: UInt32 = (f < 15) ? UInt32(XENORA_INPUT_RIGHT) :
+                          (f < 30) ? UInt32(XENORA_INPUT_NONE) :
+                          (f < 45) ? UInt32(XENORA_INPUT_LEFT) : UInt32(XENORA_INPUT_RIGHT)
+        var input = xenora_input_state(buttons: btn, stick_x: 0, stick_y: 0, mouse_dx: 0, mouse_dy: 0, mouse_buttons: 0, connected: 1, reserved: 0)
+        _ = xenora_session_queue_input(session, &input)
+    }
+    var state: UInt32 = 0
+    var completed: UInt32 = 0
+    var frameId: UInt32 = 0
+    var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
+    while true {
+        let code = rgba.withUnsafeMutableBufferPointer { buf in
+            xenora_session_frame_loop_status(session, &state, &completed, &frameId, buf.baseAddress, UInt64(buf.count))
+        }
+        if code != XENORA_OK {
+            print("frame_loop_status failed: \(code)")
+            exit(1)
+        }
+        if state != UInt32(XENORA_LOOP_RUNNING) { break }
+        Thread.sleep(forTimeInterval: 0.005)
+    }
+    print("interactive: state=\(state) completed=\(completed) frame_id=\(frameId)")
+    exit(state == UInt32(XENORA_LOOP_FINISHED) && completed == 60 ? 0 : 1)
 }
 
 // `--smoke-loop` runs 300 frames on the Metal device and exits; it needs a GPU.
