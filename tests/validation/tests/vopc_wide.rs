@@ -1198,7 +1198,7 @@ fn neighbouring_compares_stay_unsupported() {
 }
 
 #[test]
-#[ignore = "requires a native Metal device with API and shader validation, and the translator's 16- and 64-bit forms"]
+#[ignore = "requires a native Metal device with API and shader validation, and the translator's 16- and 64-bit forms (skipped by scripts/test-gpu.sh until then)"]
 fn vopc_wide_match_the_guide_on_native_metal() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("MTL_SHADER_VALIDATION").as_deref(), Ok("1"));
