@@ -33,7 +33,7 @@ ignored.
 Sources are normal SGPRs, inline integers (-16 to 64) or one literal word.
 
 These forms are declared as data in the semantic registry,
-`crates/isa/semantics/rdna2.toml`: opcode, operation, signedness, carry-in,
+`crates/isa/semantics/rdna2/sop2.toml`: opcode, operation, signedness, carry-in,
 SCC effect, operand rule and guide references. `crates/isa/generate_semantics.py`
 checks each declaration against the pinned AMD XML snapshot and rejects
 contradictions (for example a carry-in on a bitwise form, or a signed form whose

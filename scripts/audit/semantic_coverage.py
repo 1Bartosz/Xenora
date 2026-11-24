@@ -142,6 +142,24 @@ def parse_generated(source):
     raise ValueError(f"{GENERATED}: unterminated FORM_IDS")
 
 
+def load_registry(path):
+    """The root registry with its family files merged, by the generator's loader.
+
+    One loader for every consumer, so the family-file guards (one family per
+    file, include paths, duplicates) apply here too.
+    """
+    import importlib.util
+
+    script = ROOT / "crates/isa/generate_semantics.py"
+    spec = importlib.util.spec_from_file_location("generate_semantics", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.load_registry(path)
+    except module.RegistryError as error:
+        raise ValueError(f"{REGISTRY}: {error}") from error
+
+
 def read_declarations(registry, identified):
     if type(registry.get("schema")) is not int or registry["schema"] != 1:
         raise ValueError(f"{REGISTRY}: expected schema 1")
@@ -161,7 +179,25 @@ def read_declarations(registry, identified):
         rules[name] = (family, set(unsupported))
 
     declared = set()
-    for form in registry["form"]:
+    # An encoding variant declares its base form in another encoding family.
+    raw_variants = registry.get("encoding_variant", [])
+    if not isinstance(raw_variants, list) or not all(
+        isinstance(variant, dict)
+        and {"family", "of", "opcode", "operands"} <= set(variant)
+        and all(isinstance(variant[key], str) for key in ("family", "of", "operands"))
+        and type(variant["opcode"]) is int
+        for variant in raw_variants
+    ):
+        raise ValueError(
+            f"{REGISTRY}: every encoding_variant needs string family, of and operands"
+            " and an integer opcode"
+        )
+    variants = [
+        {"family": variant["family"], "name": variant["of"], "opcode": variant["opcode"],
+         "operands": variant["operands"]}
+        for variant in raw_variants
+    ]
+    for form in registry["form"] + variants:
         key = (form["family"], form["name"])
         if key not in identified:
             raise ValueError(f"{REGISTRY}: unknown form {key}")
@@ -294,7 +330,7 @@ def main():
     args = parser.parse_args()
     try:
         identified = load_snapshot(ROOT)
-        registry = tomllib.loads((ROOT / REGISTRY).read_text(encoding="utf-8"))
+        registry = load_registry(ROOT / REGISTRY)
         decoder = parse_decoder((ROOT / DECODER).read_text(encoding="utf-8")) | parse_generated(
             (ROOT / GENERATED).read_text(encoding="utf-8"))
         status = tomllib.loads((ROOT / STATUS).read_text(encoding="utf-8"))

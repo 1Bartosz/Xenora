@@ -4,7 +4,8 @@ use std::process::{Command, Stdio};
 
 use xenora_decoder::{
     Architecture, CompareRelation, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction,
-    ScalarAluOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorSource, decode, decode_at,
+    ScalarAluOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorSource, decode,
+    decode_at,
 };
 use xenora_isa::semantics::Signedness;
 use xenora_ref::{
@@ -43,7 +44,8 @@ fn decodes_each_fixture_instruction_with_offset_and_length() {
         (
             20,
             8,
-            Instruction::AddNoCarryU32 {
+            Instruction::VectorAluVop3 {
+                op: VectorAluVop3Op::AddNcU32,
                 dst: 1,
                 src0: 1,
                 src1: 2,
@@ -373,7 +375,13 @@ fn reference_op(instruction: Instruction) -> Op {
             reference_scalar(src0),
             reference_scalar(src1),
         ),
-        Instruction::AddNoCarryU32 { dst, src0, src1 } => Op::Add(dst, src0, src1),
+        // The reference's VOP3 add; it is the only VOP3 variant so far.
+        Instruction::VectorAluVop3 {
+            op: VectorAluVop3Op::AddNcU32,
+            dst,
+            src0,
+            src1,
+        } => Op::Add(dst, src0, src1),
         Instruction::ScalarMoveB32 { dst, src } => Op::ScalarMove(dst, reference_scalar(src)),
         Instruction::ScalarUnary { op, dst, src } => Op::ScalarUnary(
             match op {
@@ -998,7 +1006,8 @@ fn accepts_scalar_destination_105_and_vgpr_zero_add_sources() {
     let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     assert_eq!(
         decode(Architecture::Gfx1030, &bytes).unwrap()[0].instruction,
-        Instruction::AddNoCarryU32 {
+        Instruction::VectorAluVop3 {
+            op: VectorAluVop3Op::AddNcU32,
             dst: 1,
             src0: 0,
             src1: 0
