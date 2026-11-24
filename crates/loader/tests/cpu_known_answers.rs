@@ -2732,22 +2732,9 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("ptest_flags", 0),
     ("push16_moves_rsp_by_two", 0),
     ("pushfq_popfq_status_round_trip", 0),
-    ("rcl16_by16", 0),
-    ("rcl16_by17_is_identity", 0),
-    ("rcl32_by31", 0),
-    ("rcl32_cl32_affects_nothing_but_extension", 0),
-    ("rcl64_by63", 0),
-    ("rcl8_by1_clear_carry_in", 0),
-    ("rcl8_by1_set_carry_in_preserves_szap", 0),
-    ("rcl8_by8", 0),
-    ("rcl8_by9_is_identity", 0),
     ("rcpps_special_values", 0),
     ("rcpss_relative_error_bound", 0),
     ("rcpss_rsqrtss_signal_nothing", 0),
-    ("rcr64_by1", 0),
-    ("rcr8_by10_is_by_one_mod_9", 0),
-    ("rcr8_by1_clear_carry_in", 0),
-    ("rcr8_by1_set_carry_in", 0),
     ("rep_lodsb_source_fault", 1),
     ("rep_movsb_addr32_uses_32bit_registers", 1),
     ("repe_cmpsb_fault_restores_flags", 1),
@@ -2768,7 +2755,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("shld32_by4", 0),
     ("shld32_cl32_is_count_zero", 0),
     ("shld64_by63", 0),
-    ("shr_rcr_128bit_right_shift", 1),
     ("shrd32_by8", 0),
     ("shrd64_by1_sign_change", 0),
     ("shrd64_cl64_is_count_zero", 0),
@@ -4055,11 +4041,7 @@ fn shift_and_rotate_sweep_matches_operation_pseudocode() {
             runs += bench.runs;
         }
     }
-    let wanted: Vec<String> = ["rcl", "rcr"]
-        .iter()
-        .flat_map(|op| WIDTHS.map(|bits| format!("{op}{bits}")))
-        .collect();
-    assert_eq!(refused, wanted, "unsupported shift forms changed");
+    assert_eq!(refused, Vec::<String>::new(), "a shift form is refused");
     println!("{runs} engine runs");
 }
 
