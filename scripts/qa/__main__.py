@@ -172,7 +172,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "rdna2" and args.action == "rank":
         from .rdna2_rank import run_rank
 
-        return run_rank(_root(), args)
+        try:
+            return run_rank(_root(), args)
+        except ValueError as exc:
+            # A malformed registry is a diagnostic, not a traceback.
+            print(f"rdna2: {exc}", file=sys.stderr)
+            return 2
     if args.command == "rdna2" and args.no_float:
         r.error("--no-float requires the rank action")
     root = _root()
@@ -263,7 +268,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
-        data = load_inventories(root)
+        try:
+            data = load_inventories(root)
+        except ValueError as exc:
+            # A malformed registry is a diagnostic, not a traceback.
+            print(f"rdna2: {exc}", file=sys.stderr)
+            return 2
         inv = summarize_inventory(data)
         exclude_families: list[str] = []
         claimed_paths: list[str] = []

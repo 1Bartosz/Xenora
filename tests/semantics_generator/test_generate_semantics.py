@@ -964,6 +964,15 @@ class Validate(unittest.TestCase):
         self.assertTrue(any("missing ['width']" in error for error in errors), errors)
         self.assertTrue(any("is incomplete" in error for error in errors), errors)
 
+    def test_a_variant_of_an_incomplete_first_duplicate_is_a_diagnostic(self):
+        reg = variants()
+        base = next(f for f in reg["form"] if f["name"] == reg["encoding_variant"][0]["of"])
+        incomplete = copy.deepcopy(base)
+        del incomplete["width"]
+        reg["form"].insert(reg["form"].index(base), incomplete)
+        errors = self.errors(reg)
+        self.assertTrue(any("missing ['width']" in error for error in errors), errors)
+
     def test_a_non_array_or_non_table_variant_is_a_diagnostic(self):
         reg = variants()
         reg["encoding_variant"] = 1
