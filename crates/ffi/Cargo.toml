@@ -1,0 +1,16 @@
+[package]
+name = "xenora-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Versioned C interface between the native macOS application and the Xenora runtime"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+xenora-loader = { path = "../loader" }
