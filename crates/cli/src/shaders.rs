@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use xenora_decoder::{Architecture, SEMANTIC_FORMS, decode};
+use xenora_decoder::{Architecture, SEMANTIC_FORMS, decode_at};
 use xenora_isa::meta::{self, EncodingFamily, FORMS, identify};
 
 const USAGE: &str = "usage: xenora shaders <coverage [--json] | inspect <gfx1030.bin>>";
@@ -74,43 +74,134 @@ fn inspect(path: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let listing = listing(&bytes);
+    for row in &listing.rows {
+        println!("{row}");
+    }
+    if let Some(failure) = listing.failure {
+        println!("{failure}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "{} instructions inspected against {} gfx1030 forms; {} not executable",
+        listing.rows.len(),
+        FORMS.len(),
+        listing.unsupported
+    );
+    ExitCode::SUCCESS
+}
+
+/// The printed rows of `xenora shaders inspect`, the number of rows that do
+/// not decode into executable instructions and the identification failure
+/// that ended the stream early, if any.
+struct Listing {
+    rows: Vec<String>,
+    unsupported: usize,
+    failure: Option<String>,
+}
+
+fn listing(bytes: &[u8]) -> Listing {
+    let mut listing = Listing {
+        rows: Vec::new(),
+        unsupported: 0,
+        failure: None,
+    };
+    // Identify every instruction first: a branch target is valid only if it
+    // lands on one of these boundaries, which no single instruction can show.
+    let mut forms = Vec::new();
     let mut offset = 0;
-    let mut unsupported = 0;
-    let mut count = 0;
     while offset < bytes.len() {
-        let found = match identify(&bytes[offset..]) {
-            Ok(found) => found,
-            Err(error) => {
-                println!("{offset:#06x}  decode failure: {error}");
-                return ExitCode::FAILURE;
+        match identify(&bytes[offset..]) {
+            Ok(found) => {
+                forms.push((offset, found));
+                offset += found.len;
             }
-        };
-        let words: Vec<String> = bytes[offset..offset + found.len]
+            Err(error) => {
+                listing.failure = Some(format!("{offset:#06x}  decode failure: {error}"));
+                break;
+            }
+        }
+    }
+    let boundary = |target: usize| forms.binary_search_by_key(&target, |form| form.0).is_ok();
+    for &(offset, found) in &forms {
+        let instruction = &bytes[offset..offset + found.len];
+        let words: Vec<String> = instruction
             .chunks(4)
             .map(|chunk| format!("{:08x}", u32::from_le_bytes(chunk.try_into().unwrap())))
             .collect();
-        let status = match decode(Architecture::Gfx1030, &bytes[offset..offset + found.len]) {
-            Ok(_) => "semantic".to_owned(),
+        let status = match decode_at(Architecture::Gfx1030, &bytes[..offset + found.len], offset) {
+            Ok(decoded) => match decoded.branch_target() {
+                Some(target) if !boundary(target) => {
+                    format!("invalid branch target {target:#04x}")
+                }
+                _ => "semantic".to_owned(),
+            },
             Err(error) if SEMANTIC_FORMS.contains(&(found.form.name, found.form.family)) => {
                 format!("unsupported operands: {error}")
             }
             Err(_) => "unsupported instruction semantics".to_owned(),
         };
         if status != "semantic" {
-            unsupported += 1;
+            listing.unsupported += 1;
         }
-        println!(
+        listing.rows.push(format!(
             "{offset:#06x}  {:<8} {:<28} {:<26} {status}",
             found.form.family.name(),
             found.form.name.to_ascii_lowercase(),
             words.join(" ")
-        );
-        offset += found.len;
-        count += 1;
+        ));
     }
-    println!(
-        "{count} instructions inspected against {} gfx1030 forms; {unsupported} not executable",
-        FORMS.len()
-    );
-    ExitCode::SUCCESS
+    listing
+}
+
+#[cfg(test)]
+mod tests {
+    use super::listing;
+
+    fn program(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn branches_in_a_valid_program_are_semantic() {
+        let fixture = include_bytes!("../../../fixtures/rdna2/bitwise-branch.bin");
+        let listing = listing(fixture);
+        assert_eq!(listing.failure, None);
+        assert_eq!(listing.rows.len(), 15);
+        let branches: Vec<_> = listing
+            .rows
+            .iter()
+            .filter(|row| row.contains("branch"))
+            .collect();
+        assert_eq!(branches.len(), 3);
+        for row in &branches {
+            assert!(row.ends_with(" semantic"), "{row}");
+        }
+        assert_eq!(listing.unsupported, 0);
+    }
+
+    #[test]
+    fn branch_targets_are_checked_against_the_whole_stream() {
+        // s_branch 1 skips one word; s_cbranch_scc0 1 lands inside the
+        // two-word v_mov_b32 literal form; s_endpgm.
+        let listing = listing(&program(&[
+            0xbf82_0001,
+            0xbf84_0001,
+            0x7e04_02ff,
+            0x00ff_00ff,
+            0xbf81_0000,
+        ]));
+        assert_eq!(listing.failure, None);
+        assert!(
+            listing.rows[0].ends_with(" semantic"),
+            "{}",
+            listing.rows[0]
+        );
+        assert!(
+            listing.rows[1].ends_with("invalid branch target 0x0c"),
+            "{}",
+            listing.rows[1]
+        );
+        assert_eq!(listing.unsupported, 1);
+    }
 }
