@@ -300,9 +300,7 @@ impl VectorInteger {
         };
         match self {
             Self::Multiply24 { signed } => (field(a, signed) * field(b, signed)) as u32,
-            Self::MultiplyHigh24 { signed } => {
-                ((field(a, signed) * field(b, signed)) >> 32) as u32
-            }
+            Self::MultiplyHigh24 { signed } => ((field(a, signed) * field(b, signed)) >> 32) as u32,
             Self::Minimum { signed } => {
                 if widen(a, signed) < widen(b, signed) {
                     a

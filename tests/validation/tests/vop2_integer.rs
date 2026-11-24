@@ -358,10 +358,14 @@ fn cases() -> Vec<Case> {
             let setup = vmov(3, b);
             let code = program(&setup, &[vop2(op, 2, vgpr(1), 3)], &[], 2);
             let label = format!("v1, {b:#x}");
-            cases.push(case(entry, "vop2 domain", label, code, lanes(), |_, x| f(x, b)));
+            cases.push(case(entry, "vop2 domain", label, code, lanes(), |_, x| {
+                f(x, b)
+            }));
             let code = program(&setup, &[vop2(op, 2, vgpr(3), 1)], &[], 2);
             let label = format!("{b:#x}, v1");
-            cases.push(case(entry, "vop2 domain", label, code, lanes(), |_, x| f(b, x)));
+            cases.push(case(entry, "vop2 domain", label, code, lanes(), |_, x| {
+                f(b, x)
+            }));
         }
         // Both sources differ per lane: v4 = v1 ^ key.
         for key in PAIR_KEYS {
@@ -370,10 +374,14 @@ fn cases() -> Vec<Case> {
             let family = "vop2 lane pairs";
             let code = program(&setup, &[vop2(op, 2, vgpr(1), 4)], &[], 2);
             let label = format!("v1, v1 ^ {key:#x}");
-            cases.push(case(entry, family, label, code, lanes(), |_, x| f(x, x ^ key)));
+            cases.push(case(entry, family, label, code, lanes(), |_, x| {
+                f(x, x ^ key)
+            }));
             let code = program(&setup, &[vop2(op, 2, vgpr(4), 1)], &[], 2);
             let label = format!("v1 ^ {key:#x}, v1");
-            cases.push(case(entry, family, label, code, lanes(), |_, x| f(x ^ key, x)));
+            cases.push(case(entry, family, label, code, lanes(), |_, x| {
+                f(x ^ key, x)
+            }));
         }
         // VDST aliasing a source, with v3 = b.
         let b = 0xff80_0001;
@@ -381,27 +389,59 @@ fn cases() -> Vec<Case> {
         let family = "vop2 aliasing";
         let alu = [vop2(op, 1, vgpr(1), 1)];
         let code = program(&setup, &alu, &[], 1);
-        cases.push(case(entry, family, "v1 = v1, v1".into(), code, lanes(), |_, x| f(x, x)));
+        cases.push(case(
+            entry,
+            family,
+            "v1 = v1, v1".into(),
+            code,
+            lanes(),
+            |_, x| f(x, x),
+        ));
         let code = program(&setup, &[vop2(op, 1, vgpr(1), 3)], &[], 1);
-        cases.push(case(entry, family, "v1 = v1, v3".into(), code, lanes(), |_, x| f(x, b)));
+        cases.push(case(
+            entry,
+            family,
+            "v1 = v1, v3".into(),
+            code,
+            lanes(),
+            |_, x| f(x, b),
+        ));
         let code = program(&setup, &[vop2(op, 3, vgpr(1), 3)], &[], 3);
-        cases.push(case(entry, family, "v3 = v1, v3".into(), code, lanes(), |_, x| f(x, b)));
+        cases.push(case(
+            entry,
+            family,
+            "v3 = v1, v3".into(),
+            code,
+            lanes(),
+            |_, x| f(x, b),
+        ));
         let code = program(&setup, &[vop2(op, 3, vgpr(3), 3)], &[], 3);
-        cases.push(case(entry, family, "v3 = v3, v3".into(), code, lanes(), |_, _| f(b, b)));
+        cases.push(case(
+            entry,
+            family,
+            "v3 = v3, v3".into(),
+            code,
+            lanes(),
+            |_, _| f(b, b),
+        ));
         // Every integer inline constant (-16..64) as SRC0.
         for selector in 128..=208 {
             let value = inline_integer(selector);
             let code = program(&[], &[vop2(op, 2, selector, 1)], &[], 2);
             let label = format!("inline {selector} ({value:#x}), v1");
             let family = "vop2 inline integer";
-            cases.push(case(entry, family, label, code, lanes(), |_, x| f(value, x)));
+            cases.push(case(entry, family, label, code, lanes(), |_, x| {
+                f(value, x)
+            }));
         }
         // One literal dword after the VOP2 word as SRC0.
         for literal in LITERALS {
             let code = program(&[], &[vop2(op, 2, LITERAL, 1), literal], &[], 2);
             let label = format!("literal {literal:#x}, v1");
             let family = "vop2 literal";
-            cases.push(case(entry, family, label, code, lanes(), |_, x| f(literal, x)));
+            cases.push(case(entry, family, label, code, lanes(), |_, x| {
+                f(literal, x)
+            }));
         }
         // SGPR SRC0: s8 and s105, the highest SGPR (guide 5.2), and vcc_lo.
         for (reg, family) in [
@@ -412,7 +452,9 @@ fn cases() -> Vec<Case> {
             for value in SGPR_VALUES {
                 let code = program(&smov(reg, value), &[vop2(op, 2, reg, 1)], &[], 2);
                 let label = format!("s{reg} = {value:#x}, v1");
-                cases.push(case(entry, family, label, code, lanes(), |_, x| f(value, x)));
+                cases.push(case(entry, family, label, code, lanes(), |_, x| {
+                    f(value, x)
+                }));
             }
         }
         // v255, the highest VGPR, in each slot.
@@ -421,11 +463,32 @@ fn cases() -> Vec<Case> {
         let family = "vop2 max register";
         let alu = [vop2(op, 255, vgpr(1), 1)];
         let code = program(&setup, &alu, &[], 255);
-        cases.push(case(entry, family, "v255 = v1, v1".into(), code, lanes(), |_, x| f(x, x)));
+        cases.push(case(
+            entry,
+            family,
+            "v255 = v1, v1".into(),
+            code,
+            lanes(),
+            |_, x| f(x, x),
+        ));
         let code = program(&setup, &[vop2(op, 2, vgpr(255), 1)], &[], 2);
-        cases.push(case(entry, family, "v255, v1".into(), code, lanes(), |_, x| f(b, x)));
+        cases.push(case(
+            entry,
+            family,
+            "v255, v1".into(),
+            code,
+            lanes(),
+            |_, x| f(b, x),
+        ));
         let code = program(&setup, &[vop2(op, 2, vgpr(1), 255)], &[], 2);
-        cases.push(case(entry, family, "v1, v255".into(), code, lanes(), |_, x| f(x, b)));
+        cases.push(case(
+            entry,
+            family,
+            "v1, v255".into(),
+            code,
+            lanes(),
+            |_, x| f(x, b),
+        ));
         // EXEC around the ALU word: v2 = v1 ^ OLD before it, so each inactive
         // lane must keep its own old value; EXEC is -1 again for the store.
         let b = 0x00ff_fff0;
@@ -464,12 +527,24 @@ fn cases() -> Vec<Case> {
         // A final wave with absent lanes: 7 lanes, and 45 lanes (one full wave
         // and 13 lanes), also with partial EXEC in both waves.
         let family = "vop2 partial wave";
-        let long: Vec<u32> = lanes().into_iter().chain(MORE_LANES.into_iter().take(13)).collect();
+        let long: Vec<u32> = lanes()
+            .into_iter()
+            .chain(MORE_LANES.into_iter().take(13))
+            .collect();
         let code = program(&setup, &[vop2(op, 2, vgpr(1), 3)], &[], 2);
         let label = "7 lanes".into();
         let short = lanes()[..7].to_vec();
-        cases.push(case(entry, family, label, code.clone(), short, |_, x| f(x, b)));
-        cases.push(case(entry, family, "45 lanes".into(), code, long.clone(), |_, x| f(x, b)));
+        cases.push(case(entry, family, label, code.clone(), short, |_, x| {
+            f(x, b)
+        }));
+        cases.push(case(
+            entry,
+            family,
+            "45 lanes".into(),
+            code,
+            long.clone(),
+            |_, x| f(x, b),
+        ));
         let exec = 0x5555_5555;
         let mut before = setup.clone();
         before.extend(smov(126, exec));
@@ -629,7 +704,10 @@ fn vop2_integer_forms_match_the_guide_on_the_independent_interpreter() {
         "independent interpreter disagrees with the guide:\n{}",
         failed.join("\n")
     );
-    eprintln!("vop2_integer: {} independent-interpreter cases", cases.len());
+    eprintln!(
+        "vop2_integer: {} independent-interpreter cases",
+        cases.len()
+    );
 }
 
 #[test]
