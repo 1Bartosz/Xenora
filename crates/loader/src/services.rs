@@ -15,6 +15,8 @@ mod files;
 mod heap;
 mod modules;
 
+use crate::runtime::HResult;
+
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions};
@@ -396,7 +398,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
           -> Result<u64, ExitReason> {
         let pp_device = args.get(3, mem).map_err(ExitReason::MemoryFault)?;
         if pp_device == 0 {
-            return Ok(0x80070057); // E_INVALIDARG
+            return Ok(HResult::from_win32(ERROR_INVALID_PARAMETER).guest_return());
         }
         let mut gfx = s_gfx
             .lock()
@@ -405,9 +407,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             Ok(handle) => {
                 mem.write_u64(pp_device, handle.to_u64())
                     .map_err(ExitReason::MemoryFault)?;
-                Ok(0) // S_OK
+                Ok(HResult::OK.guest_return())
             }
-            Err(_) => Ok(0x80004005), // E_FAIL
+            Err(_) => Ok(HResult::FAIL.guest_return()),
         }
     };
     registry.register("xenora_fixture.dll", "CreateGraphicsDevice", handler);
@@ -430,7 +432,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
           -> Result<u64, ExitReason> {
         let vtx_addr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
         if vtx_addr == 0 {
-            return Ok(0x80070057); // E_INVALIDARG
+            return Ok(HResult::from_win32(ERROR_INVALID_PARAMETER).guest_return());
         }
         let clear_raw = args.get(1, mem).map_err(ExitReason::MemoryFault)? as u32;
         let clear_color = [
@@ -507,7 +509,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                 .map_err(ExitReason::MemoryFault)?;
         }
 
-        Ok(0) // S_OK
+        Ok(HResult::OK.guest_return())
     };
     registry.register("xenora_fixture.dll", "SubmitGuestDraw", handler);
     registry.set_status(

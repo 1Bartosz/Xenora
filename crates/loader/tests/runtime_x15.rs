@@ -1122,6 +1122,21 @@ fn test_guest_crt_string_length_through_iat() {
 }
 
 #[test]
+fn guest_hresult_failures_preserve_last_error() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call = |module, symbol, args: &[u64]| {
+        let result = call_service_fixture(&state, module, symbol, args);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result.execution.final_state.get(Register::Rax)
+    };
+    call("kernel32.dll", "SetLastError", &[123]);
+    for symbol in ["CreateGraphicsDevice", "SubmitGuestDraw"] {
+        assert_eq!(call("xenora_fixture.dll", symbol, &[0; 4]), 0x8007_0057);
+        assert_eq!(call("kernel32.dll", "GetLastError", &[]), 123);
+    }
+}
+
+#[test]
 fn test_guest_resolves_and_calls_a_dynamic_export() {
     const IMAGE: u64 = 0x140000000;
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
