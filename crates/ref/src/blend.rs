@@ -109,7 +109,11 @@ pub struct RefChannel {
     pub exact: bool,
 }
 
-/// Blend one channel of `source` over `destination`.
+/// Blend one channel (0 to 3: R, G, B, A) of `source` over `destination`.
+///
+/// # Panics
+///
+/// Panics when `channel` is above 3.
 pub fn blend_channel(
     blend: RefBlend,
     source: [u8; 4],
@@ -148,7 +152,7 @@ pub fn blend_channel(
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum BlendRefError {
-    /// The extent is empty or its pixel count overflows.
+    /// The extent is empty or holds more than 4096 pixels, the native limit.
     Extent,
     /// The triangle coverage could not be computed.
     Raster(DepthRefError),
@@ -168,7 +172,7 @@ impl std::error::Error for BlendRefError {}
 ///
 /// # Errors
 ///
-/// Returns an error for an empty or overflowing extent, or when a triangle's
+/// Returns an error for an extent that is empty or above 4096 pixels, or when a triangle's
 /// coverage cannot be computed (see [`render_depth`]).
 pub fn render_blend(
     extent: [usize; 2],
@@ -178,7 +182,7 @@ pub fn render_blend(
     let exact = |value| RefChannel { value, exact: true };
     let pixels = extent[0]
         .checked_mul(extent[1])
-        .filter(|&n| n > 0)
+        .filter(|&n| (1..=4096).contains(&n))
         .ok_or(BlendRefError::Extent)?;
     let mut target = vec![clear_color.map(exact); pixels];
     for draw in draws {
@@ -238,7 +242,7 @@ mod tests {
 
     #[test]
     fn bad_extents_are_rejected() {
-        for extent in [[0, 4], [4, 0], [usize::MAX, 2]] {
+        for extent in [[0, 4], [4, 0], [usize::MAX, 2], [usize::MAX, 1], [65, 64]] {
             assert_eq!(
                 render_blend(extent, [0; 4], &[]),
                 Err(BlendRefError::Extent)

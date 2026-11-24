@@ -180,7 +180,14 @@ pub fn expected() -> Vec<Expected> {
                 "palette" => {
                     let key = words[1].chars().next().unwrap();
                     let rgba: Vec<u8> = words[2..6].iter().map(|w| w.parse().unwrap()).collect();
-                    let flags: Vec<bool> = words[6].chars().map(|c| c == 'e').collect();
+                    let flags: Vec<bool> = words[6]
+                        .chars()
+                        .map(|c| match c {
+                            'e' => true,
+                            'r' => false,
+                            other => panic!("unexpected rounding flag {other}"),
+                        })
+                        .collect();
                     palette.push((
                         key,
                         <[u8; 4]>::try_from(rgba).unwrap(),
