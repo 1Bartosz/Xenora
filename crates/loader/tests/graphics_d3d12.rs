@@ -590,3 +590,335 @@ fn test_guest_dbt_graphics_pipeline_metal_render_dual_inputs() {
     let expected_clear = [10, 20, 30, 255];
     assert_eq!(pixels2, expected_clear.repeat(12));
 }
+
+/// Guest addresses of the indexed-draw fixtures.
+const INDEXED_VB: u64 = 0x7000_0000;
+const INDEXED_IB: u64 = 0x7100_0000;
+/// Vertex stride of the indexed fixtures: a float4 position and 16 unused bytes.
+const INDEXED_STRIDE: usize = 32;
+
+/// Triangle (4,3) (16,4) (6,16) of a 16x16 target in clip space; no pixel
+/// centre lies on one of its edges.
+const INDEXED_TRIANGLE: [[f32; 4]; 3] = [
+    [-0.5, 0.625, 0.5, 1.0],
+    [1.0, 0.5, 0.5, 1.0],
+    [-0.25, -1.0, 0.5, 1.0],
+];
+
+/// Ten vertices: the triangle at vertices 5, 7 and 2, and decoys elsewhere,
+/// so a wrong fetch passes different positions.
+fn indexed_vertices() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for vertex in 0..10 {
+        let position = match vertex {
+            5 => INDEXED_TRIANGLE[0],
+            7 => INDEXED_TRIANGLE[1],
+            2 => INDEXED_TRIANGLE[2],
+            other => [other as f32 * 0.125 - 0.75, -0.5, 0.5, 1.0],
+        };
+        for value in position {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.extend([0xAB; 16]);
+    }
+    bytes
+}
+
+struct IndexedRig {
+    ctx: GraphicsContext,
+    memory: GuestMemory,
+    queue: GraphicsHandle,
+    alloc: GraphicsHandle,
+    list: GraphicsHandle,
+    vb: GraphicsHandle,
+    ib16: GraphicsHandle,
+    ib32: GraphicsHandle,
+}
+
+/// A context with guest-backed vertex and index buffers. The 16-bit buffer
+/// holds 9, 9, 6, 8, 3, 5, 0 and the 32-bit buffer 9, 3, 5, 0, 7 and three
+/// indices above 16 bits, 0x10003, 0x10005, 0x10000.
+fn indexed_rig() -> IndexedRig {
+    use xenora_loader::memory::MemoryPermissions;
+    let mut ctx = GraphicsContext::new();
+    let device = ctx.create_device().unwrap();
+    let queue = ctx
+        .create_command_queue(device, CommandListType::Direct)
+        .unwrap();
+    let alloc = ctx
+        .create_command_allocator(device, CommandListType::Direct)
+        .unwrap();
+    let list = ctx
+        .create_command_list(device, alloc, CommandListType::Direct)
+        .unwrap();
+    let buffer = |ctx: &mut GraphicsContext, bytes: usize, addr| {
+        let desc = ResourceDesc {
+            dimension: ResourceDimension::Buffer,
+            width: bytes as u64,
+            height: 1,
+            depth_or_array_size: 1,
+            mip_levels: 1,
+            format_rgba8: false,
+        };
+        ctx.create_committed_resource(device, desc, ResourceStates::COMMON, Some(addr))
+            .unwrap()
+    };
+    let vertices = indexed_vertices();
+    let ib16: Vec<u8> = [9u16, 9, 6, 8, 3, 5, 0]
+        .iter()
+        .flat_map(|index| index.to_le_bytes())
+        .collect();
+    let ib32: Vec<u8> = [9u32, 3, 5, 0, 7, 0x1_0003, 0x1_0005, 0x1_0000]
+        .iter()
+        .flat_map(|index| index.to_le_bytes())
+        .collect();
+    let vb = buffer(&mut ctx, vertices.len(), INDEXED_VB);
+    let ib16_handle = buffer(&mut ctx, ib16.len(), INDEXED_IB);
+    let ib32_handle = buffer(&mut ctx, ib32.len(), INDEXED_IB + 0x1000);
+    let mut memory = GuestMemory::new();
+    for (addr, bytes) in [
+        (INDEXED_VB, &vertices),
+        (INDEXED_IB, &ib16),
+        (INDEXED_IB + 0x1000, &ib32),
+    ] {
+        memory
+            .map_region_with_data(addr, 0x1000, MemoryPermissions::READ_ONLY, bytes)
+            .unwrap();
+    }
+    IndexedRig {
+        ctx,
+        memory,
+        queue,
+        alloc,
+        list,
+        vb,
+        ib16: ib16_handle,
+        ib32: ib32_handle,
+    }
+}
+
+/// Record one indexed draw (16x16 viewport, the rig's vertex buffer) and run it.
+fn run_indexed(
+    rig: &mut IndexedRig,
+    index_buffer: (GraphicsHandle, usize, u32),
+    draw: (u32, u32, u32, i32),
+) -> Result<xenora_loader::graphics::ExecutionOutcome, GraphicsError> {
+    let ctx = &mut rig.ctx;
+    ctx.reset_command_list(rig.list, rig.alloc)?;
+    ctx.cmd_set_viewport(rig.list, 16, 16)?;
+    ctx.cmd_set_vertex_buffer(rig.list, rig.vb, 0, INDEXED_STRIDE)?;
+    ctx.cmd_set_index_buffer(rig.list, index_buffer.0, index_buffer.1, index_buffer.2)?;
+    let (count, instances, start, base) = draw;
+    ctx.cmd_draw_indexed_instanced(rig.list, count, instances, start, base, 0)?;
+    ctx.close_command_list(rig.list)?;
+    ctx.execute_command_list(rig.queue, rig.list, &rig.memory)
+}
+
+const R16_UINT: u32 = 57;
+const R32_UINT: u32 = 42;
+
+/// Start index, signed base vertex, index size and buffer offset all select
+/// vertices 5, 7, 2: the backend receives exactly the triangle's positions
+/// (literal values), never a decoy.
+#[test]
+fn test_d3d12_indexed_draw_fetches_start_and_base_vertex() {
+    let mut rig = indexed_rig();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    rig.ctx.set_metal_backend(move |vtx, viewport, clear| {
+        record.lock().unwrap().push(*vtx);
+        GraphicsContext::execute_software_reference_draw(vtx, viewport, clear)
+    });
+    let (ib16, ib32) = (rig.ib16, rig.ib32);
+    for (name, buffer, draw) in [
+        // 16-bit indices 3, 5, 0 at index 4, base vertex +2.
+        ("u16 positive base", (ib16, 0, R16_UINT), (3, 1, 4, 2)),
+        // 16-bit indices 6, 8, 3 at index 2, base vertex -1.
+        ("u16 negative base", (ib16, 0, R16_UINT), (3, 1, 2, -1)),
+        // The same through a buffer offset of one index (2 bytes).
+        ("u16 buffer offset", (ib16, 2, R16_UINT), (3, 1, 1, -1)),
+        // 32-bit indices 3, 5, 0 at index 1, base vertex +2.
+        ("u32 positive base", (ib32, 0, R32_UINT), (3, 1, 1, 2)),
+        // 32-bit indices above 16 bits, base vertex -65534: all 32 bits count.
+        ("u32 wide indices", (ib32, 0, R32_UINT), (3, 1, 5, -65534)),
+    ] {
+        seen.lock().unwrap().clear();
+        let outcome = run_indexed(&mut rig, buffer, draw).expect(name);
+        assert_eq!(outcome.draw_count, 1, "{name}");
+        assert_eq!(*seen.lock().unwrap(), vec![INDEXED_TRIANGLE], "{name}");
+        assert_eq!(
+            outcome.pixels,
+            GraphicsContext::execute_software_reference_draw(
+                &INDEXED_TRIANGLE,
+                (16, 16),
+                [0, 0, 0, 255]
+            )
+            .unwrap(),
+            "{name}"
+        );
+    }
+    // Zero indices or zero instances draw nothing.
+    for draw in [(0, 1, 0, 0), (3, 0, 0, 0)] {
+        let outcome = run_indexed(&mut rig, (ib16, 0, R16_UINT), draw).unwrap();
+        assert_eq!(outcome.draw_count, 0);
+    }
+}
+
+/// Index format, offset, count, range, negative fetch and unknown or missing
+/// buffers each fail with a typed error, and nothing reaches the backend.
+#[test]
+fn test_d3d12_indexed_draw_errors() {
+    let mut rig = indexed_rig();
+    let (ib16, ib32) = (rig.ib16, rig.ib32);
+    let unknown = GraphicsHandle {
+        id: 999,
+        generation: 1,
+    };
+    for format in [0, 41, 56, 58, 28] {
+        assert_eq!(
+            run_indexed(&mut rig, (ib16, 0, format), (3, 1, 0, 0)).unwrap_err(),
+            GraphicsError::InvalidIndexFormat(format)
+        );
+    }
+    for (name, buffer, draw, error) in [
+        (
+            "misaligned offset",
+            (ib32, 2, R32_UINT),
+            (3, 1, 0, 0),
+            GraphicsError::InvalidDescriptor,
+        ),
+        (
+            "offset past buffer",
+            (ib16, 16, R16_UINT),
+            (3, 1, 0, 0),
+            GraphicsError::InvalidDescriptor,
+        ),
+        (
+            "unknown buffer",
+            (unknown, 0, R16_UINT),
+            (3, 1, 0, 0),
+            GraphicsError::InvalidResourceHandle,
+        ),
+        (
+            "count not one triangle",
+            (ib16, 0, R16_UINT),
+            (6, 1, 0, 0),
+            GraphicsError::InvalidDescriptor,
+        ),
+        (
+            "indices past buffer",
+            (ib16, 0, R16_UINT),
+            (3, 1, 5, 0),
+            GraphicsError::IndexOutOfRange,
+        ),
+        (
+            "start overflow",
+            (ib32, 0, R32_UINT),
+            (3, 1, u32::MAX, 0),
+            GraphicsError::IndexOutOfRange,
+        ),
+        (
+            "negative vertex",
+            (ib16, 0, R16_UINT),
+            (3, 1, 4, -1),
+            GraphicsError::IndexOutOfRange,
+        ),
+        (
+            "vertex past buffer",
+            (ib16, 0, R16_UINT),
+            (3, 1, 0, 1),
+            GraphicsError::IndexOutOfRange,
+        ),
+        (
+            "base overflow",
+            (ib32, 0, R32_UINT),
+            (3, 1, 0, i32::MAX),
+            GraphicsError::IndexOutOfRange,
+        ),
+    ] {
+        let got = run_indexed(&mut rig, buffer, draw);
+        assert_eq!(got.unwrap_err(), error, "{name}");
+    }
+
+    // A draw without an index buffer is rejected at execution.
+    let ctx = &mut rig.ctx;
+    ctx.reset_command_list(rig.list, rig.alloc).unwrap();
+    ctx.cmd_set_vertex_buffer(rig.list, rig.vb, 0, INDEXED_STRIDE)
+        .unwrap();
+    ctx.cmd_draw_indexed_instanced(rig.list, 3, 1, 0, 0, 0)
+        .unwrap();
+    ctx.close_command_list(rig.list).unwrap();
+    assert_eq!(
+        ctx.execute_command_list(rig.queue, rig.list, &rig.memory),
+        Err(GraphicsError::InvalidResourceHandle)
+    );
+    // A stride smaller than one float4 position is rejected.
+    ctx.reset_command_list(rig.list, rig.alloc).unwrap();
+    ctx.cmd_set_vertex_buffer(rig.list, rig.vb, 0, 12).unwrap();
+    ctx.cmd_set_index_buffer(rig.list, ib16, 0, R16_UINT)
+        .unwrap();
+    ctx.cmd_draw_indexed_instanced(rig.list, 3, 1, 4, 2, 0)
+        .unwrap();
+    ctx.close_command_list(rig.list).unwrap();
+    assert_eq!(
+        ctx.execute_command_list(rig.queue, rig.list, &rig.memory),
+        Err(GraphicsError::InvalidDescriptor)
+    );
+}
+
+/// The loader's indexed fetch feeds the native Metal renderer: the GPU image
+/// of the fetched triangle equals the image of the literal triangle.
+#[test]
+#[cfg_attr(
+    not(feature = "gpu-tests"),
+    ignore = "needs native Metal device; run scripts/test-gpu.sh"
+)]
+fn test_d3d12_indexed_draw_native_metal() {
+    use xenora_metal::NativeCompute;
+    use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
+
+    let vs_bytes = include_bytes!("../../../fixtures/rdna2/x9-constant-vs.bin");
+    let ps_bytes = include_bytes!("../../../fixtures/rdna2/x9-constant-ps.bin");
+    let msl = compile_graphics(Architecture::Gfx1030, vs_bytes, ps_bytes)
+        .expect("compile graphics RDNA2 shaders")
+        .msl;
+    let gpu = Arc::new(NativeCompute::new().expect("native Metal GPU device"));
+    let render = {
+        let gpu = gpu.clone();
+        let msl = msl.clone();
+        move |vtx: &[[f32; 4]; 3], vp: (usize, usize), cc: [u8; 4]| {
+            gpu.render_rgba8(
+                &msl,
+                [VERTEX_ENTRY_POINT, PIXEL_ENTRY_POINT],
+                vtx,
+                &[[0.0; 4]; 3],
+                [vp.0, vp.1],
+                cc,
+            )
+            .map_err(|e| GraphicsError::BackendError(format!("Metal GPU error: {e:?}")))
+        }
+    };
+    let direct = render(&INDEXED_TRIANGLE, (16, 16), [0, 0, 0, 255]).expect("direct render");
+    let mut rig = indexed_rig();
+    rig.ctx.set_metal_backend(render);
+    let ib16 = rig.ib16;
+    let outcome = run_indexed(&mut rig, (ib16, 0, R16_UINT), (3, 1, 2, -1)).expect("indexed");
+    assert_eq!(outcome.backend, GraphicsBackendId::MetalNative);
+    assert_eq!(outcome.pixels, direct);
+    // The constant shader paints the covered pixels red; the CPU rasteriser
+    // agrees pixel for pixel, and the triangle covers some but not all pixels.
+    let reference = GraphicsContext::execute_software_reference_draw(
+        &INDEXED_TRIANGLE,
+        (16, 16),
+        [0, 0, 0, 255],
+    )
+    .unwrap();
+    assert_eq!(outcome.pixels, reference);
+    let red = outcome
+        .pixels
+        .chunks(4)
+        .filter(|p| *p == [255, 0, 0, 255])
+        .count();
+    assert!((1..256).contains(&red), "{red} red pixels");
+    println!("indexed native Metal draw: {red} of 256 pixels covered");
+}

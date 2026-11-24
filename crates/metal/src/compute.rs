@@ -23,7 +23,10 @@ use xenora_texture::{
 #[path = "render.rs"]
 mod render;
 
-pub use render::{DepthCompare, DepthDraw, DepthFill, DepthOutput, DepthPass, DepthState};
+pub use render::{
+    DepthCompare, DepthDraw, DepthFill, DepthOutput, DepthPass, DepthState, IndexBuffer,
+    IndexedDraw, IndexedPass,
+};
 
 const MAX_THREADS_PER_GROUP: usize = 64;
 const MAX_GROUPS: usize = 64;

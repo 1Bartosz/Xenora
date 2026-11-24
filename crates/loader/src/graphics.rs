@@ -117,6 +117,11 @@ pub enum GraphicsError {
     DeviceCreationFailure(String),
     BackendError(String),
     NativeMetalRequired,
+    /// An index buffer format other than DXGI `R16_UINT` (57) or `R32_UINT` (42).
+    InvalidIndexFormat(u32),
+    /// An indexed draw reads past its index buffer or fetches a vertex,
+    /// after applying the base vertex, outside its vertex buffer.
+    IndexOutOfRange,
 }
 
 impl std::fmt::Display for GraphicsError {
@@ -140,6 +145,10 @@ impl std::fmt::Display for GraphicsError {
                 f,
                 "native Metal backend required but not provided or failed"
             ),
+            Self::InvalidIndexFormat(format) => {
+                write!(f, "unsupported index buffer format {format}")
+            }
+            Self::IndexOutOfRange => write!(f, "indexed draw outside its index or vertex buffer"),
         }
     }
 }
@@ -173,6 +182,32 @@ pub struct GraphicsResource {
     pub data: Vec<u8>,
 }
 
+/// Index size of an index buffer view, as `D3D12_INDEX_BUFFER_VIEW::Format`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexFormat {
+    R16Uint,
+    R32Uint,
+}
+
+impl IndexFormat {
+    /// The format for a DXGI format code: `R16_UINT` (57) or `R32_UINT` (42).
+    pub const fn from_dxgi(format: u32) -> Option<Self> {
+        match format {
+            57 => Some(Self::R16Uint),
+            42 => Some(Self::R32Uint),
+            _ => None,
+        }
+    }
+
+    /// Bytes per index.
+    pub const fn size(self) -> usize {
+        match self {
+            Self::R16Uint => 2,
+            Self::R32Uint => 4,
+        }
+    }
+}
+
 /// Primitive Draw Command recorded in a Command List.
 #[derive(Clone, Debug)]
 pub enum GraphicsCommand {
@@ -198,6 +233,18 @@ pub enum GraphicsCommand {
         vertex_count_per_instance: u32,
         instance_count: u32,
         start_vertex_location: u32,
+        start_instance_location: u32,
+    },
+    SetIndexBuffer {
+        resource: GraphicsHandle,
+        offset: usize,
+        format: IndexFormat,
+    },
+    DrawIndexedInstanced {
+        index_count_per_instance: u32,
+        instance_count: u32,
+        start_index_location: u32,
+        base_vertex_location: i32,
         start_instance_location: u32,
     },
 }
@@ -548,6 +595,70 @@ impl GraphicsContext {
         Ok(())
     }
 
+    /// Record set index buffer. `format` is a DXGI format code; only
+    /// `R16_UINT` (57) and `R32_UINT` (42) are index formats.
+    pub fn cmd_set_index_buffer(
+        &mut self,
+        list: GraphicsHandle,
+        resource: GraphicsHandle,
+        offset: usize,
+        format: u32,
+    ) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if !cmd_list.is_recording {
+            return Err(GraphicsError::CommandListNotRecording);
+        }
+        let format =
+            IndexFormat::from_dxgi(format).ok_or(GraphicsError::InvalidIndexFormat(format))?;
+        let res = self
+            .resources
+            .get(&resource)
+            .ok_or(GraphicsError::InvalidResourceHandle)?;
+        if !offset.is_multiple_of(format.size()) || offset > res.data.len() {
+            return Err(GraphicsError::InvalidDescriptor);
+        }
+        cmd_list.commands.push(GraphicsCommand::SetIndexBuffer {
+            resource,
+            offset,
+            format,
+        });
+        Ok(())
+    }
+
+    /// Record draw indexed instanced. Each draw renders one triangle, so the
+    /// index count must be 3, or 0 (with a zero instance count) to draw nothing;
+    /// execution rejects any other count.
+    pub fn cmd_draw_indexed_instanced(
+        &mut self,
+        list: GraphicsHandle,
+        index_count_per_instance: u32,
+        instance_count: u32,
+        start_index_location: u32,
+        base_vertex_location: i32,
+        start_instance_location: u32,
+    ) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get_mut(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if !cmd_list.is_recording {
+            return Err(GraphicsError::CommandListNotRecording);
+        }
+        cmd_list
+            .commands
+            .push(GraphicsCommand::DrawIndexedInstanced {
+                index_count_per_instance,
+                instance_count,
+                start_index_location,
+                base_vertex_location,
+                start_instance_location,
+            });
+        Ok(())
+    }
+
     /// Close command list.
     pub fn close_command_list(&mut self, list: GraphicsHandle) -> Result<(), GraphicsError> {
         let cmd_list = self
@@ -649,6 +760,8 @@ impl GraphicsContext {
         let mut target_handle: Option<GraphicsHandle> = None;
         let mut vertex_resource: Option<GraphicsHandle> = None;
         let mut vertex_offset = 0usize;
+        let mut vertex_stride = 0usize;
+        let mut index_buffer: Option<(GraphicsHandle, usize, IndexFormat)> = None;
         let mut rendered_output: Option<Vec<u8>> = None;
         let mut draw_count = 0usize;
 
@@ -679,10 +792,54 @@ impl GraphicsContext {
                     viewport = (*width, *height);
                 }
                 GraphicsCommand::SetVertexBuffer {
-                    resource, offset, ..
+                    resource,
+                    offset,
+                    stride,
                 } => {
                     vertex_resource = Some(*resource);
                     vertex_offset = *offset;
+                    vertex_stride = *stride;
+                }
+                GraphicsCommand::SetIndexBuffer {
+                    resource,
+                    offset,
+                    format,
+                } => index_buffer = Some((*resource, *offset, *format)),
+                GraphicsCommand::DrawIndexedInstanced {
+                    index_count_per_instance,
+                    instance_count,
+                    start_index_location,
+                    base_vertex_location,
+                    ..
+                } => {
+                    if *index_count_per_instance == 0 || *instance_count == 0 {
+                        continue;
+                    }
+                    if *index_count_per_instance != 3 {
+                        return Err(GraphicsError::InvalidDescriptor);
+                    }
+                    let vertices = self.fetch_indexed_triangle(
+                        memory,
+                        index_buffer,
+                        (vertex_resource, vertex_offset, vertex_stride),
+                        *start_index_location,
+                        *base_vertex_location,
+                    )?;
+                    draw_count += 1;
+                    let pixels = if let Some(renderer) = backend_renderer {
+                        renderer(&vertices, viewport, clear_color)?
+                    } else if backend_id == GraphicsBackendId::MetalNative {
+                        return Err(GraphicsError::NativeMetalRequired);
+                    } else {
+                        Self::execute_software_reference_draw(&vertices, viewport, clear_color)?
+                    };
+                    if let Some(th) = target_handle
+                        && let Some(target_res) = self.resources.get_mut(&th)
+                        && target_res.data.len() >= pixels.len()
+                    {
+                        target_res.data[..pixels.len()].copy_from_slice(&pixels);
+                    }
+                    rendered_output = Some(pixels);
                 }
                 GraphicsCommand::DrawInstanced {
                     vertex_count_per_instance,
@@ -759,6 +916,78 @@ impl GraphicsContext {
             height: viewport.1,
             draw_count,
         })
+    }
+
+    /// The three float4 positions one indexed triangle fetches: index `k` is
+    /// read at `offset + (start + k) * size` of the index buffer, and vertex
+    /// `index + base_vertex` at `offset + vertex * stride` of the vertex buffer.
+    fn fetch_indexed_triangle(
+        &self,
+        memory: &GuestMemory,
+        index_buffer: Option<(GraphicsHandle, usize, IndexFormat)>,
+        (vertex_resource, vertex_offset, vertex_stride): (Option<GraphicsHandle>, usize, usize),
+        start: u32,
+        base_vertex: i32,
+    ) -> Result<[[f32; 4]; 3], GraphicsError> {
+        let resource = |handle: Option<GraphicsHandle>| {
+            handle
+                .and_then(|handle| self.resources.get(&handle))
+                .ok_or(GraphicsError::InvalidResourceHandle)
+        };
+        let (index_handle, index_offset, format) =
+            index_buffer.ok_or(GraphicsError::InvalidResourceHandle)?;
+        let index_res = resource(Some(index_handle))?;
+        let vertex_res = resource(vertex_resource)?;
+        if vertex_stride < 16 {
+            return Err(GraphicsError::InvalidDescriptor);
+        }
+        let size = format.size();
+        let mut raw_indices = [0u8; 12];
+        let raw_indices = &mut raw_indices[..3 * size];
+        let first = (start as usize)
+            .checked_mul(size)
+            .and_then(|bytes| bytes.checked_add(index_offset))
+            .ok_or(GraphicsError::IndexOutOfRange)?;
+        Self::read_resource(index_res, memory, first, raw_indices)?;
+        let mut vertices = [[0.0f32; 4]; 3];
+        for (row, index) in vertices.iter_mut().zip(raw_indices.chunks_exact(size)) {
+            let index = if size == 2 {
+                u32::from(u16::from_le_bytes([index[0], index[1]]))
+            } else {
+                u32::from_le_bytes(index.try_into().unwrap())
+            };
+            let vertex = usize::try_from(i64::from(index) + i64::from(base_vertex))
+                .map_err(|_| GraphicsError::IndexOutOfRange)?;
+            let at = vertex
+                .checked_mul(vertex_stride)
+                .and_then(|bytes| bytes.checked_add(vertex_offset))
+                .ok_or(GraphicsError::IndexOutOfRange)?;
+            let mut raw = [0u8; 16];
+            Self::read_resource(vertex_res, memory, at, &mut raw)?;
+            for (value, bytes) in row.iter_mut().zip(raw.as_chunks::<4>().0) {
+                *value = f32::from_le_bytes(*bytes);
+            }
+        }
+        Ok(vertices)
+    }
+
+    /// Read `out.len()` bytes at `offset` of a resource, from its guest backing
+    /// when it has one. The range must lie inside the resource's size.
+    fn read_resource(
+        res: &GraphicsResource,
+        memory: &GuestMemory,
+        offset: usize,
+        out: &mut [u8],
+    ) -> Result<(), GraphicsError> {
+        let end = offset
+            .checked_add(out.len())
+            .filter(|&end| end <= res.data.len())
+            .ok_or(GraphicsError::IndexOutOfRange)?;
+        match res.guest_backing_addr {
+            Some(guest_addr) => memory.read_bytes(guest_addr + offset as u64, out)?,
+            None => out.copy_from_slice(&res.data[offset..end]),
+        }
+        Ok(())
     }
 
     /// Software reference rasterizer for deterministic test verification when GPU tests are off.
