@@ -327,6 +327,88 @@ fn system_time_comes_from_the_injected_clock() {
 }
 
 #[test]
+fn guest_udp_loopback_delivers_datagrams_through_bound_imports() {
+    let symbols = [
+        "WSAStartup",
+        "socket",
+        "bind",
+        "connect",
+        "send",
+        "recv",
+        "WSAGetLastError",
+        "WSACleanup",
+    ];
+    let imports = symbols.map(|symbol| ("ws2_32.dll", Symbol::Name(symbol)));
+    let image = build(&imports);
+    let pe = ParsedPe::parse(&image.bytes).unwrap();
+    let mut memory = pe.load_into_memory(&image.bytes).unwrap().memory;
+    memory
+        .map_region(SCRATCH, 4096, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    memory
+        .map_region(STACK, 4096, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let (mut registry, _) = standard(0);
+    assert_eq!(
+        registry
+            .bind_imports(&pe, &image.bytes, BASE, &mut memory)
+            .unwrap(),
+        symbols.len()
+    );
+    let mut engine = DbtEngine::new(256 * 1024).unwrap();
+    engine.set_import_registry(registry);
+    let mut call = |memory: &mut GuestMemory, symbol, args: &[u64]| {
+        let index = symbols.iter().position(|&name| symbol == name).unwrap() as u64;
+        let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index, STACK_TOP);
+        for (register, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(register, value);
+        }
+        let result = engine.run(&mut cpu, memory, 8);
+        assert_eq!(result.exit_reason, ExitReason::Halt, "{symbol}");
+        cpu.get(Register::Rax)
+    };
+    let address = SCRATCH + 0x200;
+    let outgoing = SCRATCH + 0x220;
+    let incoming = SCRATCH + 0x240;
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, SCRATCH]), 0);
+    let receiver = call(&mut memory, "socket", &[2, 2, 17]);
+    let sender = call(&mut memory, "socket", &[2, 2, 17]);
+    assert_ne!(receiver, u64::MAX);
+    assert_ne!(sender, u64::MAX);
+    assert_ne!(sender, receiver);
+    let mut endpoint = [0; 16];
+    endpoint[..8].copy_from_slice(&[2, 0, 0x13, 0x88, 127, 0, 0, 1]);
+    memory.write_bytes(address, &endpoint).unwrap();
+    assert_eq!(call(&mut memory, "bind", &[receiver, address, 16]), 0);
+    assert_eq!(call(&mut memory, "connect", &[sender, address, 16]), 0);
+    memory.write_bytes(outgoing, b"loop").unwrap();
+    for _ in 0..16 {
+        assert_eq!(call(&mut memory, "send", &[sender, outgoing, 4, 0]), 4);
+    }
+    assert_eq!(
+        call(&mut memory, "send", &[sender, outgoing, 4, 0]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10055);
+    for _ in 0..16 {
+        assert_eq!(call(&mut memory, "recv", &[receiver, incoming, 4, 0]), 4);
+        let mut received = [0; 4];
+        memory.read_bytes(incoming, &mut received).unwrap();
+        assert_eq!(&received, b"loop");
+        memory.write_u32(incoming, 0).unwrap();
+    }
+    assert_eq!(
+        call(&mut memory, "recv", &[receiver, incoming, 4, 0]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(call(&mut memory, "WSAGetLastError", &[]), 10035);
+    assert_eq!(call(&mut memory, "WSACleanup", &[]), 0);
+}
+
+#[test]
 fn last_error_isolated_across_guest_thread_switches() {
     let mut guest = Guest::new();
     guest.teb = 0x10000;
