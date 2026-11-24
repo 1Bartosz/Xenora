@@ -46,6 +46,7 @@ remains unsupported.
 
 ### Changed
 
+- Simplified the claim rules in `AGENTS.md`, `CONTRIBUTING.md` and the pull request template at the maintainer's request: claim an issue by replying on it in plain words, never claim over an existing claim, and treat a claim as stale only after about one week without a pull request. The task-queue lease (`lease_hours` in `.github/agent-queue.json`) is now 168 hours to match, and `docs/coordination/agent-tasks.md` marks the queue commands as optional.
 - The static PE probe now marks x86-64 SIB memory addressing as DBT-supported, matching the
   native DBT.
 

@@ -25,7 +25,7 @@ Closes #<!-- the issue you claimed -->
 
 ## Checklist
 
-- [ ] I claimed the linked issue before starting, and the claim was still mine when I opened this pull request.
+- [ ] I claimed the linked issue with a reply before starting, and nobody else held a live claim on it.
 - [ ] I reviewed the changes and disclosed material AI assistance below, if applicable.
 - [ ] The change preserves native ARM64 and Metal-first requirements.
 - [ ] I added relevant tests or explained why they are not applicable.
