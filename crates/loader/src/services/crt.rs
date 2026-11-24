@@ -165,35 +165,85 @@ pub(super) fn register(registry: &mut ImportRegistry) {
     }
 }
 
+const ENOMEM: u32 = 12;
+const EINVAL: u32 = 22;
+
+fn set_errno(memory: &mut GuestMemory, error: u32) -> Result<(), ExitReason> {
+    let address = memory
+        .crt_errno_address()
+        .map_err(ExitReason::MemoryFault)?;
+    memory
+        .write_u32(address, error)
+        .map_err(ExitReason::MemoryFault)
+}
+
+fn allocation_result(
+    memory: &mut GuestMemory,
+    result: Result<u64, MemoryError>,
+) -> Result<u64, ExitReason> {
+    match result {
+        Ok(address) => Ok(address),
+        Err(_) => {
+            set_errno(memory, ENOMEM)?;
+            Ok(0)
+        }
+    }
+}
+
+pub(super) fn register_errno(registry: &mut ImportRegistry) {
+    registry.register(UCRT, "_errno", |_, _, memory| {
+        memory.crt_errno_address().map_err(ExitReason::MemoryFault)
+    });
+    registry.register(UCRT, "_set_errno", |args, _, memory| {
+        set_errno(memory, args.rcx as u32)?;
+        Ok(0)
+    });
+    registry.register(UCRT, "_get_errno", |args, _, memory| {
+        if args.rcx == 0 {
+            set_errno(memory, EINVAL)?;
+            return Ok(u64::from(EINVAL));
+        }
+        let address = memory
+            .crt_errno_address()
+            .map_err(ExitReason::MemoryFault)?;
+        let value = memory.read_u32(address).map_err(ExitReason::MemoryFault)?;
+        memory
+            .write_u32(args.rcx, value)
+            .map_err(ExitReason::MemoryFault)?;
+        Ok(0)
+    });
+    for symbol in ["_errno", "_set_errno", "_get_errno"] {
+        registry.alias("api-ms-win-crt-runtime-l1-1-0.dll", UCRT, symbol);
+        registry.set_status(UCRT, symbol, ServiceStatus::Partial);
+    }
+}
+
 pub(super) fn register_heap(registry: &mut ImportRegistry) {
     registry.register(UCRT, "malloc", |args, _, memory| {
-        Ok(memory
-            .map_heap_allocation(PROCESS_HEAP, args.rcx.max(1) as usize)
-            .unwrap_or(0))
+        let result = memory.map_heap_allocation(PROCESS_HEAP, args.rcx.max(1) as usize);
+        allocation_result(memory, result)
     });
     registry.register(UCRT, "calloc", |args, _, memory| {
-        let Some(size) = args.rcx.checked_mul(args.rdx) else {
-            return Ok(0);
-        };
-        Ok(memory
-            .map_heap_allocation(PROCESS_HEAP, size.max(1) as usize)
-            .unwrap_or(0))
+        let result = args
+            .rcx
+            .checked_mul(args.rdx)
+            .ok_or(MemoryError::AllocationFailed)
+            .and_then(|size| memory.map_heap_allocation(PROCESS_HEAP, size.max(1) as usize));
+        allocation_result(memory, result)
     });
     registry.register(UCRT, "realloc", |args, _, memory| {
         let address = args.rcx;
         let size = args.rdx;
         if address == 0 {
-            return Ok(memory
-                .map_heap_allocation(PROCESS_HEAP, size.max(1) as usize)
-                .unwrap_or(0));
+            let result = memory.map_heap_allocation(PROCESS_HEAP, size.max(1) as usize);
+            return allocation_result(memory, result);
         }
         if size == 0 {
             free(memory, address)?;
             return Ok(0);
         }
-        Ok(memory
-            .resize_heap_allocation(PROCESS_HEAP, address, size as usize, false)
-            .unwrap_or(0))
+        let result = memory.resize_heap_allocation(PROCESS_HEAP, address, size as usize, false);
+        allocation_result(memory, result)
     });
     registry.register(UCRT, "free", |args, _, memory| {
         free(memory, args.rcx)?;

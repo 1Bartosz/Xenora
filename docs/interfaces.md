@@ -176,7 +176,10 @@ UCRT and the CRT heap API set expose `malloc`, `calloc`, `realloc`, and
 `free` on the bounded default guest heap. `calloc` checks for size overflow.
 `realloc(NULL, size)` allocates a new block, and resizing a nonnull block to
 zero frees it. Allocation failures return null and preserve existing blocks.
-CRT `errno` and new-handler callbacks remain unsupported. See
+Allocation failures also set the synthetic main thread's CRT `errno` to
+`ENOMEM`. The runtime API set and UCRT expose `_errno`, `_get_errno`, and
+`_set_errno` through a stable guest memory slot. Additional guest threads
+and CRT parameter or new-handler callbacks remain unsupported. See
 [Microsoft CRT allocation documentation](https://learn.microsoft.com/cpp/c-runtime-library/memory-allocation).
 
 ### Event signaling

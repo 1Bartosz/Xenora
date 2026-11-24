@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added guest CRT errno accessors and allocation failure reporting for the synthetic main thread.
+
 - Added guest CRT allocation, zeroed array allocation, resizing, and release.
 
 - Added private guest heap creation and destruction with per-heap allocation ownership.

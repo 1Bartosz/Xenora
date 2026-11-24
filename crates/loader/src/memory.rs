@@ -120,6 +120,7 @@ pub struct GuestMemory {
     regions: Vec<MappedRegion>,
     private_heaps: std::collections::BTreeSet<u64>,
     private_heap_serial: u64,
+    crt_errno: Option<u64>,
 }
 
 impl GuestMemory {
@@ -199,6 +200,16 @@ impl GuestMemory {
         permissions: MemoryPermissions,
     ) -> Result<u64, MemoryError> {
         self.map_dynamic_allocation(requested_base, size, permissions, AllocationKind::Virtual)
+    }
+
+    pub(crate) fn crt_errno_address(&mut self) -> Result<u64, MemoryError> {
+        if let Some(address) = self.crt_errno {
+            return Ok(address);
+        }
+        let address = self.find_dynamic_base(4)?;
+        self.map_region(address, 4, MemoryPermissions::READ_WRITE)?;
+        self.crt_errno = Some(address);
+        Ok(address)
     }
 
     pub(crate) fn create_private_heap(&mut self, initial: u64) -> Option<u64> {

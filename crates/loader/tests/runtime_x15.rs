@@ -1193,6 +1193,76 @@ fn test_guest_event_signaling_through_iat() {
 }
 
 #[test]
+fn test_guest_crt_errno_through_iat() {
+    const MODULE: &str = "api-ms-win-crt-runtime-l1-1-0.dll";
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let run = |first, argument: u64, second, output: u64| {
+        let mut code = vec![0x48, 0x83, 0xec, 0x28, 0x48, 0xb9];
+        code.extend_from_slice(&argument.to_le_bytes());
+        append_import_call(&mut code, 0x2060);
+        code.extend_from_slice(&[0x48, 0x89, 0xc3, 0x48, 0xb9]);
+        code.extend_from_slice(&output.to_le_bytes());
+        append_import_call(&mut code, 0x21a0);
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xf4]);
+        let bytes = TestPeBuilder::new(0x140000000, 0x1000)
+            .add_import("ucrtbase.dll", first)
+            .add_import(MODULE, second)
+            .code(&code)
+            .build();
+        let mut imports = ImportRegistry::new();
+        register_standard_services(&mut imports, state.clone());
+        let result = run_synthetic_startup(
+            &bytes,
+            StartupLayout {
+                image_base: 0x140000000,
+                stack_top: PROCESS_FIXTURE_STACK_TOP,
+                tls_base: 0x300000000,
+            },
+            imports,
+            100,
+        )
+        .unwrap();
+        assert_eq!(result.bound_imports, 2);
+        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+        result
+    };
+
+    let output = PROCESS_FIXTURE_OUTPUT;
+    let failed = run("malloc", u64::MAX, "_get_errno", output);
+    assert_eq!(failed.execution.final_state.get(Register::Rbx), 0);
+    assert_eq!(failed.execution.final_state.get(Register::Rax), 0);
+    assert_eq!(failed.image.memory.read_u32(output).unwrap(), 12);
+
+    let set = run("_set_errno", 34, "_errno", 0);
+    let slot = set.execution.final_state.get(Register::Rax);
+    assert_eq!(set.image.memory.read_u32(slot).unwrap(), 34);
+    let fresh = run("_errno", 0, "_errno", 0);
+    assert_eq!(
+        fresh.execution.final_state.get(Register::Rbx),
+        fresh.execution.final_state.get(Register::Rax)
+    );
+    assert_eq!(
+        fresh
+            .image
+            .memory
+            .read_u32(fresh.execution.final_state.get(Register::Rax))
+            .unwrap(),
+        0
+    );
+
+    let invalid = run("_get_errno", 0, "_errno", 0);
+    assert_eq!(invalid.execution.final_state.get(Register::Rbx), 22);
+    assert_eq!(
+        invalid
+            .image
+            .memory
+            .read_u32(invalid.execution.final_state.get(Register::Rax))
+            .unwrap(),
+        22
+    );
+}
+
+#[test]
 fn test_guest_crt_allocation_and_resize_through_iat() {
     const IMAGE: u64 = 0x140000000;
     const MODULE: &str = "api-ms-win-crt-heap-l1-1-0.dll";

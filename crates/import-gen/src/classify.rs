@@ -380,14 +380,11 @@ impl SymbolDb {
         ] {
             self.crt_native(m, sym, libc, "ISO C runtime — identical ABI on macOS");
         }
-        self.win32_stub(
-            m,
-            "_errno",
-            false,
-            "Windows errno accessor — returns pointer to thread errno",
-        );
-        self.win32_stub(m, "_get_errno", false, "Windows get_errno");
-        self.win32_stub(m, "_set_errno", false, "Windows set_errno");
+        for module in [m, "ucrtbase.dll"] {
+            for symbol in ["_errno", "_get_errno", "_set_errno"] {
+                self.ins(module, symbol, Classification::StandardService);
+            }
+        }
         self.win32_stub(m, "_set_app_type", false, "CRT app-type hint — no-op");
         self.win32_stub(m, "_set_fmode", false, "CRT file mode hint — no-op");
         self.win32_stub(m, "_set_new_mode", false, "CRT new-mode hint — no-op");
