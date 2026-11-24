@@ -5,7 +5,9 @@
 //! Compiles decoded x86-64 basic blocks to native Apple Silicon ARM64 machine code,
 //! executes them in a W^X code cache, and manages host-service dispatch and fallbacks.
 
-use crate::arm64::{Arm64Assembler, SP, X0, X1, X2, X4, X5, X6, X9, X10, X19, X20, X21, X29, X30};
+use crate::arm64::{
+    Arm64Assembler, Condition, SP, X0, X1, X2, X4, X5, X6, X9, X10, X19, X20, X21, X29, X30, XZR,
+};
 use crate::cpu::{CpuState, ExecutionResult, ExitReason, Register};
 use crate::jit::{JitError, JitMemory};
 use crate::memory::GuestMemory;
@@ -214,10 +216,26 @@ impl DbtEngine {
         // Stop at the instruction quota or a control-flow boundary.
         loop {
             let insn_rip = cur_rip;
-            let b0 = memory
+            let mut seg_gs = false;
+            let mut seg_fs = false;
+
+            let mut b0 = memory
                 .fetch_instruction_byte(cur_rip)
                 .map_err(ExitReason::MemoryFault)?;
             cur_rip += 1;
+
+            // Handle legacy prefixes: 0x65 (GS), 0x64 (FS)
+            while b0 == 0x65 || b0 == 0x64 {
+                if b0 == 0x65 {
+                    seg_gs = true;
+                } else {
+                    seg_fs = true;
+                }
+                b0 = memory
+                    .fetch_instruction_byte(cur_rip)
+                    .map_err(ExitReason::MemoryFault)?;
+                cur_rip += 1;
+            }
 
             let mut rex_w = false;
             let mut rex_r = false;
@@ -472,30 +490,34 @@ impl DbtEngine {
                         .map_err(ExitReason::MemoryFault)? as i8;
                     cur_rip += 1;
 
-                    if !matches!(sub_op, 0 | 5) {
+                    if !matches!(sub_op, 0 | 5 | 7) {
                         return Err(ExitReason::IllegalInstruction(op));
                     }
                     let reg_offset = u32::from(rm_idx) * 8;
-                    let subtract = sub_op == 5;
+                    let subtract = sub_op == 5 || sub_op == 7;
                     asm.ldr_uoff_64(X9, X19, reg_offset);
                     if rex_w {
-                        // A signed imm8 always fits the existing unsigned
-                        // immediate forms after choosing ADD or SUB by sign.
-                        let magnitude = u16::from(imm8.unsigned_abs());
-                        if subtract ^ (imm8 < 0) {
-                            asm.sub_imm_64(X9, X9, magnitude);
+                        asm.load_imm_64(X10, (imm8 as i64) as u64);
+                        if sub_op == 7 {
+                            asm.cmp_reg_64(X9, X10);
+                        } else if subtract {
+                            asm.subs_reg_64(X9, X9, X10);
                         } else {
-                            asm.add_imm_64(X9, X9, magnitude);
+                            asm.adds_reg_64(X9, X9, X10);
                         }
                     } else {
                         asm.load_imm_64(X10, (imm8 as i64) as u64);
-                        if subtract {
-                            asm.sub_reg_32(X9, X9, X10);
+                        if sub_op == 7 {
+                            asm.cmp_reg_32(X9, X10);
+                        } else if subtract {
+                            asm.subs_reg_32(X9, X9, X10);
                         } else {
-                            asm.add_reg_32(X9, X9, X10);
+                            asm.adds_reg_32(X9, X9, X10);
                         }
                     }
-                    asm.str_uoff_64(X9, X19, reg_offset);
+                    if sub_op != 7 {
+                        asm.str_uoff_64(X9, X19, reg_offset);
+                    }
                 }
 
                 // PUSH reg (0x50..=0x57)
@@ -628,6 +650,70 @@ impl DbtEngine {
                     break;
                 }
 
+                // MOV r/m8, reg8 (0x88) or MOV reg8, r/m8 (0x8A)
+                0x88 | 0x8A => {
+                    insn_count += 1;
+                    let modrm = memory
+                        .fetch_instruction_byte(cur_rip)
+                        .map_err(ExitReason::MemoryFault)?;
+                    cur_rip += 1;
+                    let mode = (modrm >> 6) & 3;
+                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
+                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+
+                    if mode == 3 {
+                        let (src, dst) = if op == 0x88 {
+                            (reg_idx, rm_idx)
+                        } else {
+                            (rm_idx, reg_idx)
+                        };
+                        asm.ldr_uoff_64(X9, X19, (src as u32) * 8);
+                        asm.uxtb_32(X9, X9);
+                        // Read dest, clear low 8 bits, or in low 8 bits
+                        asm.ldr_uoff_64(X10, X19, (dst as u32) * 8);
+                        asm.load_imm_64(X2, !0xFFu64);
+                        asm.and_reg_64(X10, X10, X2);
+                        asm.orr_reg_64(X10, X10, X9);
+                        asm.str_uoff_64(X10, X19, (dst as u32) * 8);
+                    } else {
+                        Self::emit_effective_address(
+                            asm,
+                            memory,
+                            &mut cur_rip,
+                            modrm,
+                            mode,
+                            rm_idx,
+                            rex_x,
+                            rex_b,
+                            seg_gs,
+                            seg_fs,
+                        )?;
+
+                        if op == 0x88 {
+                            // MOV [EA], reg8
+                            asm.ldr_uoff_64(X2, X19, (reg_idx as u32) * 8);
+                            asm.mov_reg_64(X0, X20);
+                            let helper_fn = write_u8_helper as *const () as u64;
+                            asm.load_imm_64(X4, helper_fn);
+                            asm.blr(X4);
+                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
+                        } else {
+                            // MOV reg8, [EA]
+                            asm.mov_reg_64(X0, X20);
+                            let helper_fn = read_u8_helper as *const () as u64;
+                            asm.load_imm_64(X4, helper_fn);
+                            asm.blr(X4);
+                            emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
+                            asm.uxtb_32(X9, X0);
+                            asm.ldr_uoff_64(X10, X19, (reg_idx as u32) * 8);
+                            asm.load_imm_64(X2, !0xFFu64);
+                            asm.and_reg_64(X10, X10, X2);
+                            asm.orr_reg_64(X10, X10, X9);
+                            asm.str_uoff_64(X10, X19, (reg_idx as u32) * 8);
+                        }
+                    }
+                }
+
                 // MOV r/m, reg (0x89) or MOV reg, r/m (0x8B)
                 0x89 | 0x8B => {
                     insn_count += 1;
@@ -686,55 +772,19 @@ impl DbtEngine {
                             emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
                         }
                     } else {
-                        // Memory operand with base register and optional SIB / displacement
-                        // Handle SIB if (modrm & 7) == 4
-                        let base_reg = if (modrm & 7) == 4 {
-                            let sib = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            if rex_x || (sib >> 3) & 7 != 4 || (mode == 0 && sib & 7 == 5) {
-                                return Err(ExitReason::IllegalInstruction(op));
-                            }
-                            (sib & 7) + if rex_b { 8 } else { 0 }
-                        } else {
-                            rm_idx
-                        };
-
-                        let disp = match mode {
-                            1 => {
-                                let d = memory
-                                    .fetch_instruction_byte(cur_rip)
-                                    .map_err(ExitReason::MemoryFault)?
-                                    as i8;
-                                cur_rip += 1;
-                                d as i64
-                            }
-                            2 => {
-                                let mut d_bytes = [0u8; 4];
-                                for b in &mut d_bytes {
-                                    *b = memory
-                                        .fetch_instruction_byte(cur_rip)
-                                        .map_err(ExitReason::MemoryFault)?;
-                                    cur_rip += 1;
-                                }
-                                i32::from_le_bytes(d_bytes) as i64
-                            }
-                            _ => 0i64,
-                        };
-
-                        // Compute effective address in X1: base_reg + disp
-                        asm.ldr_uoff_64(X1, X19, (base_reg as u32) * 8);
-                        if disp != 0 {
-                            if disp > 0 && disp <= 4095 {
-                                asm.add_imm_64(X1, X1, disp as u16);
-                            } else if disp < 0 && (-disp) <= 4095 {
-                                asm.sub_imm_64(X1, X1, (-disp) as u16);
-                            } else {
-                                asm.load_imm_64(X9, disp as u64);
-                                asm.add_reg_64(X1, X1, X9);
-                            }
-                        }
+                        // Memory operand with complete SIB addressing, RIP-relative or displacement
+                        Self::emit_effective_address(
+                            asm,
+                            memory,
+                            &mut cur_rip,
+                            modrm,
+                            mode,
+                            rm_idx,
+                            rex_x,
+                            rex_b,
+                            seg_gs,
+                            seg_fs,
+                        )?;
 
                         if op == 0x89 {
                             // MOV [EA], reg: load reg into X2 and call write_u64_helper(ctx: X0, addr: X1, val: X2)
@@ -790,52 +840,19 @@ impl DbtEngine {
                         }
                         asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
                     } else {
-                        let base_reg = if (modrm & 7) == 4 {
-                            let sib = memory
-                                .fetch_instruction_byte(cur_rip)
-                                .map_err(ExitReason::MemoryFault)?;
-                            cur_rip += 1;
-                            if rex_x || (sib >> 3) & 7 != 4 || (mode == 0 && sib & 7 == 5) {
-                                return Err(ExitReason::IllegalInstruction(op));
-                            }
-                            (sib & 7) + if rex_b { 8 } else { 0 }
-                        } else {
-                            rm_idx
-                        };
-
-                        let disp = match mode {
-                            1 => {
-                                let d = memory
-                                    .fetch_instruction_byte(cur_rip)
-                                    .map_err(ExitReason::MemoryFault)?
-                                    as i8;
-                                cur_rip += 1;
-                                d as i64
-                            }
-                            2 => {
-                                let mut d_bytes = [0u8; 4];
-                                for b in &mut d_bytes {
-                                    *b = memory
-                                        .fetch_instruction_byte(cur_rip)
-                                        .map_err(ExitReason::MemoryFault)?;
-                                    cur_rip += 1;
-                                }
-                                i32::from_le_bytes(d_bytes) as i64
-                            }
-                            _ => 0i64,
-                        };
-
-                        asm.ldr_uoff_64(X9, X19, (base_reg as u32) * 8);
-                        if disp != 0 {
-                            if disp > 0 && disp <= 4095 {
-                                asm.add_imm_64(X9, X9, disp as u16);
-                            } else if disp < 0 && (-disp) <= 4095 {
-                                asm.sub_imm_64(X9, X9, (-disp) as u16);
-                            } else {
-                                asm.load_imm_64(X10, disp as u64);
-                                asm.add_reg_64(X9, X9, X10);
-                            }
-                        }
+                        Self::emit_effective_address(
+                            asm,
+                            memory,
+                            &mut cur_rip,
+                            modrm,
+                            mode,
+                            rm_idx,
+                            rex_x,
+                            rex_b,
+                            seg_gs,
+                            seg_fs,
+                        )?;
+                        asm.mov_reg_64(X9, X1);
                         if !rex_w {
                             asm.mov_reg_32(X9, X9);
                         }
@@ -976,6 +993,303 @@ impl DbtEngine {
                     }
                 }
 
+                // TEST r/m, reg (0x85)
+                0x85 => {
+                    insn_count += 1;
+                    let modrm = memory
+                        .fetch_instruction_byte(cur_rip)
+                        .map_err(ExitReason::MemoryFault)?;
+                    cur_rip += 1;
+                    let mode = (modrm >> 6) & 3;
+                    if mode != 3 {
+                        return Err(ExitReason::IllegalInstruction(op));
+                    }
+                    let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
+                    let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+
+                    asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
+                    asm.ldr_uoff_64(X10, X19, (reg_idx as u32) * 8);
+                    if rex_w {
+                        asm.tst_reg_64(X9, X10);
+                    } else {
+                        asm.tst_reg_32(X9, X10);
+                    }
+                }
+
+                // Jcc rel8 (0x70..=0x7F)
+                0x70..=0x7F => {
+                    insn_count += 1;
+                    let rel8 = memory
+                        .fetch_instruction_byte(cur_rip)
+                        .map_err(ExitReason::MemoryFault)? as i8;
+                    cur_rip += 1;
+                    let target_rip = (cur_rip as i64 + rel8 as i64) as u64;
+                    let fallthrough_rip = cur_rip;
+
+                    let cond = match op {
+                        0x70 => Condition::Vs, // JO
+                        0x71 => Condition::Vc, // JNO
+                        0x72 => Condition::Cs, // JB / JC / JNAE
+                        0x73 => Condition::Cc, // JAE / JNB / JNC
+                        0x74 => Condition::Eq, // JE / JZ
+                        0x75 => Condition::Ne, // JNE / JNZ
+                        0x76 => Condition::Ls, // JBE / JNA
+                        0x77 => Condition::Hi, // JA / JNBE
+                        0x78 => Condition::Mi, // JS
+                        0x79 => Condition::Pl, // JNS
+                        0x7C => Condition::Lt, // JL / JNGE
+                        0x7D => Condition::Ge, // JGE / JNL
+                        0x7E => Condition::Le, // JLE / JNG
+                        0x7F => Condition::Gt, // JG / JNLE
+                        _ => return Err(ExitReason::IllegalInstruction(op)),
+                    };
+
+                    // Branch if condition true to taken block
+                    let branch_idx = asm.current_offset();
+                    asm.b_cond(cond, 0); // patch target below
+
+                    // Not taken path: RIP = fallthrough_rip, then jump to epilogue
+                    asm.load_imm_64(X9, fallthrough_rip);
+                    asm.str_uoff_64(X9, X19, 16 * 8);
+                    let exit_not_taken = asm.current_offset();
+                    asm.b(0);
+
+                    // Taken path: RIP = target_rip, then fall through to epilogue
+                    let taken_offset = asm.current_offset();
+                    asm.patch_b_cond(
+                        branch_idx,
+                        cond,
+                        (taken_offset as i32) - (branch_idx as i32),
+                    );
+                    asm.load_imm_64(X9, target_rip);
+                    asm.str_uoff_64(X9, X19, 16 * 8);
+
+                    let taken_end = asm.current_offset();
+                    asm.patch_b(exit_not_taken, (taken_end as i32) - (exit_not_taken as i32));
+                    break;
+                }
+
+                // Two-byte opcode escape (0x0F)
+                0x0F => {
+                    let op2 = memory
+                        .fetch_instruction_byte(cur_rip)
+                        .map_err(ExitReason::MemoryFault)?;
+                    cur_rip += 1;
+
+                    match op2 {
+                        // Jcc rel32 (0x0F 0x80..=0x8F)
+                        0x80..=0x8F => {
+                            insn_count += 1;
+                            let mut rel_bytes = [0u8; 4];
+                            for b in &mut rel_bytes {
+                                *b = memory
+                                    .fetch_instruction_byte(cur_rip)
+                                    .map_err(ExitReason::MemoryFault)?;
+                                cur_rip += 1;
+                            }
+                            let rel32 = i32::from_le_bytes(rel_bytes) as i64;
+                            let target_rip = (cur_rip as i64 + rel32) as u64;
+                            let fallthrough_rip = cur_rip;
+
+                            let cond = match op2 {
+                                0x80 => Condition::Vs, // JO
+                                0x81 => Condition::Vc, // JNO
+                                0x82 => Condition::Cs, // JB / JC
+                                0x83 => Condition::Cc, // JAE / JNC
+                                0x84 => Condition::Eq, // JE / JZ
+                                0x85 => Condition::Ne, // JNE / JNZ
+                                0x86 => Condition::Ls, // JBE
+                                0x87 => Condition::Hi, // JA
+                                0x88 => Condition::Mi, // JS
+                                0x89 => Condition::Pl, // JNS
+                                0x8C => Condition::Lt, // JL
+                                0x8D => Condition::Ge, // JGE
+                                0x8E => Condition::Le, // JLE
+                                0x8F => Condition::Gt, // JG
+                                _ => return Err(ExitReason::IllegalInstruction(op2)),
+                            };
+
+                            let branch_idx = asm.current_offset();
+                            asm.b_cond(cond, 0);
+
+                            asm.load_imm_64(X9, fallthrough_rip);
+                            asm.str_uoff_64(X9, X19, 16 * 8);
+                            let exit_not_taken = asm.current_offset();
+                            asm.b(0);
+
+                            let taken_offset = asm.current_offset();
+                            asm.patch_b_cond(
+                                branch_idx,
+                                cond,
+                                (taken_offset as i32) - (branch_idx as i32),
+                            );
+                            asm.load_imm_64(X9, target_rip);
+                            asm.str_uoff_64(X9, X19, 16 * 8);
+
+                            let taken_end = asm.current_offset();
+                            asm.patch_b(
+                                exit_not_taken,
+                                (taken_end as i32) - (exit_not_taken as i32),
+                            );
+                            break;
+                        }
+
+                        // MOVZX r32/r64, r/m8 (0x0F 0xB6)
+                        0xB6 => {
+                            insn_count += 1;
+                            let modrm = memory
+                                .fetch_instruction_byte(cur_rip)
+                                .map_err(ExitReason::MemoryFault)?;
+                            cur_rip += 1;
+                            let mode = (modrm >> 6) & 3;
+                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
+                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+
+                            if mode == 3 {
+                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
+                                asm.uxtb_32(X9, X9);
+                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
+                            } else {
+                                Self::emit_effective_address(
+                                    asm,
+                                    memory,
+                                    &mut cur_rip,
+                                    modrm,
+                                    mode,
+                                    rm_idx,
+                                    rex_x,
+                                    rex_b,
+                                    seg_gs,
+                                    seg_fs,
+                                )?;
+                                asm.mov_reg_64(X0, X20);
+                                let helper_fn = read_u8_helper as *const () as u64;
+                                asm.load_imm_64(X4, helper_fn);
+                                asm.blr(X4);
+                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
+                                asm.uxtb_32(X0, X0);
+                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
+                            }
+                        }
+
+                        // MOVZX r32/r64, r/m16 (0x0F 0xB7)
+                        0xB7 => {
+                            insn_count += 1;
+                            let modrm = memory
+                                .fetch_instruction_byte(cur_rip)
+                                .map_err(ExitReason::MemoryFault)?;
+                            cur_rip += 1;
+                            let mode = (modrm >> 6) & 3;
+                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
+                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+
+                            if mode == 3 {
+                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
+                                asm.uxth_32(X9, X9);
+                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
+                            } else {
+                                Self::emit_effective_address(
+                                    asm,
+                                    memory,
+                                    &mut cur_rip,
+                                    modrm,
+                                    mode,
+                                    rm_idx,
+                                    rex_x,
+                                    rex_b,
+                                    seg_gs,
+                                    seg_fs,
+                                )?;
+                                asm.mov_reg_64(X0, X20);
+                                let helper_fn = read_u16_helper as *const () as u64;
+                                asm.load_imm_64(X4, helper_fn);
+                                asm.blr(X4);
+                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
+                                asm.uxth_32(X0, X0);
+                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
+                            }
+                        }
+
+                        // MOVSX r64, r/m8 (0x0F 0xBE)
+                        0xBE => {
+                            insn_count += 1;
+                            let modrm = memory
+                                .fetch_instruction_byte(cur_rip)
+                                .map_err(ExitReason::MemoryFault)?;
+                            cur_rip += 1;
+                            let mode = (modrm >> 6) & 3;
+                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
+                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+
+                            if mode == 3 {
+                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
+                                asm.sxtb_64(X9, X9);
+                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
+                            } else {
+                                Self::emit_effective_address(
+                                    asm,
+                                    memory,
+                                    &mut cur_rip,
+                                    modrm,
+                                    mode,
+                                    rm_idx,
+                                    rex_x,
+                                    rex_b,
+                                    seg_gs,
+                                    seg_fs,
+                                )?;
+                                asm.mov_reg_64(X0, X20);
+                                let helper_fn = read_u8_helper as *const () as u64;
+                                asm.load_imm_64(X4, helper_fn);
+                                asm.blr(X4);
+                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
+                                asm.sxtb_64(X0, X0);
+                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
+                            }
+                        }
+
+                        // MOVSX r64, r/m16 (0x0F 0xBF)
+                        0xBF => {
+                            insn_count += 1;
+                            let modrm = memory
+                                .fetch_instruction_byte(cur_rip)
+                                .map_err(ExitReason::MemoryFault)?;
+                            cur_rip += 1;
+                            let mode = (modrm >> 6) & 3;
+                            let reg_idx = ((modrm >> 3) & 7) + if rex_r { 8 } else { 0 };
+                            let rm_idx = (modrm & 7) + if rex_b { 8 } else { 0 };
+
+                            if mode == 3 {
+                                asm.ldr_uoff_64(X9, X19, (rm_idx as u32) * 8);
+                                asm.sxth_64(X9, X9);
+                                asm.str_uoff_64(X9, X19, (reg_idx as u32) * 8);
+                            } else {
+                                Self::emit_effective_address(
+                                    asm,
+                                    memory,
+                                    &mut cur_rip,
+                                    modrm,
+                                    mode,
+                                    rm_idx,
+                                    rex_x,
+                                    rex_b,
+                                    seg_gs,
+                                    seg_fs,
+                                )?;
+                                asm.mov_reg_64(X0, X20);
+                                let helper_fn = read_u16_helper as *const () as u64;
+                                asm.load_imm_64(X4, helper_fn);
+                                asm.blr(X4);
+                                emit_fault_guard(asm, &mut fault_guards, insn_count - 1, insn_rip);
+                                asm.sxth_64(X0, X0);
+                                asm.str_uoff_64(X0, X19, (reg_idx as u32) * 8);
+                            }
+                        }
+
+                        _ => return Err(ExitReason::IllegalInstruction(op2)),
+                    }
+                }
+
                 _ => {
                     let _ = insn_rip;
                     return Err(ExitReason::IllegalInstruction(op));
@@ -1012,6 +1326,122 @@ impl DbtEngine {
         self.metrics.blocks_compiled += 1;
         self.metrics.native_bytes_emitted += asm.instructions().len() * 4;
         Ok(emitted)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_effective_address(
+        asm: &mut Arm64Assembler,
+        memory: &GuestMemory,
+        cur_rip: &mut u64,
+        modrm: u8,
+        mode: u8,
+        rm_idx: u8,
+        rex_x: bool,
+        rex_b: bool,
+        seg_gs: bool,
+        seg_fs: bool,
+    ) -> Result<(), ExitReason> {
+        let (base_reg, index_scale) = if (modrm & 7) == 4 {
+            let sib = memory
+                .fetch_instruction_byte(*cur_rip)
+                .map_err(ExitReason::MemoryFault)?;
+            *cur_rip += 1;
+            let scale = (sib >> 6) & 3;
+            let raw_index = (sib >> 3) & 7;
+            let raw_base = sib & 7;
+
+            let index_opt = if raw_index != 4 {
+                Some((raw_index + if rex_x { 8 } else { 0 }, scale))
+            } else if rex_x {
+                Some((12, scale)) // raw_index 4 with rex_x is R12
+            } else {
+                None
+            };
+
+            let base_opt = if mode == 0 && raw_base == 5 {
+                None // disp32 only
+            } else {
+                Some(raw_base + if rex_b { 8 } else { 0 })
+            };
+
+            (base_opt, index_opt)
+        } else {
+            (Some(rm_idx), None)
+        };
+
+        let disp: i64 = match mode {
+            0 => {
+                if (modrm & 7) == 4 && (base_reg.is_none()) {
+                    let mut d_bytes = [0u8; 4];
+                    for b in &mut d_bytes {
+                        *b = memory
+                            .fetch_instruction_byte(*cur_rip)
+                            .map_err(ExitReason::MemoryFault)?;
+                        *cur_rip += 1;
+                    }
+                    i32::from_le_bytes(d_bytes) as i64
+                } else {
+                    0
+                }
+            }
+            1 => {
+                let d = memory
+                    .fetch_instruction_byte(*cur_rip)
+                    .map_err(ExitReason::MemoryFault)? as i8;
+                *cur_rip += 1;
+                d as i64
+            }
+            2 => {
+                let mut d_bytes = [0u8; 4];
+                for b in &mut d_bytes {
+                    *b = memory
+                        .fetch_instruction_byte(*cur_rip)
+                        .map_err(ExitReason::MemoryFault)?;
+                    *cur_rip += 1;
+                }
+                i32::from_le_bytes(d_bytes) as i64
+            }
+            _ => 0i64,
+        };
+
+        // Emit computation of base + index*scale + disp into X1
+        if let Some(base) = base_reg {
+            asm.ldr_uoff_64(X1, X19, (base as u32) * 8);
+        } else {
+            asm.mov_reg_64(X1, XZR);
+        }
+
+        if let Some((idx, scale)) = index_scale {
+            asm.ldr_uoff_64(X9, X19, (idx as u32) * 8);
+            if scale > 0 {
+                asm.add_reg_shifted_64(X1, X1, X9, scale);
+            } else {
+                asm.add_reg_64(X1, X1, X9);
+            }
+        }
+
+        if disp != 0 {
+            if disp > 0 && disp <= 4095 {
+                asm.add_imm_64(X1, X1, disp as u16);
+            } else if disp < 0 && (-disp) <= 4095 {
+                asm.sub_imm_64(X1, X1, (-disp) as u16);
+            } else {
+                asm.load_imm_64(X9, disp as u64);
+                asm.add_reg_64(X1, X1, X9);
+            }
+        }
+
+        if seg_gs {
+            // Add CpuState.gs_base (offset 16*8 + 8 + 8 = 144) to X1
+            asm.ldr_uoff_64(X9, X19, 144);
+            asm.add_reg_64(X1, X1, X9);
+        } else if seg_fs {
+            // Add CpuState.fs_base (offset 16*8 + 8 + 8 + 8 = 152) to X1
+            asm.ldr_uoff_64(X9, X19, 152);
+            asm.add_reg_64(X1, X1, X9);
+        }
+
+        Ok(())
     }
 
     fn emit_set_exit_reason(asm: &mut Arm64Assembler, code: u32, next_rip: u64) {
@@ -1085,6 +1515,53 @@ extern "C" fn read_u64_helper(ctx: *mut BlockContext, addr: u64) -> u64 {
         let mem = &*(*ctx).memory_ptr;
         match mem.read_u64(addr) {
             Ok(v) => v,
+            Err(e) => {
+                (*ctx).faulted = 1;
+                (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
+                0
+            }
+        }
+    }
+}
+
+extern "C" fn write_u8_helper(ctx: *mut BlockContext, addr: u64, val: u64) {
+    unsafe {
+        if (*ctx).exit_reason.is_some() {
+            return;
+        }
+        let mem = &mut *(*ctx).memory_ptr;
+        if let Err(e) = mem.write_u8(addr, val as u8) {
+            (*ctx).faulted = 1;
+            (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
+        }
+    }
+}
+
+extern "C" fn read_u8_helper(ctx: *mut BlockContext, addr: u64) -> u64 {
+    unsafe {
+        if (*ctx).exit_reason.is_some() {
+            return 0;
+        }
+        let mem = &*(*ctx).memory_ptr;
+        match mem.read_u8(addr) {
+            Ok(v) => v as u64,
+            Err(e) => {
+                (*ctx).faulted = 1;
+                (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
+                0
+            }
+        }
+    }
+}
+
+extern "C" fn read_u16_helper(ctx: *mut BlockContext, addr: u64) -> u64 {
+    unsafe {
+        if (*ctx).exit_reason.is_some() {
+            return 0;
+        }
+        let mem = &*(*ctx).memory_ptr;
+        match mem.read_u16(addr) {
+            Ok(v) => v as u64,
             Err(e) => {
                 (*ctx).faulted = 1;
                 (*ctx).exit_reason = Some(ExitReason::MemoryFault(e));
@@ -1192,15 +1669,42 @@ mod tests {
     }
 
     #[test]
-    fn no_base_sib_does_not_emit_a_host_state_read() {
+    fn no_base_sib_computes_displacement_without_base() {
+        // mov rax, [0x2000]; hlt
         let code = [
-            0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0,    // mov rax, [0]
+            0x48, 0x8B, 0x04, 0x25, 0x00, 0x20, 0, 0,    // mov rax, [0x2000]
             0xF4, // hlt
         ];
         let (mut engine, mut cpu, mut memory) = fixture(&code);
+        memory
+            .map_region(0x2000, 16, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory.write_u64(0x2000, 0x1122_3344_5566_7788).unwrap();
         let result = engine.run(&mut cpu, &mut memory, 16);
-        assert_eq!(result.exit_reason, ExitReason::IllegalInstruction(0x8B));
-        assert_eq!(engine.metrics.blocks_compiled, 0);
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        assert_eq!(cpu.get(Register::Rax), 0x1122_3344_5566_7788);
+    }
+
+    #[test]
+    fn sib_store_executes_through_the_native_dbt() {
+        // mov [rsp + 0x20], rbx; hlt. The SIB store form that the static
+        // probe used to report as a startup blocker.
+        let code = [
+            0x48, 0x89, 0x5c, 0x24, 0x20, // mov [rsp + 0x20], rbx
+            0xF4, // hlt
+        ];
+        let (mut engine, mut cpu, mut memory) = fixture(&code);
+        const STACK: u64 = 0x4000;
+        const STORED_ADDR: u64 = 0x4020;
+        const STORED_VALUE: u64 = 0x1122_3344_5566_7788;
+        cpu.set(Register::Rsp, STACK);
+        cpu.set(Register::Rbx, STORED_VALUE);
+        memory
+            .map_region(STACK, 0x100, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        let result = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        assert_eq!(memory.read_u64(STORED_ADDR).unwrap(), STORED_VALUE);
     }
 
     #[test]

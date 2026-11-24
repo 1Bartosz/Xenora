@@ -43,12 +43,21 @@ fn create_synthetic_probe_pe() -> Vec<u8> {
 
     // Place instructions in .text at raw offset 0x200:
     // 48 83 ec 28 : sub rsp, 0x28
-    // 48 89 5c 24 20 : mov [rsp + 0x20], rbx (SIB store, first unsupported DBT)
+    // 48 89 5c 24 20 : mov [rsp + 0x20], rbx (SIB store, now DBT-supported)
     // c3 : ret
     pe[0x200..0x204].copy_from_slice(&[0x48, 0x83, 0xec, 0x28]);
     pe[0x204..0x209].copy_from_slice(&[0x48, 0x89, 0x5c, 0x24, 0x20]);
     pe[0x209] = 0xc3;
 
+    pe
+}
+
+fn create_synthetic_probe_pe_with_unsupported_op() -> Vec<u8> {
+    let mut pe = create_synthetic_probe_pe();
+    // Replace the SIB store slot with INT3: the native DBT returns
+    // ExitReason::IllegalInstruction for it, so it is genuinely unsupported
+    // and must keep being reported as a startup blocker.
+    pe[0x204..0x209].copy_from_slice(&[0xCC, 0x90, 0x90, 0x90, 0x90]);
     pe
 }
 
@@ -63,13 +72,33 @@ fn test_probe_static_analysis_does_not_execute_code() {
     assert_eq!(report.parsed.entry_point_rva, 0x1000);
     assert_eq!(report.parsed.image_base, 0x140000000);
 
-    // Verify first unsupported DBT instruction detected at 0x1004 (RVA 0x1004)
+    // The SIB store `mov [rsp + 0x20], rbx` at RVA 0x1004 is supported by the
+    // native DBT (verified by the DBT execution test
+    // `dbt::tests::sib_store_executes_through_the_native_dbt`), so the static
+    // probe reports no blocker for this program.
+    assert!(report.first_unsupported_dbt_insn.is_none());
+
+    let sib_store = report
+        .instruction_records
+        .iter()
+        .find(|record| record.rva == 0x1004)
+        .expect("SIB store decoded at RVA 0x1004");
+    assert_eq!(sib_store.bytes, vec![0x48, 0x89, 0x5c, 0x24, 0x20]);
+    assert!(sib_store.is_supported_dbt);
+    assert!(sib_store.is_supported_interp);
+}
+
+#[test]
+fn test_probe_static_analysis_detects_genuinely_unsupported_instruction() {
+    let pe_bytes = create_synthetic_probe_pe_with_unsupported_op();
+    let report = probe_pe_bytes(&pe_bytes, &ProbeConfig::default()).expect("probe should succeed");
+
     let blocker = report
         .first_unsupported_dbt_insn
         .expect("blocker must be detected");
     assert_eq!(blocker.rva, 0x1004);
-    assert_eq!(blocker.bytes, vec![0x48, 0x89, 0x5c, 0x24, 0x20]);
-    assert!(blocker.notes.contains("SIB"));
+    assert_eq!(blocker.bytes, vec![0xCC]);
+    assert_eq!(blocker.mnemonic, "int3");
 }
 
 #[test]

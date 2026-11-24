@@ -117,10 +117,25 @@ pub fn run_synthetic_startup_with_observer(
         .checked_sub(STACK_SIZE as u64)
         .ok_or(MemoryError::Overflow)?;
     memory.map_region(stack_base, STACK_SIZE, MemoryPermissions::READ_WRITE)?;
+
+    // Allocate and initialize Win64 TEB (Thread Environment Block)
+    // Layout in TEB:
+    // +0x08: StackBase (highest address)
+    // +0x10: StackLimit (lowest address)
+    // +0x30: Self pointer (TEB linear address)
+    // +0x58: ThreadLocalStoragePointer
+    let teb_base = layout.tls_base.saturating_add(0x10000);
+    memory.map_region(teb_base, 0x2000, MemoryPermissions::READ_WRITE)?;
+    memory.write_u64_bypass(teb_base + 0x08, layout.stack_top)?;
+    memory.write_u64_bypass(teb_base + 0x10, stack_base)?;
+    memory.write_u64_bypass(teb_base + 0x30, teb_base)?;
+    memory.write_u64_bypass(teb_base + 0x58, layout.tls_base)?;
+
     let mut engine = DbtEngine::new(JIT_CAPACITY)?;
     engine.set_import_registry(imports);
 
     let mut tls_cpu = CpuState::new(image.entry_point, layout.stack_top);
+    tls_cpu.gs_base = teb_base;
     let mut tls_callbacks = 0;
     if let Some(tls) = &tls {
         tls_callbacks = execute_tls_callbacks(
@@ -145,6 +160,7 @@ pub fn run_synthetic_startup_with_observer(
     // Model function entry with the Win64 32-byte home area and return slot.
     // The synthetic entry point terminates with HLT.
     let mut entry_cpu = CpuState::new(image.entry_point, layout.stack_top - 40);
+    entry_cpu.gs_base = teb_base;
     let execution = engine.run(&mut entry_cpu, memory, entry_budget);
     Ok(StartupResult {
         image,
