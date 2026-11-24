@@ -20,7 +20,7 @@ pub use rdna2::{
 };
 pub use semantics_gen::{
     ScalarAluOp, ScalarCompareOp, ScalarImmediateCompareOp, ScalarImmediateOp, ScalarUnaryOp,
-    VectorAluOp, VectorAluVop3Op, VectorCompareOp,
+    SoppControlOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp,
 };
 
 /// SGPR index of `vcc_lo`, the Wave32 vector condition code.

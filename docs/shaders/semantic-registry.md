@@ -210,6 +210,17 @@ The XML must give SIMM16 as 16-bit `FMT_NUM_I16` (`FMT_NUM_U16` for `unsigned`).
 The word never takes a literal dword. The details are in
 [scalar-immediate.md](scalar-immediate.md).
 
+The SOPP control rules (AMD RDNA 2 ISA guide §§12.5 and 13.1.5) generate
+`SoppControlOp` for the existing Wave32 compute subset. `sopp_end` accepts
+`s_endpgm` with zero in SIMM16. `sopp_wait` accepts only `s_waitcnt vmcnt(0)`
+(`0x3f70`), completing a pending vector load. `sopp_branch` accepts
+`s_branch`, `s_cbranch_scc0`, `s_cbranch_vccz` and `s_cbranch_execz` with a
+nonnegative signed SIMM16 displacement in dwords from the next instruction.
+The decoder and compiler require a valid target boundary. The conditional
+branches read SCC, VCC_LO or EXEC_LO without writing those registers.
+Other SOPP forms, including `s_nop`, the nonzero branches, `s_sendmsg`,
+`s_trap`, `s_sethalt` and `s_setprio`, remain unsupported.
+
 Behaviour is chosen only from these declared fields, never from the mnemonic.
 
 ## What the validator checks
