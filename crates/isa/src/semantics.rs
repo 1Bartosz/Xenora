@@ -49,6 +49,25 @@ pub enum Operation {
     ArithmeticShiftRight,
     /// Compare S0 with S1 under the form's relation; writes only SCC.
     Compare,
+    /// Bitwise complement of S0.
+    Not,
+    /// S0 with its bit order reversed.
+    ReverseBits,
+    /// Number of zero bits in S0.
+    CountZeros,
+    /// Number of one bits in S0.
+    CountOnes,
+    /// Index of the lowest zero bit of S0, or -1 when there is none.
+    FindFirstZero,
+    /// Index of the lowest one bit of S0, or -1 when there is none.
+    FindFirstOne,
+    /// Unsigned: count of zeros above the highest one bit; signed: count of bits
+    /// above the highest bit that differs from the sign bit. -1 when none.
+    FindLastBit,
+    /// Sign-extend the low `source_bits` of S0 to 32 bits.
+    SignExtend,
+    /// Two's-complement absolute value; the most negative value maps to itself.
+    Absolute,
 }
 
 /// How the operands are interpreted. `Bitwise` exactly when the operation is logical.
@@ -113,6 +132,9 @@ pub enum OperandRule {
     /// SOPC: no destination; SSRC0/SSRC1 as for SOP2 sources (s0-s105, inline
     /// integers -16..64 or one literal word). Everything else is rejected.
     SopcScalar,
+    /// SOP1 unary: SDST is s0-s105; SSRC0 is s0-s105, an inline integer -16..64 or
+    /// a literal word. Everything else is rejected as unsupported.
+    Sop1Sgpr,
 }
 
 /// Evidence a form needs before it counts as verified.
@@ -167,6 +189,8 @@ pub struct FormSemantics {
     pub width: u8,
     /// Low bits of S1 used as the shift count by shift operations; 0 otherwise.
     pub shift_count_bits: u8,
+    /// Low bits of S0 that the operation reads: `width`, or 8 or 16 for sign extension.
+    pub source_bits: u8,
     /// The relation tested by compares (S0 on the left); `None` otherwise.
     pub relation: Option<CompareRelation>,
     /// SCC write.

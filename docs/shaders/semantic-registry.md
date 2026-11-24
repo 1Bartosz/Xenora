@@ -55,6 +55,7 @@ error.
 | `signedness` | How operands are read | `unsigned`, `signed`, `bitwise` (always `bitwise` for the logical operations, never for `add` and `sub`; shifts take their primitive's signedness) |
 | `carry_in` | Whether the form reads SCC as carry-in or borrow-in | `none`, `scc` (`scc` only for unsigned `add` and `sub`) |
 | `width` | Operand and result width in bits | `32` |
+| `source_bits` | Sign extension only: the low bits of S0 that are read. The XML must list S0 with that size and format (`FMT_NUM_I8` or `FMT_NUM_I16`) | `8`, `16`; required for `sext`, rejected elsewhere |
 | `relation` | Compares only: the relation tested with S0 on the left | `eq`, `lg` (not equal), `gt`, `ge`, `lt`, `le`; required for `compare`, rejected elsewhere |
 | `shift_count_bits` | Shifts only: the low bits of S1 used as the count. The generator masks S1 with it, and the XML must list S1 as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
 | `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `relation` (compares only), `unchanged` |
@@ -77,10 +78,16 @@ fixes the `scc` value:
 | `lshl` / `bitwise` | `nonzero` | `lshl_nonzero_b32` | no |
 | `lshr` / `unsigned` | `nonzero` | `lshr_nonzero_b32` | no |
 | `ashr` / `signed` | `nonzero` | `ashr_nonzero_i32` | no |
+| `not`, `bcnt0`, `bcnt1` / `bitwise` | `nonzero` | `not_nonzero_b32`, `bcnt0_nonzero_b32`, `bcnt1_nonzero_b32` | no |
+| `brev`, `ff0`, `ff1`, `flbit` / `bitwise` | `unchanged` | `brev_b32`, `ff0_b32`, `ff1_b32`, `flbit_b32` | no |
+| `flbit`, `sext` / `signed` | `unchanged` | `flbit_i32`, `sext_i32` | no |
+| `abs` / `signed` | `nonzero` | `abs_nonzero_i32` | no |
 | `compare` / `signed` or `unsigned` | `relation` | `eq_b32`, `ne_b32` (for both signednesses), `gt_i32`/`gt_u32`, `ge_*`, `lt_*`, `le_*` | no |
 
 A compare must use an operand rule of the compare kind (`sopc_scalar`: two
-sources, no destination), and an ALU operation must not.
+sources, no destination), a unary operation one of the unary kind (`sop1_sgpr`:
+one source and an SGPR destination), and a two-source ALU operation
+`sop2_sgpr`.
 
 Behaviour is chosen only from these declared fields, never from the mnemonic.
 

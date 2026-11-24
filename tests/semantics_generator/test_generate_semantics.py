@@ -82,9 +82,36 @@ def snapshot():
             "instruction": name, "encoding": "ENC_SOPC", "opcode": opcode,
             "operands": _operands(data_format)[1:],
         }
+    sop1 = {
+        "name": "ENC_SOP1",
+        "bits": 32,
+        "fields": [
+            ["SSRC0", [[0, 8]]], ["OP", [[8, 8]]], ["SDST", [[16, 7]]], ["ENCODING", [[23, 9]]],
+        ],
+        "identifier_mask": 0xFF80FF00,
+        "identifiers": [0xBE800000 | (op << 8) for op in (7, 11, 25)],
+    }
+
+    def unary(dst, src, size, scc):
+        rows = [
+            ["SDST", dst, "OPR_SDST", 32, False, True, False, True],
+            ["SSRC0", src, "OPR_SSRC_NOLDS", size, True, False, False, True],
+        ]
+        if scc:
+            rows.append(["", "FMT_NUM_B1", "OPR_SSRC_SPECIAL_SCC", 1, False, True, True, True])
+        return rows
+
+    for name, opcode, operands in (
+        ("S_NOT_B32", 7, unary(U32, U32, 32, True)),
+        ("S_BREV_B32", 11, unary(U32, U32, 32, False)),
+        ("S_SEXT_I32_I8", 25, unary(I32, "FMT_NUM_I8", 8, False)),
+    ):
+        variants[(name, "ENC_SOP1")] = {
+            "instruction": name, "encoding": "ENC_SOP1", "opcode": opcode, "operands": operands,
+        }
     return {
         "source": {"sha256": SHA},
-        "encodings": {"ENC_SOP2": encoding, "ENC_SOPC": sopc},
+        "encodings": {"ENC_SOP2": encoding, "ENC_SOPC": sopc, "ENC_SOP1": sop1},
         "variants": variants,
     }
 
@@ -98,6 +125,25 @@ def _form(name, opcode, variant, operation, signedness, scc, carry_in="none"):
         "spec": [{"document": "guide", "section": "12.1", "page": 101}],
         "verify": ["reference", "independent"],
     }
+
+
+def unaries():
+    reg = registry()
+    rule = copy.deepcopy(gen.OPERAND_RULES["sop1_sgpr"]["shape"])
+    rule["unsupported"] = sorted(gen.OPERAND_RULES["sop1_sgpr"]["unsupported"])
+    reg["operand_rules"]["sop1_sgpr"] = rule
+
+    def unary(name, opcode, variant, operation, signedness, scc, **extra):
+        form = _form(name, opcode, variant, operation, signedness, scc)
+        form.update(family="SOP1", operands="sop1_sgpr", **extra)
+        return form
+
+    reg["form"] += [
+        unary("S_NOT_B32", 7, "NotB32", "not", "bitwise", "nonzero"),
+        unary("S_BREV_B32", 11, "BrevB32", "brev", "bitwise", "unchanged"),
+        unary("S_SEXT_I32_I8", 25, "SextI32I8", "sext", "signed", "unchanged", source_bits=8),
+    ]
+    return reg
 
 
 def compares():
@@ -378,6 +424,43 @@ class Validate(unittest.TestCase):
             "Self::AshrI32 => primitive::ashr_nonzero_i32(src0, src1 & 0x1f),",
             gen.render(registry(), snapshot()),
         )
+
+    def test_accepts_unaries(self):
+        self.assertEqual(self.errors(unaries()), [])
+
+    def test_rejects_a_sext_without_source_bits(self):
+        reg = unaries()
+        del reg["form"][-1]["source_bits"]
+        self.rejects(reg, "S_SEXT_I32_I8: source_bits must be one of [8, 16], got None")
+
+    def test_rejects_a_sext_whose_source_bits_contradict_the_xml(self):
+        reg = unaries()
+        reg["form"][-1]["source_bits"] = 16
+        self.rejects(reg, "S_SEXT_I32_I8: SSRC0 is 8 bits in the XML, declared 16")
+        self.rejects(reg, "S_SEXT_I32_I8: SSRC0 has XML format FMT_NUM_I8, not FMT_NUM_I16")
+
+    def test_rejects_source_bits_on_another_operation(self):
+        reg = unaries()
+        reg["form"][-2]["source_bits"] = 8
+        self.rejects(reg, "S_BREV_B32: source_bits on a non-sext operation")
+
+    def test_rejects_an_scc_write_the_xml_does_not_show(self):
+        reg = unaries()
+        reg["form"][-2]["operation"] = "not"
+        reg["form"][-2]["scc"] = "nonzero"
+        self.rejects(reg, "S_BREV_B32: scc nonzero contradicts the XML SCC output")
+
+    def test_rejects_a_unary_operation_under_a_binary_rule(self):
+        reg = unaries()
+        reg["form"][0]["operation"] = "not"
+        reg["form"][0]["scc"] = "nonzero"
+        self.rejects(reg, "S_ADD_U32: operation not does not fit rule sop2_sgpr")
+
+    def test_renders_unary_scc_as_optional(self):
+        text = gen.render(unaries(), snapshot())
+        self.assertIn("Self::BrevB32 => (primitive::brev_b32(src), None),", text)
+        self.assertIn("Self::SextI32I8 => (primitive::sext_i32(src, 8), None),", text)
+        self.assertIn("let (value, scc) = primitive::not_nonzero_b32(src);", text)
 
     def test_accepts_compares(self):
         self.assertEqual(self.errors(compares()), [])
