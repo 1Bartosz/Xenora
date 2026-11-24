@@ -187,13 +187,13 @@ fn mode2_worked_example_index_bit_position() {
     bits |= 0b11 << 115;
     block = bits.to_le_bytes();
     let out = decode_bc7(block);
-    for t in 0..16 {
+    for (t, px) in out.iter().enumerate() {
         let want = if t == 9 {
             [255, 255, 255, 255]
         } else {
             [0, 0, 0, 255]
         };
-        assert_eq!(out[t], want, "texel {t}");
+        assert_eq!(*px, want, "texel {t}");
     }
 }
 
@@ -215,9 +215,9 @@ fn mode0_three_subset_anchors_store_one_bit_less() {
     }
     b.put(u32::MAX, 32).put((1 << 13) - 1, 13);
     let out = decode_bc7(b.finish());
-    for t in 0..16 {
+    for (t, px) in out.iter().enumerate() {
         let v = if [0, 3, 8].contains(&t) { 108 } else { 255 };
-        assert_eq!(out[t], [v, v, v, 255], "texel {t}");
+        assert_eq!(*px, [v, v, v, 255], "texel {t}");
     }
 }
 
@@ -243,14 +243,14 @@ fn mode7_alpha_endpoints_with_pbits() {
         }
     }
     let out = decode_bc7(b.finish());
-    for t in 0..16 {
+    for (t, px) in out.iter().enumerate() {
         let v = match t {
             0 => 82,
             15 => 86,
             _ if t % 4 < 2 => 251,
             _ => 255,
         };
-        assert_eq!(out[t], [v; 4], "texel {t}");
+        assert_eq!(*px, [v; 4], "texel {t}");
     }
 }
 
@@ -266,9 +266,9 @@ fn mode3_eight_bit_endpoints_need_no_replication() {
     b.put(1, 1).put(0, 1).put(0, 1).put(0, 1);
     b.put(0, 30);
     let out = decode_bc7(b.finish());
-    for t in 0..16 {
+    for (t, px) in out.iter().enumerate() {
         let v = if t % 4 < 2 { 171 } else { 84 };
-        assert_eq!(out[t], [v, v, v, 255], "texel {t}");
+        assert_eq!(*px, [v, v, v, 255], "texel {t}");
     }
 }
 
@@ -295,8 +295,8 @@ fn mode5_rotation_with_eight_bit_alpha() {
     }
     let out = decode_bc7(b.finish());
     assert_eq!(out[0], [255, 0, 72, 0]);
-    for t in 1..16 {
-        assert_eq!(out[t], [255, 0, 200, 0], "texel {t}");
+    for (t, px) in out.iter().enumerate().skip(1) {
+        assert_eq!(*px, [255, 0, 200, 0], "texel {t}");
     }
 }
 
