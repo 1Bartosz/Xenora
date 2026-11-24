@@ -96,7 +96,8 @@ allocation there fails. The import trampolines above that page are intercepted
 in the same way and are not reserved.
 
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
-without guest execution. `missing_imports.csv` lists unresolved ordinary keys
+without guest execution. Without `--report` it writes to `diagnostics/probe`,
+where `xenora imports sync` also looks. `missing_imports.csv` lists unresolved ordinary keys
 with their import address table relative virtual addresses. The full inventory,
 `imports.csv`, marks each entry `ordinary` or `delayed` in its `import_table`
 column and records whether each key is registered, its implementation
