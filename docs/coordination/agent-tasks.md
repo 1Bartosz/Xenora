@@ -1,7 +1,11 @@
 # Agent task queue
 
 Work items are GitHub issues. Contributors and coding agents claim them with a comment, work in
-their own branch, and open a pull request that is checked against the claim. The queue is
+their own branch, and open a pull request that is checked against the claim. The claim rules for
+everyone are in `AGENTS.md` ("Claiming work before you start"): a plain reply is a valid claim, and
+a claim goes stale after about one week without a pull request. The commands below are an optional
+layer for contributors listed in `.github/agent-queue.json`; the bot only sees `/claim` comments, so
+read the issue's comments before using it and never `/claim` over a plain-reply claim. The queue is
 deterministic: the rules live in `scripts/agent_queue/` (standard-library Python, no network, no
 model or external service), and GitHub Actions and the shell helpers only call it.
 
@@ -58,7 +62,7 @@ done
 4. `scripts/agent-queue.sh start <n>` creates branch `task/<n>-<slug>` from `upstream/main` in a
    separate worktree `../xenora-task-<n>` (`--here` uses the current clean checkout instead).
 5. Keep the lease alive with `scripts/agent-queue.sh progress <n> "what changed"`. A claim lapses
-   `lease_hours` (24) after the latest of: the grant, your `/progress` comment, a push to your
+   `lease_hours` (168, one week) after the latest of: the grant, your `/progress` comment, a push to your
    linked pull request. Other people's comments never renew it. A lapsed task returns to the queue.
 6. Open the pull request with `Closes #<n>` and a DCO sign-off (`git commit -s`).
 7. A different person (not the author, not the task holder) who is a maintainer or has `qa`
