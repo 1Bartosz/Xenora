@@ -1872,8 +1872,32 @@ impl VectorCompareOp {
     }
 }
 
-/// Identity of every registry form, in registry order.
-pub const FORM_IDS: [(&str, EncodingFamily); 84] = [
+impl VectorAluOp {
+    /// Selects the operation from the first word of its VOP3 encoding (operand
+    /// rule `vop3_vgpr2`): the encoding bits (mask 0xfc00_0000) and then
+    /// the OP field (bits 16-25). `None` for undeclared opcodes.
+    pub const fn from_vop3_word(word: u32) -> Option<Self> {
+        if word & 0xfc00_0000 != 0xd400_0000 {
+            return None;
+        }
+        match (word >> 16) & 0x3ff {
+            293 => Some(Self::AddNcU32),
+            _ => None,
+        }
+    }
+
+    /// Assembler name of the VOP3 encoding, as LLVM prints it, if declared.
+    pub const fn vop3_assembly_name(self) -> Option<&'static str> {
+        match self {
+            Self::AddNcU32 => Some("v_add_nc_u32_e64"),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+}
+
+/// Identity of every registry form and encoding variant, in registry order.
+pub const FORM_IDS: [(&str, EncodingFamily); 85] = [
     ("S_ADD_U32", EncodingFamily::Sop2),
     ("S_SUB_U32", EncodingFamily::Sop2),
     ("S_ADD_I32", EncodingFamily::Sop2),
@@ -1958,10 +1982,11 @@ pub const FORM_IDS: [(&str, EncodingFamily); 84] = [
     ("V_CMP_T_I32", EncodingFamily::Vopc),
     ("V_CMP_F_U32", EncodingFamily::Vopc),
     ("V_CMP_T_U32", EncodingFamily::Vopc),
+    ("V_ADD_NC_U32", EncodingFamily::Vop3),
 ];
 
 /// One validated row per registry form, in registry order.
-pub static FORMS: [FormSemantics; 84] = [
+pub static FORMS: [FormSemantics; 85] = [
     FormSemantics {
         name: "S_ADD_U32",
         family: EncodingFamily::Sop2,
@@ -3724,6 +3749,27 @@ pub static FORMS: [FormSemantics; 84] = [
         wave: Wave::Wave32,
         operands: OperandRule::VopcVcc,
         spec: &[SpecRef { document: Document::Guide, section: "12.9", page: 150 }, SpecRef { document: Document::Guide, section: "3.9", page: 19 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "V_ADD_NC_U32",
+        family: EncodingFamily::Vop3,
+        opcode: 293,
+        operation: Operation::Add,
+        signedness: Signedness::Unsigned,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        swap_sources: false,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Vop3Vgpr2,
+        spec: &[SpecRef { document: Document::Guide, section: "12.12", page: 167 }, SpecRef { document: Document::Guide, section: "12.7", page: 134 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
 ];

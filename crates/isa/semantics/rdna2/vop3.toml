@@ -1,0 +1,35 @@
+# VOP3 encodings of the gfx1030 semantic registry; included by ../rdna2.toml.
+# Data only; see the root file for the field meanings.
+
+# ---- VOP3 encoding variants of registry forms (#215) ----
+# An [[encoding_variant]] re-encodes a form declared in another family file: it
+# names the form (`of`), this family, the XML opcode here and the operand rule
+# of this encoding, and inherits everything else (operation, signedness,
+# effects) from the form. The XML must agree with the inherited declaration.
+
+# Two VGPR sources, VGPR destination, no modifiers (ABS, OP_SEL, CLAMP, OMOD
+# and NEG clear) and SRC2 the assembler's unused inline zero. This is the
+# subset the decoder accepted for v_add_nc_u32_e64 before the registry.
+[operand_rules.vop3_vgpr2]
+family = "VOP3"
+dst = { field = "VDST", class = "vgpr", min = 0, max = 255 }
+src = [
+  { field = "SRC0", class = "vgpr" },
+  { field = "SRC1", class = "vgpr" },
+]
+max_literals = 0
+unsupported = [
+  "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+  "src_float_inline", "src_special", "src_literal", "modifiers", "src2",
+]
+
+[[encoding_variant]]
+of = "V_ADD_NC_U32"
+family = "VOP3"
+opcode = 293
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 134 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]

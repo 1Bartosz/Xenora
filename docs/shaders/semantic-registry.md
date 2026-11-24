@@ -35,6 +35,39 @@ families therefore never edits the same registry file. To add a family, create
 `rdna2/<family>.toml` and append it to `include`; the generated order (and so
 the generated file) changes only where the new file is placed.
 
+## Encoding variants
+
+An `[[encoding_variant]]` is another encoding of a form that is already declared,
+such as the VOP3 (`_e64`) encoding of a VOP2 form. It is pure data in the family
+file of its encoding (`rdna2/vop3.toml`) and has exactly these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `of` | The `name` of the declared base form |
+| `family` | The encoding family of this variant; must differ from the form's |
+| `opcode` | The XML opcode in that family |
+| `operands` | An operand rule of that family whose kind can encode the base form (today `vop3_vgpr2` for VOP2 vector forms) |
+| `spec`, `verify` | As for a form |
+
+Everything else (operation, signedness, effects, source order) is inherited
+from the base form, and the XML check runs on that inherited declaration with
+the variant's family, opcode and operand rule, so the VOP3 operand widths and
+formats must agree with it. The generator emits, on the base enum,
+`from_<family>_word` (encoding bits, then an explicit match on the OP field) and
+`<family>_assembly_name`, and one `FORMS` row per variant after the forms. A
+variant-only rule (one marked `variant_of` in the generator) cannot be used by a
+form. The validator rejects a variant of an undeclared form, one in the form's
+own family, a duplicate encoding of a form or a duplicate `(family, opcode)`, a
+rule that cannot encode the form, missing or unknown fields, and any XML
+disagreement.
+
+`vop3_vgpr2` is the subset the decoder accepted for `v_add_nc_u32_e64` before
+the registry: VGPR destination, two VGPR sources, ABS, OP_SEL, CLAMP, OMOD and
+NEG clear, and SRC2 the assembler's unused inline zero. `v_add_nc_u32_e64` is its
+first variant; adding the VOP3 encoding of another VOP2 form under this rule is
+one `[[encoding_variant]]` entry. Wider VOP3 operand rules (scalar and inline
+sources, legal modifiers) come with the VOP3 batch.
+
 ## Fields
 
 The root file holds:

@@ -160,3 +160,36 @@ fn vector_compare_dispatch_selects_exactly_the_registry_vopc_forms() {
         VectorCompareOp::from_word(word).map(|op| op.semantics().name)
     });
 }
+
+#[test]
+fn vop3_variant_dispatch_selects_exactly_the_registry_vop3_rows() {
+    for row in FORMS
+        .iter()
+        .filter(|row| row.family == EncodingFamily::Vop3)
+    {
+        let op = VectorAluOp::ALL
+            .into_iter()
+            .find(|op| op.semantics().name == row.name)
+            .unwrap_or_else(|| panic!("{} has no base VOP2 form", row.name));
+        let base = op.semantics();
+        // The variant inherits the base declaration; only identity and the
+        // operand rule differ.
+        assert_eq!(
+            (
+                base.operation,
+                base.signedness,
+                base.scc,
+                base.vcc,
+                base.exec
+            ),
+            (row.operation, row.signedness, row.scc, row.vcc, row.exec)
+        );
+        assert_eq!(
+            op.vop3_assembly_name(),
+            Some(format!("{}_e64", op.mnemonic()).as_str())
+        );
+    }
+    dispatch_selects_exactly(EncodingFamily::Vop3, |word| {
+        VectorAluOp::from_vop3_word(word).map(|op| op.semantics().name)
+    });
+}

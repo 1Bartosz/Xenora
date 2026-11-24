@@ -43,7 +43,8 @@ fn decodes_each_fixture_instruction_with_offset_and_length() {
         (
             20,
             8,
-            Instruction::AddNoCarryU32 {
+            Instruction::VectorAluVop3 {
+                op: VectorAluOp::AddNcU32,
                 dst: 1,
                 src0: 1,
                 src1: 2,
@@ -373,7 +374,14 @@ fn reference_op(instruction: Instruction) -> Op {
             reference_scalar(src0),
             reference_scalar(src1),
         ),
-        Instruction::AddNoCarryU32 { dst, src0, src1 } => Op::Add(dst, src0, src1),
+        // The reference's VOP3 add; it is the only VOP3 variant so far.
+        Instruction::VectorAluVop3 {
+            op: VectorAluOp::AddNcU32,
+            dst,
+            src0,
+            src1,
+        } => Op::Add(dst, src0, src1),
+        Instruction::VectorAluVop3 { op, .. } => panic!("no reference VOP3 mapping for {op:?}"),
         Instruction::ScalarMoveB32 { dst, src } => Op::ScalarMove(dst, reference_scalar(src)),
         Instruction::ScalarUnary { op, dst, src } => Op::ScalarUnary(
             match op {
@@ -998,7 +1006,8 @@ fn accepts_scalar_destination_105_and_vgpr_zero_add_sources() {
     let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     assert_eq!(
         decode(Architecture::Gfx1030, &bytes).unwrap()[0].instruction,
-        Instruction::AddNoCarryU32 {
+        Instruction::VectorAluVop3 {
+            op: VectorAluOp::AddNcU32,
             dst: 1,
             src0: 0,
             src1: 0

@@ -9,8 +9,8 @@ pub use graphics::{PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 pub use xenora_decoder::Architecture;
 use xenora_decoder::{
-    DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorBinary, VectorCompareOp,
-    VectorSource,
+    DecodeError, DecodedInstruction, Instruction, ScalarSource, VectorAluOp, VectorBinary,
+    VectorCompareOp, VectorSource,
 };
 
 /// SGPR index of `vcc_lo`.
@@ -215,7 +215,6 @@ fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
 
 #[derive(Clone, Copy)]
 enum Binary {
-    Add,
     ShiftLeft,
     ShiftRight,
     ArithmeticShiftRight,
@@ -224,14 +223,14 @@ enum Binary {
     Xor,
     FloatAdd,
     FloatMul,
-    /// A registry VOP2 integer operation, lowered by its typed template.
+    /// A registry VOP2 integer operation (or its VOP3 encoding), lowered by its
+    /// typed template.
     Vector(VectorBinary),
 }
 
 impl Binary {
     fn operator(self) -> (&'static str, &'static str) {
         match self {
-            Self::Add => ("add.u32", "+"),
             Self::ShiftLeft => ("lshl.b32", "<<"),
             Self::ShiftRight => ("lshr.b32", ">>"),
             Self::ArithmeticShiftRight => ("ashr.i32", ">>"),
@@ -684,7 +683,12 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         if let Some((_, _, before)) = &region {
             let dst = match instruction.instruction {
                 Instruction::MoveB32 { dst, .. }
-                | Instruction::AddNoCarryU32 { dst, .. }
+                // Of the VOP3 variants, the contract admits only v_add_nc_u32_e64.
+                | Instruction::VectorAluVop3 {
+                    op: VectorAluOp::AddNcU32,
+                    dst,
+                    ..
+                }
                 | Instruction::VectorLshlrevB32 { dst, .. }
                 | Instruction::VectorLshrrevB32 { dst, .. }
                 | Instruction::VectorAshrrevI32 { dst, .. }
@@ -723,7 +727,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
         if exec == 0 {
             match instruction.instruction {
                 Instruction::MoveB32 { .. }
-                | Instruction::AddNoCarryU32 { .. }
+                | Instruction::VectorAluVop3 { .. }
                 | Instruction::VectorLshlrevB32 { .. }
                 | Instruction::VectorLshrrevB32 { .. }
                 | Instruction::VectorAshrrevI32 { .. }
@@ -830,8 +834,21 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 Some(dst),
                 Op::Constant(read_scalar(ScalarSource::Register(register))?),
             ),
-            Instruction::AddNoCarryU32 { dst, src0, src1 } => {
-                (Some(dst), Op::Binary(Binary::Add, read(src0)?, read(src1)?))
+            Instruction::VectorAluVop3 {
+                op,
+                dst,
+                src0,
+                src1,
+            } => {
+                let (left, right) = if op.swaps_sources() {
+                    (read(src1)?, read(src0)?)
+                } else {
+                    (read(src0)?, read(src1)?)
+                };
+                (
+                    Some(dst),
+                    Op::Binary(Binary::Vector(op.lowering()), left, right),
+                )
             }
             Instruction::VectorLshlrevB32 { dst, src0, src1 } => (
                 Some(dst),

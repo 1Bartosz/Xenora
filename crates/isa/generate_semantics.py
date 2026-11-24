@@ -37,7 +37,17 @@ FORM_KEYS = {
     "name", "family", "opcode", "variant", "operation", "signedness", "carry_in",
     "width", "scc", "vcc", "exec", "wave", "operands", "spec", "verify",
 }
-TOP_KEYS = {"schema", "architecture", "source_sha256", "documents", "operand_rules", "form"}
+TOP_KEYS = {
+    "schema", "architecture", "source_sha256", "documents", "operand_rules", "form",
+    "encoding_variant",
+}
+# An encoding variant is another encoding of a form already in the registry (for
+# example the VOP3 `_e64` encoding of a VOP2 form): pure data that names the base
+# form, the encoding family, its opcode there and the operand rule of that
+# encoding. It inherits the base form's operation, signedness and effects.
+VARIANT_KEYS = {"of", "family", "opcode", "operands", "spec", "verify"}
+# The assembler suffix LLVM prints for a variant's encoding family.
+ASSEMBLY_SUFFIX = {"VOP3": "_e64"}
 
 OPERATIONS = {
     "add": "Add", "sub": "Sub", "and": "And", "or": "Or", "xor": "Xor",
@@ -222,7 +232,9 @@ UNSUPPORTED_COMBOS = {
 }
 # Every combo name a rule may list (VOP2 also names vcc_hi and NULL sources,
 # which SOP2 groups under src_vcc and src_special).
-ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null"}
+# VOP3 rules also name source classes and encoding fields they refuse.
+VOP3_COMBOS = {"src_sgpr", "src_inline", "src_literal", "modifiers", "src2"}
+ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null"} | VOP3_COMBOS
 OPERAND_RULES = {
     "sop2_sgpr": {
         "rust": "Sop2Sgpr",
@@ -287,6 +299,28 @@ OPERAND_RULES = {
         },
         "kind": "vector_compare",
     },
+    "vop3_vgpr2": {
+        "rust": "Vop3Vgpr2",
+        "enum": "VectorAluOp",
+        "shape": {
+            "family": "VOP3",
+            "dst": {"field": "VDST", "class": "vgpr", "min": 0, "max": 255},
+            "src": [
+                {"field": "SRC0", "class": "vgpr"},
+                {"field": "SRC1", "class": "vgpr"},
+            ],
+            "max_literals": 0,
+        },
+        # Two VGPR sources only, with ABS, OP_SEL, CLAMP, OMOD and NEG clear and
+        # SRC2 the assembler's unused inline zero; the decoder rejects the rest.
+        "unsupported": {
+            "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+            "src_float_inline", "src_special", "src_literal", "modifiers", "src2",
+        },
+        "kind": "vector_vop3",
+        # Only encoding variants of forms whose rule has this kind may use it.
+        "variant_of": "vector",
+    },
     "vop2_vgpr": {
         "rust": "Vop2Vgpr",
         "enum": "VectorAluOp",
@@ -321,7 +355,7 @@ class RegistryError(ValueError):
 
 
 # Keys a family file may hold; everything else lives in the root file.
-FAMILY_FILE_KEYS = {"operand_rules", "form"}
+FAMILY_FILE_KEYS = {"operand_rules", "form", "encoding_variant"}
 
 
 def load_registry(path=REGISTRY):
@@ -364,6 +398,11 @@ def load_registry(path=REGISTRY):
                 label = form.get("name", f"form #{index}") if isinstance(form, dict) else index
                 raise RegistryError(f"{include}: form {label} is not a {family} form")
             forms.append(form)
+        for index, variant in enumerate(part.get("encoding_variant", [])):
+            if not isinstance(variant, dict) or variant.get("family") != family:
+                label = variant.get("of", f"#{index}") if isinstance(variant, dict) else index
+                raise RegistryError(f"{include}: encoding variant {label} is not a {family} encoding")
+            registry.setdefault("encoding_variant", []).append(variant)
     return registry
 
 
@@ -661,6 +700,8 @@ def validate(registry, snapshot):
             if form["carry_in"] == "scc" and not takes_carry:
                 errors.append(f"{label}: carry_in scc contradicts {form['operation']}/{form['signedness']}")
         rule = rules.get(form["operands"])
+        if _implemented_rule(form) and "variant_of" in _implemented_rule(form):
+            errors.append(f"{label}: operand rule {form['operands']} is only for encoding variants")
         if rule is None:
             errors.append(f"{label}: unknown operand rule {form['operands']!r}")
         elif rule.get("family") != form["family"]:
@@ -682,7 +723,66 @@ def validate(registry, snapshot):
         if len(set(verify)) != len(verify):
             errors.append(f"{label}: duplicate verification requirement")
         _check_xml(form, rule, snapshot, errors)
+    _check_variants(registry, rules, documents, snapshot, seen, errors)
     return errors
+
+
+def variant_row(registry, variant):
+    """The base form re-encoded: its declaration with the variant's identity."""
+    base = next(form for form in registry["form"] if form.get("name") == variant["of"])
+    return dict(
+        base, family=variant["family"], opcode=variant["opcode"], operands=variant["operands"],
+        spec=variant["spec"], verify=variant["verify"],
+    )
+
+
+def _check_variants(registry, rules, documents, snapshot, seen, errors):
+    forms = {form.get("name"): form for form in registry.get("form", [])}
+    identities = {(form.get("name"), form.get("family")) for form in registry.get("form", [])}
+    for index, variant in enumerate(registry.get("encoding_variant", [])):
+        label = f"{variant.get('of', f'variant #{index}')} ({variant.get('family')})"
+        missing = sorted(VARIANT_KEYS - set(variant))
+        extra = sorted(set(variant) - VARIANT_KEYS)
+        if missing:
+            errors.append(f"{label}: incomplete encoding variant, missing {missing}")
+        if extra:
+            errors.append(f"{label}: unknown keys {extra}")
+        if missing:
+            continue
+        base = forms.get(variant["of"])
+        if base is None:
+            errors.append(f"{label}: encoding variant of an undeclared form")
+            continue
+        if type(variant["opcode"]) is not int or not 0 <= variant["opcode"] <= U16_MAX:
+            errors.append(f"{label}: invalid opcode")
+            continue
+        if variant["family"] == base.get("family"):
+            errors.append(f"{label}: an encoding variant must use another family than its form")
+        identity = (variant["of"], variant["family"])
+        if identity in identities:
+            errors.append(f"{label}: duplicate encoding of {variant['of']}")
+        identities.add(identity)
+        if (variant["family"], variant["opcode"]) in seen["opcode"]:
+            errors.append(f"{label}: duplicate opcode {(variant['family'], variant['opcode'])}")
+        seen["opcode"].add((variant["family"], variant["opcode"]))
+        implemented = OPERAND_RULES.get(variant["operands"]) if isinstance(variant["operands"], str) else None
+        rule = rules.get(variant["operands"])
+        if rule is None or implemented is None:
+            errors.append(f"{label}: unknown operand rule {variant['operands']!r}")
+            continue
+        if rule.get("family") != variant["family"]:
+            errors.append(f"{label}: operand rule {variant['operands']} is for {rule.get('family')}")
+        if implemented.get("variant_of") != _rule_kind(base) or implemented["enum"] != _rule_enum(base):
+            errors.append(
+                f"{label}: operand rule {variant['operands']} cannot encode a {_rule_kind(base)} form"
+            )
+        _check_spec(label, variant["spec"], documents, errors)
+        verify = variant["verify"]
+        if not verify or any(item not in EVIDENCE for item in verify) or len(set(verify)) != len(verify):
+            errors.append(f"{label}: invalid verification requirements {verify}")
+        # The XML check runs on the re-encoded declaration, so the variant's
+        # operands must agree with the base form's widths, signedness and effects.
+        _check_xml(variant_row(registry, variant), rule, snapshot, errors)
 
 
 def _implemented_rule(form):
@@ -743,9 +843,15 @@ def render(registry, snapshot):
     for rule_name in rule_names:
         selected = [form for form in forms if form["operands"] == rule_name]
         out += _render_enum(rule_name, selected, snapshot, positions)
+    variants = registry.get("encoding_variant", [])
+    for rule_name in sorted({variant["operands"] for variant in variants}):
+        selected = [variant for variant in variants if variant["operands"] == rule_name]
+        out += _render_variants(rule_name, selected, registry, snapshot)
+    # Encoding variants follow the forms, as rows of their own.
+    forms = forms + [variant_row(registry, variant) for variant in variants]
     out += [
         "",
-        "/// Identity of every registry form, in registry order.",
+        "/// Identity of every registry form and encoding variant, in registry order.",
         f"pub const FORM_IDS: [(&str, EncodingFamily); {len(forms)}] = [",
     ]
     for form in forms:
@@ -789,6 +895,51 @@ def render(registry, snapshot):
         ]
     out += ["];", ""]
     return "\n".join(out)
+
+
+def _render_variants(rule_name, variants, registry, snapshot):
+    """Dispatch of one operand rule's encoding variants onto the base enum."""
+    enum = OPERAND_RULES[rule_name]["enum"]
+    family = variants[0]["family"]
+    encoding = snapshot["encodings"][_family_encoding(family)]
+    (offset, size), = dict((name, ranges) for name, ranges in encoding["fields"])["OP"]
+    op_mask = ((1 << size) - 1) << offset
+    fixed_mask = encoding["identifier_mask"] & ~op_mask
+    fixed_bits = encoding["identifiers"][0] & fixed_mask
+    if any(identifier & fixed_mask != fixed_bits for identifier in encoding["identifiers"]):
+        raise ValueError(f"{family}: identifiers do not split into fixed bits and OP")
+    lower = family.lower()
+    variant_of = {form["name"]: form["variant"] for form in registry["form"]}
+    rows = sorted(variants, key=lambda variant: variant["opcode"])
+    out = [
+        "",
+        f"impl {enum} {{",
+        f"    /// Selects the operation from the first word of its {family} encoding (operand",
+        f"    /// rule `{rule_name}`): the encoding bits (mask 0x{fixed_mask:09_x}) and then",
+        f"    /// the OP field (bits {offset}-{offset + size - 1}). `None` for undeclared opcodes.",
+        f"    pub const fn from_{lower}_word(word: u32) -> Option<Self> {{",
+        f"        if word & 0x{fixed_mask:09_x} != 0x{fixed_bits:09_x} {{",
+        "            return None;",
+        "        }",
+        f"        match (word >> {offset}) & 0x{(1 << size) - 1:x} {{",
+    ]
+    out += [f"            {row['opcode']} => Some(Self::{variant_of[row['of']]})," for row in rows]
+    out += [
+        "            _ => None,",
+        "        }",
+        "    }",
+        "",
+        f"    /// Assembler name of the {family} encoding, as LLVM prints it, if declared.",
+        f"    pub const fn {lower}_assembly_name(self) -> Option<&'static str> {{",
+        "        match self {",
+    ]
+    out += [
+        f"            Self::{variant_of[row['of']]} => "
+        f"Some(\"{row['of'].lower()}{ASSEMBLY_SUFFIX[family]}\"),"
+        for row in variants
+    ]
+    out += ["            #[allow(unreachable_patterns)]", "            _ => None,", "        }", "    }", "}"]
+    return out
 
 
 def _render_enum(rule_name, forms, snapshot, positions):

@@ -167,11 +167,34 @@ def snapshot():
                 ["VSRC1", data_format, "OPR_VGPR", 32, True, False, False, True],
             ],
         }
+    vop3 = {
+        "name": "ENC_VOP3",
+        "bits": 64,
+        "fields": [
+            ["VDST", [[0, 8]]], ["ABS", [[8, 3]]], ["OP_SEL", [[11, 4]]], ["CLAMP", [[15, 1]]],
+            ["OP", [[16, 10]]], ["ENCODING", [[26, 6]]], ["SRC0", [[32, 9]]], ["SRC1", [[41, 9]]],
+            ["SRC2", [[50, 9]]], ["OMOD", [[59, 2]]], ["NEG", [[61, 3]]],
+        ],
+        "identifier_mask": 0xFFFF0000,
+        "identifiers": [0xD4000000 | (op << 16) for op in (265, 273, 295)],
+    }
+    # Values copied from the AMD XML snapshot: VOP3 encodings of VOP2 forms.
+    for name, opcode, data_format in (
+        ("V_MUL_I32_I24", 265, I32), ("V_MIN_I32", 273, I32), ("V_SUBREV_NC_U32", 295, U32),
+    ):
+        variants[(name, "ENC_VOP3")] = {
+            "instruction": name, "encoding": "ENC_VOP3", "opcode": opcode,
+            "operands": [
+                ["VDST", data_format, "OPR_VGPR", 32, False, True, False, True],
+                ["SRC0", data_format, "OPR_SRC", 32, True, False, False, True],
+                ["SRC1", data_format, "OPR_SRC_NOLDS", 32, True, False, False, True],
+            ],
+        }
     return {
         "source": {"sha256": SHA},
         "encodings": {
             "ENC_SOP2": encoding, "ENC_SOPC": sopc, "ENC_SOP1": sop1, "ENC_VOP2": vop2,
-            "ENC_VOPC": vopc,
+            "ENC_VOPC": vopc, "ENC_VOP3": vop3,
         },
         "variants": variants,
     }
@@ -264,6 +287,25 @@ def vector_compares():
         compare("V_CMP_NE_U32", 197, "CmpNeU32", "lg", "unsigned"),
     ]
     return reg
+
+
+def variants():
+    reg = vectors()
+    rule = copy.deepcopy(gen.OPERAND_RULES["vop3_vgpr2"]["shape"])
+    rule["unsupported"] = sorted(gen.OPERAND_RULES["vop3_vgpr2"]["unsupported"])
+    reg["operand_rules"]["vop3_vgpr2"] = rule
+    reg["encoding_variant"] = [
+        _variant("V_MIN_I32", 273), _variant("V_SUBREV_NC_U32", 295),
+    ]
+    return reg
+
+
+def _variant(of, opcode):
+    return {
+        "of": of, "family": "VOP3", "opcode": opcode, "operands": "vop3_vgpr2",
+        "spec": [{"document": "guide", "section": "12.12", "page": 167}],
+        "verify": ["reference", "independent"],
+    }
 
 
 def compares():
@@ -784,6 +826,68 @@ class Validate(unittest.TestCase):
         reg["documents"]["guide"]["file"] = "missing.pdf"
         self.rejects(reg, "document guide: differs from the pinned public document")
 
+    # ---- encoding variants ----
+
+    def test_accepts_encoding_variants(self):
+        self.assertEqual(self.errors(variants()), [])
+
+    def test_rejects_a_variant_of_an_undeclared_form(self):
+        reg = variants()
+        reg["encoding_variant"].append(_variant("V_MUL_HI_I32_I24", 266))
+        self.rejects(reg, "V_MUL_HI_I32_I24 (VOP3): encoding variant of an undeclared form")
+
+    def test_rejects_an_incomplete_or_unknown_variant_field(self):
+        reg = variants()
+        del reg["encoding_variant"][0]["spec"]
+        reg["encoding_variant"][1]["operation"] = "sub"
+        self.rejects(reg, "V_MIN_I32 (VOP3): incomplete encoding variant, missing ['spec']")
+        self.rejects(reg, "V_SUBREV_NC_U32 (VOP3): unknown keys ['operation']")
+
+    def test_rejects_a_variant_opcode_that_disagrees_with_the_xml(self):
+        reg = variants()
+        reg["encoding_variant"][0]["opcode"] = 265
+        self.rejects(reg, "V_MIN_I32: opcode 265 disagrees with the XML opcode 273")
+
+    def test_rejects_a_duplicate_variant_or_opcode(self):
+        reg = variants()
+        reg["encoding_variant"].append(_variant("V_MIN_I32", 273))
+        self.rejects(reg, "V_MIN_I32 (VOP3): duplicate encoding of V_MIN_I32")
+        self.rejects(reg, "V_MIN_I32 (VOP3): duplicate opcode ('VOP3', 273)")
+
+    def test_rejects_a_variant_in_its_forms_own_family(self):
+        reg = variants()
+        reg["encoding_variant"][0].update(family="VOP2", opcode=17, operands="vop2_vgpr")
+        self.rejects(reg, "V_MIN_I32 (VOP2): an encoding variant must use another family than its form")
+
+    def test_rejects_a_variant_rule_that_cannot_encode_the_form(self):
+        reg = variants()
+        reg["encoding_variant"][0]["operands"] = "sop2_sgpr"
+        self.rejects(reg, "V_MIN_I32 (VOP3): operand rule sop2_sgpr is for SOP2")
+        self.rejects(reg, "V_MIN_I32 (VOP3): operand rule sop2_sgpr cannot encode a vector form")
+
+    def test_rejects_a_form_that_uses_a_variant_only_rule(self):
+        reg = variants()
+        form(reg, "V_MIN_I32")["operands"] = "vop3_vgpr2"
+        self.rejects(reg, "V_MIN_I32: operand rule vop3_vgpr2 is only for encoding variants")
+
+    def test_checks_the_variant_xml_against_the_inherited_declaration(self):
+        snap = snapshot()
+        for row in snap["variants"][("V_MIN_I32", "ENC_VOP3")]["operands"]:
+            row[1] = U32
+        self.rejects(variants(), "V_MIN_I32: signedness signed contradicts XML format FMT_NUM_U32", snap)
+
+    def test_renders_variant_dispatch_and_rows(self):
+        text = gen.render(variants(), snapshot())
+        self.assertIn("pub const fn from_vop3_word(word: u32) -> Option<Self> {", text)
+        self.assertIn("if word & 0xfc00_0000 != 0xd400_0000 {", text)
+        self.assertIn("273 => Some(Self::AddU32),", text)  # V_MIN_I32's variant name
+        self.assertIn('Self::SubrevNcU32 => Some("v_subrev_nc_u32_e64"),', text)
+        self.assertIn('("V_MIN_I32", EncodingFamily::Vop3),', text)
+        self.assertIn("operands: OperandRule::Vop3Vgpr2,", text)
+        # The VOP3 row inherits SUBREV's reversed sources.
+        row = text.split('name: "V_SUBREV_NC_U32",\n        family: EncodingFamily::Vop3,', 1)[1]
+        self.assertIn("swap_sources: true,", row.split("}", 1)[0])
+
     def test_rejects_an_unenforced_wave_restriction(self):
         reg = registry()
         reg["form"][0]["wave"] = "wave32"
@@ -1070,8 +1174,9 @@ class LoadRegistry(unittest.TestCase):
         # Each family is one contiguous run, in include order.
         runs = [family for index, family in enumerate(families) if index == 0 or families[index - 1] != family]
         self.assertEqual(len(runs), len(set(runs)))
+        declared = set(runs) | {variant["family"] for variant in registry.get("encoding_variant", [])}
         for name, rule in registry["operand_rules"].items():
-            self.assertIn(rule["family"], runs, name)
+            self.assertIn(rule["family"], declared, name)
 
     def test_merges_family_files_in_include_order(self):
         root = self.write('include = ["rdna2/vop2.toml", "rdna2/sop2.toml"]\n', {

@@ -156,6 +156,7 @@ def load_registry(path):
                 raise ValueError(f"{REGISTRY}: operand rule {name} is declared twice")
             registry["operand_rules"][name] = rule
         registry.setdefault("form", []).extend(part.get("form", []))
+        registry.setdefault("encoding_variant", []).extend(part.get("encoding_variant", []))
     return registry
 
 
@@ -178,7 +179,13 @@ def read_declarations(registry, identified):
         rules[name] = (family, set(unsupported))
 
     declared = set()
-    for form in registry["form"]:
+    # An encoding variant declares its base form in another encoding family.
+    variants = [
+        {"family": variant["family"], "name": variant["of"], "opcode": variant["opcode"],
+         "operands": variant["operands"]}
+        for variant in registry.get("encoding_variant", [])
+    ]
+    for form in registry["form"] + variants:
         key = (form["family"], form["name"])
         if key not in identified:
             raise ValueError(f"{REGISTRY}: unknown form {key}")

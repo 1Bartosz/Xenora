@@ -22,6 +22,7 @@ include = [
   "rdna2/sop1.toml",
   "rdna2/vop2.toml",
   "rdna2/vopc.toml",
+  "rdna2/vop3.toml",
 ]
 
 # Named public documents that spec references point at.
