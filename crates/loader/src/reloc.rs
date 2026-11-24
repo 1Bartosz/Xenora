@@ -117,7 +117,10 @@ pub fn apply_relocations(
                 size: reloc_size,
             })?;
 
-    if reloc_file_offset + (reloc_size as usize) > bytes.len() {
+    if reloc_file_offset
+        .checked_add(reloc_size as usize)
+        .is_none_or(|end| end > bytes.len())
+    {
         return Err(RelocationError::DirectoryOutOfBounds {
             rva: reloc_rva,
             size: reloc_size,
@@ -127,13 +130,20 @@ pub fn apply_relocations(
     let mut read_bytes = 0usize;
     let max_read = reloc_size as usize;
 
-    while read_bytes + 8 <= max_read {
+    while read_bytes < max_read {
+        // A partial block header after the last block is malformed, not padding.
+        if max_read - read_bytes < 8 {
+            return Err(RelocationError::MalformedBlockHeader {
+                offset: reloc_file_offset + read_bytes,
+            });
+        }
         let block_start = reloc_file_offset + read_bytes;
         let page_rva = u32::from_le_bytes(bytes[block_start..block_start + 4].try_into().unwrap());
         let block_size =
             u32::from_le_bytes(bytes[block_start + 4..block_start + 8].try_into().unwrap());
 
-        if block_size < 8 {
+        // A block is an 8-byte header followed by whole 2-byte entries.
+        if block_size < 8 || block_size % 2 != 0 {
             return Err(RelocationError::MalformedBlockHeader {
                 offset: block_start,
             });
@@ -166,6 +176,15 @@ pub fn apply_relocations(
                     let target_rva = page_rva
                         .checked_add(offset_in_page)
                         .ok_or(RelocationError::ArithmeticOverflow)?;
+                    // The 8-byte target must lie inside the image, not in other mapped memory.
+                    if target_rva
+                        .checked_add(8)
+                        .is_none_or(|end| end > pe.size_of_image)
+                    {
+                        return Err(RelocationError::TargetOutOfBounds {
+                            target_va: loaded_base.wrapping_add(u64::from(target_rva)),
+                        });
+                    }
                     let target_va = loaded_base
                         .checked_add(target_rva as u64)
                         .ok_or(RelocationError::ArithmeticOverflow)?;
@@ -213,8 +232,8 @@ fn find_reloc_directory(
         return Ok(None);
     }
     let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
-    let opt_offset = e_lfanew + 24;
     let coff_offset = e_lfanew + 4;
+    let opt_offset = coff_offset + 20;
     if bytes.len() < coff_offset + 18 {
         return Ok(None);
     }
@@ -224,8 +243,17 @@ fn find_reloc_directory(
             .unwrap(),
     ) as usize;
 
-    // Relocation directory is directory index 5 (offset 112 + 5 * 8 = 152 in Optional Header)
+    // Relocation directory is directory index 5 (offset 112 + 5 * 8 = 152 in Optional Header).
+    // It exists only when NumberOfRvaAndSizes (offset 108) covers index 5.
     if size_of_opt < 160 || bytes.len() < opt_offset + 160 {
+        return Ok(None);
+    }
+    let number_of_rva_and_sizes = u32::from_le_bytes(
+        bytes[opt_offset + 108..opt_offset + 112]
+            .try_into()
+            .unwrap(),
+    );
+    if number_of_rva_and_sizes < 6 {
         return Ok(None);
     }
 
