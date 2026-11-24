@@ -222,7 +222,7 @@ llvm = "three-way passed"
 [[instruction]]
 form = "s_cmp_lg_u32"
 encoding = "SOPC; normal SGPR, inline integer or literal sources with at most one literal; SCC = S0 != S1 (unsigned)"
-representation = "`BF07C108`"
+representation = "`BF07FF0A 89ABCDEF`"
 lowering = "resolved SCC"
 reference = "implemented"
 cpu = "local known-answer test passed"

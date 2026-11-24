@@ -262,9 +262,14 @@ def _check_xml(form, rule, snapshot, errors):
         errors.append(f"{label}: scc {form['scc']} contradicts the XML SCC output")
     if rule is None:
         return
+    if not isinstance(rule.get("src"), list) or not all(
+        isinstance(src, dict) and isinstance(src.get("field"), str) for src in rule["src"]
+    ) or ("dst" in rule and not (isinstance(rule["dst"], dict) and "field" in rule["dst"])):
+        return  # the rule check already reported the malformed shape
     fields = [(rule["dst"]["field"], False)] if "dst" in rule else []
     fields += [(src["field"], True) for src in rule["src"]]
-    count_field = rule["src"][1]["field"] if form["operation"] in SHIFTS else None
+    shift = form["operation"] in SHIFTS and len(rule["src"]) > 1
+    count_field = rule["src"][1]["field"] if shift else None
     for field, is_source in fields:
         if field not in operands:
             errors.append(f"{label}: XML has no operand {field}")
@@ -374,7 +379,7 @@ def validate(registry, snapshot):
             errors.append(f"{label}: {SHIFT_KEY} on a non-shift operation")
         if form["operation"] == "compare":
             relation = form.get(RELATION_KEY)
-            if relation not in RELATIONS:
+            if not isinstance(relation, str) or relation not in RELATIONS:
                 errors.append(f"{label}: unknown or missing {RELATION_KEY} {relation!r}")
             elif (relation, form["signedness"]) not in COMPARE_PRIMITIVES:
                 errors.append(f"{label}: no primitive implements {relation}/{form['signedness']}")

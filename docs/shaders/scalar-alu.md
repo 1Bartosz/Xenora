@@ -131,7 +131,9 @@ literal. Both sources selecting the literal encoding (255) is rejected for SOPC
 as for SOP2; whether the guide allows one shared literal there was not settled.
 
 `tests/validation/tests/sopc_stage_d.rs` checks 7,824 cases, with expected
-values derived from the guide separately from the registry, plus 348 rejected
-programs, on both CPU interpreters and, through the translator, on native
-Metal. `fixtures/rdna2/scalar-compare.s` (LLVM-assembled, expected input ^
+values derived from the guide separately from the registry, on both CPU
+interpreters and, through the translator, on native Metal (compiled per case
+and read back from nine distinct generated kernels). Its 348 rejected programs
+are checked on both CPU interpreters and against the compiler, which rejects
+them before any Metal dispatch. `fixtures/rdna2/scalar-compare.s` (LLVM-assembled, expected input ^
 0x00000d5b) records every compare's SCC through an `s_cbranch_scc0` per form.

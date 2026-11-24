@@ -392,6 +392,16 @@ class Validate(unittest.TestCase):
         reg["form"][-1]["relation"] = "ne"
         self.rejects(reg, "S_CMP_LT_U32: unknown or missing relation 'ne'")
 
+    def test_rejects_a_non_string_relation(self):
+        reg = compares()
+        reg["form"][-1]["relation"] = ["lt"]
+        self.rejects(reg, "S_CMP_LT_U32: unknown or missing relation ['lt']")
+
+    def test_rejects_a_rule_without_sources(self):
+        reg = compares()
+        del reg["operand_rules"]["sopc_scalar"]["src"]
+        self.rejects(reg, "operand rule sopc_scalar: declaration differs from the decoder's implemented rule")
+
     def test_rejects_a_relation_on_a_non_compare(self):
         reg = compares()
         reg["form"][0]["relation"] = "lt"

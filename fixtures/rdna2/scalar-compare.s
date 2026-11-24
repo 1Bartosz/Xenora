@@ -38,7 +38,8 @@ s_cmp_eq_u32 s9, 1              // 1 == 1: SCC = 1
 s_cbranch_scc0 .Lskip6
 s_or_b32 s20, s20, 64
 .Lskip6:
-s_cmp_lg_u32 s8, 0xffffffff     // 0xffffffff != 0xffffffff: SCC = 0
+s_mov_b32 s10, 0x89abcdef
+s_cmp_lg_u32 s10, 0x89abcdef     // 0x89abcdef != 0x89abcdef: SCC = 0 (literal)
 s_cbranch_scc0 .Lskip7
 s_or_b32 s20, s20, 0x80
 .Lskip7:

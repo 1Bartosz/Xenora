@@ -6,11 +6,11 @@
 004c: branch.uniform 0x0054 taken=false
 0058: branch.uniform 0x0060 taken=true
 0064: branch.uniform 0x006c taken=false
-0070: branch.uniform 0x007c taken=true
-0080: branch.uniform 0x008c taken=false
-0090: branch.uniform 0x009c taken=true
-00a0: branch.uniform 0x00ac taken=false
-00b0: branch.uniform 0x00bc taken=false
-00bc: t13 = const.u32 0x00000d5b
-00c0: t14 = xor.b32 t0, t13
-00c4: store.u32 output[index], t14
+007c: branch.uniform 0x0088 taken=true
+008c: branch.uniform 0x0098 taken=false
+009c: branch.uniform 0x00a8 taken=true
+00ac: branch.uniform 0x00b8 taken=false
+00bc: branch.uniform 0x00c8 taken=false
+00c8: t13 = const.u32 0x00000d5b
+00cc: t14 = xor.b32 t0, t13
+00d0: store.u32 output[index], t14
