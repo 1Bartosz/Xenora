@@ -347,41 +347,6 @@ fn symbol_to_ident_lower(sym: &str) -> String {
 /// Returns a dispatch body for CRT calls with a compatible guest ABI adapter.
 fn crt_dispatch_expr(symbol: &str) -> Option<String> {
     Some(match symbol {
-        // memset(dst, val, count) -> dst
-        "memset" => r#"let dst = args.rcx;
-            let val = (args.rdx & 0xFF) as u8;
-            let count = args.r8 as usize;
-            for i in 0..count as u64 {
-                mem.write_u8(dst + i, val).map_err(ExitReason::MemoryFault)?;
-            }
-            Ok(dst)"#
-            .to_string(),
-        // memcpy(dst, src, n) -> dst
-        "memcpy" | "memmove" => r#"let dst = args.rcx;
-            let src = args.rdx;
-            let n = args.r8 as usize;
-            let mut buf = vec![0u8; n];
-            for (i, slot) in buf.iter_mut().enumerate() {
-                *slot = mem.read_u8(src + i as u64).map_err(ExitReason::MemoryFault)?;
-            }
-            for (i, &b) in buf.iter().enumerate() {
-                mem.write_u8(dst + i as u64, b).map_err(ExitReason::MemoryFault)?;
-            }
-            Ok(dst)"#
-            .to_string(),
-        // memcmp(a, b, n) -> int
-        "memcmp" => r#"let a = args.rcx;
-            let b = args.rdx;
-            let n = args.r8 as usize;
-            for i in 0..n as u64 {
-                let ba = mem.read_u8(a + i).map_err(ExitReason::MemoryFault)?;
-                let bb = mem.read_u8(b + i).map_err(ExitReason::MemoryFault)?;
-                if ba != bb {
-                    return Ok((ba as i64 - bb as i64) as u64);
-                }
-            }
-            Ok(0)"#
-            .to_string(),
         // strcmp(a, b) -> int
         "strcmp" => r#"let a = args.rcx;
             let b = args.rdx;

@@ -1023,6 +1023,45 @@ fn test_guest_duplicates_thread_handle_through_iat() {
 }
 
 #[test]
+fn test_guest_crt_memory_through_iat() {
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let slot = PROCESS_FIXTURE_OUTPUT;
+    let call = |symbol, args: &[u64]| {
+        call_service_fixture(&state, "api-ms-win-crt-string-l1-1-0.dll", symbol, args)
+    };
+    let fill = call("memset", &[slot + 2, 0x141, 3]);
+    assert_eq!(fill.execution.final_state.get(Register::Rax), slot + 2);
+    assert_eq!(
+        fill.image.memory.read_u64(slot).unwrap().to_le_bytes(),
+        [255, 255, 65, 65, 65, 255, 255, 255]
+    );
+
+    let copy = call("memcpy", &[slot + 8, slot, 8]);
+    assert_eq!(copy.execution.final_state.get(Register::Rax), slot + 8);
+    assert_eq!(copy.image.memory.read_u64(slot + 8).unwrap(), u64::MAX);
+
+    let shifted = call("memmove", &[slot + 1, slot, 8]);
+    assert_eq!(shifted.image.memory.read_u64(slot + 1).unwrap(), u64::MAX);
+    let shifted = call("memmove", &[slot, slot + 1, 8]);
+    assert_eq!(
+        shifted.image.memory.read_u64(slot).unwrap().to_le_bytes(),
+        [255, 255, 255, 255, 255, 255, 255, 0]
+    );
+
+    for (a, b, expected) in [
+        (slot, slot + 8, 255),
+        (slot + 8, slot, -255),
+        (slot, slot, 0),
+    ] {
+        let result = call("memcmp", &[a, b, 8]);
+        assert_eq!(
+            result.execution.final_state.get(Register::Rax) as i32,
+            expected
+        );
+    }
+}
+
+#[test]
 fn test_guest_crt_string_length_through_iat() {
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     for module in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {

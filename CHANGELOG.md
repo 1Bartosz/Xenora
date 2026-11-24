@@ -11,6 +11,8 @@ remains unsupported.
 
 ### Added
 
+- Added bounded guest CRT byte fill, copy, move, and comparison services.
+
 - Added guest CRT string length services for UCRT and its string API set.
 
 - Added unnamed guest events with manual and automatic reset, signaling, immediate waits, and same-process handle duplication.

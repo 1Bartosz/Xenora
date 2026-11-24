@@ -148,6 +148,11 @@ a null byte or the requested bound for `strnlen`. A scan that would continue
 past 1 MiB reports an unsupported-service fault. See the
 [Microsoft CRT string-length contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/strnlen-strnlen-s).
 
+The same modules expose `memset`, `memcpy`, `memmove`, and `memcmp` for spans
+up to 1 MiB. Each nonempty span must fit in one mapped guest region with the
+required permissions. Writes validate the full destination before changing
+bytes, and moves preserve the original source bytes when ranges overlap.
+
 ### Event signaling
 
 The synthetic runtime supports unnamed manual-reset and auto-reset events

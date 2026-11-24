@@ -37,7 +37,7 @@ fn test_builtin_db_case_insensitive() {
 fn test_manifest_and_codegen_pipeline() {
     let csv_content = r#""module","symbol_or_ordinal","iat_rva"
 "api-ms-win-crt-math-l1-1-0.dll","acos",0x1000
-"api-ms-win-crt-string-l1-1-0.dll","memset",0x1008
+"api-ms-win-crt-string-l1-1-0.dll","strcmp",0x1008
 "api-ms-win-core-processthreads-l1-1-0.dll","CreateThread",0x1010
 "custom.dll","UnknownCustomFunc",0x1018
 "kernel32.dll","QueryPerformanceCounter",0x1020
@@ -68,7 +68,7 @@ fn test_manifest_and_codegen_pipeline() {
 
     let files = generate(&manifest, &db);
     assert!(files.crt_rs.contains("register_generated_crt_services"));
-    assert!(files.crt_rs.contains("memset"));
+    assert!(files.crt_rs.contains("strcmp"));
     let acos = files.crt_rs.split_once("\"acos\"").unwrap().1;
     let (acos, _) = acos.split_once("registry.register_with_status").unwrap();
     assert!(acos.contains("ServiceStatus::Stub"));
@@ -79,7 +79,7 @@ fn test_manifest_and_codegen_pipeline() {
     assert!(!files.stubs_rs.contains("GetThreadId"));
     assert!(!files.stubs_rs.contains("DuplicateHandle"));
     assert!(!files.stubs_rs.contains("GetTickCount64"));
-    assert!(files.tests_rs.contains("generated_test_memset"));
+    assert!(files.tests_rs.contains("generated_test_strcmp"));
 
     let out_dir = tmp_dir.join("out");
     files.write_all(out_dir.to_str().unwrap()).unwrap();
