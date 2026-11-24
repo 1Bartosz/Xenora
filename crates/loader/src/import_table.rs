@@ -3,6 +3,10 @@
 //! Bounded parser for the PE32+ import directory (Microsoft PE format,
 //! "The .idata Section"). Binding and static inspection both use it, so they
 //! agree on which imports an image has and how they are named.
+//!
+//! Static inspection also reads the delay-load directory ("Delay-Load Import
+//! Tables (Image Only)"). Binding does not: the PE format leaves those imports
+//! to a delay-load helper that runs inside the image on first use.
 
 use std::fmt;
 
@@ -14,6 +18,9 @@ pub const MAX_IMPORTS: usize = 65_536;
 pub const MAX_NAME_LEN: usize = 4096;
 
 const DESCRIPTOR_LEN: u32 = 20;
+const DELAY_DESCRIPTOR_LEN: u32 = 32;
+/// Delay-load attribute bit 0: the descriptor's address fields are RVAs.
+const DELAY_RVA_BASED: u32 = 1;
 const ORDINAL_FLAG: u64 = 1 << 63;
 
 /// How an import names its target. A symbol that happens to be spelled like an
@@ -56,6 +63,19 @@ pub enum ImportTableError {
     ReservedBits {
         rva: u32,
     },
+    /// The delay-load descriptor at this RVA sets reserved attribute bits.
+    DelayReservedBits {
+        rva: u32,
+    },
+    /// The delay-load descriptor at this RVA has `RvaBased` clear, the earlier
+    /// form whose address fields are virtual addresses. It is not read.
+    DelayVirtualAddresses {
+        rva: u32,
+    },
+    /// The delay-load descriptor at this RVA has no import name table.
+    DelayNamesMissing {
+        rva: u32,
+    },
     TooManyDescriptors,
     TooManyImports,
 }
@@ -63,7 +83,10 @@ pub enum ImportTableError {
 impl fmt::Display for ImportTableError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::OutOfBounds { rva } => write!(f, "import data at RVA 0x{rva:08x} is truncated"),
+            Self::OutOfBounds { rva } => write!(
+                f,
+                "import data at RVA 0x{rva:08x} is truncated or outside the section data"
+            ),
             Self::MalformedName { rva } => write!(f, "malformed import name at RVA 0x{rva:08x}"),
             Self::ReservedBits { rva } => {
                 write!(
@@ -71,6 +94,18 @@ impl fmt::Display for ImportTableError {
                     "reserved bits set in the import lookup at RVA 0x{rva:08x}"
                 )
             }
+            Self::DelayReservedBits { rva } => write!(
+                f,
+                "reserved attribute bits set in the delay-load descriptor at RVA 0x{rva:08x}"
+            ),
+            Self::DelayVirtualAddresses { rva } => write!(
+                f,
+                "delay-load descriptor at RVA 0x{rva:08x} holds virtual addresses, not RVAs, and is not read"
+            ),
+            Self::DelayNamesMissing { rva } => write!(
+                f,
+                "delay-load descriptor at RVA 0x{rva:08x} has no import name table"
+            ),
             Self::TooManyDescriptors => write!(f, "more than {MAX_DESCRIPTORS} import descriptors"),
             Self::TooManyImports => write!(f, "more than {MAX_IMPORTS} imported symbols"),
         }
@@ -159,9 +194,63 @@ fn collect<F: Fn(u32) -> Option<usize>>(
             return Ok(());
         }
         let module = reader.name(name_rva)?;
-        collect_symbols(reader, &module, lookup_rva, address_rva, entries)?;
+        collect_symbols(reader, &module, lookup_rva, address_rva, false, entries)?;
         descriptor = descriptor
             .checked_add(DESCRIPTOR_LEN)
+            .ok_or(ImportTableError::OutOfBounds { rva: descriptor })?;
+    }
+    Err(ImportTableError::TooManyDescriptors)
+}
+
+/// Parse the delay-load directory at `directory_rva`.
+///
+/// Each entry's `iat_rva` is its slot in the delay import address table.
+/// Returns every import before the first problem, and the problem.
+pub fn parse_delay_imports(
+    bytes: &[u8],
+    directory_rva: u32,
+    rva_to_offset: impl Fn(u32) -> Option<usize>,
+) -> (Vec<ImportEntry>, Option<ImportTableError>) {
+    let reader = Reader {
+        bytes,
+        rva_to_offset,
+    };
+    let mut entries = Vec::new();
+    let error = collect_delayed(&reader, directory_rva, &mut entries).err();
+    (entries, error)
+}
+
+fn collect_delayed<F: Fn(u32) -> Option<usize>>(
+    reader: &Reader<'_, F>,
+    directory_rva: u32,
+    entries: &mut Vec<ImportEntry>,
+) -> Result<(), ImportTableError> {
+    let mut descriptor = directory_rva;
+    for _ in 0..MAX_DESCRIPTORS {
+        // Reading the whole descriptor also proves its field RVAs do not overflow.
+        let fields = reader.array::<{ DELAY_DESCRIPTOR_LEN as usize }>(descriptor)?;
+        // The table ends with an empty descriptor.
+        if fields == [0; DELAY_DESCRIPTOR_LEN as usize] {
+            return Ok(());
+        }
+        let attributes = reader.u32(descriptor)?;
+        if attributes & !DELAY_RVA_BASED != 0 {
+            return Err(ImportTableError::DelayReservedBits { rva: descriptor });
+        }
+        if attributes & DELAY_RVA_BASED == 0 {
+            return Err(ImportTableError::DelayVirtualAddresses { rva: descriptor });
+        }
+        let name_rva = reader.u32(descriptor + 4)?;
+        let address_rva = reader.u32(descriptor + 12)?;
+        let names_rva = reader.u32(descriptor + 16)?;
+        // The address table holds thunk addresses, so it cannot stand in for names.
+        if names_rva == 0 {
+            return Err(ImportTableError::DelayNamesMissing { rva: descriptor });
+        }
+        let module = reader.name(name_rva)?;
+        collect_symbols(reader, &module, names_rva, address_rva, true, entries)?;
+        descriptor = descriptor
+            .checked_add(DELAY_DESCRIPTOR_LEN)
             .ok_or(ImportTableError::OutOfBounds { rva: descriptor })?;
     }
     Err(ImportTableError::TooManyDescriptors)
@@ -172,6 +261,7 @@ fn collect_symbols<F: Fn(u32) -> Option<usize>>(
     module: &str,
     lookup_rva: u32,
     address_rva: u32,
+    slots_on_disk: bool,
     entries: &mut Vec<ImportEntry>,
 ) -> Result<(), ImportTableError> {
     // Without a lookup table the address table holds the same entries on disk.
@@ -194,6 +284,10 @@ fn collect_symbols<F: Fn(u32) -> Option<usize>>(
             return Err(ImportTableError::TooManyImports);
         }
         let iat_rva = at(address_rva)?;
+        if slots_on_disk {
+            // A delay-load slot starts out holding its thunk's address.
+            reader.array::<8>(iat_rva)?;
+        }
         let name = if value & ORDINAL_FLAG != 0 {
             let ordinal = value & !ORDINAL_FLAG;
             ImportName::Ordinal(

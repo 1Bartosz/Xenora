@@ -69,16 +69,31 @@ storage, invokes its callbacks and runs the entry point. The fixture entry point
 uses a Win64-aligned stack and terminates with HLT. The result includes the loaded
 guest memory and the entry execution outcome.
 
-`xenora probe --mode static` inventories ordinary PE imports without guest
-execution. `missing_imports.csv` lists unresolved keys with their import address
-table relative virtual addresses. The full inventory records whether each key is registered, its implementation
-status, and the canonical module behind API-set aliases. Runtime-loaded modules
-and services require separate analysis. The coverage matrix groups unresolved
-imports by shared startup prerequisites. Static imports do not reveal call
-order. The JSON report counts import slots, DLL and symbol keys, distinct
-names with DLL-scoped ordinals, and canonical registered handlers separately.
-The unresolved total includes explicitly tracked unsupported APIs and other
-missing handlers. Existing stubs remain visible in the full inventory.
+`xenora probe --mode static` inventories ordinary and delay-loaded PE imports
+without guest execution. `missing_imports.csv` lists unresolved ordinary keys
+with their import address table relative virtual addresses. The full inventory,
+`imports.csv`, marks each entry `ordinary` or `delayed` in its `import_table`
+column and records whether each key is registered, its implementation
+status, and the canonical module behind API-set aliases. Modules and services
+loaded by other means at run time require separate analysis. The coverage matrix
+groups unresolved ordinary imports by shared startup prerequisites. Static
+imports do not reveal call order. The JSON report counts import slots, DLL and
+symbol keys, distinct names with DLL-scoped ordinals, and canonical registered
+handlers separately. The unresolved total includes explicitly tracked
+unsupported APIs and other missing handlers. Existing stubs remain visible in
+the full inventory.
+
+Delay-loaded imports come from the PE32+ delay-load directory, data directory
+13 in Microsoft's PE format. The probe reports each one with its DLL, symbol or
+ordinal, and slot in the delay import address table, after the ordinary rows.
+Binding does not resolve them: the PE format leaves that to a delay-load helper
+inside the image. The totals above and `missing_imports.csv` therefore cover
+ordinary imports only, and the JSON report counts delayed slots and DLLs in
+`delayed_imports` and `delayed_imported_dlls_count`. The probe reads descriptors
+whose `RvaBased` attribute is set. A truncated or out-of-range table, a reserved
+attribute bit, a missing name table or the earlier virtual-address descriptor
+form is reported in `delay_import_error` and in the Markdown report, together
+with the entries read before it.
 
 The synthetic process registry supports the current-process pseudo handle and
 its process ID. The priority boost setter and getter record and query a guest
