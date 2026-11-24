@@ -6,7 +6,9 @@ deterministic: the rules live in `scripts/agent_queue/` (standard-library Python
 model or external service), and GitHub Actions and the shell helpers only call it.
 
 Status: implemented and unit-tested locally. **Not yet run on GitHub**: the workflows are untested
-against the real API until the first live run.
+against the real API until the first live run. Until a live smoke test has passed and existing issues
+have been migrated into the queue, the pull request check is **advisory**: it reports problems but
+never blocks a merge, and it must not be made a required check.
 
 ## Areas
 
@@ -47,6 +49,10 @@ done
    prints "claimed".** Refusals name the reason: not `agent:ready`, area not allowed for you, open
    or missing dependency, dependency cycle, or file overlap with a claimed task (the issue is named).
    Claims are decided one at a time across the whole repository, so two overlapping claims cannot both win.
+   GitHub keeps at most one waiting run in a concurrency group and cancels it when a newer one
+   queues, so each run decides every command of the last `lease_hours` that has no bot reply yet,
+   oldest first. A command whose own run was cancelled is answered by the run that replaced it, or at
+   the latest by the hourly audit. Each reply carries a marker naming the comment it answers.
 4. `scripts/agent-queue.sh start <n>` creates branch `task/<n>-<slug>` from `upstream/main` in a
    separate worktree `../xenora-task-<n>` (`--here` uses the current clean checkout instead).
 5. Keep the lease alive with `scripts/agent-queue.sh progress <n> "what changed"`. A claim lapses
@@ -58,6 +64,9 @@ done
    head and invalidates the verification.
 
 ## Commands (issue comments)
+
+A command must start the comment. Comments that do not start with `/` (on an issue) or with
+`/verified` (on a pull request) start no workflow run.
 
 | Command | Who | Effect |
 | --- | --- | --- |
@@ -80,7 +89,12 @@ machine-readable summary (counts and lists per area, priority and state).
 `agent-pr-checks` fails a pull request when: it has no `Closes #N` for a claimed task; the task is held
 by someone else; it changes files outside the task's patterns; it changes a file that another open
 pull request also changes; the claim has lapsed without a push; or no eligible `/verified <current
-head sha>` exists. After a `/verified` comment the check is re-run automatically.
+head sha>` exists. After a `/verified` comment the check is re-run automatically; other pull request
+comments do not re-run it.
+
+The check is advisory for now: a failure is shown as a warning and in the run summary, and the job
+still succeeds. It becomes blocking (fail on problems, then a required check) only after a live smoke
+test on GitHub and the migration of existing issues into the queue.
 
 ## Forks and upstream sync
 
@@ -104,7 +118,7 @@ sync report that shows upstream touching your files is the signal to re-read the
 - Acceptance commands are never run automatically. `scripts/agent-queue.sh acceptance <n>` prints
   one only when a maintainer's `/approve-acceptance` marker (posted by the bot) matches a hash of
   the current text; editing the issue body invalidates the approval. Read the command before running it.
-- Markers (grant, approval) count only when posted by the Actions bot, so they cannot be forged in a comment.
+- Markers (grant, approval, answered command) count only when posted by the Actions bot, so they cannot be forged in a comment.
 - Workflows declare empty top-level permissions and grant each job only what it needs; actions are
   pinned by commit SHA. Pull request checks run on the base branch (`pull_request_target`), never
   check out or run pull request code and read changed files through the API.
@@ -118,4 +132,6 @@ sh -n scripts/agent-queue.sh scripts/agent-sync.sh
 ```
 
 The tests cover command decisions, overlap, cycles, leases, acceptance hashing, pull request checks,
-the summary, the CLI and a structural check of the workflow files. They do not exercise GitHub itself.
+the summary, the CLI, claim concurrency (a model of a concurrency group in which newer runs cancel
+pending ones, and in-order replay of unanswered commands) and a structural check of the workflow
+files, including which comments start a run. They do not exercise GitHub itself.

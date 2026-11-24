@@ -35,6 +35,14 @@ class PRChecks(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         self.assertEqual(r["verified_by"], ["qaer"])
 
+    def test_verification_needs_no_bot_reply(self):
+        # A /verified whose verify run was cancelled while pending has no bot reply; the check reads
+        # the comments themselves, so the surviving run's re-run still counts it.
+        r = run(pr(), [vc("qaer"), vc("maint"), {"user": BOT, "body": "Verification of %s recorded for maint." % SHA[:12],
+                                                  "created_at": "2026-01-10T11:31:00Z"}])
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["verified_by"], ["qaer", "maint"])
+
     def test_missing_link(self):
         r = run(pr(body="no link"), [vc("qaer")])
         self.assertFalse(r["ok"])

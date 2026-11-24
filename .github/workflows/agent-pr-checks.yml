@@ -4,6 +4,11 @@ name: Agent PR checks
 # ownership, overlap with other open pull requests, and independent
 # verification. Runs on the base branch only: pull request code is never checked
 # out or executed; changed files come from the API. Not yet run on GitHub.
+#
+# Advisory: problems are reported as a warning and in the run summary, but the
+# check does not fail until a live smoke test and the migration of existing
+# issues are done (docs/coordination/agent-tasks.md). Only a comment starting
+# with /verified starts the verify job; ordinary comments start nothing.
 
 on:
   pull_request_target:
@@ -43,10 +48,15 @@ jobs:
             cat "$RUNNER_TEMP/result.json"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          # 1 means problems were found: advisory for now. Anything else is a failure of the check itself.
+          if [ "$status" -eq 1 ]; then
+            echo "::warning title=Agent PR check (advisory)::problems found; see the run summary"
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
 
   verify:
-    if: github.event_name == 'issue_comment' && github.event.issue.pull_request
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/verified')
     runs-on: ubuntu-24.04-arm
     # issues: write posts the reply; actions: write re-runs the check after a recorded verification.
     permissions:

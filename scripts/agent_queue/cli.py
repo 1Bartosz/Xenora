@@ -3,12 +3,12 @@
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import config as cfgmod
 from . import ghio
 from . import lease as L
-from . import prcheck, queue
+from . import prcheck, queue, replay
 from . import tasks as T
 from . import decide as decide_mod
 from .decide import decide
@@ -35,6 +35,8 @@ def main(argv):
     p.add_argument("--now", default="", help="UTC time YYYY-MM-DDTHH:MM:SSZ (tests)")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("gather"); s.add_argument("--repo", required=True); s.add_argument("--no-prs", action="store_true"); s.add_argument("--pr", type=int, default=0)
+    s.add_argument("--recent-commands", action="store_true", help="include comments from the last lease_hours for replay")
+    s = sub.add_parser("replay"); s.add_argument("--state", required=True)
     s = sub.add_parser("decide"); s.add_argument("--event", required=True); s.add_argument("--state", required=True)
     s = sub.add_parser("apply"); s.add_argument("--repo", required=True); s.add_argument("--actions", required=True)
     s = sub.add_parser("audit"); s.add_argument("--state", required=True)
@@ -65,13 +67,18 @@ def main(argv):
         v = cfg[a.key]
         print(v if isinstance(v, (str, int, float)) else json.dumps(v))
     elif a.cmd == "gather":
-        st = ghio.gather(a.repo, with_prs=not a.no_prs)
+        since = ""
+        if a.recent_commands:
+            since = (_now(a.now) - timedelta(hours=cfg["lease_hours"])).strftime("%Y-%m-%dT%H:%M:%SZ")
+        st = ghio.gather(a.repo, with_prs=not a.no_prs, recent_since=since)
         if a.pr:
             st["pr"] = ghio.pr_data(a.repo, a.pr)
             st["pr_comments"] = ghio.comments(a.repo, a.pr)
         _out(st)
     elif a.cmd == "decide":
         _out(decide(_load(a.event), _load(a.state), cfg))
+    elif a.cmd == "replay":
+        _out(replay.replay(_load(a.state), cfg, _now(a.now)))
     elif a.cmd == "apply":
         ghio.apply_actions(a.repo, _load(a.actions))
     elif a.cmd == "audit":

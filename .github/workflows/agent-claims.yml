@@ -4,6 +4,13 @@ name: Agent task claims
 # /unblock, /approve-acceptance) and audits the queue hourly. Comment and issue
 # text is only parsed as data by scripts/agent_queue; it is never executed and
 # never interpolated into a shell. Not yet run on GitHub.
+#
+# Both jobs share one concurrency group, so decisions never race. GitHub keeps
+# at most one pending run per group and cancels the older pending run when a
+# newer one queues, so a run does not decide only its own comment: `replay`
+# decides every command of the last lease_hours that has no bot reply yet,
+# oldest first. The surviving run, or at the latest the hourly audit, answers
+# the commands of cancelled runs. Comments that do not start with `/` start no run.
 
 on:
   issue_comment:
@@ -16,7 +23,7 @@ permissions: {}
 
 jobs:
   command:
-    if: github.event_name == 'issue_comment' && !github.event.issue.pull_request
+    if: github.event_name == 'issue_comment' && !github.event.issue.pull_request && startsWith(github.event.comment.body, '/')
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -36,9 +43,8 @@ jobs:
           PYTHONPATH: scripts
         run: |
           set -eu
-          python3 -m agent_queue event --path "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/event.json"
-          python3 -m agent_queue gather --repo "$GH_REPO" --no-prs > "$RUNNER_TEMP/state.json"
-          python3 -m agent_queue decide --event "$RUNNER_TEMP/event.json" --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
+          python3 -m agent_queue gather --repo "$GH_REPO" --no-prs --recent-commands > "$RUNNER_TEMP/state.json"
+          python3 -m agent_queue replay --state "$RUNNER_TEMP/state.json" > "$RUNNER_TEMP/actions.json"
           python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/actions.json"
 
   audit:
@@ -54,6 +60,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Decide commands whose runs were cancelled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PYTHONPATH: scripts
+        run: |
+          set -eu
+          python3 -m agent_queue gather --repo "$GH_REPO" --no-prs --recent-commands > "$RUNNER_TEMP/commands.json"
+          python3 -m agent_queue replay --state "$RUNNER_TEMP/commands.json" > "$RUNNER_TEMP/replay.json"
+          python3 -m agent_queue apply --repo "$GH_REPO" --actions "$RUNNER_TEMP/replay.json"
       - name: Lapse stale claims, flag invalid tasks, write summary
         env:
           GH_TOKEN: ${{ github.token }}
