@@ -27,7 +27,22 @@ enum {
     XENORA_LIMIT_EXCEEDED = 6,
     XENORA_BUFFER_TOO_SMALL = 7,
     XENORA_EXECUTION_FAILED = 8,
+    XENORA_INVALID_STATE = 9,
 };
+
+/* Frame-loop states reported by xenora_session_frame_loop_status. */
+enum {
+    XENORA_LOOP_NONE = 0,
+    XENORA_LOOP_RUNNING = 1,
+    XENORA_LOOP_PAUSED = 2,
+    XENORA_LOOP_FINISHED = 3,
+    XENORA_LOOP_STOPPED = 4,
+    XENORA_LOOP_FAILED = 5,
+};
+
+#define XENORA_FRAME_LOOP_MAX_FRAMES 100000u
+/* Frame id reported when no frame has been completed yet. */
+#define XENORA_NO_FRAME 0xFFFFFFFFu
 
 /* Size of the frame drawn by the trusted fixture: RGBA8, rows top to bottom. */
 #define XENORA_FIXTURE_FRAME_WIDTH 4u
@@ -64,6 +79,34 @@ xenora_status xenora_session_run_trusted_fixture(
     uint64_t capacity,
     uint32_t *out_width,
     uint32_t *out_height);
+
+/*
+ * Persistent rendering (one frame loop per session). Start runs the embedded
+ * frame-loop fixture on a session-owned guest thread: the guest submits frames
+ * 0, 1, 2, ... and each is rendered on native Metal and verified before it
+ * becomes the latest frame. The guest stops after `frame_count` frames
+ * (1..=XENORA_FRAME_LOOP_MAX_FRAMES). Pause holds the guest at its next frame
+ * submission; resume continues it; stop makes it leave its loop and halt, and
+ * waits for its thread. Destroying the session stops the loop first. Starting a
+ * second loop on the same session returns XENORA_INVALID_STATE.
+ */
+xenora_status xenora_session_start_frame_loop(xenora_session session, uint32_t frame_count);
+xenora_status xenora_session_pause_frame_loop(xenora_session session);
+xenora_status xenora_session_resume_frame_loop(xenora_session session);
+xenora_status xenora_session_stop_frame_loop(xenora_session session);
+
+/*
+ * Report the loop's state, the number of completed frames, and the latest
+ * verified frame: its id (XENORA_NO_FRAME if none yet) and, when one exists,
+ * its RGBA8 pixels (XENORA_FIXTURE_FRAME_WIDTH x HEIGHT) in `out_rgba`.
+ */
+xenora_status xenora_session_frame_loop_status(
+    xenora_session session,
+    uint32_t *out_state,
+    uint32_t *out_completed,
+    uint32_t *out_frame_id,
+    uint8_t *out_rgba,
+    uint64_t capacity);
 
 /* Largest file xenora_inspect_executable accepts, in bytes. */
 #define XENORA_MAX_INSPECT_BYTES 268435456u
