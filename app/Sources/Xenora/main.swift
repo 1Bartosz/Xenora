@@ -6,6 +6,7 @@
 
 import AppKit
 import AVFoundation
+import CoreAudio
 import CXenora
 import Foundation
 import SwiftUI
@@ -174,10 +175,37 @@ struct AudioVfsFrame {
 
 private enum FixturePlaybackError: Error {
     case invalidPCM
+    case noDefaultOutput(OSStatus)
     case timedOut
 }
 
-private func playFixturePCM(_ pcm: [UInt8]) throws -> Int {
+private struct FixturePlayback {
+    let frames: Int
+    let outputDevice: AudioDeviceID
+    let outputSampleRate: Double
+    let outputChannels: AVAudioChannelCount
+    let presentationLatency: TimeInterval
+    let completionElapsed: TimeInterval
+}
+
+private func defaultAudioOutput() throws -> AudioDeviceID {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var device = AudioDeviceID(kAudioObjectUnknown)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    let status = AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device
+    )
+    guard status == noErr, device != kAudioObjectUnknown else {
+        throw FixturePlaybackError.noDefaultOutput(status)
+    }
+    return device
+}
+
+private func playFixturePCM(_ pcm: [UInt8]) throws -> FixturePlayback {
     // The embedded audio/VFS fixture submits mono 48 kHz S16LE frames.
     guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
           let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1),
@@ -191,6 +219,7 @@ private func playFixturePCM(_ pcm: [UInt8]) throws -> Int {
         let high = UInt16(pcm[frame * 2 + 1]) << 8
         samples[frame] = Float(Int16(bitPattern: low | high)) / 32_768
     }
+    let outputDevice = try defaultAudioOutput()
     let engine = AVAudioEngine()
     let player = AVAudioPlayerNode()
     let played = DispatchSemaphore(value: 0)
@@ -202,14 +231,22 @@ private func playFixturePCM(_ pcm: [UInt8]) throws -> Int {
         engine.detach(player)
     }
     try engine.start()
+    let output = engine.outputNode.outputFormat(forBus: 0)
+    let presentationLatency = engine.outputNode.presentationLatency
     player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
         played.signal()
     }
+    let start = DispatchTime.now()
     player.play()
     guard played.wait(timeout: .now() + .seconds(3)) == .success else {
         throw FixturePlaybackError.timedOut
     }
-    return Int(buffer.frameLength)
+    let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+    return FixturePlayback(
+        frames: Int(buffer.frameLength), outputDevice: outputDevice,
+        outputSampleRate: output.sampleRate, outputChannels: output.channelCount,
+        presentationLatency: presentationLatency, completionElapsed: elapsed
+    )
 }
 
 /// Owns the latest fixture run. A class with @Published avoids SwiftUI macros,
@@ -649,8 +686,8 @@ if CommandLine.arguments.contains("--smoke-native-audio") {
     }
     do {
         let played = try playFixturePCM(frame.pcm)
-        print("smoke-native-audio: playedBackFrames=\(played)")
-        exit(played == Int(frame.samples) ? 0 : 1)
+        print("smoke-native-audio: playedBackFrames=\(played.frames) defaultDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
+        exit(played.frames == Int(frame.samples) && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
     } catch {
         print("smoke-native-audio: \(error)")
         exit(1)
