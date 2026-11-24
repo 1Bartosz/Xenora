@@ -12,9 +12,11 @@ use crate::CompareRelation;
 /// Registry schema of the generated tables.
 pub const GENERATED_SCHEMA: u32 = 1;
 
-/// SOP1 operations declared in the semantic registry (operand rule `sop1_sgpr`).
+/// SOP1 operations declared in the semantic registry (operand rules `sop1_move`, `sop1_sgpr`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScalarUnaryOp {
+    /// `s_mov_b32` (SOP1 opcode 3): bitwise mov, SCC = unchanged.
+    MovB32,
     /// `s_not_b32` (SOP1 opcode 7): bitwise not, SCC = nonzero.
     NotB32,
     /// `s_brev_b32` (SOP1 opcode 11): bitwise brev, SCC = unchanged.
@@ -44,7 +46,7 @@ const SCALAR_UNARY_OP_BY_OPCODE: [Option<ScalarUnaryOp>; 256] = [
     None,
     None,
     None,
-    None,
+    Some(ScalarUnaryOp::MovB32),
     None,
     None,
     None,
@@ -301,7 +303,8 @@ const SCALAR_UNARY_OP_BY_OPCODE: [Option<ScalarUnaryOp>; 256] = [
 
 impl ScalarUnaryOp {
     /// Every operation, in registry order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
+        Self::MovB32,
         Self::NotB32,
         Self::BrevB32,
         Self::Bcnt0I32B32,
@@ -327,6 +330,7 @@ impl ScalarUnaryOp {
     /// Lower-case mnemonic.
     pub const fn mnemonic(self) -> &'static str {
         match self {
+            Self::MovB32 => "s_mov_b32",
             Self::NotB32 => "s_not_b32",
             Self::BrevB32 => "s_brev_b32",
             Self::Bcnt0I32B32 => "s_bcnt0_i32_b32",
@@ -344,23 +348,25 @@ impl ScalarUnaryOp {
     /// The validated registry row.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
-            Self::NotB32 => 61,
-            Self::BrevB32 => 62,
-            Self::Bcnt0I32B32 => 63,
-            Self::Bcnt1I32B32 => 64,
-            Self::Ff0I32B32 => 65,
-            Self::Ff1I32B32 => 66,
-            Self::FlbitI32B32 => 67,
-            Self::FlbitI32 => 68,
-            Self::SextI32I8 => 69,
-            Self::SextI32I16 => 70,
-            Self::AbsI32 => 71,
+            Self::MovB32 => 61,
+            Self::NotB32 => 62,
+            Self::BrevB32 => 63,
+            Self::Bcnt0I32B32 => 64,
+            Self::Bcnt1I32B32 => 65,
+            Self::Ff0I32B32 => 66,
+            Self::Ff1I32B32 => 67,
+            Self::FlbitI32B32 => 68,
+            Self::FlbitI32 => 69,
+            Self::SextI32I8 => 70,
+            Self::SextI32I16 => 71,
+            Self::AbsI32 => 72,
         }]
     }
 
     /// Whether the operation writes SCC.
     pub const fn writes_scc(self) -> bool {
         match self {
+            Self::MovB32 => false,
             Self::NotB32 => true,
             Self::BrevB32 => false,
             Self::Bcnt0I32B32 => true,
@@ -379,6 +385,7 @@ impl ScalarUnaryOp {
     /// unchanged).
     pub const fn evaluate(self, src: u32) -> (u32, Option<bool>) {
         match self {
+            Self::MovB32 => (primitive::mov_b32(src), None),
             Self::NotB32 => {
                 let (value, scc) = primitive::not_nonzero_b32(src);
                 (value, Some(scc))
@@ -1788,7 +1795,7 @@ impl VectorSwapOp {
     /// The validated registry row.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
-            Self::SwapB32 => 77,
+            Self::SwapB32 => 78,
         }]
     }
 
@@ -2108,11 +2115,11 @@ impl VectorUnaryOp {
     /// The validated registry row.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
-            Self::NotB32 => 72,
-            Self::BfrevB32 => 73,
-            Self::FfbhU32 => 74,
-            Self::FfblB32 => 75,
-            Self::FfbhI32 => 76,
+            Self::NotB32 => 73,
+            Self::BfrevB32 => 74,
+            Self::FfbhU32 => 75,
+            Self::FfblB32 => 76,
+            Self::FfbhI32 => 77,
         }]
     }
 
@@ -2307,24 +2314,24 @@ impl VectorAluOp {
     /// The validated registry row.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
-            Self::MulI32I24 => 78,
-            Self::MulHiI32I24 => 79,
-            Self::MulU32U24 => 80,
-            Self::MulHiU32U24 => 81,
-            Self::MinI32 => 82,
-            Self::MaxI32 => 83,
-            Self::MinU32 => 84,
-            Self::MaxU32 => 85,
-            Self::XnorB32 => 86,
-            Self::AddNcU32 => 87,
-            Self::SubNcU32 => 88,
-            Self::SubrevNcU32 => 89,
-            Self::LshrrevB32 => 90,
-            Self::AshrrevI32 => 91,
-            Self::LshlrevB32 => 92,
-            Self::AndB32 => 93,
-            Self::OrB32 => 94,
-            Self::XorB32 => 95,
+            Self::MulI32I24 => 79,
+            Self::MulHiI32I24 => 80,
+            Self::MulU32U24 => 81,
+            Self::MulHiU32U24 => 82,
+            Self::MinI32 => 83,
+            Self::MaxI32 => 84,
+            Self::MinU32 => 85,
+            Self::MaxU32 => 86,
+            Self::XnorB32 => 87,
+            Self::AddNcU32 => 88,
+            Self::SubNcU32 => 89,
+            Self::SubrevNcU32 => 90,
+            Self::LshrrevB32 => 91,
+            Self::AshrrevI32 => 92,
+            Self::LshlrevB32 => 93,
+            Self::AndB32 => 94,
+            Self::OrB32 => 95,
+            Self::XorB32 => 96,
         }]
     }
 
@@ -2777,22 +2784,22 @@ impl VectorCompareOp {
     /// The validated registry row.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
-            Self::CmpLtI32 => 96,
-            Self::CmpEqI32 => 97,
-            Self::CmpLeI32 => 98,
-            Self::CmpGtI32 => 99,
-            Self::CmpNeI32 => 100,
-            Self::CmpGeI32 => 101,
-            Self::CmpLtU32 => 102,
-            Self::CmpEqU32 => 103,
-            Self::CmpLeU32 => 104,
-            Self::CmpGtU32 => 105,
-            Self::CmpNeU32 => 106,
-            Self::CmpGeU32 => 107,
-            Self::CmpFI32 => 108,
-            Self::CmpTI32 => 109,
-            Self::CmpFU32 => 110,
-            Self::CmpTU32 => 111,
+            Self::CmpLtI32 => 97,
+            Self::CmpEqI32 => 98,
+            Self::CmpLeI32 => 99,
+            Self::CmpGtI32 => 100,
+            Self::CmpNeI32 => 101,
+            Self::CmpGeI32 => 102,
+            Self::CmpLtU32 => 103,
+            Self::CmpEqU32 => 104,
+            Self::CmpLeU32 => 105,
+            Self::CmpGtU32 => 106,
+            Self::CmpNeU32 => 107,
+            Self::CmpGeU32 => 108,
+            Self::CmpFI32 => 109,
+            Self::CmpTI32 => 110,
+            Self::CmpFU32 => 111,
+            Self::CmpTU32 => 112,
         }]
     }
 
@@ -2928,13 +2935,13 @@ impl VectorAluVop3Op {
     /// The validated registry row of this encoding.
     pub fn semantics(self) -> &'static FormSemantics {
         &FORMS[match self {
-            Self::AddNcU32 => 112,
+            Self::AddNcU32 => 113,
         }]
     }
 }
 
 /// Identity of every registry form and encoding variant, in registry order.
-pub const FORM_IDS: [(&str, EncodingFamily); 113] = [
+pub const FORM_IDS: [(&str, EncodingFamily); 114] = [
     ("S_ADD_U32", EncodingFamily::Sop2),
     ("S_SUB_U32", EncodingFamily::Sop2),
     ("S_ADD_I32", EncodingFamily::Sop2),
@@ -2996,6 +3003,7 @@ pub const FORM_IDS: [(&str, EncodingFamily); 113] = [
     ("S_CMPK_LE_U32", EncodingFamily::Sopk),
     ("S_ADDK_I32", EncodingFamily::Sopk),
     ("S_MULK_I32", EncodingFamily::Sopk),
+    ("S_MOV_B32", EncodingFamily::Sop1),
     ("S_NOT_B32", EncodingFamily::Sop1),
     ("S_BREV_B32", EncodingFamily::Sop1),
     ("S_BCNT0_I32_B32", EncodingFamily::Sop1),
@@ -3051,7 +3059,7 @@ pub const FORM_IDS: [(&str, EncodingFamily); 113] = [
 ];
 
 /// One validated row per registry form, in registry order.
-pub static FORMS: [FormSemantics; 113] = [
+pub static FORMS: [FormSemantics; 114] = [
     FormSemantics {
         name: "S_ADD_U32",
         family: EncodingFamily::Sop2,
@@ -4331,6 +4339,27 @@ pub static FORMS: [FormSemantics; 113] = [
         wave: Wave::Any,
         operands: OperandRule::SopkSgpr,
         spec: &[SpecRef { document: Document::Guide, section: "12.2", page: 106 }, SpecRef { document: Document::Guide, section: "13.1.2", page: 240 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "S_MOV_B32",
+        family: EncodingFamily::Sop1,
+        opcode: 3,
+        operation: Operation::Move,
+        signedness: Signedness::Bitwise,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        swap_sources: false,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Any,
+        operands: OperandRule::Sop1Move,
+        spec: &[SpecRef { document: Document::Guide, section: "12.3", page: 0 }, SpecRef { document: Document::Guide, section: "5.3", page: 33 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
     FormSemantics {
