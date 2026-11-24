@@ -1,18 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Winsock lifecycle for the synthetic guest. Descriptors are guest-owned.
+//! Process-local Winsock UDP loopback for the synthetic guest.
 
 use super::ServicesState;
+use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
-use std::collections::BTreeSet;
+use crate::memory::GuestMemory;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 const MODULE: &str = "ws2_32.dll";
 const VERSION: u16 = 0x0202;
 const WSADATA_SIZE: usize = 408;
+const MAX_DATAGRAM: usize = 65_507;
+const MAX_PENDING_DATAGRAMS: usize = 16;
 const MAX_SOCKETS: usize = 64;
 const SOCKET_ERROR: u64 = u32::MAX as u64;
 const INVALID_SOCKET: u64 = u64::MAX;
+const WSAEACCES: u32 = 10013;
+const WSAEINVAL: u32 = 10022;
+const WSAEWOULDBLOCK: u32 = 10035;
+const WSAEMSGSIZE: u32 = 10040;
+const WSAEADDRINUSE: u32 = 10048;
+const WSAENOBUFS: u32 = 10055;
+const WSAENOTCONN: u32 = 10057;
 const WSAEFAULT: u32 = 10014;
 const WSAEMFILE: u32 = 10024;
 const WSAENOTSOCK: u32 = 10038;
@@ -27,7 +38,64 @@ const WSANOTINITIALISED: u32 = 10093;
 pub(super) struct Winsock {
     refs: u32,
     serial: u32,
-    sockets: BTreeSet<u64>,
+    sockets: BTreeMap<u64, Socket>,
+}
+
+#[derive(Default)]
+struct Socket {
+    port: Option<u16>,
+    peer: Option<u16>,
+    pending: VecDeque<(u16, Vec<u8>)>,
+}
+
+impl Winsock {
+    fn socket(&self, handle: u64) -> Result<&Socket, u32> {
+        if self.refs == 0 {
+            return Err(WSANOTINITIALISED);
+        }
+        self.sockets.get(&handle).ok_or(WSAENOTSOCK)
+    }
+
+    fn port(&self, requested: u16) -> Result<u16, u32> {
+        let available = |port| {
+            self.sockets
+                .values()
+                .all(|socket| socket.port != Some(port))
+        };
+        if requested != 0 {
+            return available(requested)
+                .then_some(requested)
+                .ok_or(WSAEADDRINUSE);
+        }
+        (49152..=65535)
+            .find(|&port| available(port))
+            .ok_or(WSAEADDRINUSE)
+    }
+}
+
+fn loopback_port(memory: &GuestMemory, address: u64, size: u32) -> Result<u16, u32> {
+    let mut data = [0; 16];
+    if (size as i32) < 16 || address == 0 || memory.read_bytes(address, &mut data).is_err() {
+        return Err(WSAEFAULT);
+    }
+    if u16::from_le_bytes([data[0], data[1]]) != 2 {
+        return Err(WSAEAFNOSUPPORT);
+    }
+    if data[4..8] != [127, 0, 0, 1] {
+        return Err(WSAEACCES);
+    }
+    Ok(u16::from_be_bytes([data[2], data[3]]))
+}
+
+fn socket_result(
+    state: &ServicesState,
+    teb: u64,
+    result: Result<u64, u32>,
+) -> Result<u64, ExitReason> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => state.fail(teb, error, SOCKET_ERROR),
+    }
 }
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
@@ -91,7 +159,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         };
         net.serial = next;
         let socket = 0x5300_0000_0000_0000 | u64::from(next);
-        net.sockets.insert(socket);
+        net.sockets.insert(socket, Socket::default());
         Ok(socket)
     });
 
@@ -101,11 +169,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         if net.refs == 0 {
             return close.fail(cpu.gs_base, WSANOTINITIALISED, SOCKET_ERROR);
         }
-        if !net.sockets.remove(&args.rcx) {
+        if net.sockets.remove(&args.rcx).is_none() {
             return close.fail(cpu.gs_base, WSAENOTSOCK, SOCKET_ERROR);
         }
         Ok(0)
     });
+
+    register_loopback(registry, state);
 
     let get = Arc::clone(state);
     registry.register(MODULE, "WSAGetLastError", move |_, cpu, _| {
@@ -119,4 +189,202 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     for symbol in ["WSAStartup", "WSACleanup", "socket", "closesocket"] {
         registry.set_status(MODULE, symbol, ServiceStatus::Partial);
     }
+}
+
+fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    for (symbol, connect) in [("bind", false), ("connect", true)] {
+        let state = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, memory| {
+                let mut net = state.winsock.lock().expect("guest Winsock state");
+                let result = (|| {
+                    let socket = net.socket(args.rcx)?;
+                    let existing = socket.port;
+                    let requested = loopback_port(memory, args.rdx, args.r8 as u32)?;
+                    if connect && requested == 0 || !connect && existing.is_some() {
+                        return Err(WSAEINVAL);
+                    }
+                    let local = match (connect, existing) {
+                        (true, Some(port)) => port,
+                        (true, None) => net.port(0)?,
+                        (false, _) => net.port(requested)?,
+                    };
+                    let socket = net.sockets.get_mut(&args.rcx).expect("validated socket");
+                    socket.port = Some(local);
+                    if connect {
+                        socket.peer = Some(requested);
+                        socket.pending.retain(|(source, _)| *source == requested);
+                    }
+                    Ok(0)
+                })();
+                socket_result(&state, cpu.gs_base, result)
+            },
+        );
+    }
+
+    let send = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "send",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let mut net = send.winsock.lock().expect("guest Winsock state");
+            let result = (|| {
+                let socket = net.socket(args.rcx)?;
+                let peer = socket.peer.ok_or(WSAENOTCONN)?;
+                let source = socket.port.expect("connected socket is bound");
+                let length = args.r8 as i32;
+                if length < 0 || args.r9 as u32 != 0 {
+                    return Err(WSAEINVAL);
+                }
+                let length = length as usize;
+                if length > MAX_DATAGRAM {
+                    return Err(WSAEMSGSIZE);
+                }
+                let mut data = vec![0; length];
+                if length != 0 {
+                    memory
+                        .read_bytes(args.rdx, &mut data)
+                        .map_err(|_| WSAEFAULT)?;
+                }
+                if let Some(target) = net.sockets.values_mut().find(|socket| {
+                    socket.port == Some(peer) && socket.peer.is_none_or(|port| port == source)
+                }) {
+                    if target.pending.len() == MAX_PENDING_DATAGRAMS {
+                        return Err(WSAENOBUFS);
+                    }
+                    target.pending.push_back((source, data));
+                }
+                Ok(length as u64)
+            })();
+            socket_result(&send, cpu.gs_base, result)
+        },
+    );
+
+    let recv = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "recv",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let mut net = recv.winsock.lock().expect("guest Winsock state");
+            let result = (|| {
+                if net.socket(args.rcx)?.port.is_none() {
+                    return Err(WSAEINVAL);
+                }
+                let length = args.r8 as i32;
+                if length < 0 || args.r9 as u32 != 0 {
+                    return Err(WSAEINVAL);
+                }
+                let socket = net.sockets.get_mut(&args.rcx).expect("validated socket");
+                let (_, data) = socket.pending.front().ok_or(WSAEWOULDBLOCK)?;
+                let copied = (length as usize).min(data.len());
+                if copied != 0 {
+                    memory
+                        .write_bytes(args.rdx, &data[..copied])
+                        .map_err(|_| WSAEFAULT)?;
+                }
+                let truncated = copied < data.len();
+                socket.pending.pop_front();
+                if truncated {
+                    return Err(WSAEMSGSIZE);
+                }
+                Ok(copied as u64)
+            })();
+            socket_result(&recv, cpu.gs_base, result)
+        },
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn loopback_datagrams_preserve_boundaries_and_reject_external_addresses() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::MockClock;
+
+    let mut registry = ImportRegistry::new();
+    register(
+        &mut registry,
+        &Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),
+    );
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 4096, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        let descriptor = registry
+            .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, 0x1000]), 0);
+    let server = call(&mut memory, "socket", &[2, 2, 17]);
+    let client = call(&mut memory, "socket", &[2, 2, 17]);
+    let mut address = [0; 16];
+    address[..8].copy_from_slice(&[2, 0, 0x13, 0x88, 127, 0, 0, 1]);
+    memory.write_bytes(0x1200, &address).unwrap();
+    assert_eq!(call(&mut memory, "bind", &[server, 0x1200, 16]), 0);
+    assert_eq!(
+        call(&mut memory, "bind", &[client, 0x1200, 16]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEADDRINUSE)
+    );
+    memory.write_u8(0x1204, 192).unwrap();
+    assert_eq!(
+        call(&mut memory, "connect", &[client, 0x1200, 16]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEACCES)
+    );
+    memory.write_u8(0x1204, 127).unwrap();
+    assert_eq!(call(&mut memory, "connect", &[client, 0x1200, 16]), 0);
+    memory.write_bytes(0x1300, b"hello").unwrap();
+    assert_eq!(call(&mut memory, "send", &[client, 0x1300, 5, 0]), 5);
+    assert_eq!(call(&mut memory, "send", &[client, 0x1300, 2, 0]), 2);
+    assert_eq!(
+        call(&mut memory, "recv", &[server, 0xff, 4, 0]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEFAULT)
+    );
+    assert_eq!(
+        call(&mut memory, "recv", &[server, 0x1400, 4, 0]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEMSGSIZE)
+    );
+    let mut received = [0; 4];
+    memory.read_bytes(0x1400, &mut received).unwrap();
+    assert_eq!(&received, b"hell");
+    assert_eq!(call(&mut memory, "recv", &[server, 0x1400, 4, 0]), 2);
+    assert_eq!(
+        call(&mut memory, "recv", &[server, 0x1400, 4, 0]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEWOULDBLOCK)
+    );
 }
