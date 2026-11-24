@@ -373,6 +373,8 @@ pub fn execute(
             Encoding::OpRegImm => write_reg(cpu, insn.reg, size, insn.imm),
             _ => write_rm(cpu, memory, insn, insn.imm & mask(size))?,
         },
+        // A non-temporal store is an ordinary store: there is no cache to bypass.
+        Op::Movnti => write_rm(cpu, memory, insn, read_reg(cpu, insn.reg, size))?,
         Op::Movzx => {
             let value = read_rm(cpu, memory, insn)?;
             write_reg(cpu, insn.reg, size, value);
@@ -603,6 +605,10 @@ pub fn execute(
             cpu.gpr[RSP] = sp.wrapping_add(8).wrapping_add(insn.imm);
         }
         Op::Nop => {}
+        // Every load and store of an instruction completes before the next
+        // instruction starts, on one host thread, so guest accesses are already
+        // totally ordered and a fence has nothing further to enforce.
+        Op::Lfence | Op::Mfence | Op::Sfence => {}
         Op::Cpuid => {
             // The leaf is EAX and the subleaf ECX. Each result is a 32-bit
             // register write, so the upper halves are cleared.

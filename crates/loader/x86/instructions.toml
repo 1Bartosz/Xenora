@@ -108,6 +108,7 @@ movups = { ref = "sdm MOVUPS" }
 movdqa = { ref = "sdm MOVDQA" }
 movdqu = { ref = "sdm MOVDQU" }
 movntdq = { ref = "sdm MOVNTDQ" }
+movnti = { ref = "sdm MOVNTI" }
 movntps = { ref = "sdm MOVNTPS/MOVNTPD" }
 movss = { ref = "sdm MOVSS" }
 movsd = { ref = "sdm MOVSD (scalar double)" }
@@ -185,6 +186,9 @@ shufpd = { ref = "sdm SHUFPD" }
 pinsrw = { ref = "sdm PINSRW" }
 pextrw = { ref = "sdm PEXTRW" }
 ldmxcsr = { ref = "sdm LDMXCSR" }
+lfence = { ref = "sdm LFENCE" }
+mfence = { ref = "sdm MFENCE" }
+sfence = { ref = "sdm SFENCE" }
 stmxcsr = { ref = "sdm STMXCSR" }
 
 # Floating point. Every form can raise a SIMD floating-point exception.
@@ -948,6 +952,14 @@ opcode = 0xE7
 enc = "rm_xmm"
 size = "x"
 src = "x"
+memory_only = true
+
+[[form]]
+op = "movnti"
+map = "0f"
+opcode = 0xC3
+enc = "rm_reg"
+size = "y"
 memory_only = true
 
 [[form]]
@@ -1966,6 +1978,36 @@ enc = "rm"
 size = "n"
 src = "d"
 memory_only = true
+
+# The fences are the register forms of digits 5 to 7; the r/m field is ignored.
+# The memory forms of those digits (the XSAVE family and CLFLUSH) are not
+# declared.
+[[form]]
+op = "lfence"
+map = "0f"
+opcode = 0xAE
+digit = 5
+enc = "rm_unread"
+size = "n"
+register_only = true
+
+[[form]]
+op = "mfence"
+map = "0f"
+opcode = 0xAE
+digit = 6
+enc = "rm_unread"
+size = "n"
+register_only = true
+
+[[form]]
+op = "sfence"
+map = "0f"
+opcode = 0xAE
+digit = 7
+enc = "rm_unread"
+size = "n"
+register_only = true
 
 # SSE and SSE2 floating-point forms. RCP and RSQRT approximations are not
 # architecturally exact and are left out.
