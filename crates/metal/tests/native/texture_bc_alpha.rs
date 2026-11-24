@@ -8,12 +8,12 @@
 //! decoder is the value under test, so expected and actual values come from
 //! different decoders.
 
-use super::context;
+use super::{context, native};
 use xenora_texture::{BcAlphaFormat, BcAlphaUpload, BcAlphaUploadDesc, decode_bc2, decode_bc3};
 
 /// The specifications define colour and BC3 alpha interpolation in real
 /// numbers, and the CPU reference truncates them. On an Apple M5 Pro the
-/// native decoder's interpolated values lie within 1.14 codes of the real
+/// native decoder's interpolated values lie within 8/7 (1.143) codes of the real
 /// value (they match 6-bit fixed-point weights), so they can sit two codes
 /// above the truncated reference: 124 against 122 for BC3 alpha
 /// (4 * 200 + 3 * 20) / 7 = 122.86. Endpoints, BC2 alpha and BC3's fixed
@@ -89,14 +89,48 @@ fn upload_bytes(layers: [Layer; 2]) -> Vec<u8> {
     bytes
 }
 
-/// Crops decoded blocks (a row-major block grid) to a `width`×`height` level
-/// of words with red in the lowest byte, as the readback kernel writes them.
-fn reference(blocks: &[[[u8; 4]; 16]], blocks_x: usize, width: usize, height: usize) -> Vec<u32> {
+/// Per-channel tolerance of each texel of `block`: zero where the index
+/// selects a stored endpoint, a BC2 alpha nibble or BC3's fixed 0 or 255,
+/// and [`TOLERANCE`] only for interpolated codes.
+fn tolerances(format: BcAlphaFormat, block: [u8; 16]) -> [[u8; 4]; 16] {
+    let colour = u32::from_le_bytes([block[12], block[13], block[14], block[15]]);
+    let mut alpha_bits = [0; 8];
+    alpha_bits[..6].copy_from_slice(&block[2..8]);
+    let alpha_indices = u64::from_le_bytes(alpha_bits);
+    let six_value = block[0] <= block[1];
+    std::array::from_fn(|t| {
+        let rgb = if (colour >> (2 * t)) & 3 < 2 {
+            0
+        } else {
+            TOLERANCE
+        };
+        let index = (alpha_indices >> (3 * t)) & 7;
+        let a = match format {
+            BcAlphaFormat::Bc2 => 0,
+            BcAlphaFormat::Bc3 if index < 2 || (six_value && index >= 6) => 0,
+            BcAlphaFormat::Bc3 => TOLERANCE,
+        };
+        [rgb, rgb, rgb, a]
+    })
+}
+
+/// Crops a row-major grid of blocks to a `width`×`height` level of CPU-decoded
+/// words (red in the lowest byte, as the readback kernel writes them), each
+/// with its per-channel tolerance.
+fn reference(
+    format: BcAlphaFormat,
+    decode: fn([u8; 16]) -> [[u8; 4]; 16],
+    blocks: &[[u8; 16]],
+    blocks_x: usize,
+    (width, height): (usize, usize),
+) -> Vec<(u32, [u8; 4])> {
     let mut texels = Vec::new();
     for y in 0..height {
         for x in 0..width {
-            let decoded = blocks[(y / 4) * blocks_x + x / 4];
-            texels.push(u32::from_le_bytes(decoded[(y % 4) * 4 + x % 4]));
+            let block = blocks[(y / 4) * blocks_x + x / 4];
+            let t = (y % 4) * 4 + x % 4;
+            let word = u32::from_le_bytes(decode(block)[t]);
+            texels.push((word, tolerances(format, block)[t]));
         }
     }
     texels
@@ -106,24 +140,24 @@ fn alpha(word: u32) -> u8 {
     word.to_le_bytes()[3]
 }
 
-/// Returns the largest per-channel difference, failing on any texel above the
-/// tolerance with its index and both values.
-fn assert_close(label: &str, actual: &[u32], expected: &[u32]) -> u8 {
+/// Returns the largest per-channel difference, failing on any channel above
+/// its tolerance with the texel index and both values.
+fn assert_close(label: &str, actual: &[u32], expected: &[(u32, [u8; 4])]) -> u8 {
     assert_eq!(actual.len(), expected.len(), "{label}: texel count");
     let mut worst = 0;
-    for (texel, (&got, &want)) in actual.iter().zip(expected).enumerate() {
-        let diff = got
+    for (texel, (&got, &(want, tolerance))) in actual.iter().zip(expected).enumerate() {
+        for ((g, w), limit) in got
             .to_le_bytes()
-            .iter()
+            .into_iter()
             .zip(want.to_le_bytes())
-            .map(|(g, w)| g.abs_diff(w))
-            .max()
-            .unwrap();
-        assert!(
-            diff <= TOLERANCE,
-            "{label}: texel {texel} got {got:#010x}, want {want:#010x}"
-        );
-        worst = worst.max(diff);
+            .zip(tolerance)
+        {
+            assert!(
+                g.abs_diff(w) <= limit,
+                "{label}: texel {texel} got {got:#010x}, want {want:#010x} (per-channel limit {tolerance:?})"
+            );
+            worst = worst.max(g.abs_diff(w));
+        }
     }
     worst
 }
@@ -155,13 +189,12 @@ fn read_and_compare(
     let gpu = context();
     let mut worst = 0;
     let reads = std::array::from_fn(|layer| {
-        let decoded = layers[layer].map(decode);
-        let base = gpu.read_bc_alpha_upload(&upload, layer, 0).unwrap();
-        let expected = reference(&decoded[..4], 2, WIDTH, HEIGHT);
+        let base = native(gpu.read_bc_alpha_upload(&upload, layer, 0));
+        let expected = reference(format, decode, &layers[layer][..4], 2, (WIDTH, HEIGHT));
         let label = format!("{format:?} layer {layer}");
         worst = worst.max(assert_close(&format!("{label} mip 0"), &base, &expected));
-        let small = gpu.read_bc_alpha_upload(&upload, layer, 1).unwrap();
-        let expected = reference(&decoded[4..], 1, 2, 2);
+        let small = native(gpu.read_bc_alpha_upload(&upload, layer, 1));
+        let expected = reference(format, decode, &layers[layer][4..], 1, (2, 2));
         worst = worst.max(assert_close(&format!("{label} mip 1"), &small, &expected));
         [base, small]
     });
@@ -284,4 +317,88 @@ fn reads_pitched_bc3_interpolated_alpha_across_mips_and_layers() {
     assert_near("six-value index 2", small[2], 56.0);
     assert_near("six-value index 3", small[3], 92.0);
     println!("checked 58 BC3 texels from four subresources, worst channel difference {worst}");
+}
+
+/// Reads one-mip, one-layer uploads of `width`×`height` from `blocks` laid
+/// out with `row_pitch`, comparing with the CPU decoder.
+fn read_edge(
+    format: BcAlphaFormat,
+    decode: fn([u8; 16]) -> [[u8; 4]; 16],
+    blocks: &[[u8; 16]],
+    (width, height, row_pitch): (usize, usize, usize),
+) -> Vec<u32> {
+    let bytes = blocks.as_flattened();
+    let upload = BcAlphaUpload::new(
+        bytes,
+        BcAlphaUploadDesc {
+            width,
+            height,
+            mips: 1,
+            layers: 1,
+            format,
+            row_pitch,
+            slice_pitch: bytes.len(),
+        },
+    )
+    .unwrap();
+    let actual = native(context().read_bc_alpha_upload(&upload, 0, 0));
+    let expected = reference(format, decode, blocks, width.div_ceil(4), (width, height));
+    assert_close(&format!("{format:?} {width}x{height}"), &actual, &expected);
+    actual
+}
+
+#[test]
+fn reads_bc2_and_bc3_edge_blocks() {
+    let ramp = [0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe];
+    let reverse = ramp.map(|byte: u8| !byte);
+    let [descending, equal] = [DESCENDING, EQUAL].map(colour);
+    // 5×3 is one row of two blocks: Metal receives a zero row stride, and
+    // both blocks are cut at row 3, the second also at column 1. The row
+    // pitch keeps one padding block.
+    let wide = (5, 3, 48);
+    let bc2 = read_edge(
+        BcAlphaFormat::Bc2,
+        decode_bc2,
+        &[block(ramp, descending), block(reverse, equal), PAD],
+        wide,
+    );
+    // (0, 0) red, nibble 0; (4, 0) green, reversed nibble 15; (0, 2) red,
+    // nibble 8; (4, 2) green, reversed nibble 7.
+    assert_eq!(
+        [bc2[0], bc2[4], bc2[10], bc2[14]],
+        [0x0000_00ff, 0xff00_ff00, 0x8800_00ff, 0x7700_ff00]
+    );
+    let bc3 = read_edge(
+        BcAlphaFormat::Bc3,
+        decode_bc3,
+        &[
+            block(bc3_alpha(200, 20), descending),
+            block(bc3_alpha(20, 200), equal),
+            PAD,
+        ],
+        wide,
+    );
+    // Row 0 of block 0 is indices 6, 7, 0, 1: (2, 0) and (3, 0) are the
+    // endpoints 200 and 20. Column 0 of block 1 is indices 6, 2, 6: green
+    // with the fixed 0, then (4 * 20 + 200) / 5 = 56.
+    assert_eq!([alpha(bc3[2]), alpha(bc3[3])], [200, 20]);
+    assert_eq!([bc3[4], bc3[14]], [0x0000_ff00; 2]);
+    assert_near("six-value index 2", alpha(bc3[9]), 56.0);
+    // 1×1 is a single block cut to its first texel.
+    let one = (1, 1, 16);
+    let bc2 = read_edge(
+        BcAlphaFormat::Bc2,
+        decode_bc2,
+        &[block(reverse, descending)],
+        one,
+    );
+    assert_eq!(bc2, [0xff00_00ff]);
+    let bc3 = read_edge(
+        BcAlphaFormat::Bc3,
+        decode_bc3,
+        &[block(bc3_alpha(20, 200), descending)],
+        one,
+    );
+    assert_eq!(bc3, [0x0000_00ff]);
+    println!("checked 32 BC2 and BC3 texels from 5x3 and 1x1 edge levels");
 }
