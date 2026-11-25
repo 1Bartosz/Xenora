@@ -2915,14 +2915,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("roundss_imm_modes", 0),
     ("sahf_clear_keeps_of", 0),
     ("sahf_ignores_bits_1_3_5", 0),
-    ("shld16_by16_takes_source", 0),
-    ("shld32_by1_sign_change", 0),
-    ("shld32_by4", 0),
-    ("shld32_cl32_is_count_zero", 0),
-    ("shld64_by63", 0),
-    ("shrd32_by8", 0),
-    ("shrd64_by1_sign_change", 0),
-    ("shrd64_cl64_is_count_zero", 0),
 ];
 
 // ---------------------------------------------------------------------------
