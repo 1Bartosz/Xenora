@@ -20,7 +20,8 @@ use xenora_loader::x86_table::{FORMS, Op};
 const FIXTURE: &str = include_str!("x86/integer.txt");
 const ENTRY: u64 = 0x1000;
 const DATA: u64 = 0x2000;
-/// Address of `[rsi + 4*rdi + 16]` with RSI = DATA and RDI = 4.
+/// Address of `[rsi + 4*rdi + 16]` with RSI = DATA and RDI = 4, and the
+/// absolute address of the `movabs` accumulator forms.
 const OPERAND: u64 = DATA + 32;
 const STACK: u64 = 0x3000;
 const STACK_TOP: u64 = STACK + 0x80;
@@ -330,6 +331,11 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
         index: RDX,
         bits,
         high: false,
+    };
+    let ah = Place::Reg {
+        index: RAX,
+        bits: 8,
+        high: true,
     };
 
     if let Some(code) = name.strip_prefix("cmov") {
@@ -789,6 +795,26 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             m.flags.cf = !m.flags.cf;
             Outcome::Done(none)
         }
+        // AH bits 7 to 0 are SF, ZF, 0, AF, 0, PF, 1 and CF; OF has no bit.
+        "lahf" => {
+            let f = m.flags;
+            let bits = [f.cf, true, f.pf, false, f.af, false, f.zf, f.sf];
+            let value = (0..8)
+                .filter(|&index| bits[index])
+                .map(|index| 1u128 << index)
+                .sum();
+            write(m, ah, value);
+            Outcome::Done(none)
+        }
+        "sahf" => {
+            let value = read(m, ah, 8);
+            m.flags.cf = bit(value, 0);
+            m.flags.pf = bit(value, 2);
+            m.flags.af = bit(value, 4);
+            m.flags.zf = bit(value, 6);
+            m.flags.sf = bit(value, 7);
+            Outcome::Done(none)
+        }
         // The fences order memory accesses and compute nothing.
         "nop" | "pause" | "lfence" | "mfence" | "sfence" => Outcome::Done(none),
         "fninit" => {
@@ -800,14 +826,15 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
         }
         "cpuid" => {
             // Xenora's guest CPUID contract, restated: the vendor "Xenora guest"
-            // and the four features whose every instruction exists, CMOV and
-            // POPCNT in leaf 1, LZCNT and long mode in leaf 0x8000_0001.
+            // and the five features whose every instruction exists, CMOV and
+            // POPCNT in leaf 1, LAHF/SAHF, LZCNT and long mode in leaf
+            // 0x8000_0001.
             let word = |text: &[u8; 4]| u32::from_le_bytes(*text);
             let values = match m.gpr[RAX] as u32 {
                 0 => [1, word(b"Xeno"), word(b"uest"), word(b"ra g")],
                 1 => [0, 0, 1 << 23, 1 << 15],
                 0x8000_0000 => [0x8000_0001, 0, 0, 0],
-                0x8000_0001 => [0, 0, 1 << 5, 1 << 29],
+                0x8000_0001 => [0, 0, 1 | 1 << 5, 1 << 29],
                 _ => [0; 4],
             };
             // EAX, EBX, ECX and EDX, each zero-extended.
@@ -1067,6 +1094,10 @@ fn every_declared_form_is_executed_by_a_fixture() {
     let separate = [
         Op::Ldmxcsr,
         Op::Jcc,
+        Op::Loop,
+        Op::Loope,
+        Op::Loopne,
+        Op::Jrcxz,
         Op::Jmp,
         Op::Call,
         Op::Ret,
@@ -1301,6 +1332,7 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0xF2, 0xA4],             // repne movsb
         &[0xF3, 0xA6],             // repe cmpsb
         &[0x67, 0x8B, 0x06],       // address-size override
+        &[0x67, 0xA1, 0, 0, 0, 0], // mov eax, [moffs32]
         &[0x64, 0x2E, 0x8B, 0x06], // CS after FS
         &[0x66, 0x50],             // push ax
         &[0x66, 0xE8, 0, 0],       // call rel16
@@ -1702,10 +1734,17 @@ fn segment_bases_apply_to_every_addressing_form_in_both_engines() {
         (&[0x64, 0x65, 0x48, 0x8B, 0x03], GS + 0x3000),     // FS then GS
         (&[0x65, 0x64, 0x48, 0x8B, 0x03], GS + 0x3000),     // GS then FS
         (&[0x64, 0x65, 0x64, 0x48, 0x8B, 0x03], GS + 0x3000),
+        (&[0x64, 0x48, 0xA1, 0x40, 0, 0, 0, 0, 0, 0, 0], FS + 0x40), // movabs rax, fs:[0x40]
+        (
+            &[
+                0x65, 0x48, 0xA3, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            ],
+            GS - 0x10,
+        ), // movabs gs:[-0x10], rax
     ];
     for &(code, address) in cases {
         let opcode = code[code.iter().position(|byte| *byte == 0x48).unwrap() + 1];
-        let store = opcode == 0x89;
+        let store = matches!(opcode, 0x89 | 0xA3);
         for native in [false, true] {
             for mapped in [true, false] {
                 let mut memory = GuestMemory::new();

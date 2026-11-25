@@ -26,7 +26,11 @@
 # size: b = 8-bit, v = 16/32/64-bit by 0x66 and REX.W, q = 64-bit always,
 #       y = 32/64-bit only, n = no operand. imm: ib = signed 8-bit,
 #       iz = 16/32-bit sign-extended, iv = full operand size, iw = 16-bit,
-#       rel8/rel32 = signed branch offset.
+#       rel8/rel32 = signed branch offset, moffs = 64-bit absolute address.
+#
+# enc = "acc_moffs" and "moffs_acc" take no ModRM: the operands are the
+# accumulator and the memory at the moffs address, which FS or GS may override.
+# They decode as reg_rm and rm_reg would.
 
 schema = 1
 architecture = "x86-64"
@@ -93,6 +97,11 @@ leave = { ref = "sdm LEAVE" }
 call = { terminator = true, ref = "sdm CALL" }
 jmp = { terminator = true, ref = "sdm JMP" }
 jcc = { reads = "cf zf sf of pf", terminator = true, ref = "sdm Jcc" }
+# The count is RCX: the address-size prefix that would select ECX is rejected.
+loopne = { reads = "zf", terminator = true, ref = "sdm LOOP/LOOPcc" }
+loope = { reads = "zf", terminator = true, ref = "sdm LOOP/LOOPcc" }
+loop = { terminator = true, ref = "sdm LOOP/LOOPcc" }
+jrcxz = { terminator = true, ref = "sdm Jcc" }
 ret = { terminator = true, ref = "sdm RET" }
 nop = { ref = "sdm NOP" }
 hlt = { terminator = true, ref = "sdm HLT" }
@@ -100,6 +109,10 @@ syscall = { terminator = true, ref = "sdm SYSCALL" }
 clc = { writes = "cf", ref = "sdm CLC" }
 stc = { writes = "cf", ref = "sdm STC" }
 cmc = { reads = "cf", writes = "cf", ref = "sdm CMC" }
+# AH holds SF, ZF, AF, PF and CF; valid in 64-bit mode when CPUID
+# 8000_0001h ECX bit 0 is set.
+lahf = { reads = "cf zf sf pf af", ref = "sdm LAHF" }
+sahf = { writes = "cf zf sf pf af", ref = "sdm SAHF" }
 cpuid = { ref = "sdm CPUID" }
 cld = { ref = "sdm CLD" }
 std = { ref = "sdm STD" }
@@ -483,6 +496,34 @@ enc = "reg_rm"
 size = "v"
 
 [[form]]
+op = "mov"
+opcode = 0xA0
+enc = "acc_moffs"
+size = "b"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA1
+enc = "acc_moffs"
+size = "v"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA2
+enc = "moffs_acc"
+size = "b"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA3
+enc = "moffs_acc"
+size = "v"
+imm = "moffs"
+
+[[form]]
 op = "lea"
 opcode = 0x8D
 enc = "reg_rm"
@@ -515,6 +556,18 @@ op = "cdq"
 opcode = 0x99
 enc = "none"
 size = "v"
+
+[[form]]
+op = "sahf"
+opcode = 0x9E
+enc = "none"
+size = "n"
+
+[[form]]
+op = "lahf"
+opcode = 0x9F
+enc = "none"
+size = "n"
 
 [[form]]
 op = "mov"
@@ -566,6 +619,34 @@ op = "leave"
 opcode = 0xC9
 enc = "none"
 size = "q"
+
+[[form]]
+op = "loopne"
+opcode = 0xE0
+enc = "rel"
+size = "n"
+imm = "rel8"
+
+[[form]]
+op = "loope"
+opcode = 0xE1
+enc = "rel"
+size = "n"
+imm = "rel8"
+
+[[form]]
+op = "loop"
+opcode = 0xE2
+enc = "rel"
+size = "n"
+imm = "rel8"
+
+[[form]]
+op = "jrcxz"
+opcode = 0xE3
+enc = "rel"
+size = "n"
+imm = "rel8"
 
 [[form]]
 op = "call"
