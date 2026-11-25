@@ -91,6 +91,32 @@ impl DbtEngine {
         memory: &mut GuestMemory,
         max_instructions: usize,
     ) -> ExecutionResult {
+        self.run_bounded(cpu, memory, max_instructions, true)
+    }
+
+    /// As [`Self::run`], but stop at the first block boundary that reaches the
+    /// budget. Repeated slices reuse whole blocks instead of compiling a
+    /// shortened one at every cutoff. The budget may be exceeded by less than
+    /// one block.
+    pub(crate) fn run_slice(
+        &mut self,
+        cpu: &mut CpuState,
+        memory: &mut GuestMemory,
+        max_instructions: usize,
+    ) -> ExecutionResult {
+        self.run_bounded(cpu, memory, max_instructions, false)
+    }
+
+    /// Both entry points go through the process-exit latch: once the guest
+    /// process has exited, no guest instruction runs again, whichever guest
+    /// thread the caller tries to run.
+    fn run_bounded(
+        &mut self,
+        cpu: &mut CpuState,
+        memory: &mut GuestMemory,
+        max_instructions: usize,
+        exact: bool,
+    ) -> ExecutionResult {
         if let Some(status) = self.exited {
             return ExecutionResult {
                 instructions_executed: 0,
@@ -98,7 +124,7 @@ impl DbtEngine {
                 exit_reason: ExitReason::ProcessExit(status),
             };
         }
-        let result = self.execute(cpu, memory, max_instructions);
+        let result = self.execute(cpu, memory, max_instructions, exact);
         if let ExitReason::ProcessExit(status) = result.exit_reason {
             self.exited = Some(status);
         }
@@ -110,6 +136,7 @@ impl DbtEngine {
         cpu: &mut CpuState,
         memory: &mut GuestMemory,
         max_instructions: usize,
+        exact: bool,
     ) -> ExecutionResult {
         let mut instructions_count = 0;
 
@@ -145,7 +172,11 @@ impl DbtEngine {
             }
 
             // Look up or translate block at cpu.rip
-            let block_limit = (max_instructions - instructions_count).min(MAX_BLOCK_INSTRUCTIONS);
+            let block_limit = if exact {
+                (max_instructions - instructions_count).min(MAX_BLOCK_INSTRUCTIONS)
+            } else {
+                MAX_BLOCK_INSTRUCTIONS
+            };
             let mut block = self.get_or_compile_block(cpu.rip, memory, block_limit);
             // A decode failure can belong to a later instruction in the block.
             // Execute the current instruction alone so earlier effects retire

@@ -176,6 +176,12 @@ pub enum ExitReason {
     /// The guest ended its own process with this exit status. Only the guest
     /// stops; the host keeps running.
     ProcessExit(u32),
+    /// A service has to wait; it had no effect and runs again later.
+    GuestBlocked,
+    /// A service completed and asked the scheduler for a turn.
+    GuestYield,
+    /// The running guest thread ended itself.
+    GuestThreadExited,
 }
 
 impl fmt::Display for ExitReason {
@@ -195,6 +201,9 @@ impl fmt::Display for ExitReason {
             Self::ServiceAbiViolation => {
                 write!(f, "host service changed a nonvolatile guest register")
             }
+            Self::GuestBlocked => write!(f, "guest thread is waiting"),
+            Self::GuestYield => write!(f, "guest thread gave up its turn"),
+            Self::GuestThreadExited => write!(f, "guest thread exited"),
         }
     }
 }
