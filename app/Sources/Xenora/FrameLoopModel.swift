@@ -77,15 +77,20 @@ final class FrameLoopModel: ObservableObject {
 
     private let api: any FrameLoopAPI
     private let readController: @MainActor () -> DetectedController?
+    private let sleepBeforePoll: (@MainActor (Duration) async throws -> Void)?
     private var session: xenora_session = 0
     private var pollTask: Task<Void, Never>?
+    private var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
+    private var rateSample: (time: ContinuousClock.Instant, completed: UInt32)?
 
     init(
         api: any FrameLoopAPI = NativeFrameLoopAPI(),
-        readController: @escaping @MainActor () -> DetectedController? = pollGameController
+        readController: @escaping @MainActor () -> DetectedController? = pollGameController,
+        sleepBeforePoll: (@MainActor (Duration) async throws -> Void)? = nil
     ) {
         self.api = api
         self.readController = readController
+        self.sleepBeforePoll = sleepBeforePoll
     }
 
     deinit {
@@ -132,6 +137,7 @@ final class FrameLoopModel: ObservableObject {
         frameId = XENORA_NO_FRAME
         image = nil
         hostFps = nil
+        rateSample = nil
 
         guard destroySession() else { return }
         var newSession: xenora_session = 0
@@ -213,86 +219,118 @@ final class FrameLoopModel: ObservableObject {
     }
 
     func pause() {
-        guard session != 0 else { return }
-        check(api.pause(session), operation: "pause frame loop")
+        guard session != 0, check(api.pause(session), operation: "pause frame loop") else { return }
+        refreshPolling()
     }
 
     func resume() {
-        guard session != 0 else { return }
-        check(api.resume(session), operation: "resume frame loop")
+        guard session != 0, check(api.resume(session), operation: "resume frame loop") else { return }
+        refreshPolling()
     }
 
     func stop() {
-        guard session != 0 else { return }
-        check(api.stop(session), operation: "stop frame loop")
+        guard session != 0, check(api.stop(session), operation: "stop frame loop") else { return }
+        refreshPolling()
+    }
+
+    // Refresh native state after a successful control command, then replace the
+    // pending sleep so resume never waits for the next paused heartbeat.
+    private func refreshPolling() {
+        guard pollTask != nil else { return }
+        cancelPolling()
+        if poll() { startPolling(session) }
     }
 
     private func startPolling(_ handle: xenora_session) {
-        pollTask = Task { [weak self] in
-            var windowStart = Date()
-            var windowFrames: UInt32? = nil
+        var interval = pollInterval
+        pollTask = Task { [weak self, sleepBeforePoll] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 16_000_000)
-                // Cancellation can arrive while this task is asleep. Check it
-                // before using either the old handle or the replacement's state.
-                guard !Task.isCancelled, let self, self.session == handle else { return }
-                var st: UInt32 = 0
-                var comp: UInt32 = 0
-                var fId: UInt32 = XENORA_NO_FRAME
-                var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
-                let code = rgba.withUnsafeMutableBufferPointer { buffer in
-                    self.api.status(handle, &st, &comp, &fId, buffer)
-                }
-                guard self.check(code, operation: "read frame loop status") else {
-                    self.state = UInt32(XENORA_LOOP_FAILED)
-                    self.cancelPolling()
-                    _ = self.destroySession()
-                    return
-                }
-                if self.isInteractive && (st == XENORA_LOOP_RUNNING || st == XENORA_LOOP_PAUSED) {
-                    self.updateGameController()
-                }
-                self.state = st
-                self.completed = comp
-                self.frameId = fId
-                let elapsed = Date().timeIntervalSince(windowStart)
-                if let first = windowFrames {
-                    if elapsed >= 0.5 {
-                        self.hostFps = Double(comp &- first) / elapsed
-                        windowStart = Date()
-                        windowFrames = comp
-                    }
+                if let sleepBeforePoll {
+                    try? await sleepBeforePoll(interval)
                 } else {
-                    windowFrames = comp
-                    windowStart = Date()
+                    try? await Task.sleep(for: interval)
                 }
-                if fId != XENORA_NO_FRAME, let provider = CGDataProvider(data: Data(rgba) as CFData) {
-                    self.image = CGImage(
-                        width: Int(XENORA_FIXTURE_FRAME_WIDTH),
-                        height: Int(XENORA_FIXTURE_FRAME_HEIGHT),
-                        bitsPerComponent: 8,
-                        bitsPerPixel: 32,
-                        bytesPerRow: Int(XENORA_FIXTURE_FRAME_WIDTH) * 4,
-                        space: CGColorSpaceCreateDeviceRGB(),
-                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                        provider: provider,
-                        decode: nil,
-                        shouldInterpolate: false,
-                        intent: .defaultIntent
-                    )
-                }
-                if st != UInt32(XENORA_LOOP_RUNNING) && st != UInt32(XENORA_LOOP_PAUSED) {
-                    // A loop that ends inside its first window still gets a rate.
-                    if let first = windowFrames, comp > first, elapsed > 0 {
-                        self.hostFps = Double(comp - first) / elapsed
-                    }
-                    if st == XENORA_LOOP_FAILED && self.errorMessage == nil {
-                        self.errorMessage = "Fixture frame loop entered the failed state."
-                    }
-                    self.cancelPolling()
-                    return
-                }
+                // Cancellation can arrive during sleep, including on restart
+                // with a replacement handle or a new cadence for the same one.
+                guard !Task.isCancelled, let self, self.session == handle, self.poll() else { return }
+                interval = self.pollInterval
             }
         }
+    }
+
+    private var pollInterval: Duration {
+        isPaused ? .milliseconds(250) : .milliseconds(16)
+    }
+
+    /// Returns whether the native loop still needs a heartbeat.
+    private func poll() -> Bool {
+        var st: UInt32 = 0
+        var comp: UInt32 = 0
+        var fId: UInt32 = XENORA_NO_FRAME
+        let code = rgba.withUnsafeMutableBufferPointer { buffer in
+            api.status(session, &st, &comp, &fId, buffer)
+        }
+        guard check(code, operation: "read frame loop status") else {
+            state = UInt32(XENORA_LOOP_FAILED)
+            cancelPolling()
+            _ = destroySession()
+            return false
+        }
+
+        let active = st == XENORA_LOOP_RUNNING || st == XENORA_LOOP_PAUSED
+        if isInteractive && active { updateGameController() }
+        if state != st { state = st }
+        if completed != comp { completed = comp }
+        // Interactive frame IDs identify fixture columns, whose pixels repeat.
+        if frameId != fId {
+            if fId == XENORA_NO_FRAME {
+                frameId = fId
+                image = nil
+            } else if let snapshot = makeImage() {
+                frameId = fId
+                image = snapshot
+            }
+        }
+
+        let now = ContinuousClock.now
+        if let sample = rateSample {
+            let elapsed = sample.time.duration(to: now)
+            if elapsed >= .milliseconds(500) || (!active && comp > sample.completed && elapsed > .zero) {
+                let parts = elapsed.components
+                let seconds = Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+                let rate = Double(comp &- sample.completed) / seconds
+                if hostFps != rate { hostFps = rate }
+                rateSample = (now, comp)
+            }
+        } else {
+            rateSample = (now, comp)
+        }
+
+        if !active {
+            if st == XENORA_LOOP_FAILED && errorMessage == nil {
+                errorMessage = "Fixture frame loop entered the failed state."
+            }
+            cancelPolling()
+        }
+        return active
+    }
+
+    private func makeImage() -> CGImage? {
+        // The provider must own a snapshot because subsequent polls overwrite rgba.
+        let pixels = rgba.withUnsafeBytes { Data($0) }
+        guard let provider = CGDataProvider(data: pixels as CFData) else { return nil }
+        return CGImage(
+            width: Int(XENORA_FIXTURE_FRAME_WIDTH),
+            height: Int(XENORA_FIXTURE_FRAME_HEIGHT),
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: Int(XENORA_FIXTURE_FRAME_WIDTH) * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
     }
 }
