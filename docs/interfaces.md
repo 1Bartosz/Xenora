@@ -772,6 +772,32 @@ compare function. Colour and the stored depth are both read back.
 These passes are checked on the GPU with Metal validation against expectations
 derived independently from the public semantics; synthetic fixtures only.
 
+## Guest graphics command path
+
+`xenora_graphics.dll` exposes the graphics runtime to guest code, so a guest
+program can author graphics work instead of receiving one fixed draw. The
+exports cover device, command queue, command allocator and command list
+creation; buffer and render-target resources; viewport, render-target, vertex
+and index binding; draws; execution; framebuffer readback into guest memory;
+and ordered destruction. Every export takes Win64 arguments, returns an
+`HRESULT`, and passes generation-checked opaque handles, never host pointers.
+
+A guest draw travels from the loaded executable through the import binding and
+the service layer into `GraphicsContext`, out to a backend that renders
+through the translated gfx1030 stages, and back as pixels in a render-target
+resource the guest can read. The native Metal path crosses the existing
+`BackendRenderer` closure boundary, so the loader stays free of a direct Metal
+dependency and the deterministic software reference rasteriser remains the
+default on a host without a GPU.
+
+Destruction is ordered and enforced: a device outlives its queues, allocators,
+command lists and resources, an allocator outlives its command lists, a
+resource outlives the recording lists that reference it, and a recording list
+must be closed before it is destroyed. A refusal is an explicit error.
+
+The exact exports, arguments and limits are in the
+[guest graphics command path](runtime/guest-graphics.md).
+
 ### Guest texture binding (descriptor tables)
 
 `GraphicsContext` lets a guest command list sample one texture in the pixel
