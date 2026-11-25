@@ -21,6 +21,28 @@ The gate is `crates/loader/tests/gate_a1.rs`:
 cargo test --locked -p xenora-loader --test gate_a1 -- --nocapture
 ```
 
+### Toolchain setup
+
+A1 needs a native-ARM64 clang and an LLD. The build script
+([`tests/compat_fixtures/build-gate-a1.sh`](../../tests/compat_fixtures/build-gate-a1.sh))
+discovers them in this order:
+
+1. `LLD_LINK` if set;
+2. Homebrew `lld`, then the `lld-link` beside a Homebrew `llvm`;
+3. `lld-link` on `PATH`;
+4. the `rust-lld` inside the active Rust toolchain.
+
+Homebrew's `rust` formula does not ship `rust-lld`, so a Homebrew Rust
+installation alone is not enough — install one of the others, for example:
+
+```sh
+brew install llvm lld
+```
+
+If nothing is found, the build fails with the install hint rather than
+skipping the gate. The discovered tools are checked to be ARM64 Mach-O
+executables and the binaries they link against.
+
 The test builds the program from source, then runs each build through
 `run_synthetic_startup` with `register_standard_services`, loaded away from its
 preferred base. It checks, at `-O0`, `-O1`, `-O2` and `-Os`:
