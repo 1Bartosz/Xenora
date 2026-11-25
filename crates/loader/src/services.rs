@@ -10,8 +10,12 @@
 //! - Xbox physical memory: `XMemAlloc`, `XMemFree`
 
 mod crt;
+mod crt_arguments;
 mod crt_callbacks;
+mod crt_files;
+mod crt_format;
 mod crt_startup;
+mod crt_streams;
 mod events;
 mod files;
 mod gdk_queue;
@@ -26,6 +30,8 @@ pub(crate) mod threads;
 mod winsock;
 
 use crate::runtime::HResult;
+pub use crt_arguments::{MAX_PROGRAM_ARGUMENT_BYTES, ProgramArgumentsError};
+pub use crt_streams::MAX_CAPTURED_OUTPUT;
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -201,7 +207,9 @@ pub struct ServicesState {
     pub guest_profile: sysinfo::GuestSystemProfile,
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
+    crt_arguments: Mutex<crt_arguments::CrtArguments>,
     synch: Mutex<synch::Synch>,
+    crt_streams: Mutex<crt_streams::StandardStreams>,
     pub(crate) threads: Mutex<threads::ThreadTable>,
     pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
@@ -230,7 +238,9 @@ impl ServicesState {
             guest_profile: sysinfo::GuestSystemProfile::default(),
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
+            crt_arguments: Mutex::default(),
             synch: Mutex::default(),
+            crt_streams: Mutex::default(),
             threads: Mutex::default(),
             hooks: Arc::default(),
             atexit: Mutex::default(),
@@ -246,6 +256,21 @@ impl ServicesState {
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),
         }
     }
+    /// Give a hosted C program the arguments its `main` receives in `argv`,
+    /// program name first. Call it before running the guest: the C runtime's
+    /// startup code builds `argv` once, and a call after that is refused.
+    ///
+    /// The strings reach the guest as their bytes; no code page is applied.
+    /// A host that never calls this gives the program one argument, the empty
+    /// string. An empty slice gives it none.
+    pub fn set_program_arguments(&self, arguments: &[&str]) -> Result<(), ProgramArgumentsError> {
+        self.crt_arguments().supply(arguments)
+    }
+
+    fn crt_arguments(&self) -> std::sync::MutexGuard<'_, crt_arguments::CrtArguments> {
+        self.crt_arguments.lock().expect("program arguments")
+    }
+
     fn uptime_millis(&self) -> u64 {
         let ticks = self
             .clock
@@ -327,6 +352,23 @@ impl ServicesState {
             .close_all();
         self.gdk_queue_changed.notify_all();
         status
+    }
+
+    /// Everything the guest has written to `stdout`, as the bytes a text-mode
+    /// stream hands the operating system: each line feed the program wrote is
+    /// a carriage return and a line feed here.
+    pub fn standard_output(&self) -> Vec<u8> {
+        self.crt_streams().output().to_vec()
+    }
+
+    /// Everything the guest has written to `stderr`, in the same form as
+    /// [`Self::standard_output`].
+    pub fn standard_error(&self) -> Vec<u8> {
+        self.crt_streams().error().to_vec()
+    }
+
+    fn crt_streams(&self) -> std::sync::MutexGuard<'_, crt_streams::StandardStreams> {
+        self.crt_streams.lock().expect("standard streams")
     }
 
     /// Read the last-error value for a guest thread's TEB.
@@ -896,6 +938,132 @@ pub(crate) mod handlers {
             .map_err(ExitReason::MemoryFault)
     }
 
+    // Streams, files and formatted output (#400, #402). `crt_streams.rs` and
+    // `crt_files.rs` hold the rules; a failure that has an errno value sets it
+    // here. The stream state is always locked before the object state.
+
+    fn or_errno<T>(
+        context: &mut ServiceContext<'_>,
+        outcome: crt_streams::Outcome<T>,
+    ) -> Outcome<T> {
+        match outcome? {
+            Ok(value) => Ok(value),
+            Err(crt_streams::Failed(value, errno)) => {
+                crt::set_errno(context.memory, context.teb, errno)?;
+                Ok(value)
+            }
+        }
+    }
+
+    pub fn standard_stream(context: &mut ServiceContext<'_>, index: u32) -> Outcome<u64> {
+        context.state.crt_streams().file(context.memory, index)
+    }
+
+    pub fn vfprintf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        stream: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.print(
+                context.memory,
+                &mut drive,
+                options,
+                stream,
+                format,
+                locale,
+                arguments,
+            )
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fwrite(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        size: u64,
+        count: u64,
+        stream: u64,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.write_items(context.memory, &mut drive, buffer, size, count, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fputs(context: &mut ServiceContext<'_>, text: u64, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.put_string(context.memory, &mut drive, text, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fflush(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        context.state.crt_streams().flush(stream)
+    }
+
+    pub fn setvbuf(
+        context: &mut ServiceContext<'_>,
+        stream: u64,
+        _buffer: u64,
+        mode: i32,
+        size: u64,
+    ) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().set_buffer(stream, mode, size);
+        or_errno(context, outcome)
+    }
+
+    pub fn fopen(context: &mut ServiceContext<'_>, name: u64, mode: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.open(context.memory, &mut drive, name, mode)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fclose(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().close(context.memory, stream);
+        or_errno(context, outcome)
+    }
+
+    pub fn fgets(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        count: i32,
+        stream: u64,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.get_line(context.memory, &drive, buffer, count, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn perror(context: &mut ServiceContext<'_>, message: u64) -> Outcome<()> {
+        let address = context
+            .memory
+            .crt_errno_address(context.teb)
+            .map_err(ExitReason::MemoryFault)?;
+        let errno = context
+            .memory
+            .read_u32(address)
+            .map_err(ExitReason::MemoryFault)?;
+        let mut streams = context.state.crt_streams();
+        let mut drive = context.state.objects.lock().expect("guest object state");
+        streams.report(context.memory, &mut drive, message, errno)
+    }
+
     pub fn get_last_error(context: &mut ServiceContext<'_>) -> Outcome<u32> {
         Ok(context.state.last_error(context.teb))
     }
@@ -903,6 +1071,38 @@ pub(crate) mod handlers {
     pub fn set_last_error(context: &mut ServiceContext<'_>, code: u32) -> Outcome<()> {
         context.state.set_last_error(context.teb, code);
         Ok(())
+    }
+
+    // What a hosted C program's startup code hands to `main` (#392).
+    // `crt_arguments.rs` says what is documented, inferred and Xenora's choice.
+
+    pub fn argc_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        let mut arguments = context.state.crt_arguments();
+        arguments.address(context.memory, crt_arguments::Variable::Argc)
+    }
+
+    pub fn argv_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        let mut arguments = context.state.crt_arguments();
+        arguments.address(context.memory, crt_arguments::Variable::Argv)
+    }
+
+    pub fn environ_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        let mut arguments = context.state.crt_arguments();
+        arguments.address(context.memory, crt_arguments::Variable::Environ)
+    }
+
+    pub fn configure_narrow_argv(context: &mut ServiceContext<'_>, mode: i32) -> Outcome<i32> {
+        context
+            .state
+            .crt_arguments()
+            .configure(context.memory, mode)
+    }
+
+    pub fn initialize_narrow_environment(context: &mut ServiceContext<'_>) -> Outcome<i32> {
+        context
+            .state
+            .crt_arguments()
+            .initialize_environment(context.memory)
     }
 
     pub fn virtual_alloc(

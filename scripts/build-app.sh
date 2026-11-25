@@ -65,5 +65,6 @@ for dependency in $(otool -L "$binary" | tail -n +2 | awk '{print $1}'); do
     esac
 done
 "$binary" --smoke
+"$binary" --smoke-inspection-order
 "$binary" --smoke-import-result
 echo "build-app: built $bundle"
