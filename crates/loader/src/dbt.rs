@@ -428,6 +428,11 @@ pub fn is_translatable(insn: &Insn) -> bool {
 /// calls the shared semantics and is counted in
 /// [`DbtMetrics::interpreter_fallbacks`].
 pub fn is_native(insn: &Insn) -> bool {
+    // Locked read-modify-writes stay on the shared semantics, the one place
+    // atomicity has to be provided once guest threads run concurrently.
+    if insn.lock {
+        return false;
+    }
     let wide = matches!(insn.size, 4 | 8);
     // The bit scans work on any register or memory source, and the bit test
     // needs the index in a register.

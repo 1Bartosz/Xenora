@@ -128,6 +128,11 @@ pub struct GuestMemory {
     crt_errno: std::collections::BTreeMap<u64, u64>,
     pub(crate) callback_frames:
         std::collections::BTreeMap<(u64, u64), crate::imports::CallbackFrame>,
+    /// Function tables of the mapped images, for exception dispatch.
+    pub(crate) function_tables: Vec<crate::exceptions::FunctionTable>,
+    /// Exception dispatches waiting for a guest handler, by TEB and stack slot.
+    pub(crate) exception_frames:
+        std::collections::BTreeMap<(u64, u64), crate::exceptions::Dispatch>,
 }
 
 impl GuestMemory {

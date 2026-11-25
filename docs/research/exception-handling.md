@@ -2,7 +2,7 @@
 
 This page maps the public Windows x64 exception-handling and unwinding ABI to what Xenora's guest runtime would need in order to run compiled C and C++ programs that raise, catch or unwind through exceptions. It records what exists on main `d362e17`, what two original probe programs do there today, the pieces that are missing in dependency order, the unknowns, a fixture plan, and ranked follow-ups (#441).
 
-It is research only. Nothing here is implemented, and nothing describes Xbox console behaviour, which is unknown. Commercial game execution remains unsupported.
+It was written as research. Since then #447 implemented follow-ups 1, 2 and 4 for statically linked mingw-w64 C++ programs: the exception directory, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlCaptureContext`, `RaiseException` and `RtlUnwindEx` (`crates/loader/src/exceptions.rs`, tested by `crates/loader/tests/guest_cpp_exceptions.rs`). The tables below describe main at `d362e17`, before that work. `__C_specific_handler`, CPU faults as exceptions and the unhandled-exception filter remain open. Nothing here describes Xbox console behaviour, which is unknown. Commercial game execution remains unsupported.
 
 ## Sources
 

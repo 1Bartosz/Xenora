@@ -136,10 +136,13 @@ def load(text):
         for offset, (enc, size, imm) in enumerate([
                 ("rm_reg", "b", ""), ("rm_reg", "v", ""), ("reg_rm", "b", ""),
                 ("reg_rm", "v", ""), ("acc_imm", "b", "ib"), ("acc_imm", "v", "iz")]):
-            forms.append({"op": op, "opcode": base + offset, "enc": enc, "size": size, "imm": imm})
+            # Intel SDM Vol. 2, LOCK: every ALU operation but CMP may lock a
+            # memory destination.
+            forms.append({"op": op, "opcode": base + offset, "enc": enc, "size": size, "imm": imm,
+                          "lock": op != "cmp" and enc == "rm_reg"})
         for opcode, size, imm in ((0x80, "b", "ib"), (0x81, "v", "iz"), (0x83, "v", "ib")):
             forms.append({"op": op, "opcode": opcode, "digit": index, "enc": "rm_imm",
-                          "size": size, "imm": imm})
+                          "size": size, "imm": imm, "lock": op != "cmp"})
     for group in data["group"]:
         check_keys("group", group, GROUP_KEYS)
         for opcode, size, imm, enc in group["opcodes"]:
