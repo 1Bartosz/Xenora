@@ -10,7 +10,7 @@
 //! the state unchanged. Flags that the architecture leaves undefined keep their
 //! previous value, which is permitted but not something guests may rely on.
 
-use crate::cpu::{CpuState, ExitReason, RFlags, Register, cpuid};
+use crate::cpu::{CpuState, ExitReason, RFlags, Register, X87State, cpuid};
 use crate::memory::GuestMemory;
 use crate::x86_decode::{Encoding, Insn, MemOperand, RegOperand, RmOperand, Segment};
 use crate::x86_simd;
@@ -49,6 +49,26 @@ pub fn address(cpu: &CpuState, operand: &MemOperand) -> u64 {
     base.wrapping_add(offset(cpu, operand))
 }
 
+/// Whether a 64-bit guest address is canonical under the x86-64 48-bit
+/// virtual-address rule (Intel SDM Vol. 1, section 3.3.7.1).
+pub(crate) fn is_canonical(address: u64) -> bool {
+    matches!(address >> 47, 0 | 0x1_ffff)
+}
+
+/// Whether every byte of a data access has a canonical address. An overflowing
+/// range is left to [`GuestMemory`] so it keeps its existing overflow fault.
+pub(crate) fn canonical_access(address: u64, size: u8) -> bool {
+    if !is_canonical(address) {
+        return false;
+    }
+    if size <= 1 {
+        return true;
+    }
+    address
+        .checked_add(u64::from(size) - 1)
+        .is_none_or(is_canonical)
+}
+
 /// Effective address without a segment base, as LEA computes it.
 fn offset(cpu: &CpuState, operand: &MemOperand) -> u64 {
     let base = operand.base.map_or(0, |index| cpu.gpr[usize::from(index)]);
@@ -78,6 +98,9 @@ pub(crate) fn write_reg(cpu: &mut CpuState, reg: RegOperand, size: u8, value: u6
 }
 
 pub(crate) fn read_mem(memory: &GuestMemory, address: u64, size: u8) -> Result<u64, ExitReason> {
+    if !canonical_access(address, size) {
+        return Err(ExitReason::GeneralProtection);
+    }
     match size {
         1 => memory.read_u8(address).map(u64::from),
         2 => memory.read_u16(address).map(u64::from),
@@ -93,6 +116,9 @@ pub(crate) fn write_mem(
     size: u8,
     value: u64,
 ) -> Result<(), ExitReason> {
+    if !canonical_access(address, size) {
+        return Err(ExitReason::GeneralProtection);
+    }
     match size {
         1 => memory.write_u8(address, value as u8),
         2 => memory.write_u16(address, value as u16),
@@ -296,6 +322,54 @@ fn shift(op: Op, value: u64, count: u64, size: u8, old: RFlags) -> Option<(u64, 
     Some((result, flags))
 }
 
+/// SHLD and SHRD (Intel SDM Vol. 2B, "SHLD" and "SHRD"): `dst` is shifted by
+/// `count` and the vacated bits are filled from `src`, which is unchanged.
+/// `None` means a masked count of zero, which changes neither the destination
+/// nor the flags.
+///
+/// A count above the operand size is possible only for 16-bit operands and
+/// leaves the result and flags undefined. Xenora then returns the bits the
+/// 32-bit concatenation gives and keeps every flag; no test relies on that.
+fn double_shift(
+    op: Op,
+    dst: u64,
+    src: u64,
+    count: u64,
+    size: u8,
+    old: RFlags,
+) -> Option<(u64, RFlags)> {
+    let count = (count & if size == 8 { 0x3F } else { 0x1F }) as u32;
+    if count == 0 {
+        return None;
+    }
+    let bits = 8 * u32::from(size);
+    let (dst, src) = (u128::from(dst), u128::from(src));
+    // SHLD shifts `dst:src` left and keeps the high half; SHRD shifts
+    // `src:dst` right and keeps the low half. CF is the last bit shifted out
+    // of the destination.
+    let (result, cf) = if op == Op::Shld {
+        let pair = dst << bits | src;
+        let shifted = pair << count;
+        (shifted >> bits, pair >> (2 * bits - count) & 1 != 0)
+    } else {
+        let pair = src << bits | dst;
+        (pair >> count, pair >> (count - 1) & 1 != 0)
+    };
+    let result = result as u64 & mask(size);
+    let mut flags = old;
+    if count > bits {
+        return Some((result, flags));
+    }
+    flags.cf = cf;
+    result_flags(&mut flags, result, size);
+    // OF is defined only for a count of one: set when the sign changed.
+    if count == 1 {
+        let top = u128::from(sign_bit(size));
+        flags.of = (u128::from(result) & top != 0) != (dst & top != 0);
+    }
+    Some((result, flags))
+}
+
 fn push(cpu: &mut CpuState, memory: &mut GuestMemory, value: u64) -> Result<(), ExitReason> {
     let sp = cpu.gpr[RSP]
         .checked_sub(8)
@@ -448,6 +522,23 @@ pub fn execute(
                 if negative { mask(size) } else { 0 },
             );
         }
+        Op::Shld | Op::Shrd => {
+            let dst = read_rm(cpu, memory, insn)?;
+            let src = read_reg(cpu, insn.reg, size);
+            let count = match insn.encoding {
+                Encoding::RmRegCl => cpu.gpr[RCX] & 0xFF,
+                _ => insn.imm & 0xFF,
+            };
+            match double_shift(insn.op, dst, src, count, size, cpu.flags) {
+                Some((value, flags)) => {
+                    write_rm(cpu, memory, insn, value)?;
+                    cpu.flags = flags;
+                }
+                // As for the other shifts, a zero count still performs the
+                // write's permission check and the 32-bit zero-extension.
+                None => write_rm(cpu, memory, insn, dst)?,
+            }
+        }
         Op::Rol | Op::Ror | Op::Rcl | Op::Rcr | Op::Shl | Op::Shr | Op::Sar => {
             let (a, count) = operands(cpu, memory, insn)?;
             match shift(insn.op, a, count, size, cpu.flags) {
@@ -599,6 +690,26 @@ pub fn execute(
                 next = insn.imm;
             }
         }
+        // The count is RCX, decremented without changing any flag; LOOPE and
+        // LOOPNE also test ZF (Intel SDM Vol. 2A, LOOP/LOOPcc).
+        Op::Loop | Op::Loope | Op::Loopne => {
+            let count = cpu.gpr[RCX].wrapping_sub(1);
+            cpu.gpr[RCX] = count;
+            let zf_holds = match insn.op {
+                Op::Loope => cpu.flags.zf,
+                Op::Loopne => !cpu.flags.zf,
+                _ => true,
+            };
+            if count != 0 && zf_holds {
+                next = insn.imm;
+            }
+        }
+        // JRCXZ reads RCX and changes nothing (Intel SDM Vol. 2A, Jcc).
+        Op::Jrcxz => {
+            if cpu.gpr[RCX] == 0 {
+                next = insn.imm;
+            }
+        }
         Op::Ret => {
             let sp = cpu.gpr[RSP];
             next = read_mem(memory, sp, 8)?;
@@ -609,6 +720,12 @@ pub fn execute(
         // instruction starts, on one host thread, so guest accesses are already
         // totally ordered and a fence has nothing further to enforce.
         Op::Lfence | Op::Mfence | Op::Sfence => {}
+        // The control, status and tag words take their initial values. The
+        // no-wait form checks no pending exception, and the data registers,
+        // which Xenora does not model, are left alone and only tagged empty
+        // (Intel SDM Vol. 2A, "FINIT/FNINIT"). FNINIT also clears the x87
+        // instruction and data pointers and last opcode, which are not modelled.
+        Op::Fninit => cpu.x87 = X87State::INIT,
         Op::Cpuid => {
             // The leaf is EAX and the subleaf ECX. Each result is a 32-bit
             // register write, so the upper halves are cleared.
