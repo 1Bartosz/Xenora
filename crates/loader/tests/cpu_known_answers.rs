@@ -1294,6 +1294,147 @@ gs_xadd_without_lock: rbx=8 rcx=5 gs8=03000000 => rcx=3 gs8=08000000 f=cpazso
 fs_rep_movsb_overrides_source_only_df_clear: rsi=8 rdi=D rcx=2 fs8=a1a2 m0=0000 => rsi=a rdi=D+2 rcx=0 m0=a1a2 f=*
 ";
 
+/// MOV r/m, imm (opcodes C6 /0 and C7 /0), issue #194.
+///
+/// Memory-form encodings came from Apple clang's assembler. The register forms
+/// of C6/C7 are the long alternatives to B0+r and B8+r, which that assembler
+/// never emits, so they were written by hand from the opcode map (ModRM
+/// `11 000 rm`). Expected values follow SDM 2B MOV, where the imm32 of the
+/// 64-bit form is sign-extended, and were computed by hand before the first run,
+/// without reading how the interpreter or the DBT execute C6 and C7. The author is
+/// an AI model, as for the rest of this file. Both engines already agreed with
+/// every case, so this group closes a coverage gap and fixes no defect.
+const IMMEDIATE_STORES: &str = r"
+@ mov byte ptr [rdi], 0x80
+  c60780
+  SDM 2B MOV (C6 /0)
+store_byte_base: rdi=D m0=aaaaaaaa => m0=80aaaaaa f=*
+@ mov word ptr [rdi], 0x8001
+  66c7070180
+  SDM 2B MOV (C7 /0, 66 prefix)
+store_word_base: rdi=D m0=aaaaaaaa => m0=0180aaaa f=*
+@ mov dword ptr [rdi], 0x80000001
+  c70701000080
+  SDM 2B MOV (C7 /0)
+store_dword_base_is_not_sign_extended: rdi=D m0=aaaaaaaaaaaaaaaa => m0=01000080aaaaaaaa f=*
+@ mov qword ptr [rdi], -0x7fffffff
+  48c70701000080
+  SDM 2B MOV (REX.W C7 /0, imm32 sign-extended to 64 bits)
+store_qword_negative_immediate_sign_extends: rdi=D m0=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa => m0=01000080ffffffffaaaaaaaaaaaaaaaa f=*
+@ mov qword ptr [rdi], 1
+  48c70701000000
+  SDM 2B MOV (REX.W C7 /0)
+store_qword_positive_immediate_clears_upper_half: rdi=D m0=ffffffffffffffffaaaaaaaaaaaaaaaa => m0=0100000000000000aaaaaaaaaaaaaaaa f=*
+@ mov qword ptr [rdi+rcx*8+0x10], -2
+  48c744cf10feffffff
+  SDM 2B MOV; 2A 2.1.5 (SIB, disp8)
+store_qword_sib_scale_8_disp8: rdi=D rcx=2 m20=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa => m20=feffffffffffffffaaaaaaaaaaaaaaaa f=*
+@ mov dword ptr [rdi+0x7f], 0x11223344
+  c7477f44332211
+  SDM 2B MOV; 2A 2.1.5 (disp8, largest positive)
+store_dword_disp8_positive_limit: rdi=D m7e=aaaaaaaaaaaaaaaaaaaa => m7e=aa44332211aaaaaaaaaa f=*
+@ mov dword ptr [rdi-0x80], 0x11223344
+  c7478044332211
+  SDM 2B MOV; 2A 2.1.5 (disp8 is sign-extended)
+store_dword_disp8_negative_limit: rdi=D+80 m0=aaaaaaaaaaaaaaaa => m0=44332211aaaaaaaa f=*
+@ mov dword ptr [rdi+0x100], 0x11223344
+  c7870001000044332211
+  SDM 2B MOV; 2A 2.1.5 (disp32)
+store_dword_disp32: rdi=D m100=aaaaaaaaaaaaaaaa => m100=44332211aaaaaaaa f=*
+@ mov byte ptr [r9+r10*2+1], 7
+  43c644510107
+  SDM 2B MOV; 2A 2.1.5 (REX.X and REX.B)
+store_byte_rex_base_and_index: r9=D+10 r10=8 m20=aaaaaaaa => m20=aa07aaaa f=*
+@ mov qword ptr [r12], 5
+  49c7042405000000
+  SDM 2B MOV; 2A 2.1.5 (R12 needs a SIB byte)
+store_qword_r12_base: r12=D+30 m30=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa => m30=0500000000000000aaaaaaaaaaaaaaaa f=*
+@ mov qword ptr [r13], 5
+  49c7450005000000
+  SDM 2B MOV; 2A 2.1.5 (R13 with mod 00 would be RIP-relative, so disp8 0)
+store_qword_r13_base: r13=D+40 m40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa => m40=0500000000000000aaaaaaaaaaaaaaaa f=*
+@ mov word ptr [rsp+8], 0x1234
+  66c74424083412
+  SDM 2B MOV; 2A 2.1.5 (RSP needs a SIB byte)
+store_word_rsp_base: rsp=D+58 m60=aaaaaaaa => m60=3412aaaa f=*
+@ mov byte ptr [rbp+2], 0x7f
+  c645027f
+  SDM 2B MOV
+store_byte_rbp_disp8: rbp=D+70 m72=aaaa => m72=7faa f=*
+@ mov byte ptr [rdi+rcx], -1
+  c6040fff
+  SDM 2B MOV
+store_byte_base_plus_index: rdi=D+80 rcx=5 m84=aaaaaaaa => m84=aaffaaaa f=*
+@ mov word ptr [r8+r9*4+0x20], 0x7ffe
+  6643c7448820fe7f
+  SDM 2B MOV; 2A 2.1.5
+store_word_r8_r9_scaled: r8=D r9=10 m60=aaaaaaaa => m60=fe7faaaa f=*
+@ mov eax, 0x80000001
+  c7c001000080
+  SDM 2B MOV (C7 /0, register form); 1 3.4.1.1
+register_dword_zero_extends: rax=ffffffffffffffff => rax=0000000080000001 f=*
+@ mov ax, 0x8001
+  66c7c00180
+  SDM 2B MOV; 1 3.4.1.1
+register_word_keeps_upper_bits: rax=1122334455667788 => rax=1122334455668001 f=*
+@ mov rax, -2
+  48c7c0feffffff
+  SDM 2B MOV (REX.W C7 /0, register form)
+register_qword_sign_extends: rax=0 => rax=fffffffffffffffe f=*
+@ mov r10, 0x7fffffff
+  49c7c2ffffff7f
+  SDM 2B MOV
+register_qword_rex_b_positive: r10=ffffffffffffffff => r10=000000007fffffff f=*
+@ mov r8d, -1
+  41c7c0ffffffff
+  SDM 2B MOV; 1 3.4.1.1
+register_dword_rex_b_zero_extends: r8=1122334455667788 => r8=00000000ffffffff f=*
+@ mov al, 0x80
+  c6c080
+  SDM 2B MOV (C6 /0, register form)
+register_byte_al: rax=1122334455667788 => rax=1122334455667780 f=*
+@ mov ah, 5
+  c6c405
+  SDM 2B MOV; 1 3.4.1.1 (no REX: ModRM 4 is AH)
+register_byte_ah: rax=1122334455667788 => rax=1122334455660588 f=*
+@ mov sil, 3
+  40c6c603
+  SDM 2B MOV; 1 3.4.1.1 (a REX prefix makes ModRM 6 SIL)
+register_byte_sil: rsi=1122334455667788 => rsi=1122334455667703 f=*
+@ mov r9b, 4
+  41c6c104
+  SDM 2B MOV
+register_byte_r9b: r9=1122334455667788 => r9=1122334455667704 f=*
+@ mov byte ptr [rdi], 0x80
+  !c60780
+  SDM 3A 7.15 Interrupt 14
+store_byte_unmapped: rdi=U => ! PFW U
+store_byte_readonly: rdi=R+8 => ! PFW R+8
+@ mov word ptr [rdi], 0x8001
+  !66c7070180
+  SDM 3A 7.15 Interrupt 14
+store_word_unmapped: rdi=U => ! PFW U
+store_word_readonly: rdi=R+8 => ! PFW R+8
+@ mov dword ptr [rdi], 0x80000001
+  !c70701000080
+  SDM 3A 7.15 Interrupt 14
+store_dword_unmapped: rdi=U => ! PFW U
+store_dword_readonly: rdi=R+8 => ! PFW R+8
+@ mov qword ptr [rdi], -0x7fffffff
+  !48c70701000080
+  SDM 3A 7.15 Interrupt 14
+store_qword_unmapped: rdi=U => ! PFW U
+store_qword_readonly: rdi=R+8 => ! PFW R+8
+@ C6 with ModRM reg field 1 (no such instruction)
+  !c60f01
+  SDM 2B MOV (C6 is defined only as /0); 3A 7.15 Interrupt 6
+c6_reg_field_1_is_ud: rdi=D m0=aaaaaaaa => ! UD
+@ C7 with ModRM reg field 1 (no such instruction)
+  !c70f01000000
+  SDM 2B MOV (C7 is defined only as /0); 3A 7.15 Interrupt 6
+c7_reg_field_1_is_ud: rdi=D m0=aaaaaaaa => ! UD
+";
+
 const DECODING: &str = r"
 @ mov eax, [ebx]
   678b03
@@ -3405,6 +3546,11 @@ fn partial_registers() {
 #[test]
 fn exchange() {
     check_group(EXCHANGE);
+}
+
+#[test]
+fn immediate_stores() {
+    check_group(IMMEDIATE_STORES);
 }
 
 #[test]
