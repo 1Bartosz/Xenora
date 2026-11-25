@@ -212,7 +212,7 @@ pub enum ExitReason {
     /// The guest ended its own process with this exit status. Only the guest
     /// stops; the host keeps running.
     ProcessExit(u32),
-    /// A service has to wait; it had no effect and runs again later.
+    /// A service has to wait; the same call runs again later.
     GuestBlocked,
     /// A service completed and asked the scheduler for a turn.
     GuestYield,

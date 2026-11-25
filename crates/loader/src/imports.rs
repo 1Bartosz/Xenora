@@ -711,7 +711,7 @@ impl ImportRegistry {
                     cpu.set(Register::Rax, value);
                     cpu.set(Register::Rsp, frame.after);
                     cpu.rip = frame.resume;
-                    Ok(())
+                    self.end_call()
                 }
             };
         }
@@ -745,6 +745,7 @@ impl ImportRegistry {
                     cpu.set(Register::Rax, value);
                     cpu.set(Register::Rsp, after);
                     cpu.rip = ret_addr;
+                    return self.end_call();
                 }
                 CallbackStart::Call { task, entry, args } => {
                     let mut preserved = preserved;
@@ -803,6 +804,11 @@ impl ImportRegistry {
         cpu.set(Register::Rax, value);
         cpu.set(Register::Rsp, after);
         cpu.rip = ret_addr;
+        self.end_call()
+    }
+
+    /// Stop a guest thread whose completed call asked the scheduler for a turn.
+    fn end_call(&self) -> Result<(), ExitReason> {
         if self.hooks.as_ref().is_some_and(|h| h.switch_requested()) {
             return Err(ExitReason::GuestYield);
         }
