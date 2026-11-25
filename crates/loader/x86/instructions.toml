@@ -26,7 +26,11 @@
 # size: b = 8-bit, v = 16/32/64-bit by 0x66 and REX.W, q = 64-bit always,
 #       y = 32/64-bit only, n = no operand. imm: ib = signed 8-bit,
 #       iz = 16/32-bit sign-extended, iv = full operand size, iw = 16-bit,
-#       rel8/rel32 = signed branch offset.
+#       rel8/rel32 = signed branch offset, moffs = 64-bit absolute address.
+#
+# enc = "acc_moffs" and "moffs_acc" take no ModRM: the operands are the
+# accumulator and the memory at the moffs address, which FS or GS may override.
+# They decode as reg_rm and rm_reg would.
 
 schema = 1
 architecture = "x86-64"
@@ -486,6 +490,34 @@ op = "mov"
 opcode = 0x8B
 enc = "reg_rm"
 size = "v"
+
+[[form]]
+op = "mov"
+opcode = 0xA0
+enc = "acc_moffs"
+size = "b"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA1
+enc = "acc_moffs"
+size = "v"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA2
+enc = "moffs_acc"
+size = "b"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA3
+enc = "moffs_acc"
+size = "v"
+imm = "moffs"
 
 [[form]]
 op = "lea"

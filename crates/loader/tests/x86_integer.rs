@@ -20,7 +20,8 @@ use xenora_loader::x86_table::{FORMS, Op};
 const FIXTURE: &str = include_str!("x86/integer.txt");
 const ENTRY: u64 = 0x1000;
 const DATA: u64 = 0x2000;
-/// Address of `[rsi + 4*rdi + 16]` with RSI = DATA and RDI = 4.
+/// Address of `[rsi + 4*rdi + 16]` with RSI = DATA and RDI = 4, and the
+/// absolute address of the `movabs` accumulator forms.
 const OPERAND: u64 = DATA + 32;
 const STACK: u64 = 0x3000;
 const STACK_TOP: u64 = STACK + 0x80;
@@ -1305,6 +1306,7 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0xF2, 0xA4],             // repne movsb
         &[0xF3, 0xA6],             // repe cmpsb
         &[0x67, 0x8B, 0x06],       // address-size override
+        &[0x67, 0xA1, 0, 0, 0, 0], // mov eax, [moffs32]
         &[0x64, 0x2E, 0x8B, 0x06], // CS after FS
         &[0x66, 0x50],             // push ax
         &[0x66, 0xE8, 0, 0],       // call rel16
@@ -1706,10 +1708,17 @@ fn segment_bases_apply_to_every_addressing_form_in_both_engines() {
         (&[0x64, 0x65, 0x48, 0x8B, 0x03], GS + 0x3000),     // FS then GS
         (&[0x65, 0x64, 0x48, 0x8B, 0x03], GS + 0x3000),     // GS then FS
         (&[0x64, 0x65, 0x64, 0x48, 0x8B, 0x03], GS + 0x3000),
+        (&[0x64, 0x48, 0xA1, 0x40, 0, 0, 0, 0, 0, 0, 0], FS + 0x40), // movabs rax, fs:[0x40]
+        (
+            &[
+                0x65, 0x48, 0xA3, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            ],
+            GS - 0x10,
+        ), // movabs gs:[-0x10], rax
     ];
     for &(code, address) in cases {
         let opcode = code[code.iter().position(|byte| *byte == 0x48).unwrap() + 1];
-        let store = opcode == 0x89;
+        let store = matches!(opcode, 0x89 | 0xA3);
         for native in [false, true] {
             for mapped in [true, false] {
                 let mut memory = GuestMemory::new();
