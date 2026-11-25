@@ -298,3 +298,19 @@ mingw-w64's `COPYING` file says its runtime is under the Zope Public License
 library is GPL-3.0-or-later with the GCC Runtime Library Exception. The C
 library itself is not linked: the program imports it by name, and Xenora's
 own services answer.
+
+## C runtime mathematics
+
+`tests/compat_fixtures/crt_math.c` (#468) is a hosted C program that calls the
+49 `math.h` functions Xenora serves beyond `sqrt` and `fabs`. Built by
+`build-crt-math.sh` with mingw-w64 (UCRT flavour) and `-fno-builtin`, each call
+is an import of `api-ms-win-crt-math-l1-1-0.dll`; the arguments are volatile so
+no call is folded at compile time. The program compares every result with a
+value it carries and exits with the number of the first failed check, or 0.
+Functions that IEC 60559 fixes exactly must match to the bit; the others may be
+one unit in the last place from a reference computed with mpmath at 200 bits by
+`crt_math_reference.py`. It is built at `-O0` and `-O2`, and once at `-O1` with
+`CRT_MATH_BREAK`, which expects a wrong value for check 67, as a control.
+`crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+Provenance is as for Gate A2: the source and scripts are Xenora's, and the
+executables are test output that contains mingw-w64 startup code.
