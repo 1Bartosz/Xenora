@@ -140,22 +140,23 @@ impl FileStreams {
         if self.open.len() >= MAX_OPEN_STREAMS {
             return Err(EMFILE);
         }
-        match drive.drive_entry(&path) {
+        let create = match drive.drive_entry(&path) {
             DriveEntry::Directory => return Err(EACCES),
-            DriveEntry::File => {}
+            DriveEntry::File => false,
             DriveEntry::Missing { .. } if mode.existing => return Err(ENOENT),
             DriveEntry::Missing { parent: false } => return Err(ENOENT),
-            DriveEntry::Missing { parent: true } => {
-                if !drive.drive_create(&path) {
-                    return Err(ENOSPC);
-                }
-            }
-        }
-        // The FILE object is allocated before the contents are destroyed, so
-        // a failure here leaves an existing file as it was.
+            DriveEntry::Missing { parent: true } => true,
+        };
+        // The FILE object is allocated before the drive is touched, so a
+        // failed fopen neither creates a file nor destroys the contents of
+        // one.
         let file = memory
             .map_heap_allocation(PROCESS_HEAP, 8)
             .map_err(|_| ENOMEM)?;
+        if create && !drive.drive_create(&path) {
+            memory.release_heap_allocation(PROCESS_HEAP, file);
+            return Err(ENOSPC);
+        }
         if mode.truncate {
             drive.drive_truncate(&path);
         }

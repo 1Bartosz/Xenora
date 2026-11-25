@@ -29,6 +29,8 @@ const IMPORTS: &[(&str, &str)] = &[
     (UCRT, "fgets"),
     (UCRT, "fputs"),
     (UCRT, "_errno"),
+    (UCRT, "malloc"),
+    (UCRT, "free"),
 ];
 
 const GENERIC_READ: u64 = 0x8000_0000;
@@ -38,6 +40,7 @@ const OPEN_EXISTING: u64 = 3;
 const INVALID_HANDLE: u64 = u64::MAX;
 const ENOENT: u32 = 2;
 const EBADF: u32 = 9;
+const ENOMEM: u32 = 12;
 const EACCES: u32 = 13;
 
 // Scratch layout: a wide name, a narrow name, a mode, a transfer buffer and a
@@ -223,4 +226,38 @@ fn a_stream_whose_file_was_deleted_fails_cleanly() {
     // And the name is free again.
     assert_eq!(fopen(&mut guest, "gone.txt", "r"), 0);
     assert_eq!(errno(&mut guest), ENOENT);
+}
+
+/// A `FILE` object comes from the process heap. When the heap has no room for
+/// one, `fopen` fails with `ENOMEM` and has neither created the file nor
+/// destroyed the contents of an existing one. The heap holds 4,096 blocks.
+#[test]
+fn an_fopen_that_cannot_allocate_leaves_the_drive_alone() {
+    let mut guest = guest();
+    write_through_win32(&mut guest, "kept.txt", b"keep me");
+    // Fill the heap one byte at a time until it refuses.
+    let mut blocks = Vec::new();
+    loop {
+        let block = guest.call("malloc", &[1]);
+        if block == 0 {
+            break;
+        }
+        blocks.push(block);
+        assert!(blocks.len() <= 4096, "the heap never filled");
+    }
+    for (name, mode) in [
+        ("new.txt", "w"),
+        ("new.txt", "a"),
+        ("kept.txt", "w"),
+        ("kept.txt", "r"),
+    ] {
+        assert_eq!(fopen(&mut guest, name, mode), 0, "{name} {mode}");
+        assert_eq!(errno(&mut guest), ENOMEM, "{name} {mode}");
+    }
+    // With room for one block again: the new file was never created, and the
+    // existing one still has its contents.
+    guest.call("free", &[blocks.pop().unwrap()]);
+    assert_eq!(fopen(&mut guest, "new.txt", "r"), 0);
+    assert_eq!(errno(&mut guest), ENOENT);
+    assert_eq!(read_through_win32(&mut guest, "kept.txt"), b"keep me");
 }
