@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 54 |
-| Generated adapters | 54 |
-| Unique handler implementations | 54 |
+| Services with a declared ABI | 53 |
+| Generated adapters | 53 |
+| Unique handler implementations | 53 |
 | Implemented | 7 |
 | Partial | 44 |
-| Stub | 3 |
-| Conformance-tested through guest dispatch | 54 |
-| API-set aliases (not services) | 54 |
+| Stub | 2 |
+| Conformance-tested through guest dispatch | 53 |
+| API-set aliases (not services) | 53 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -58,7 +58,6 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `kernel32.dll!VirtualFree` | `(address: ptr, size: u64, kind: u32) -> bool32` | partial | 0 with ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS |
 | `kernel32.dll!VirtualProtect` | `(address: ptr, size: u64, protect: u32, old: out<4>) -> bool32` | stub | always: stops the guest with the runtime-limit fault; no protection changes |
 | `kernel32.dll!VirtualQuery` | `(address: ptr, information: out<48>, length: u64) -> u64` | stub | always: stops the guest with the runtime-limit fault; nothing is written |
-| `ucrtbase.dll!__C_specific_handler` | `(record: ptr, frame: ptr, context: ptr, dispatcher: ptr) -> i32` | stub | always: stops the guest with the runtime-limit fault; no exception is dispatched |
 | `ucrtbase.dll!sqrt` | `(x: f64) -> f64` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!sqrtf` | `(x: f32) -> f32` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!fabs` | `(x: f64) -> f64` | implemented | never |

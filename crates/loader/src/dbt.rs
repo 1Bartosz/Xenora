@@ -217,6 +217,12 @@ impl DbtEngine {
             let block_fn_ptr = match block {
                 Ok(ptr) => ptr,
                 Err(reason) => {
+                    // A fetch or decode fault of a guest instruction may be
+                    // caught by the guest's own exception handlers.
+                    if crate::exceptions::dispatch_fault(reason, true, cpu, memory).is_ok() {
+                        instructions_count += 1;
+                        continue;
+                    }
                     return ExecutionResult {
                         instructions_executed: instructions_count,
                         final_state: cpu.clone(),
@@ -246,6 +252,12 @@ impl DbtEngine {
             self.metrics.interpreter_fallbacks += ctx.helper_instructions as usize;
 
             if let Some(exit) = ctx.exit_reason {
+                // A guest instruction's fault may be caught by the guest's
+                // own exception handlers; RIP is at that instruction.
+                let exit = match crate::exceptions::dispatch_fault(exit, false, cpu, memory) {
+                    Ok(()) => continue,
+                    Err(stop) => stop,
+                };
                 return ExecutionResult {
                     instructions_executed: instructions_count,
                     final_state: cpu.clone(),

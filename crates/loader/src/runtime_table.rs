@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 54] = [
+pub static SERVICES: [ServiceMetadata; 53] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -447,17 +447,6 @@ pub static SERVICES: [ServiceMetadata; 54] = [
         aliases: &["api-ms-win-core-memory-l1-1-0.dll"],
         failure: "always: stops the guest with the runtime-limit fault; nothing is written",
         reference: "memoryapi.h VirtualQuery",
-        tests: &["memory_and_exception_stubs_stop_the_guest_and_change_nothing"],
-    },
-    ServiceMetadata {
-        library: "ucrtbase.dll",
-        symbol: "__C_specific_handler",
-        parameters: &[Parameter { name: "record", kind: "ptr" }, Parameter { name: "frame", kind: "ptr" }, Parameter { name: "context", kind: "ptr" }, Parameter { name: "dispatcher", kind: "ptr" }],
-        result: "i32",
-        status: ServiceStatus::Stub,
-        aliases: &["api-ms-win-crt-private-l1-1-0.dll"],
-        failure: "always: stops the guest with the runtime-limit fault; no exception is dispatched",
-        reference: "Microsoft Learn, x64 exception handling, language-specific handler",
         tests: &["memory_and_exception_stubs_stop_the_guest_and_change_nothing"],
     },
     ServiceMetadata {
@@ -951,17 +940,6 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a2 = call.u64(2)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::virtual_query(&mut context, a0, a1, a2)?;
-        Ok(result.place(cpu))
-    });
-    let s = state.clone();
-    registry.register_with_status("ucrtbase.dll", "__C_specific_handler", ServiceStatus::Stub, move |args, cpu, memory| {
-        let call = Call::new(args, cpu, memory);
-        let a0 = call.u64(0)?;
-        let a1 = call.u64(1)?;
-        let a2 = call.u64(2)?;
-        let a3 = call.u64(3)?;
-        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
-        let result: i32 = handlers::c_specific_handler(&mut context, a0, a1, a2, a3)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

@@ -122,7 +122,9 @@ that a handler rethrows with `throw;`; a plain class caught with
 through a frame with an 8 KiB stack array while two `double` values live
 across the throwing call. It prints one line per check and returns the
 number of checks that failed. Given the argument `uncaught`, it throws an
-exception nobody catches.
+exception nobody catches; since #453 that exception reaches the C runtime's
+startup filter, which lets `std::terminate` report it and `abort` end the
+process with exit code 3.
 
 `build-guest-cpp.sh` builds it too, at `-O0`, `-O1`, `-O2` and `-Os`:
 
@@ -134,6 +136,31 @@ Static linking puts GCC's SEH unwinder and C++ personality into the
 executable as guest code, so the program needs the operating system's
 exception services rather than C++ runtime services. `cargo test -p
 xenora-loader --test guest_cpp_exceptions` builds and runs it.
+
+## C structured exceptions
+
+`guest_c_seh.c` is an original freestanding C program that uses MSVC-style
+structured exception handling (#453). Each case is selected at compile time
+with `-DCASE=<name>`, reports what ran by calling `xenora_note` (a service the
+test registers under `xenora_seh.dll`) and exits with its own status. The
+cases are a divide by zero caught by `__try`/`__except` (exit 42); a filter
+that declines so the caller's filter catches it (43); a fault no filter
+accepts; a write, a read and a call to unmapped addresses whose filter reports
+the access-violation parameters (44 to 46); UD2 under a constant filter (47);
+a `__finally` one frame below the handler and one in the handler's own frame
+(48, 49); and a filter that continues execution after a raise (50). Each
+case's notes and status are stated next to it in the source.
+
+`build-guest-c-seh.sh` builds every case at `-O0`, `-O1` and `-O2`, with
+import libraries made from definition files and no C runtime:
+
+| Step | Command |
+| --- | --- |
+| Compile | `clang --target=x86_64-pc-windows-msvc -O<level> -fasync-exceptions -ffreestanding -fno-stack-protector -Wall -Wextra -Werror -Wno-unused-function -DCASE=<case> -c guest_c_seh.c` |
+| Link | `lld-link /entry:entry /subsystem:console /nodefaultlib /machine:x64 <case>.obj kernel32.lib ucrtbase.lib xenora_seh.lib` |
+
+`-fasync-exceptions` makes a CPU fault inside `__try` catchable. `cargo test
+-p xenora-loader --test guest_c_seh` builds and runs every case.
 
 ## Gate A1: a C program with no C library
 

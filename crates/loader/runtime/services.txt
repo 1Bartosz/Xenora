@@ -360,14 +360,6 @@ service kernel32.dll VirtualQuery(address: ptr, information: out<48>, length: u6
     ref memoryapi.h VirtualQuery
     test memory_and_exception_stubs_stop_the_guest_and_change_nothing
 
-service ucrtbase.dll __C_specific_handler(record: ptr, frame: ptr, context: ptr, dispatcher: ptr) -> i32
-    handler c_specific_handler
-    status stub
-    alias api-ms-win-crt-private-l1-1-0.dll
-    fails always: stops the guest with the runtime-limit fault; no exception is dispatched
-    ref Microsoft Learn, x64 exception handling, language-specific handler
-    test memory_and_exception_stubs_stop_the_guest_and_change_nothing
-
 service ucrtbase.dll sqrt(x: f64) -> f64
     handler sqrt
     status partial

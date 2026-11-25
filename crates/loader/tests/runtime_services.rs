@@ -1909,8 +1909,8 @@ fn virtual_memory_is_mapped_released_and_bounded() {
     assert_eq!(guest.call("VirtualFree", &[address, 0, RELEASE]), 0);
 }
 
-/// `VirtualProtect`, `VirtualQuery` and `__C_specific_handler` are stubs: a
-/// hosted C program imports them and does not call them on a normal run. A
+/// `VirtualProtect` and `VirtualQuery` are stubs: a hosted C program imports
+/// them and does not call them on a normal run. A
 /// call stops the guest with the runtime-limit fault. The service writes
 /// nothing: not the output buffers, not a result, not the last-error value.
 #[test]
@@ -1933,11 +1933,6 @@ fn memory_and_exception_stubs_stop_the_guest_and_change_nothing() {
         // A full MEMORY_BASIC_INFORMATION, 48 bytes, about a mapped address.
         ("VirtualQuery", [SCRATCH, SCRATCH + 0x40, 48, 0]),
         ("VirtualQuery", [0, 0, 0, 0]),
-        (
-            "__C_specific_handler",
-            [SCRATCH, STACK_TOP, SCRATCH + 0x40, SCRATCH + 0x80],
-        ),
-        ("__C_specific_handler", [0, 0, 0, 0]),
     ] {
         let (cpu, exit) = guest.run(symbol, &args);
         assert_eq!(exit, LIMIT, "{symbol} {args:x?}");
@@ -1966,8 +1961,9 @@ fn memory_and_exception_stubs_stop_the_guest_and_change_nothing() {
     guest.memory.write_u8(SCRATCH, 1).unwrap();
 }
 
-/// The three stubs resolve by the module and symbol pairs a program built
-/// with mingw-w64 14.0.0 (UCRT) imports them by, and say they are stubs.
+/// The two stubs, and `__C_specific_handler` (a stub until #453), resolve by
+/// the module and symbol pairs a program built with mingw-w64 14.0.0 (UCRT)
+/// imports them by. The stubs say they are stubs.
 #[test]
 fn memory_and_exception_stubs_bind_and_are_declared_stubs() {
     let (registry, _) = standard(0);
@@ -1985,11 +1981,6 @@ fn memory_and_exception_stubs_bind_and_are_declared_stubs() {
             "VirtualQuery",
             "kernel32.dll",
         ),
-        (
-            "api-ms-win-crt-private-l1-1-0.dll",
-            "__C_specific_handler",
-            "ucrtbase.dll",
-        ),
     ] {
         let service = registry
             .resolve(module, &named(symbol))
@@ -1998,6 +1989,17 @@ fn memory_and_exception_stubs_bind_and_are_declared_stubs() {
         assert!(std::ptr::eq(service, target), "{module}!{symbol}");
         assert_eq!(service.status, ServiceStatus::Stub, "{symbol}");
     }
+    let handler = registry
+        .resolve(
+            "api-ms-win-crt-private-l1-1-0.dll",
+            &named("__C_specific_handler"),
+        )
+        .expect("api-ms-win-crt-private-l1-1-0.dll!__C_specific_handler");
+    let canonical = registry
+        .resolve("ucrtbase.dll", &named("__C_specific_handler"))
+        .unwrap();
+    assert!(std::ptr::eq(handler, canonical));
+    assert_eq!(handler.status, ServiceStatus::Partial);
     // The real services beside them are not stubs, and the API sets forward
     // only the symbols listed for them.
     let alloc = registry
@@ -2019,10 +2021,7 @@ fn memory_and_exception_stubs_bind_and_are_declared_stubs() {
         .filter(|service| service.status == ServiceStatus::Stub)
         .map(|service| service.symbol)
         .collect();
-    assert_eq!(
-        stubs,
-        ["VirtualProtect", "VirtualQuery", "__C_specific_handler"]
-    );
+    assert_eq!(stubs, ["VirtualProtect", "VirtualQuery"]);
 }
 
 #[test]

@@ -1206,16 +1206,6 @@ pub(crate) mod handlers {
         Err(RUNTIME_LIMIT)
     }
 
-    pub fn c_specific_handler(
-        _: &mut ServiceContext<'_>,
-        _record: u64,
-        _frame: u64,
-        _context: u64,
-        _dispatcher: u64,
-    ) -> Outcome<i32> {
-        Err(RUNTIME_LIMIT)
-    }
-
     /// The guest MXCSR is not visible to a service, so results use the default
     /// rounding and raise no guest flags; the registry marks them partial.
     const DEFAULT_MXCSR: u32 = crate::cpu::Mxcsr::RESET;

@@ -7,7 +7,9 @@
 //! personality as guest code. This module is the operating-system side that
 //! runtime calls: function lookup over the image's exception directory,
 //! virtual unwinding, context capture, `RaiseException` with a search phase
-//! and `RtlUnwindEx` with an unwind phase.
+//! and `RtlUnwindEx` with an unwind phase. Guest CPU faults enter the same
+//! search ([`faults`], #453), and `__C_specific_handler` runs MSVC-style C
+//! scope tables ([`scope`]).
 //!
 //! The layouts and constants come from Microsoft's public x64
 //! exception-handling pages and were checked against the mingw-w64 14.0.0
@@ -16,8 +18,14 @@
 //! or with an Xbox console.
 
 use crate::cpu::{CpuState, ExitReason, Register};
-use crate::imports::{ENTRY_RETURN, ImportRegistry, ServiceStatus, Win64Args};
+use crate::imports::{CALLBACK_RETURN, ENTRY_RETURN, ImportRegistry, ServiceStatus, Win64Args};
 use crate::memory::{GuestMemory, MemoryError};
+
+mod faults;
+mod scope;
+
+pub(crate) use faults::dispatch_fault;
+pub(crate) use scope::{SCOPE_RETURN, ScopeWalk, scope_resume};
 
 const KERNEL32: &str = "kernel32.dll";
 
@@ -34,7 +42,11 @@ const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
 const EXCEPTION_UNWINDING: u32 = 0x2;
 const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
 const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
-const PHASE_FLAGS: u32 = EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND | EXCEPTION_TARGET_UNWIND;
+const EXCEPTION_COLLIDED_UNWIND: u32 = 0x40;
+const PHASE_FLAGS: u32 = EXCEPTION_UNWINDING
+    | EXCEPTION_EXIT_UNWIND
+    | EXCEPTION_TARGET_UNWIND
+    | EXCEPTION_COLLIDED_UNWIND;
 const STATUS_UNWIND: u32 = 0xC000_0027;
 const EXCEPTION_MAXIMUM_PARAMETERS: u64 = 15;
 
@@ -46,11 +58,13 @@ const CONTEXT_SIZE: u64 = 0x4D0;
 const CONTEXT_FULL: u32 = 0x0010_000B;
 const DISPATCHER_SIZE: u64 = 0x50;
 const RECORD_SIZE: u64 = 0x98;
-/// Guest stack the dispatcher uses below its caller: a CONTEXT, a
-/// DISPATCHER_CONTEXT and an EXCEPTION_RECORD.
-const SCRATCH: u64 = CONTEXT_SIZE + DISPATCHER_SIZE + RECORD_SIZE;
+/// Guest stack the dispatcher uses below its caller: the CONTEXT of the frame
+/// being looked at, a DISPATCHER_CONTEXT, the EXCEPTION_RECORD and, 16-byte
+/// aligned, the CONTEXT of the raise or fault itself.
+const SCRATCH: u64 = EXCEPTION_CONTEXT_AT + CONTEXT_SIZE;
 const DISPATCHER_AT: u64 = CONTEXT_SIZE;
 const RECORD_AT: u64 = CONTEXT_SIZE + DISPATCHER_SIZE;
+const EXCEPTION_CONTEXT_AT: u64 = (RECORD_AT + RECORD_SIZE + 15) & !15;
 
 /// Frames one dispatch may walk, and chained unwind entries one frame may have.
 const MAX_FRAMES: u32 = 4096;
@@ -624,6 +638,35 @@ pub(crate) struct Dispatch {
     /// Guest address of the CONTEXT, DISPATCHER_CONTEXT and EXCEPTION_RECORD.
     scratch: u64,
     frames: u32,
+    /// The CPU fault this search started from. A search that no frame
+    /// accepts ends the guest with it, at the faulting instruction.
+    fault: Option<ExitReason>,
+    /// The search started from an instruction-fetch fault, whose address can
+    /// be outside every image: that first frame is unwound as a leaf.
+    fetch_fault: bool,
+    /// The next frame may be outside every image (see `fetch_fault`).
+    leaf: bool,
+}
+
+impl Dispatch {
+    fn search(
+        origin: CpuState,
+        scratch: u64,
+        fault: Option<ExitReason>,
+        fetch_fault: bool,
+    ) -> Self {
+        Self {
+            unwind: None,
+            next: origin.clone(),
+            origin,
+            establisher: 0,
+            scratch,
+            frames: 0,
+            fault,
+            fetch_fault,
+            leaf: fetch_fault,
+        }
+    }
 }
 
 /// The caller's context at a service entry, and the scratch area below it.
@@ -632,6 +675,11 @@ fn caller(cpu: &CpuState, memory: &GuestMemory) -> Result<(CpuState, u64), ExitR
     let mut origin = cpu.clone();
     origin.rip = read_u64(memory, rsp)?;
     origin.set(Register::Rsp, at(rsp, 8)?);
+    Ok((origin, scratch_below(rsp, memory)?))
+}
+
+/// A writable dispatcher scratch area, and room for a handler call, below `rsp`.
+fn scratch_below(rsp: u64, memory: &GuestMemory) -> Result<u64, ExitReason> {
     let scratch = rsp
         .checked_sub(SCRATCH)
         .ok_or(fault(MemoryError::Overflow))?
@@ -642,7 +690,17 @@ fn caller(cpu: &CpuState, memory: &GuestMemory) -> Result<(CpuState, u64), ExitR
     memory
         .check_write(call, (SCRATCH + 40) as usize)
         .map_err(fault)?;
-    Ok((origin, scratch))
+    Ok(scratch)
+}
+
+/// Whether `rip` is where a guest stack ends: the return address of the
+/// entry point, of a thread's start routine, or of a guest callback a host
+/// service made. No guest frame lies beyond it to search.
+fn end_of_stack(rip: u64) -> bool {
+    matches!(
+        rip,
+        0 | ENTRY_RETURN | CALLBACK_RETURN | crate::services::threads::THREAD_RETURN
+    )
 }
 
 /// Walk frames from `dispatch.next` until a handler must run or the dispatch ends.
@@ -662,17 +720,33 @@ fn walk(
                 .get(&(teb, frame.get(Register::Rsp)))
                 .ok_or(ExitReason::InvalidUnwind)?;
             dispatch.next = outer.origin.clone();
+            dispatch.leaf = outer.fetch_fault;
             continue;
         }
-        if frame.rip == ENTRY_RETURN || frame.rip == 0 {
-            return Err(match dispatch.unwind {
-                None => ExitReason::UnhandledException(
-                    memory
-                        .read_u32(dispatch.scratch + RECORD_AT)
-                        .map_err(fault)?,
-                ),
-                Some(_) => ExitReason::InvalidUnwind,
-            });
+        if frame.rip == SCOPE_RETURN {
+            // A filter or termination handler `__C_specific_handler` called:
+            // the stack continues at that handler's own caller.
+            let walk = memory
+                .scope_frames
+                .get(&(teb, frame.get(Register::Rsp)))
+                .ok_or(ExitReason::InvalidUnwind)?;
+            dispatch.next = walk.caller(memory)?;
+            continue;
+        }
+        if end_of_stack(frame.rip) {
+            if dispatch.unwind.is_some() {
+                return Err(ExitReason::InvalidUnwind);
+            }
+            let code = memory
+                .read_u32(dispatch.scratch + RECORD_AT)
+                .map_err(fault)?;
+            if let Some(reason) = dispatch.fault {
+                // The guest stops at the faulting instruction, not inside
+                // the dispatcher or a handler.
+                *cpu = dispatch.origin;
+                return Err(reason);
+            }
+            return Err(ExitReason::UnhandledException(code));
         }
         dispatch.frames += 1;
         if dispatch.frames > MAX_FRAMES {
@@ -689,7 +763,9 @@ fn walk(
                 virtual_unwind(memory, base, entry, &mut next, handler_type)?,
                 Some((base, entry)),
             ),
-            None if !in_image(memory, frame.rip) => return Err(ExitReason::InvalidUnwind),
+            None if !dispatch.leaf && !in_image(memory, frame.rip) => {
+                return Err(ExitReason::InvalidUnwind);
+            }
             None => {
                 let establisher = next.get(Register::Rsp);
                 next.rip = pop(memory, &mut next)?;
@@ -714,6 +790,7 @@ fn walk(
         }
         dispatch.establisher = found.establisher;
         dispatch.next = next;
+        dispatch.leaf = false;
         match (found.handler, image) {
             (Some((handler, data)), Some((base, entry))) => {
                 return enter(
@@ -748,6 +825,15 @@ fn enter(
         .write_u32(record + 4, flags & !PHASE_FLAGS | phase)
         .map_err(fault)?;
     write_context(memory, s, frame)?;
+    // Exception handlers get the context of the raise or fault, which they
+    // may change before continuing execution; termination handlers get the
+    // context of the frame being unwound (Microsoft Learn, x64 exception
+    // handling, "Language-specific handler").
+    let context = if dispatch.unwind.is_some() {
+        s
+    } else {
+        s + EXCEPTION_CONTEXT_AT
+    };
     let d = s + DISPATCHER_AT;
     let target_ip = dispatch.unwind.map_or(0, |t| t.ip);
     for (offset, value) in [
@@ -775,7 +861,7 @@ fn enter(
     memory.exception_frames.insert(key, dispatch);
     cpu.set(Register::Rcx, record);
     cpu.set(Register::Rdx, establisher);
-    cpu.set(Register::R8, s);
+    cpu.set(Register::R8, context);
     cpu.set(Register::R9, d);
     cpu.set(Register::Rsp, call);
     cpu.rip = handler;
@@ -800,6 +886,9 @@ fn install(
         .retain(|&(t, key), _| t != teb || key >= rsp);
     memory
         .callback_frames
+        .retain(|&(t, key), _| t != teb || key >= rsp);
+    memory
+        .scope_frames
         .retain(|&(t, key), _| t != teb || key >= rsp);
     *cpu = frame;
     Ok(())
@@ -831,9 +920,17 @@ pub(crate) fn resume(cpu: &mut CpuState, memory: &mut GuestMemory) -> Result<(),
             if flags & EXCEPTION_NONCONTINUABLE != 0 {
                 return Err(ExitReason::InvalidUnwind);
             }
-            // ponytail: resumes at the raise point; a handler's edits to the
-            // CONTEXT it was given are not applied.
-            *cpu = dispatch.origin;
+            // Continue with the context the handler was given, including any
+            // change it made: after a raise this returns from the raise, and
+            // after a fault it runs the faulting instruction again unless the
+            // handler moved RIP.
+            let mut resumed = dispatch.origin;
+            load_registers(
+                memory,
+                dispatch.scratch + EXCEPTION_CONTEXT_AT,
+                &mut resumed,
+            )?;
+            *cpu = resumed;
             Ok(())
         }
         _ => Err(ExitReason::InvalidUnwind),
@@ -872,15 +969,8 @@ fn raise_exception(
             .write_u64(record + 0x20 + index * 8, value)
             .map_err(fault)?;
     }
-    let dispatch = Dispatch {
-        unwind: None,
-        next: origin.clone(),
-        origin,
-        establisher: 0,
-        scratch,
-        frames: 0,
-    };
-    walk(dispatch, cpu, memory)
+    write_context(memory, scratch + EXCEPTION_CONTEXT_AT, &origin)?;
+    walk(Dispatch::search(origin, scratch, None, false), cpu, memory)
 }
 
 /// `RtlUnwindEx(target_frame, target_ip, record, return_value, context, history)`.
@@ -894,28 +984,39 @@ fn unwind_ex(
         return Err(ExitReason::InvalidUnwind);
     }
     let (origin, scratch) = caller(cpu, memory)?;
+    let target = Target {
+        frame: args.rcx,
+        ip: args.rdx,
+        value: args.r9,
+    };
+    unwind(origin, scratch, target, args.r8, cpu, memory)
+}
+
+/// Start an unwind to `target` from `origin`, using the scratch area at
+/// `scratch`, with a copy of the record at `source` (or a `STATUS_UNWIND`
+/// record when it is 0).
+fn unwind(
+    origin: CpuState,
+    scratch: u64,
+    target: Target,
+    source: u64,
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+) -> Result<(), ExitReason> {
     let record = scratch + RECORD_AT;
-    if args.r8 == 0 {
+    if source == 0 {
         memory
             .write_bytes(record, &[0; RECORD_SIZE as usize])
             .map_err(fault)?;
         memory.write_u32(record, STATUS_UNWIND).map_err(fault)?;
     } else {
         let mut copy = [0; RECORD_SIZE as usize];
-        memory.read_bytes(args.r8, &mut copy).map_err(fault)?;
+        memory.read_bytes(source, &mut copy).map_err(fault)?;
         memory.write_bytes(record, &copy).map_err(fault)?;
     }
     let dispatch = Dispatch {
-        unwind: Some(Target {
-            frame: args.rcx,
-            ip: args.rdx,
-            value: args.r9,
-        }),
-        next: origin.clone(),
-        origin,
-        establisher: 0,
-        scratch,
-        frames: 0,
+        unwind: Some(target),
+        ..Dispatch::search(origin, scratch, None, false)
     };
     walk(dispatch, cpu, memory)
 }
@@ -928,6 +1029,7 @@ pub(crate) fn register(registry: &mut ImportRegistry) {
         raise_exception,
     );
     registry.register_context_service(KERNEL32, "RtlUnwindEx", ServiceStatus::Partial, unwind_ex);
+    scope::register(registry);
     registry.register_with_status(
         KERNEL32,
         "RtlCaptureContext",

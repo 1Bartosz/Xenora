@@ -133,6 +133,13 @@ pub struct GuestMemory {
     /// Exception dispatches waiting for a guest handler, by TEB and stack slot.
     pub(crate) exception_frames:
         std::collections::BTreeMap<(u64, u64), crate::exceptions::Dispatch>,
+    /// `__C_specific_handler` calls waiting for a guest filter or termination
+    /// handler, by TEB and stack slot.
+    pub(crate) scope_frames: std::collections::BTreeMap<(u64, u64), crate::exceptions::ScopeWalk>,
+    /// The unmapped address the last failed checked write stopped at. A data
+    /// fault at this address was a write, which an access-violation record
+    /// reports; [`MemoryError::UnmappedAddress`] does not say.
+    pub(crate) write_fault: Option<u64>,
 }
 
 impl GuestMemory {
@@ -531,7 +538,11 @@ impl GuestMemory {
             self.regions[index].data[range].copy_from_slice(src);
             return Ok(());
         }
-        self.write_checked(address, src, Some("write"))
+        let result = self.write_checked(address, src, Some("write"));
+        if let Err(MemoryError::UnmappedAddress(at)) = result {
+            self.write_fault = Some(at);
+        }
+        result
     }
 
     /// Read raw bytes from guest memory at the specified address, checking permissions.
