@@ -48,7 +48,7 @@ None of it has been compared with x86 hardware.
 
 ## Locked instructions
 
-XADD and CMPXCHG exist for 8-, 16-, 32- and 64-bit register and memory destinations. The LOCK prefix (F0) is accepted on exactly the forms the registry marks `lock = true`, and only when the destination is memory. Today those are the memory forms of XADD and CMPXCHG. LOCK anywhere else is an illegal instruction, as the Intel SDM (Vol. 2, "LOCK") specifies for a register destination or an instruction that cannot be locked. LOCK on the other instructions the SDM allows (ADD, ADC, AND, BTC, BTR, BTS, DEC, INC, NEG, NOT, OR, SBB, SUB, XOR and XCHG), CMPXCHG8B and CMPXCHG16B are not implemented and stay rejected.
+XADD and CMPXCHG exist for 8-, 16-, 32- and 64-bit register and memory destinations. The LOCK prefix (F0) is accepted on exactly the forms the registry marks, and only when the destination is memory: ADD, ADC, AND, DEC, INC, NEG, NOT, OR, SBB, SUB, XOR, XCHG, XADD and CMPXCHG at every width, and BTC, BTR and BTS with an immediate. That is the list the Intel SDM gives (Vol. 2, "LOCK"), without CMPXCHG8B and CMPXCHG16B, which are not implemented, and without bit tests of memory by a register index, which are not implemented either. LOCK anywhere else is an illegal instruction, as the SDM specifies for a register destination or an instruction that cannot be locked.
 
 These rules hold for both engines and are what a guest scheduler has to preserve:
 
@@ -56,9 +56,9 @@ These rules hold for both engines and are what a guest scheduler has to preserve
 - **Alignment.** A locked operand may have any alignment and may span two mapped regions.
 - **Compare failure.** CMPXCHG compares the accumulator with the destination as CMP would and sets all six status flags from it. On a match it stores the source and leaves the accumulator alone. On a mismatch it loads the destination into the accumulator and stores the destination's old value back, so the destination is written either way and a mismatch on memory that cannot be written still faults. With a 32-bit register destination both stores clear the upper half of that register, following the SDM's operation text.
 - **Faults.** If any byte of the operand cannot be read or written, the instruction faults before memory, registers or flags change.
-- **Lowering.** The DBT runs these forms on the shared semantics. They are not lowered to ARM64 atomic instructions, which could only be judged against concurrent guest threads.
+- **Lowering.** The DBT runs every locked form on the shared semantics, also where it lowers the unlocked form to ARM64. They are not lowered to ARM64 atomic instructions, which could only be judged against concurrent guest threads.
 
-The SDM cases for these forms in `tests/cpu_known_answers.rs` were written before this implementation, by another contributor. `tests/x86_atomic.rs` adds the LOCK rules, both compare outcomes at every width, unaligned operands and faults. None of it has been compared with x86 hardware, and nothing here establishes multi-thread behaviour.
+The SDM cases for these forms in `tests/cpu_known_answers.rs` were written before this implementation, by another contributor. `tests/x86_atomic.rs` adds the LOCK rules, both compare outcomes at every width, unaligned operands and faults. It also holds hand-derived results and flags for every other lockable form at every width (#451); those, like the implementation, are by one contributor. None of it has been compared with x86 hardware, and nothing here establishes multi-thread behaviour.
 
 ## Memory ordering and fences
 
