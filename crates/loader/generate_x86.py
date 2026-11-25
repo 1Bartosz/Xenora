@@ -195,7 +195,7 @@ def load(text):
                 fail(f"{where}: rm must be a ModRM r/m field value 0-7")
             if not form.get("register_only") or form["digit"] is None:
                 fail(f"{where}: a fixed r/m field needs register_only and a digit")
-        # A general register or memory exchanged with a vector lane: narrow ones
+        # A general register or memory exchanged with a vector lane: fixed ones
         # name their memory width, wide ones are 4 or 8 bytes by REX.W.
         lane = form["enc"] in ("xmm_gpr_imm", "gpr_xmm_imm")
         sourced = form["enc"] in XMM_RM
@@ -203,8 +203,8 @@ def load(text):
             fail(f"{where}: source size does not match the encoding")
         if form["src"] and not sourced and form["enc"] == "rm" and form["size"] != "n":
             fail(f"{where}: source size does not match the encoding")
-        if lane and (form["size"] not in ("x", "y") or (form["size"] == "x") != (form["src"] in ("b", "w"))):
-            fail(f"{where}: a lane is a byte or word by source, or wide by size")
+        if lane and (form["size"] not in ("x", "y") or (form["size"] == "x") != (form["src"] in ("b", "w", "d"))):
+            fail(f"{where}: a lane is a byte, word or doubleword by source, or wide by size")
         if not lane and (form["size"] == "x") != (form["enc"] in XMM_RM - {"reg_xmm", "reg_xmm_imm"}):
             fail(f"{where}: XMM size does not match the encoding")
         if form.get("lock") and (form["enc"] not in RM_DESTINATIONS or form.get("register_only")):

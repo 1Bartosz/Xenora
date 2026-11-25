@@ -9,7 +9,9 @@
 //! engines refuse. The witness must be removed before its bit can be set.
 //!
 //! Bit positions and the feature each instruction belongs to are from the
-//! Intel SDM Vol. 2, CPUID and the instruction entries. Encodings were
+//! Intel SDM Vol. 2, CPUID and the instruction entries. A feature whose own
+//! instructions all run stays clear while one it builds on is clear, and has
+//! its instruction list checked instead. Encodings were
 //! assembled with `clang -target x86_64-apple-macos` and read with `objdump`.
 
 use xenora_loader::cpu::{
@@ -228,7 +230,6 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
         ("SSSE3", 1, ECX, 9, &[0x0F, 0x38, 0x00, 0xC1]), // pshufb mm0, mm1
         ("FMA", 1, ECX, 12, &[0xC4, 0xE2, 0x71, 0x98, 0xC2]), // vfmadd132ps xmm0, xmm1, xmm2
         ("CMPXCHG16B", 1, ECX, 13, &[0x48, 0x0F, 0xC7, 0x0E]), // cmpxchg16b [rsi]
-        ("SSE4.1", 1, ECX, 19, &[0x66, 0x0F, 0x3A, 0x08, 0xC1, 0x00]), // roundps xmm0, xmm1, 0
         ("SSE4.2", 1, ECX, 20, &[0xF2, 0x0F, 0x38, 0xF1, 0xC1]), // crc32 eax, ecx
         ("MOVBE", 1, ECX, 22, &[0x0F, 0x38, 0xF0, 0x06]), // movbe eax, [rsi]
         ("AESNI", 1, ECX, 25, &[0x66, 0x0F, 0x38, 0xDC, 0xC1]), // aesenc xmm0, xmm1
@@ -265,6 +266,44 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
             assert_eq!(state, cpu, "{feature} on the {engine}");
         }
     }
+}
+
+/// SDM Vol. 1, 12.12.2: an application checks for SSE, SSE2, SSE3 and SSSE3 before
+/// SSE4.1. Those are not complete, so the bit stays clear although every SSE4.1
+/// instruction runs. Each has a fixture that the tests of
+/// `x86_vector.rs` or `x86_float.rs` run in both engines.
+#[test]
+fn sse4_1_is_complete_but_unreported_while_its_prerequisites_are() {
+    let fixtures = [
+        include_str!("x86/vector.txt"),
+        include_str!("x86/float.txt"),
+    ]
+    .concat();
+    let has = |name: &str, memory: bool| {
+        fixtures.lines().any(|line| {
+            let text = line.split_once(" | ").unwrap().1;
+            text.split(' ').next() == Some(name) && text.contains(" ptr ") == memory
+        })
+    };
+    // Every instruction the SDM assigns to the feature. MOVNTDQA has no register
+    // form; PEXTRW belongs to it only as a store.
+    let names = "blendpd blendps blendvpd blendvps dppd dpps extractps insertps mpsadbw packusdw \
+                 pblendvb pblendw pcmpeqq pextrb pextrd pextrq phminposuw pinsrb pinsrd pinsrq \
+                 pmaxsb pmaxsd pmaxud pmaxuw pminsb pminsd pminud pminuw pmovsxbw pmovsxbd \
+                 pmovsxbq pmovsxwd pmovsxwq pmovsxdq pmovzxbw pmovzxbd pmovzxbq pmovzxwd \
+                 pmovzxwq pmovzxdq pmuldq pmulld ptest roundpd roundps roundsd roundss";
+    for name in names.split_whitespace() {
+        assert!(has(name, false) && has(name, true), "{name}");
+    }
+    assert!(has("movntdqa", true) && has("pextrw", true));
+
+    let [_, _, ecx, edx] = cpuid(1, 0);
+    let prerequisites = [edx >> 25, edx >> 26, ecx, ecx >> 9].map(|bit| bit & 1);
+    assert_eq!(
+        (prerequisites, ecx >> 19 & 1),
+        ([0; 4], 0),
+        "SSE, SSE2, SSE3 and SSSE3 come before SSE4.1"
+    );
 }
 
 #[test]

@@ -10,7 +10,7 @@
 
 use xenora_loader::cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, Mxcsr, RFlags};
 use xenora_loader::dbt::{DbtEngine, is_native};
-use xenora_loader::memory::{GuestMemory, MemoryPermissions};
+use xenora_loader::memory::{GuestMemory, MemoryError, MemoryPermissions};
 use xenora_loader::x86_decode::{DecodeError, RmOperand, decode};
 use xenora_loader::x86_table::Op;
 
@@ -435,7 +435,7 @@ fn reference(m: &mut Machine, text: &str) {
         let start = match name {
             _ if name.starts_with("movh") => 8,
             // The lane number wraps at the number of lanes.
-            _ if name.starts_with("pextr") => {
+            _ if name.starts_with("pextr") || name == "extractps" => {
                 parts[2].parse::<usize>().unwrap() % (16 / bytes) * bytes
             }
             _ => 0,
@@ -463,6 +463,7 @@ fn reference(m: &mut Machine, text: &str) {
                 let lanes = split(&source, suffix(name));
                 lanes[parts[2].parse::<usize>().unwrap() % lanes.len()] as u64
             }
+            "extractps" => split(&source, 4)[parts[2].parse::<usize>().unwrap() % 4] as u64,
             _ => split(&source, bytes)[0] as u64,
         };
         return;
@@ -539,18 +540,38 @@ fn reference(m: &mut Machine, text: &str) {
             let at = imm.unwrap() % (16 / wide) * wide;
             out[at..at + wide].copy_from_slice(&source[..wide]);
         }
-        "pblendvb" => {
+        "pblendvb" | "blendvps" | "blendvpd" => {
+            // The last byte of a lane holds its sign.
+            let bytes = [1, 4, 8][["pblendvb", "blendvps", "blendvpd"]
+                .iter()
+                .position(|other| *other == name)
+                .unwrap()];
             for (at, byte) in out.iter_mut().enumerate() {
-                if m.xmm[0][at] >= 128 {
+                if m.xmm[0][at / bytes * bytes + bytes - 1] >= 128 {
                     *byte = source[at];
                 }
             }
         }
-        "pblendw" => {
-            for word in 0..8 {
-                if imm.unwrap() / 2usize.pow(word) % 2 == 1 {
-                    let at = 2 * word as usize;
-                    out[at..at + 2].copy_from_slice(&source[at..at + 2]);
+        "pblendw" | "blendps" | "blendpd" => {
+            let bytes = match name {
+                "pblendw" => 2,
+                "blendps" => 4,
+                _ => 8,
+            };
+            for (at, byte) in out.iter_mut().enumerate() {
+                if imm.unwrap() / 2usize.pow((at / bytes) as u32) % 2 == 1 {
+                    *byte = source[at];
+                }
+            }
+        }
+        "insertps" => {
+            let digits = [imm.unwrap() / 64, imm.unwrap() / 16 % 4];
+            let from = if memory { 0 } else { 4 * digits[0] };
+            let value = source[from..from + 4].to_vec();
+            out[4 * digits[1]..4 * digits[1] + 4].copy_from_slice(&value);
+            for single in 0..4 {
+                if imm.unwrap() / 2usize.pow(single) % 2 == 1 {
+                    out[4 * single as usize..][..4].fill(0);
                 }
             }
         }
@@ -773,6 +794,11 @@ fn only_the_operand_width_is_accessed_at_the_end_of_a_region() {
         (&[0xF3, 0x0F, 0x7E, 0x03], 8),             // movq xmm0, [rbx]
         (&[0x66, 0x0F, 0xC4, 0x03, 0x01], 2),       // pinsrw xmm0, [rbx], 1
         (&[0x66, 0x0F, 0x3A, 0x20, 0x03, 0x01], 1), // pinsrb xmm0, [rbx], 1
+        (&[0x66, 0x0F, 0x3A, 0x21, 0x03, 0xD8], 4), // insertps xmm0, [rbx], 0xD8
+        (&[0x66, 0x0F, 0x3A, 0x17, 0x03, 0x03], 4), // extractps [rbx], xmm0, 3
+        (&[0x66, 0x48, 0x0F, 0x3A, 0x17, 0x03, 0x03], 4), // the same with REX.W
+        (&[0x66, 0x0F, 0x3A, 0x0A, 0x03, 0x00], 4), // roundss xmm0, [rbx], 0
+        (&[0x66, 0x0F, 0x3A, 0x0B, 0x03, 0x00], 8), // roundsd xmm0, [rbx], 0
         (&[0x66, 0x0F, 0x3A, 0x22, 0x03, 0x01], 4), // pinsrd xmm0, [rbx], 1
         (&[0x66, 0x48, 0x0F, 0x3A, 0x22, 0x03, 0x01], 8), // pinsrq xmm0, [rbx], 1
         (&[0x66, 0x0F, 0x3A, 0x14, 0x03, 0x01], 1), // pextrb [rbx], xmm0, 1
@@ -885,11 +911,13 @@ fn unsupported_vector_encodings_are_rejected() {
         &[0xF0, 0x66, 0x0F, 0x38, 0x00, 0x06],       // LOCK
         &[0x66, 0x0F, 0x38, 0x0C, 0xC1],             // unassigned without VEX
         &[0x66, 0x0F, 0x38, 0x2A, 0xC1],             // movntdqa with a register
-        &[0x66, 0x0F, 0x38, 0x14, 0xC1],             // blendvps (floating point)
         &[0x66, 0x0F, 0x38, 0x37, 0xC1],             // pcmpgtq (SSE4.2)
-        &[0x66, 0x0F, 0x3A, 0x08, 0xC1, 0x00],       // roundps (floating point)
-        &[0x66, 0x0F, 0x3A, 0x17, 0xC1, 0x00],       // extractps (floating point)
-        &[0x66, 0x0F, 0x3A, 0x21, 0xC1, 0x00],       // insertps (floating point)
+        &[0x0F, 0x3A, 0x08, 0xC1, 0x00],             // roundps without 66
+        &[0xF3, 0x66, 0x0F, 0x3A, 0x0A, 0xC1, 0x00], // F3 over the 66 of roundss
+        &[0xF2, 0x66, 0x0F, 0x38, 0x14, 0xC1],       // F2 over the 66 of blendvps
+        &[0xF0, 0x66, 0x0F, 0x3A, 0x17, 0x06, 0x00], // LOCK extractps
+        &[0x66, 0x0F, 0x38, 0x13, 0xC1],             // unassigned without VEX
+        &[0x66, 0x0F, 0x3A, 0x18, 0xC1, 0x00],       // unassigned without VEX
         &[0x66, 0x0F, 0x3A, 0x62, 0xC1, 0x00],       // pcmpistrm (SSE4.2)
         &[0x66, 0x0F, 0x38, 0xDC, 0xC1],             // aesenc
         &[0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x00],       // pclmulqdq
@@ -1089,6 +1117,375 @@ fn lanes_do_not_use_the_legacy_high_byte_registers() {
         assert_eq!(result.final_state.xmm[1].to_le_bytes()[..2], [0x44, 0x77]);
         assert_eq!(result.final_state.gpr[4], 0x44);
         assert_eq!(result.final_state.gpr[0], machine.gpr[0]);
+    }
+}
+
+/// Both vector fixtures, with the byte position after the legacy prefixes.
+fn all_vector_cases() -> Vec<(Case, usize)> {
+    cases()
+        .into_iter()
+        .chain(parse(include_str!("x86/float.txt")))
+        .map(|case| {
+            let prefixes = case
+                .code
+                .iter()
+                .take_while(|byte| matches!(byte, 0x66 | 0xF2 | 0xF3))
+                .count();
+            (case, prefixes)
+        })
+        .collect()
+}
+
+/// Exit reason, state and data after one instruction, with the instruction
+/// pointer relative to the end of the instruction.
+fn outcome(
+    native: bool,
+    cpu: &CpuState,
+    code: &[u8],
+    operand: &Bytes,
+) -> (ExitReason, CpuState, Vec<u8>) {
+    let machine = Machine {
+        gpr: cpu.gpr,
+        xmm: [[0; 16]; 16],
+        operand: *operand,
+        mxcsr: 0,
+        flags: FLAGS,
+    };
+    let (_, mut memory) = load(&machine, code, MemoryPermissions::READ_WRITE);
+    let result = run(native, cpu, &mut memory, 1);
+    let mut state = result.final_state;
+    state.rip = state.rip.wrapping_sub(code.len() as u64);
+    (result.exit_reason, state, data(&memory))
+}
+
+/// All exceptions masked, the other controls of a random machine kept.
+fn masked(cpu: &mut CpuState) {
+    cpu.mxcsr.0 |= 0x1F80;
+}
+
+/// The bits of an instruction that REX.W cannot change: SDM Vol. 2 lists no
+/// REX.W form for these mnemonics.
+#[test]
+fn rex_w_changes_no_form_that_ignores_it() {
+    let mut random = Random(0xD1CE);
+    let mut checked = 0;
+    for (case, prefixes) in all_vector_cases() {
+        let name = case.text.split(' ').next().unwrap();
+        let sized = ["movd", "movq", "pextrd", "pextrq", "pinsrd", "pinsrq"].contains(&name)
+            || name.contains("2si")
+            || name.starts_with("cvtsi2");
+        if sized {
+            continue;
+        }
+        let mut code = case.code.clone();
+        if code[prefixes] & 0xF0 == 0x40 {
+            code[prefixes] |= 8;
+        } else {
+            code.insert(prefixes, 0x48);
+        }
+        let machine = random.machine();
+        let (mut cpu, _) = load(&machine, &case.code, MemoryPermissions::READ_WRITE);
+        masked(&mut cpu);
+        for native in [false, true] {
+            let plain = outcome(native, &cpu, &case.code, &machine.operand);
+            assert_eq!(plain.0, ExitReason::StepLimitExceeded, "{}", case.text);
+            let wide = outcome(native, &cpu, &code, &machine.operand);
+            assert_eq!(wide, plain, "{} as {code:02X?}", case.text);
+        }
+        checked += 1;
+    }
+    assert!(checked > 900, "{checked}");
+}
+
+#[test]
+fn segment_overrides_add_their_base_to_every_memory_operand() {
+    let mut random = Random(0xF5);
+    let mut checked = 0;
+    for (case, _) in all_vector_cases() {
+        if !case.text.contains(" ptr ") {
+            continue;
+        }
+        let machine = random.machine();
+        let (mut cpu, _) = load(&machine, &case.code, MemoryPermissions::READ_WRITE);
+        masked(&mut cpu);
+        // The other segment's base must not be used.
+        (cpu.fs_base, cpu.gs_base) = (0x1_0000, 0x2_0000);
+        for native in [false, true] {
+            let plain = outcome(native, &cpu, &case.code, &machine.operand);
+            assert_eq!(plain.0, ExitReason::StepLimitExceeded, "{}", case.text);
+            for (prefix, base) in [(0x64, 0x1_0000), (0x65, 0x2_0000), (0x2E, 0)] {
+                let code = [&[prefix][..], &case.code].concat();
+                let mut moved = cpu.clone();
+                // The sum wraps around the address space. Alignment is judged
+                // on the linear address, so an odd base does not matter.
+                moved.gpr[6] = DATA.wrapping_sub(base + 3);
+                if base != 0 {
+                    moved.fs_base += 3;
+                    moved.gs_base += 3;
+                } else {
+                    moved.gpr[6] = DATA;
+                }
+                let mut result = outcome(native, &moved, &code, &machine.operand);
+                assert_eq!(result.0, plain.0, "{prefix:02x} {}", case.text);
+                result.1.gpr[6] = plain.1.gpr[6];
+                (result.1.fs_base, result.1.gs_base) = (plain.1.fs_base, plain.1.gs_base);
+                assert_eq!(result, plain, "{prefix:02x} {}", case.text);
+            }
+            // An aligned displacement on a misaligned base is misaligned.
+            let name = case.text.split(' ').next().unwrap();
+            if case.text.contains("xmmword ptr") && !["movups", "movupd", "movdqu"].contains(&name)
+            {
+                let mut moved = cpu.clone();
+                moved.gs_base = 8;
+                let code = [&[0x65][..], &case.code].concat();
+                let (exit, mut state, _) = outcome(native, &moved, &code, &machine.operand);
+                assert_eq!(exit, ExitReason::GeneralProtection, "{}", case.text);
+                state.rip = state.rip.wrapping_add(code.len() as u64);
+                assert_eq!(state, moved, "{}", case.text);
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 250, "{checked}");
+}
+
+const EXECUTE_ONLY: MemoryPermissions = MemoryPermissions {
+    read: false,
+    write: false,
+    execute: true,
+};
+
+fn operand_width(text: &str) -> u64 {
+    let place = text.split(" ptr ").next().unwrap();
+    match place.rsplit([' ', ',']).next().unwrap() {
+        "xmmword" => 16,
+        "qword" => 8,
+        "dword" => 4,
+        "word" => 2,
+        "byte" => 1,
+        other => panic!("width {other}"),
+    }
+}
+
+#[test]
+fn vector_faults_name_the_access_and_the_first_bad_byte() {
+    let end = DATA + 0x100;
+    let mut crossing = 0;
+    for (case, _) in all_vector_cases() {
+        if !case.text.contains(" ptr ") {
+            continue;
+        }
+        let text = case.text;
+        let name = text.split(' ').next().unwrap();
+        let store = text.split(", ").next().unwrap().contains(" ptr ");
+        let width = operand_width(text);
+        let unaligned = width < 16 || ["movups", "movupd", "movdqu"].contains(&name);
+        let mut tries = vec![
+            (0x9000, MemoryPermissions::READ_WRITE, Some(0x9000)),
+            (DATA + 0x40, MemoryPermissions::READ_ONLY, None),
+            (DATA + 0x40, EXECUTE_ONLY, None),
+        ];
+        if unaligned && width > 1 {
+            // All but the last byte are mapped.
+            tries.push((end - width + 1, MemoryPermissions::READ_WRITE, Some(end)));
+            crossing += 1;
+        }
+        for (address, permissions, unmapped) in tries {
+            let mut machine = Random(0x3C).machine();
+            machine.gpr[6] = address - 32;
+            for native in [false, true] {
+                let (mut cpu, mut memory) = load(&machine, &case.code, permissions);
+                masked(&mut cpu);
+                let result = run(native, &cpu, &mut memory, 1);
+                let wanted = match unmapped {
+                    Some(at) => MemoryError::UnmappedAddress(at),
+                    None if store || permissions == EXECUTE_ONLY => {
+                        MemoryError::PermissionViolation {
+                            address,
+                            required: if store { "write" } else { "read" },
+                        }
+                    }
+                    None => continue, // a load from a readable region
+                };
+                assert_eq!(
+                    result.exit_reason,
+                    ExitReason::MemoryFault(wanted),
+                    "{text}"
+                );
+                assert_eq!(result.final_state, cpu, "{text}");
+                assert_eq!(result.instructions_executed, 0, "{text}");
+            }
+        }
+    }
+    assert!(crossing > 100, "{crossing}");
+}
+
+/// A non-canonical address is a general-protection fault, not a page fault, also
+/// when only the end of the operand is non-canonical.
+#[test]
+fn non_canonical_vector_operands_are_general_protection_faults() {
+    const LIMIT: u64 = 0x0000_8000_0000_0000;
+    let mut straddling = 0;
+    for (case, _) in all_vector_cases() {
+        if !case.text.contains(" ptr ") {
+            continue;
+        }
+        let width = operand_width(case.text);
+        let mut addresses = vec![LIMIT, 0xFFFF_7FFF_FFFF_FFF0, 1 << 63, 0x1234_5678_0000_0000];
+        if width > 1 {
+            addresses.push(LIMIT - width + 1);
+            straddling += 1;
+        }
+        for address in addresses {
+            let mut machine = Random(0x3D).machine();
+            machine.gpr[6] = address.wrapping_sub(32);
+            for native in [false, true] {
+                let (mut cpu, mut memory) =
+                    load(&machine, &case.code, MemoryPermissions::READ_WRITE);
+                masked(&mut cpu);
+                let result = run(native, &cpu, &mut memory, 1);
+                assert_eq!(
+                    result.exit_reason,
+                    ExitReason::GeneralProtection,
+                    "{} at {address:#x}",
+                    case.text
+                );
+                assert_eq!(result.final_state, cpu, "{}", case.text);
+            }
+        }
+        // The last canonical operand is only unmapped.
+        let mut machine = Random(0x3D).machine();
+        machine.gpr[6] = LIMIT - 16 - 32;
+        for native in [false, true] {
+            let (cpu, mut memory) = load(&machine, &case.code, MemoryPermissions::READ_WRITE);
+            let result = run(native, &cpu, &mut memory, 1);
+            assert_eq!(
+                result.exit_reason,
+                ExitReason::MemoryFault(MemoryError::UnmappedAddress(LIMIT - 16)),
+                "{}",
+                case.text
+            );
+        }
+    }
+    assert!(straddling > 200, "{straddling}");
+}
+
+/// The DBT may drop the flags of an instruction only if the next one replaces
+/// them all, so each vector form runs between an ADD and the end of the block.
+#[test]
+fn flags_of_an_earlier_instruction_survive_every_form_that_keeps_them() {
+    // FFFFFFFF + 1 carries out of every position and leaves zero.
+    let added = RFlags {
+        cf: true,
+        zf: true,
+        sf: false,
+        of: false,
+        pf: true,
+        af: true,
+    };
+    let mut replaced = 0;
+    for (case, _) in all_vector_cases() {
+        let name = case.text.split(' ').next().unwrap();
+        // add eax, ecx; the form; mov edx, edx; hlt
+        let code = [&[0x01, 0xC8][..], &case.code, &[0x89, 0xD2, 0xF4]].concat();
+        let mut machine = Random(0xADD).machine();
+        (machine.gpr[0], machine.gpr[1]) = (0xFFFF_FFFF, 1);
+        let mut expected = machine.clone();
+        let replaces = name == "ptest";
+        if replaces {
+            reference(&mut expected, case.text);
+            replaced += 1;
+        }
+        for budget in [2, 3, 4] {
+            let mut states = Vec::new();
+            for native in [false, true] {
+                let (mut cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+                masked(&mut cpu);
+                let result = run(native, &cpu, &mut memory, budget);
+                if replaces {
+                    assert_eq!(result.final_state.flags, expected.flags, "{}", case.text);
+                } else if !name.contains("comi") {
+                    assert_eq!(result.final_state.flags, added, "{}", case.text);
+                }
+                states.push((result.exit_reason, result.final_state));
+            }
+            assert_eq!(states[0], states[1], "{}", case.text);
+        }
+    }
+    assert_eq!(replaced, 3);
+}
+
+/// SETB, SETZ and a branch read what a register PTEST wrote, and flags before it
+/// are dead.
+#[test]
+fn flags_around_a_register_ptest_are_exact() {
+    // add eax, ecx; ptest xmm1, xmm2; setb bl; setz dl; jz +1; nop; hlt
+    let code = [
+        0x01, 0xC8, 0x66, 0x0F, 0x38, 0x17, 0xCA, 0x0F, 0x92, 0xC3, 0x0F, 0x94, 0xC2, 0x74, 0x01,
+        0x90, 0xF4,
+    ];
+    for (target, source, zf, cf) in [
+        (1u128, 2u128, true, false),
+        (3, 1, false, true),
+        (1, 3, false, false),
+        (1, 0, true, true),
+    ] {
+        let mut machine = Random(0x9C).machine();
+        // Leaves CF and ZF both set or, for the second value, both clear.
+        for addend in [(0xFFFF_FFFF, 1), (1, 1)] {
+            (machine.gpr[0], machine.gpr[1]) = addend;
+            (machine.gpr[2], machine.gpr[3]) = (0, 0);
+            machine.xmm[1] = target.to_le_bytes();
+            machine.xmm[2] = source.to_le_bytes();
+            for native in [false, true] {
+                let (cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+                let result = run(native, &cpu, &mut memory, 16);
+                assert_eq!(result.exit_reason, ExitReason::Halt);
+                assert_eq!(result.instructions_executed, if zf { 6 } else { 7 });
+                assert_eq!(result.final_state.gpr[3], u64::from(cf));
+                assert_eq!(result.final_state.gpr[2], u64::from(zf));
+                assert_eq!(
+                    result.final_state.flags,
+                    RFlags {
+                        zf,
+                        cf,
+                        ..RFlags::default()
+                    }
+                );
+            }
+        }
+    }
+    // Only the register form lets the flags before it go: the memory form can
+    // fault and leave the block with them.
+    let size = |modrm: u8| {
+        // add eax, ecx; ptest xmm1, xmm2 or [rdx]; hlt
+        let code = [0x01, 0xC8, 0x66, 0x0F, 0x38, 0x17, modrm, 0xF4];
+        let mut machine = Random(0x9E).machine();
+        machine.gpr[2] = OPERAND;
+        let (mut cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+        let mut engine = DbtEngine::new(64 * 1024).unwrap();
+        let result = engine.run(&mut cpu, &mut memory, 16);
+        assert_eq!(result.exit_reason, ExitReason::Halt);
+        assert_eq!(engine.metrics.interpreter_fallbacks, 1);
+        engine.metrics.native_bytes_emitted
+    };
+    assert!(size(0xCA) < size(0x0A), "{} {}", size(0xCA), size(0x0A));
+    // ptest xmm1, xmm2; add eax, ecx; hlt: the flags of PTEST are dead.
+    let code = [0x66, 0x0F, 0x38, 0x17, 0xCA, 0x01, 0xC8, 0xF4];
+    let mut machine = Random(0x9D).machine();
+    (machine.gpr[0], machine.gpr[1]) = (0x7FFF_FFFF, 1);
+    for native in [false, true] {
+        let (cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+        let result = run(native, &cpu, &mut memory, 16);
+        let wanted = RFlags {
+            cf: false,
+            zf: false,
+            sf: true,
+            of: true,
+            pf: true,
+            af: true,
+        };
+        assert_eq!(result.final_state.flags, wanted);
     }
 }
 

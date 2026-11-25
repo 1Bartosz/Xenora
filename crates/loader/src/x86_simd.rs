@@ -169,6 +169,27 @@ fn sums_of_differences(a: u128, b: u128, imm: u64) -> u128 {
     })
 }
 
+/// Lanes of `source` where the immediate has a bit set, else of `old`.
+fn blend(old: u128, source: u128, bits: u32, imm: u64) -> u128 {
+    build(bits, |index| {
+        let chosen = imm >> index & 1 != 0;
+        lane(if chosen { source } else { old }, bits, index)
+    })
+}
+
+/// INSERTPS: `value` in the lane of bits 5:4, then zeros by bits 3:0.
+fn insert_single(old: u128, value: u64, imm: u64) -> u128 {
+    build(32, |index| {
+        if imm >> index & 1 != 0 {
+            0
+        } else if u64::from(index) == imm >> 4 & 3 {
+            value
+        } else {
+            lane(old, 32, index)
+        }
+    })
+}
+
 /// The smallest word and, above it, the index of its first occurrence.
 fn smallest_word(value: u128) -> u128 {
     let least = (0..8).map(|index| (lane(value, 16, index), index)).min();
@@ -435,12 +456,18 @@ pub(crate) fn execute(
                 ..RFlags::default()
             };
         }
-        (Op::Pblendvb, _) => {
+        // The sign bits of XMM0's lanes select the source.
+        (Op::Pblendvb | Op::Blendvps | Op::Blendvpd, _) => {
+            let bits = match insn.op {
+                Op::Pblendvb => 8,
+                Op::Blendvps => 32,
+                _ => 64,
+            };
             let source = read_rm(cpu, memory, insn)?;
             let (old, control) = (cpu.xmm[reg], cpu.xmm[0]);
-            cpu.xmm[reg] = build(8, |index| {
-                let chosen = lane(control, 8, index) & 0x80 != 0;
-                lane(if chosen { source } else { old }, 8, index)
+            cpu.xmm[reg] = build(bits, |index| {
+                let chosen = lane(control, bits, index) >> (bits - 1) != 0;
+                lane(if chosen { source } else { old }, bits, index)
             });
         }
         (Op::Pextrw, _) => {
@@ -529,10 +556,14 @@ pub(crate) fn execute(
                 Op::Pshufhw => shuffle_16(source, imm, 4),
                 Op::Shufps => shuffle_32(old, source, imm),
                 Op::Palignr => align_right(old, source, imm),
-                Op::Pblendw => build(16, |index| {
-                    let chosen = imm >> index & 1 != 0;
-                    lane(if chosen { source } else { old }, 16, index)
-                }),
+                Op::Pblendw => blend(old, source, 16, imm),
+                Op::Blendps => blend(old, source, 32, imm),
+                Op::Blendpd => blend(old, source, 64, imm),
+                Op::Insertps => {
+                    // A memory source has one lane.
+                    let from = if in_memory { 0 } else { imm as u32 >> 6 & 3 };
+                    insert_single(old, lane(source, 32, from), imm)
+                }
                 Op::Mpsadbw => sums_of_differences(old, source, imm),
                 _ => build(64, |index| {
                     let from = if index == 0 { old } else { source };

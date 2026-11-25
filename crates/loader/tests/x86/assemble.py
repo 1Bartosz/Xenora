@@ -171,8 +171,9 @@ def vector_cases():
             phminposuw ptest""".split():
         out += [f"{op} xmm3, xmm9", f"{op} xmm10, {wide}", f"{op} xmm2, xmm2"]
     # XMM0 selects; it may also be the source or the destination.
-    out += ["pblendvb xmm3, xmm9, xmm0", f"pblendvb xmm10, {wide}, xmm0", "pblendvb xmm2, xmm0, xmm0",
-            "pblendvb xmm0, xmm9, xmm0"]
+    for op in "pblendvb blendvps blendvpd".split():
+        out += [f"{op} xmm3, xmm9, xmm0", f"{op} xmm10, {wide}, xmm0", f"{op} xmm2, xmm0, xmm0",
+                f"{op} xmm0, xmm9, xmm0"]
     for kind, width in (("bw", quad), ("bd", dword), ("bq", word), ("wd", quad), ("wq", dword), ("dq", quad)):
         for op in ("pmovsx", "pmovzx"):
             out += [f"{op}{kind} xmm3, xmm9", f"{op}{kind} xmm10, {width}", f"{op}{kind} xmm2, xmm2"]
@@ -180,6 +181,14 @@ def vector_cases():
     for op in ("pblendw", "mpsadbw"):
         out += [f"{op} xmm3, xmm9, {n}" for n in (0, 1, 2, 3, 4, 5, 6, 7, 129, 255)]
         out += [f"{op} xmm10, {wide}, 90", f"{op} xmm2, xmm2, 165"]
+    for op, most in (("blendps", 16), ("blendpd", 4)):
+        out += [f"{op} xmm3, xmm9, {n}" for n in (*range(most), 255)]
+        out += [f"{op} xmm10, {wide}, {most - 6 if most > 6 else 2}", f"{op} xmm2, xmm2, 1"]
+    # Source lane, destination lane and zero mask; memory has no source lane.
+    for n in (0, 16, 32, 48, 64, 81, 98, 152, 160, 199, 228, 254, 255):
+        out += [f"insertps xmm3, xmm9, {n}", f"insertps xmm10, {dword}, {n}", f"insertps xmm2, xmm2, {n}"]
+    for n in (0, 1, 2, 3, 4, 255):
+        out += [f"extractps {r}, xmm9, {n}" for r in ("ebx", "r9d", "ebp")] + [f"extractps {dword}, xmm3, {n}"]
     # ebp would be read as CH if its byte were a legacy byte register.
     byte = "byte ptr [rsi + 4*rdi + 16]"
     for op, regs, place in (("b", ("ebx", "r9d", "ebp"), byte), ("w", ("ebx", "r9d", "ebp"), word),
@@ -207,6 +216,11 @@ def float_cases():
             out += [f"{op}{kind} xmm3, xmm9", f"{op}{kind} xmm3, {width}{place}"]
         for code in range(8):
             out += [f"cmp{kind} xmm3, xmm9, {code}", f"cmp{kind} xmm3, {width}{place}, {code}"]
+        for n in (*range(16), 244):
+            out += [f"round{kind} xmm3, xmm9, {n}", f"round{kind} xmm3, {width}{place}, {n}"]
+    # The tests put every other immediate in the last byte.
+    for op in ("dpps", "dppd"):
+        out += [f"{op} xmm3, xmm9, 255", f"{op} xmm3, xmmword{place}, 255", f"{op} xmm3, xmm3, 255"]
     for kind in ("ss", "sd"):
         for op in ("comi", "ucomi"):
             out += [f"{op}{kind} xmm3, xmm9", f"{op}{kind} xmm3, {memory[kind]}{place}"]
