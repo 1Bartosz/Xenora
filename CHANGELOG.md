@@ -357,6 +357,7 @@ remains unsupported.
 - The claims audit now checks tracked and unignored source files in the working tree. Ignored local files and files deleted from the working tree no longer produce spurious claim errors (#582).
 
 - Generated CRT adapters now report unsupported calls when the required guest ABI or runtime behavior is missing.
+- Replaced binary insertion in guest `qsort` and `qsort_s` with a stable merge of original element indices (#589). Host index movement is now O(n log n) even for reverse-ordered inputs. Comparators still receive original guest element addresses, equal keys keep their order, and the sorted array is written only after all comparisons finish. The 1 MiB guest input limit still applies.
 
 - Win64 service argument decoding reports a guest memory error when a stack argument offset overflows.
 
