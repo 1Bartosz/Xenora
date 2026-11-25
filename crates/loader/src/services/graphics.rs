@@ -127,6 +127,12 @@ fn lock_graphics(
         .map_err(|_| ExitReason::MemoryFault(MemoryError::Overflow))
 }
 
+/// Check the output slot before any object is created, so a call that cannot
+/// hand its handle back does not leak the object it made.
+fn writable_out(memory: &GuestMemory, out: u64) -> bool {
+    memory.check_write(out, 8).is_ok()
+}
+
 /// Create a device and write its handle to `*ppDevice`.
 fn xenora_create_device(
     state: &Arc<ServicesState>,
@@ -134,7 +140,7 @@ fn xenora_create_device(
     memory: &mut GuestMemory,
 ) -> Result<u64, ExitReason> {
     let out = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
-    if out == 0 {
+    if out == 0 || !writable_out(memory, out) {
         return Ok(invalid_arg());
     }
     let mut graphics = lock_graphics(state)?;
@@ -157,7 +163,7 @@ fn xenora_create_command_queue(
     let device = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
     let list_type = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
     let out = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
-    if list_type != 0 || out == 0 {
+    if list_type != 0 || out == 0 || !writable_out(memory, out) {
         return Ok(invalid_arg());
     }
     let mut graphics = lock_graphics(state)?;
@@ -185,7 +191,7 @@ fn xenora_create_command_allocator(
     let device = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
     let list_type = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
     let out = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
-    if list_type != 0 || out == 0 {
+    if list_type != 0 || out == 0 || !writable_out(memory, out) {
         return Ok(invalid_arg());
     }
     let mut graphics = lock_graphics(state)?;
@@ -214,7 +220,7 @@ fn xenora_create_command_list(
     let allocator = args.get(1, memory).map_err(ExitReason::MemoryFault)?;
     let list_type = args.get(2, memory).map_err(ExitReason::MemoryFault)? as u32;
     let out = args.get(3, memory).map_err(ExitReason::MemoryFault)?;
-    if list_type != 0 || out == 0 {
+    if list_type != 0 || out == 0 || !writable_out(memory, out) {
         return Ok(invalid_arg());
     }
     let mut graphics = lock_graphics(state)?;
@@ -252,7 +258,7 @@ fn xenora_create_buffer(
     let guest_addr = args.get(1, memory).map_err(ExitReason::MemoryFault)?;
     let byte_length = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
     let out = args.get(3, memory).map_err(ExitReason::MemoryFault)?;
-    if out == 0 || guest_addr == 0 || byte_length == 0 {
+    if out == 0 || !writable_out(memory, out) || guest_addr == 0 || byte_length == 0 {
         return Ok(invalid_arg());
     }
     let desc = ResourceDesc {
@@ -296,7 +302,7 @@ fn xenora_create_render_target(
     let width = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
     let height = args.get(2, memory).map_err(ExitReason::MemoryFault)? as u32;
     let out = args.get(3, memory).map_err(ExitReason::MemoryFault)?;
-    if out == 0 || width == 0 || height == 0 {
+    if out == 0 || !writable_out(memory, out) || width == 0 || height == 0 {
         return Ok(invalid_arg());
     }
     let mut graphics = lock_graphics(state)?;
@@ -616,7 +622,7 @@ fn xenora_get_last_frame_info(
     memory: &mut GuestMemory,
 ) -> Result<u64, ExitReason> {
     let out = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
-    if out == 0 {
+    if out == 0 || !writable_out(memory, out) {
         return Ok(invalid_arg());
     }
     let graphics = lock_graphics(state)?;
@@ -795,6 +801,8 @@ mod tests {
     const VERTEX_ADDRESS: u64 = 0x0001_0000;
     const READBACK_ADDRESS: u64 = 0x0002_0000;
     const HANDLE_SLOT: u64 = 0x0003_0000;
+    const READ_ONLY_ADDRESS: u64 = 0x0004_0000;
+    const UNMAPPED_ADDRESS: u64 = 0x0009_0000;
 
     fn state() -> Arc<ServicesState> {
         Arc::new(ServicesState::new(Arc::new(MockClock::new(0))))
@@ -811,6 +819,9 @@ mod tests {
         memory
             .map_region(HANDLE_SLOT, 0x1000, MemoryPermissions::READ_WRITE)
             .expect("handle slot region");
+        memory
+            .map_region(READ_ONLY_ADDRESS, 0x1000, MemoryPermissions::READ_ONLY)
+            .expect("read-only region");
         memory
     }
 
@@ -880,6 +891,178 @@ mod tests {
         let result =
             xenora_create_device(&state, &args, &mut memory).expect("service call succeeds");
         assert_eq!(result, E_INVALIDARG_HRESULT);
+    }
+
+    fn live_objects(state: &Arc<ServicesState>) -> [usize; 5] {
+        let graphics = state.graphics.lock().expect("graphics state");
+        graphics.live_counts()
+    }
+
+    fn create_device_handle(state: &Arc<ServicesState>, memory: &mut GuestMemory) -> u64 {
+        let args = Win64Args {
+            rcx: HANDLE_SLOT,
+            rdx: 0,
+            r8: 0,
+            r9: 0,
+            rsp: 0,
+        };
+        assert_eq!(
+            xenora_create_device(state, &args, memory).expect("service call succeeds"),
+            ok()
+        );
+        memory.read_u64(HANDLE_SLOT).expect("handle slot")
+    }
+
+    #[test]
+    fn create_services_reject_unwritable_out_pointers_without_allocating() {
+        let state = state();
+        let mut memory = memory();
+        let before = live_objects(&state);
+        // Unmapped, read-only, and a slot that starts inside the region but
+        // crosses its end. Each must be refused before a device exists.
+        for out in [
+            UNMAPPED_ADDRESS,
+            READ_ONLY_ADDRESS,
+            HANDLE_SLOT + 0x1000 - 4,
+        ] {
+            let args = Win64Args {
+                rcx: out,
+                rdx: 0,
+                r8: 0,
+                r9: 0,
+                rsp: 0,
+            };
+            assert_eq!(
+                xenora_create_device(&state, &args, &mut memory).expect("service call succeeds"),
+                E_INVALIDARG_HRESULT,
+                "out pointer {out:#x} was accepted"
+            );
+            assert_eq!(
+                live_objects(&state),
+                before,
+                "out pointer {out:#x} allocated"
+            );
+        }
+    }
+
+    #[test]
+    fn a_buffer_with_an_unwritable_out_pointer_allocates_nothing() {
+        let state = state();
+        let mut memory = memory();
+        let device = create_device_handle(&state, &mut memory);
+        let before = live_objects(&state);
+        for out in [
+            UNMAPPED_ADDRESS,
+            READ_ONLY_ADDRESS,
+            HANDLE_SLOT + 0x1000 - 4,
+        ] {
+            let args = Win64Args {
+                rcx: device,
+                rdx: VERTEX_ADDRESS,
+                r8: 16,
+                r9: out,
+                rsp: 0,
+            };
+            assert_eq!(
+                xenora_create_buffer(&state, &args, &mut memory).expect("service call succeeds"),
+                E_INVALIDARG_HRESULT,
+                "out pointer {out:#x} was accepted"
+            );
+            assert_eq!(
+                live_objects(&state),
+                before,
+                "out pointer {out:#x} allocated"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_device_creation_and_destruction_leaves_no_objects() {
+        let state = state();
+        let mut memory = memory();
+        let empty = [0; 5];
+        for _ in 0..3 {
+            let device = create_device_handle(&state, &mut memory);
+            assert_eq!(live_objects(&state), [1, 0, 0, 0, 0]);
+            let args = Win64Args {
+                rcx: device,
+                rdx: 0,
+                r8: 0,
+                r9: 0,
+                rsp: 0,
+            };
+            assert_eq!(
+                xenora_destroy_device(&state, &args, &mut memory).expect("service call succeeds"),
+                ok()
+            );
+            assert_eq!(live_objects(&state), empty);
+        }
+    }
+
+    #[test]
+    fn a_queue_belongs_to_its_own_device() {
+        let state = state();
+        let mut memory = memory();
+        let first = create_device_handle(&state, &mut memory);
+        // The handle slot is reused, so keep the first device before making
+        // the second one.
+        let slot = 0x0005_0000;
+        memory
+            .map_region(slot, 0x1000, MemoryPermissions::READ_WRITE)
+            .expect("second handle slot");
+        let args = Win64Args {
+            rcx: slot,
+            rdx: 0,
+            r8: 0,
+            r9: 0,
+            rsp: 0,
+        };
+        assert_eq!(
+            xenora_create_device(&state, &args, &mut memory).expect("service call succeeds"),
+            ok()
+        );
+        let second = memory.read_u64(slot).expect("handle slot");
+        assert_ne!(first, second);
+
+        let queue_args = Win64Args {
+            rcx: first,
+            rdx: 0,
+            r8: HANDLE_SLOT,
+            r9: 0,
+            rsp: 0,
+        };
+        assert_eq!(
+            xenora_create_command_queue(&state, &queue_args, &mut memory)
+                .expect("service call succeeds"),
+            ok()
+        );
+        let queue = memory.read_u64(HANDLE_SLOT).expect("handle slot");
+
+        // Destroying the other device must not touch the first device's queue.
+        let destroy = Win64Args {
+            rcx: second,
+            rdx: 0,
+            r8: 0,
+            r9: 0,
+            rsp: 0,
+        };
+        assert_eq!(
+            xenora_destroy_device(&state, &destroy, &mut memory).expect("service call succeeds"),
+            ok()
+        );
+        let destroy_queue = Win64Args {
+            rcx: queue,
+            rdx: 0,
+            r8: 0,
+            r9: 0,
+            rsp: 0,
+        };
+        assert_eq!(
+            xenora_destroy_command_queue(&state, &destroy_queue, &mut memory)
+                .expect("service call succeeds"),
+            ok(),
+            "the queue still belongs to the first device"
+        );
     }
 
     #[test]

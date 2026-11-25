@@ -743,6 +743,19 @@ impl GraphicsContext {
     }
 
     /// Install a native Metal backend adapter.
+    /// Live object counts for the service tests: devices, queues, allocators,
+    /// command lists and resources. A creation that fails must not change them.
+    #[cfg(test)]
+    pub(crate) fn live_counts(&self) -> [usize; 5] {
+        [
+            self.devices.len(),
+            self.queues.len(),
+            self.allocators.len(),
+            self.command_lists.len(),
+            self.resources.len(),
+        ]
+    }
+
     pub fn set_metal_backend<F>(&mut self, renderer: F)
     where
         F: Fn(&[[f32; 4]; 3], (usize, usize), [u8; 4]) -> Result<Vec<u8>, GraphicsError>
