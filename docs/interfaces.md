@@ -199,6 +199,27 @@ Win32 references include Microsoft's documentation for
 [SetProcessPriorityBoost](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocesspriorityboost),
 and [GetProcessPriorityBoost](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesspriorityboost).
 
+### Generated report paths and future caches
+
+Probe exports can write to `artifacts/` or `diagnostics/probe/` within a
+Xenora Git checkout. Explicit `--report` destinations outside checkouts are
+allowed. Relative paths use the process's current directory. A symlink in
+the directory path is resolved before applying the policy, and dangling
+links or links at individual output filenames are refused. The guard checks
+every filename before creating any directories or files.
+
+Future persistent caches default to
+`~/Library/Caches/local.xenora.Xenora/` on macOS and must be outside
+checkouts, including ignored development output directories. This policy
+does not enable a persistent cache.
+
+The probe stages reports on the destination filesystem and publishes each
+complete file by rename. An I/O failure during publication can leave a mix of
+old and new reports. Use an output directory controlled by the caller.
+Preflight assumes the directory tree stays stable. A writer exposed to
+concurrent untrusted changes needs directory-descriptor-relative operations
+that reject links during traversal and publication.
+
 ### Performance timing
 
 The guest can import `QueryPerformanceCounter` and `QueryPerformanceFrequency`
