@@ -25,6 +25,7 @@ remains unsupported.
 
 ### Changed
 
+- The research and testing notes no longer name or link emulator projects and asset tools that are tied to one specific commercial game. The clean-room statements stay, worded for other emulator projects in general, and the rule in `AGENTS.md` against copying emulator source still names KyTx and AnyPS5.
 - Git now ignores the whole local `diagnostics/` folder instead of three named subfolders, so no local report or check output under it can be committed by accident.
 - Removed the references to one specific commercial game from the research notes `docs/research/synthetic-integration.md` and `docs/research/phase02-collaboration.md`, including a link to a reverse-engineering index for it. The notes now say in general terms that commercial game startup and execution remain unsupported.
 - Native CI runs the QA and release-tooling tests and checks both agent shell launchers for syntax errors (#545).
