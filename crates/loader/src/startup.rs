@@ -199,6 +199,11 @@ fn run_startup_with(
     observe(StartupEvent::Relocated {
         applied_dir64: relocations.applied_dir64,
     });
+    memory.main_image = Some(crate::memory::MainImage {
+        base: layout.image_base,
+        size: pe.size_of_image,
+        entry_point: image.entry_point,
+    });
     crate::exceptions::register_exception_directory(
         bytes,
         layout.image_base,

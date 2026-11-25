@@ -67,6 +67,22 @@ The runner prints the guest's exit value and returns a nonzero host status
 for load or interpreter faults. The gate compares both outcomes. These
 fixtures exercise synthetic commands and local Apple Silicon readback.
 
+## Module programs
+
+`modules.c` is an original C program with no C library linked. It compares its
+module handle, image range and entry point with the linker's `__ImageBase`, its
+own start function and its mapped header, tries the `GetModuleHandleEx` flags and
+their failures, counts references to the C runtime, and ends through an
+`ExitProcess` it looks up by name, with 0x4D0D. A failed check ends it with its
+number. `modules.cpp` is an original hosted C++ program that holds references with
+a class and uses the Windows headers' `MODULEINFO` and the `psapi.dll` export.
+
+`build-modules.sh [output directory]` builds both with mingw-w64 at `-O0`, `-O1`,
+`-O2` and `-Os`. `MODULES_BREAK` is a control that fails its fifth check,
+`MODULES_PIN` pins a module, and one build imports from API sets and KernelBase.
+`cargo test -p xenora-loader --test modules` runs the script and the programs, and
+fails when the compiler is missing. No executable is committed.
+
 ## Process startup programs
 
 `startup_info.c` is an original C program with no C library linked. It reads its

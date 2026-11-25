@@ -336,6 +336,22 @@ impl ImportRegistry {
         self.index(module, &ImportName::Name(symbol.to_owned()))
     }
 
+    /// Named aliases that `module` holds for services of other modules.
+    pub(crate) fn aliased_exports(
+        &self,
+        module: &str,
+    ) -> impl Iterator<Item = (&ImportName, usize)> {
+        self.services
+            .iter()
+            .filter_map(move |((key, name), &index)| {
+                let descriptor = &self.handlers[index];
+                (key == module
+                    && descriptor.module != *key
+                    && descriptor.status != ServiceStatus::Stub)
+                    .then_some((name, index))
+            })
+    }
+
     pub(crate) fn canonical_exports(
         &self,
         module: &str,
