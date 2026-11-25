@@ -349,6 +349,7 @@ remains unsupported.
 - Fixed import binding writing some slots before finding an unresolved import, and service calls taking effect before an unreadable return address was noticed. A service that changes a nonvolatile register, including XMM6 to XMM15, now stops the guest (part of #201).
 - Import generator manifests now preserve MSVC C++ return type qualifiers and display lvalue- and rvalue-qualified member function signatures (#595).
 - Fixed older import-generator templates that reported success for unimplemented wrappers, used a nonexistent exit reason, and read floating-point arguments from integer registers.
+- `xenora imports verify` runs both generated-binding test suites and fails when either produces no executed tests or inconsistent results (#580).
 - Fixed guest flags in the native DBT (#64, #70). They lived only in host NZCV, so they were lost across helper calls and block boundaries and register ADD, SUB and XOR set none. JB, JAE, JBE and JA used ARM carry polarity, which is inverted for subtraction. Flags are now stored in the guest state.
 - Fixed the static probe reporting support for forms an engine rejects, including NOP, TEST, most conditional branches and the FF group in the interpreter.
 - Fixed the native DBT's `SXTW` encoding, which set bit 3 of the source register and was right only for registers that already had it set; the previous test used such a register by chance.
