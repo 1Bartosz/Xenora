@@ -8,6 +8,7 @@
 
 use crate::cpu::{CpuState, ExitReason, Mxcsr, RFlags};
 use crate::memory::GuestMemory;
+use crate::x86_avx;
 use crate::x86_decode::{Encoding, Insn, RegOperand, RmOperand};
 use crate::x86_exec::{
     address, canonical_access, read_mem, read_reg, rm_operand, write_mem, write_reg,
@@ -201,7 +202,7 @@ fn smallest_word(value: u128) -> u128 {
 }
 
 /// Result of a two-source packed operation.
-fn packed(op: Op, a: u128, b: u128) -> u128 {
+pub(crate) fn packed(op: Op, a: u128, b: u128) -> u128 {
     match op {
         Op::Pand => a & b,
         Op::Pandn => !a & b,
@@ -391,6 +392,9 @@ pub(crate) fn execute(
     memory: &mut GuestMemory,
     insn: &Insn,
 ) -> Result<(), ExitReason> {
+    if let Some(vex) = insn.vex {
+        return x86_avx::execute(cpu, memory, insn, vex);
+    }
     if x86_float::execute(cpu, memory, insn)? {
         return Ok(());
     }

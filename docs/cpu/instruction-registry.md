@@ -7,7 +7,7 @@ The static PE probe, the interpreter and the native ARM64 dynamic binary transla
 | Registry | `crates/loader/x86/instructions.toml` | Opcode map, opcode, ModRM digit, operand encoding, size, immediate, flag effects and public reference. Data only. |
 | Generator | `crates/loader/generate_x86.py` | `validate`, `generate` and `--check`. Rejects overlapping encodings, opcodes that are prefixes, contradictory operand rules, a fixed r/m field on a form that could take memory, unknown vocabulary and flags both written and undefined. |
 | Tables | `crates/loader/src/x86_table.rs` | Generated static tables. No metadata is parsed at run time. |
-| Semantics | `crates/loader/src/x86_exec.rs`, `x86_simd.rs`, `x86_strings.rs`, `x86_float.rs`, `softfloat.rs` | Rust primitives for integer, vector and floating-point forms. Every instruction is all-or-nothing. |
+| Semantics | `crates/loader/src/x86_exec.rs`, `x86_simd.rs`, `x86_strings.rs`, `x86_avx.rs`, `x86_float.rs`, `softfloat.rs` | Rust primitives for integer, vector and floating-point forms. Every instruction is all-or-nothing. |
 | Lowering | `crates/loader/src/dbt.rs` | ARM64 for the forms `is_native` accepts. Every other form calls the shared semantics and is counted in `DbtMetrics::interpreter_fallbacks`. |
 
 ## Adding a form
@@ -33,6 +33,19 @@ FS and GS overrides together are architecturally undefined; GS applies, in both 
 ## Vector state
 
 XMM registers live in `CpuState::xmm`, lane 0 in the low bits, and MXCSR in `CpuState::mxcsr`. A mandatory 0x66, F3 or F2 prefix selects a form; in the 0F 38 and 0F 3A opcode maps every form needs 0x66, over which F3 and F2 take precedence, except CRC32, which needs F2 and takes 0x66 as an operand size; the generator rejects an opcode where 0x66 could be both a mandatory prefix and an operand size. A 16-byte memory operand must be aligned unless its form says otherwise, and a violation exits with `GeneralProtection` before any memory access. Non-temporal stores are ordinary stores.
+
+## VEX-encoded instructions
+
+C4 and C5 always start a VEX prefix in 64-bit mode. The registry lists VEX forms as `[[vex]]` entries with their vector length, W, VEX.vvvv use and memory width. A form shares its operation with a legacy form that has the same lanes, so `Insn::vex` tells them apart, and `x86_avx.rs` executes it. Rules, from the Intel SDM Vol. 1, 14.1 and Vol. 2A, 2.3 and 2.4:
+
+- A VEX-encoded instruction clears its destination above the vector length. A legacy SSE instruction keeps bits 255:128, which live in `CpuState::ymm_high`.
+- Memory operands may have any alignment. VMOVAPS, VMOVAPD, VMOVDQA, VMOVNTPS, VMOVNTPD, VMOVNTDQ and VMOVNTDQA need that of the operand, 16 or 32 bytes.
+- 66, F2, F3, LOCK or REX before VEX, an opcode map other than 1 to 3, a vector length or W without a form, and VEX.vvvv other than 1111b on a form without that source are illegal instructions. A REX that a segment override makes ineffective is refused too.
+- Scalar forms ignore VEX.L, where the manual says so.
+
+Implemented: VMOVAPS, VMOVAPD, VMOVUPS, VMOVUPD, VMOVDQA, VMOVDQU, VLDDQU, VMOVNTPS, VMOVNTPD, VMOVNTDQ, VMOVNTDQA, VMOVSS, VMOVSD, VMOVD, VMOVQ, VMOVLPS, VMOVLPD, VMOVHPS, VMOVHPD, VMOVHLPS, VMOVLHPS, VMOVMSKPS, VMOVMSKPD, VMOVDDUP, VMOVSLDUP, VMOVSHDUP, bitwise logic, VBROADCASTSS, VBROADCASTSD, VBROADCASTF128, VINSERTF128, VEXTRACTF128, VPERM2F128, VPERMILPS, VPERMILPD, VLDMXCSR, VSTMXCSR, VZEROUPPER and VZEROALL. The packed integer forms are 128-bit, as in AVX. VMASKMOVPS, VMASKMOVPD, VPMOVMSKB, VMASKMOVDQU, VPMOVSX and VPMOVZX are not among them. Every VEX form runs on the shared semantics in both engines. CPUID reports neither AVX nor OSXSAVE, and XGETBV is refused. An exception context holds the low halves only, like the Windows `CONTEXT` without extended state, so restoring one leaves the upper halves as they are.
+
+`tests/x86_avx.rs` runs each form against a reference that works on byte arrays from assembly text.
 
 ## String compares
 
@@ -125,4 +138,4 @@ A feature bit is set only when every instruction of that feature is implemented.
 
 ## Rejected on purpose
 
-LOCK except as described above, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, LODS, CMPS, SCAS, REPE and REPNE, every x87 instruction except FNINIT, MMX, the RCP and RSQRT approximations, SSE3, the MMX forms of SSSE3, SSE4a, AES, PCLMULQDQ, SHA, MOVBE, VEX, CMPXCHG8B and CMPXCHG16B. The DBT also refuses raw SYSCALL.
+LOCK except as described above, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, LODS, CMPS, SCAS, REPE and REPNE, every x87 instruction except FNINIT, MMX, the RCP and RSQRT approximations, SSE3, the MMX forms of SSSE3, SSE4a, AES, PCLMULQDQ, SHA, MOVBE, VEX except as described above, EVEX, XOP, CMPXCHG8B and CMPXCHG16B. The DBT also refuses raw SYSCALL.

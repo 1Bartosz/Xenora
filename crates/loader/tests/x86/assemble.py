@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assemble the original x86-64 fixtures with the LLVM assembler.
 
-  generate   write integer.txt, vector.txt and float.txt next to this file
+  generate   write integer.txt, vector.txt, float.txt and avx.txt next to this file
   --check    reassemble in memory and fail if a committed fixture differs
 
 Each output line is `<hex bytes> | <Intel-syntax text>`. The assembler is
@@ -246,6 +246,60 @@ def float_cases():
     return out
 
 
+def avx_cases():
+    place = " ptr [rsi + 4*rdi + 16]"
+    whole = {"xmm": "xmmword" + place, "ymm": "ymmword" + place}
+    xmm, quad, dword = "xmmword" + place, "qword" + place, "dword" + place
+    out = ["vzeroupper", "vzeroall"]
+    for v in ("xmm", "ymm"):
+        for op in "vmovaps vmovapd vmovups vmovupd vmovdqa vmovdqu".split():
+            out += [f"{op} {v}3, {v}9", f"{op} {v}10, {v}1", f"{op} {v}2, {v}2", f"{op} {v}12, {whole[v]}",
+                    f"{op} {whole[v]}, {v}11"]
+        for op in "vmovntps vmovntpd vmovntdq".split():
+            out.append(f"{op} {whole[v]}, {v}11")
+        out.append(f"vlddqu {v}12, {whole[v]}")
+        for op in "vandps vandpd vandnps vandnpd vorps vorpd vxorps vxorpd".split():
+            out += [f"{op} {v}3, {v}9, {v}10", f"{op} {v}12, {v}1, {whole[v]}", f"{op} {v}2, {v}2, {v}2",
+                    f"{op} {v}3, {v}3, {v}9", f"{op} {v}3, {v}9, {v}3"]
+        for op in "vmovsldup vmovshdup vmovddup".split():
+            out += [f"{op} {v}3, {v}9", f"{op} {v}12, {v}1", f"{op} {v}2, {v}2"]
+        for op in ("vmovsldup", "vmovshdup"):
+            out.append(f"{op} {v}12, {whole[v]}")
+        for op in ("vmovmskps", "vmovmskpd"):
+            out += [f"{op} ebx, {v}9", f"{op} r10d, {v}3"]
+        out.append(f"vbroadcastss {v}12, {dword}")
+        for op in ("vpermilps", "vpermilpd"):
+            out += [f"{op} {v}3, {v}9, {n}" for n in (0, 1, 2, 5, 27, 78, 177, 228, 255)]
+            out += [f"{op} {v}12, {whole[v]}, 114", f"{op} {v}2, {v}2, 57", f"{op} {v}3, {v}9, {v}10",
+                    f"{op} {v}12, {v}1, {whole[v]}", f"{op} {v}2, {v}2, {v}2", f"{op} {v}3, {v}9, {v}3"]
+    out += [f"vmovddup xmm12, {quad}", f"vmovddup ymm12, {whole['ymm']}", f"vmovntdqa xmm12, {xmm}"]
+    for op in "vpand vpandn vpor vpxor".split():
+        out += [f"{op} xmm3, xmm9, xmm10", f"{op} xmm12, xmm1, {xmm}", f"{op} xmm2, xmm2, xmm2",
+                f"{op} xmm3, xmm9, xmm3"]
+    for op, width in (("vmovss", dword), ("vmovsd", quad)):
+        out += [f"{op} xmm3, xmm9, xmm10", f"{op} xmm12, xmm1, xmm2", f"{op} xmm2, xmm2, xmm2",
+                f"{op} xmm3, xmm9, xmm3", f"{op} xmm12, {width}", f"{op} {width}, xmm11"]
+    out += [f"vmovq xmm3, xmm9", "vmovq xmm2, xmm2", f"vmovq xmm12, {quad}", f"vmovq {quad}, xmm11"]
+    out += ["vmovd xmm3, r9d", "vmovd xmm12, eax", "vmovq xmm3, r9", "vmovd r9d, xmm3", "vmovd ebx, xmm12",
+            "vmovq r9, xmm3", f"vmovd xmm3, {dword}", f"vmovd {dword}, xmm9"]
+    for op in "vmovlps vmovlpd vmovhps vmovhpd".split():
+        out += [f"{op} xmm3, xmm9, {quad}", f"{op} xmm2, xmm2, {quad}", f"{op} {quad}, xmm9"]
+    for op in ("vmovhlps", "vmovlhps"):
+        out += [f"{op} xmm3, xmm9, xmm10", f"{op} xmm12, xmm1, xmm2", f"{op} xmm2, xmm2, xmm2",
+                f"{op} xmm3, xmm9, xmm3"]
+    out += [f"vbroadcastsd ymm12, {quad}", f"vbroadcastf128 ymm12, {xmm}"]
+    for n in (0, 1, 2, 255):
+        out += [f"vinsertf128 ymm3, ymm9, xmm10, {n}", f"vinsertf128 ymm12, ymm1, {xmm}, {n}",
+                f"vinsertf128 ymm2, ymm2, xmm2, {n}", f"vextractf128 xmm3, ymm9, {n}",
+                f"vextractf128 xmm2, ymm2, {n}", f"vextractf128 {xmm}, ymm11, {n}"]
+    for n in (*range(0, 64), 128, 136, 200, 255):
+        out.append(f"vperm2f128 ymm3, ymm9, ymm10, {n}")
+    out += [f"vperm2f128 ymm12, ymm1, {whole['ymm']}, {n}" for n in (0, 33, 49, 131)]
+    out += ["vperm2f128 ymm2, ymm2, ymm2, 1", "vperm2f128 ymm3, ymm9, ymm3, 48"]
+    out += [f"vldmxcsr {dword}", f"vstmxcsr {dword}"]
+    return list(dict.fromkeys(out))
+
+
 def assemble(lines):
     with tempfile.TemporaryDirectory() as directory:
         source, obj = Path(directory, "a.s"), Path(directory, "a.o")
@@ -269,7 +323,7 @@ def main(argv):
     if len(argv) != 2 or argv[1] not in ("generate", "--check"):
         sys.exit("usage: assemble.py generate|--check")
     for name, lines in (("integer.txt", cases()), ("vector.txt", vector_cases()),
-                        ("float.txt", float_cases())):
+                        ("float.txt", float_cases()), ("avx.txt", avx_cases())):
         text = assemble(lines)
         if argv[1] == "generate":
             (HERE / name).write_text(text)
