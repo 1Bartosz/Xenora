@@ -35,7 +35,7 @@ MAPS = {"1": "ONE_BYTE", "0f": "TWO_BYTE"}
 PREFIXES = {"": "TWO_BYTE", "66": "TWO_BYTE_66", "f3": "TWO_BYTE_F3", "f2": "TWO_BYTE_F2"}
 SIZES = {"b": "Byte", "v": "Variable", "q": "Quad", "y": "Wide", "n": "None", "x": "Xmm"}
 IMMS = {"": "None", "ib": "SignedByte", "iz": "SignedFull", "iv": "Full", "iw": "Word", "ub": "Byte",
-        "rel8": "SignedByte", "rel32": "Signed32"}
+        "rel8": "SignedByte", "rel32": "Signed32", "moffs": "Offset"}
 SRCS = {"": 0, "b": 1, "w": 2, "d": 4, "q": 8, "x": 16}
 # encoding -> (Rust variant, has ModRM, required immediates)
 ENCS = {
@@ -53,6 +53,9 @@ ENCS = {
     "rm_reg_imm": ("RmRegImm", True, {"ub"}),
     "rm_reg_cl": ("RmRegCl", True, {""}),
     "acc_imm": ("AccImm", False, {"ib", "iz"}),
+    # The accumulator and an absolute address in place of ModRM (MOV A0-A3).
+    "acc_moffs": ("RegRm", False, {"moffs"}),
+    "moffs_acc": ("RmReg", False, {"moffs"}),
     "op_reg": ("OpReg", False, {""}),
     "op_reg_imm": ("OpRegImm", False, {"ib", "iv"}),
     "imm": ("Imm", False, {"ib", "iz", "iw"}),
