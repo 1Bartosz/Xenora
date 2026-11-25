@@ -78,10 +78,34 @@ Windows while the process has one thread. The exit closes every guest handle:
 kernel objects, Winsock sockets and task-queue handles, which
 `ServicesState::open_handle_count` counts together. Files stay on the synthetic `C:` drive, guest memory stays mapped so the host
 can inspect it, and `atexit` functions are not run: that belongs to the C
-runtime's `exit`, which is not implemented. `ServicesState::exit_status`
+runtime's `exit`, described below. `ServicesState::exit_status`
 reports the status. After an exit the `DbtEngine` that ran the guest executes
 no further guest instruction and answers every later `run` with the same
 `ProcessExit`. A service callback that was in progress is never resumed.
+
+A C program ends through the C runtime instead. `ucrtbase.dll` and
+`api-ms-win-crt-runtime-l1-1-0.dll` provide three ways out, each ending the
+guest with the same `ProcessExit` and the same cleanup as `ExitProcess`:
+
+| Service | Behaviour |
+| --- | --- |
+| `exit(status)` | Calls the functions registered with `atexit` and `_crt_atexit`, most recently registered first, then ends the process with `status` |
+| `_exit(status)` | Ends the process with `status` and calls no registered function |
+| `abort()` | Ends the process with exit code 3 and calls no registered function |
+
+`exit` takes one function at a time from the registered list. A function
+registered while `exit` runs is therefore called next, before the older ones
+that have not run yet, which is ISO C's rule. A registered function that calls
+`exit` again is undefined in ISO C; here the functions that have not run yet
+run once each and the process ends with the status of the later call.
+Functions that `_cexit` has already run are not run again.
+
+All three are partial. `exit` flushes no stream, because there are none, and
+runs no thread-local destructor. It does not walk a module's own `_onexit`
+table; that module's startup code runs it through `_execute_onexit_table`.
+`abort` prints no message and does not call a `SIGABRT` handler, which the
+documentation says it does when one is set. `_Exit`, `quick_exit` and
+`_c_exit` are not provided. None of this has been compared with Windows.
 
 A TLS callback may end the process too. Startup then reports the exit as its
 outcome, with the status, and runs neither the remaining callbacks nor the
@@ -319,6 +343,62 @@ Allocation failures also set the synthetic main thread's CRT `errno` to
 and CRT parameter or new-handler callbacks remain unsupported. See
 [Microsoft CRT allocation documentation](https://learn.microsoft.com/cpp/c-runtime-library/memory-allocation).
 
+### Standard output and formatted printing
+
+A hosted C program prints through the C runtime. Six services give it the
+standard streams, and what it writes to `stdout` and to `stderr` is captured
+where a host or a test can read it: `ServicesState::standard_output()` and
+`ServicesState::standard_error()`.
+
+| Service | Behaviour |
+| --- | --- |
+| `__acrt_iob_func(index)` | The `FILE` object of `stdin` (0), `stdout` (1) or `stderr` (2) |
+| `__stdio_common_vfprintf(options, stream, format, locale, arguments)` | Formats with the arguments in the guest's `va_list`, writes to `stdout` or `stderr`, and returns the number of characters written. This is what `printf` and `fprintf` call |
+| `fwrite(buffer, size, count, stream)` | Writes `size * count` bytes and returns `count` |
+| `fputs(string, stream)` | Writes the string without its terminator and returns 0 |
+| `fflush(stream)` | Returns 0. A null stream means every stream |
+| `setvbuf(stream, buffer, mode, size)` | Checks the mode and size and returns 0 |
+
+The standard streams are text-mode streams, so each line feed a program
+writes is captured as a carriage return and a line feed, as the Windows
+documentation of text mode describes. Function results count the characters
+before that replacement. Output is never held back: `fflush` has nothing to
+do and `setvbuf` only validates. Each captured stream keeps at most 16 MiB
+(`MAX_CAPTURED_OUTPUT`).
+
+The formatting engine (`crates/loader/src/services/crt_format.rs`) follows
+Microsoft's "Format specification syntax: printf and wprintf functions" and
+ISO C:
+
+- Flags `-`, `+`, blank, `#` and `0`; a width and a precision as digits or
+  `*`; size prefixes `hh`, `h`, `l`, `ll`, `j`, `z`, `t`, `I`, `I32`, `I64`.
+- Types `d`, `i`, `u`, `o`, `x`, `X`, `c`, `s`, `p` and `%%`. An integer
+  without a size prefix, and a `long`, is 32 bits. A null string prints
+  `(null)`.
+- Its output is compared with the host C library's `snprintf` on 2,600
+  generated cases whose result ISO C defines
+  (`crates/loader/tests/printf/reference.py`).
+
+Documented failures return their documented result and set `errno` to
+`EINVAL`: a null stream, format, buffer or string, and an invalid `setvbuf`
+mode or size. An invalid format, which includes `%n` because Windows
+disables it by default, also returns -1 with `EINVAL` and writes nothing;
+on Windows the invalid parameter handler runs first.
+
+Everything else that is not modelled stops the guest with the runtime-limit
+fault and writes nothing, so that nothing is printed wrongly: the
+floating-point types (`e`, `f`, `g`, `a`), wide characters and strings (`C`,
+`S`, `lc`, `ls`), a locale object, option bits other than the three that do
+not affect these conversions, any stream other than `stdout` and `stderr`
+(files do not exist yet, and `stdin` cannot be written), an index above 2,
+more than 1 MiB in one call, and output past the 16 MiB bound.
+
+Choices where the documentation leaves room, each marked in the source:
+`%p` prints sixteen upper-case hexadecimal digits; `0` pads a character and
+a string as it pads a number; a precision also limits `(null)`; `%#.0o` of
+zero prints `0`, which is ISO C's rule. All six services are `partial`. None
+of this has been compared with Windows.
+
 ### CRT integer conversion
 
 UCRT and the CRT conversion API set expose strtol, strtoul, wcstol, and
@@ -505,8 +585,8 @@ The CRT uses this for:
   on the default guest heap, and they hold at most 65,536 entries. Execution
   resets the table first, then calls the functions in reverse order of
   registration. `atexit` and `_crt_atexit` record process exit functions,
-  which `_cexit` runs in reverse order. Process termination through `exit` is
-  not modeled.
+  which `_cexit` runs in reverse order and returns. `exit` runs them and
+  then ends the process; see "PE32+ fixture startup" above.
 
 Null comparators, null arrays with a nonzero count, and reversed or
 misaligned tables would reach the CRT invalid-parameter handler. That
