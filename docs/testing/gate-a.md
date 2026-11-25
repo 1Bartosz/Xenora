@@ -64,7 +64,7 @@ whose entry point returns its status gives the same result as `ExitProcess`.
 - It is one program. Local runs used Homebrew clang 23.1.6 and Apple clang 17.0.0, each with LLD 23.1.5. Another compiler or a larger program can need instructions and services this one does not.
 - Most services it calls are marked partial in the registry. They did what this program needs.
 - It runs in the DBT only. The interpreter has no import dispatch.
-- It reaches the guest through a test, not through `xenora run`, which accepts only two built-in fixtures.
+- The gate itself is a test. The same program can be run by hand with `xenora run`; see [Running a program from the command line](#running-a-program-from-the-command-line).
 - Nothing here concerns a commercial game or an Xbox launch environment.
 
 ## A2
@@ -123,5 +123,60 @@ Seven more tests guard against a runtime that reports success for everything:
 - Most services the program calls are marked partial in the registry. No locale exists, no signal handler or exception filter is ever called, the environment table is empty, and a C stream is unbuffered and has no seek. They did what this program needs.
 - `VirtualProtect`, `VirtualQuery` and `__C_specific_handler` are stubs that stop the guest if called. The program imports them and never calls them.
 - It runs in the DBT only, on one guest thread.
-- It reaches the guest through a test, not through `xenora run`.
+- The gate itself is a test. The same program can be run by hand with `xenora run`; see [Running a program from the command line](#running-a-program-from-the-command-line).
 - Nothing here concerns a commercial game or an Xbox launch environment.
+
+## Running a program from the command line
+
+`xenora run` runs two embedded fixtures and refuses every other file. A
+program you built yourself runs only when you also give the SHA-256 of the
+exact file:
+
+```sh
+sh tests/compat_fixtures/build-gate-a2.sh artifacts/gate-a2
+shasum -a 256 artifacts/gate-a2/gate-a2-O2.exe
+cargo run --locked -p xenora -- run --experimental \
+    --pe artifacts/gate-a2/gate-a2-O2.exe \
+    --local-sha256 <the 64 digits shasum printed> \
+    -- 2026 xenora
+```
+
+What follows `--` reaches the program after its own file name. The program's
+standard output and standard error are written to the host's, and the command
+exits with the program's exit status.
+
+- **What is admitted.** The file is read once, at most 64 MiB, and hashed; the
+  bytes that were hashed are the bytes that run. A file whose digest differs
+  from the one given is refused and nothing runs. Without `--local-sha256`
+  the command behaves as it did before: only the two embedded fixtures run.
+- **Limits that stay.** The program runs in a separate worker process with a
+  15 second wall deadline and a step limit (`--max-steps`, default 1,000,000,
+  at most 50,000,000). The fixture draw service is not registered, and the
+  guest reaches no host file: its drive is in memory and is gone when it ends.
+- **Exit codes.** A host exit code has eight bits and a guest status has
+  thirty-two. The low eight bits are returned, except that a status other
+  than zero never becomes zero (it becomes 1); whenever the two differ the
+  full status is printed on standard error. 124 means the wall deadline, 125
+  any other failure: a refused file, a load error, a fault, or a step limit
+  reached before the program exited. A program that itself exits with 124 or
+  125 cannot be told apart from those by the code alone.
+- **Output.** It is shown when the program ends, standard output first and
+  then standard error, so the two are not interleaved as the program wrote
+  them. A program stopped by the wall deadline shows nothing.
+- **What this is not.** The digest shows that the file is the one you meant
+  to run. It does not make the file safe: Xenora is not a hardened runtime
+  (see [`SECURITY.md`](../../SECURITY.md)). Run only original programs you
+  built from source.
+
+`crates/cli/tests/run_local.rs` runs the real `xenora` binary on the Gate A
+programs:
+
+```sh
+cargo test --locked -p xenora --test run_local
+```
+
+It checks the arguments the program echoes, its output and exit status at four
+optimization levels, the three controls (42, 3 and 22), a 32-bit status, a
+wrong digest, a file changed after it was hashed, a step limit that is too
+small, the trace, and refusal without the option. The wall deadline is not
+tested: no Gate A program runs for 15 seconds.
