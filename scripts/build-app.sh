@@ -55,4 +55,5 @@ codesign --force --sign - "$bundle"
 binary="$bundle/Contents/MacOS/Xenora"
 [ "$(lipo -archs "$binary")" = arm64 ] || fail "executable is not arm64-only: $(lipo -archs "$binary")"
 "$binary" --smoke
+"$binary" --smoke-inspection-order
 echo "build-app: built $bundle"
