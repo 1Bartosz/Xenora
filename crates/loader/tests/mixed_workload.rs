@@ -125,6 +125,10 @@ pub enum Mismatch {
         expected: u32,
         actual: u32,
     },
+    GuestLength {
+        expected: usize,
+        actual: usize,
+    },
     GpuWord {
         index: usize,
         expected: u32,
@@ -245,6 +249,12 @@ impl MixedWorkload {
             });
         }
         let words = expected_words(count);
+        if guest.len() != words.len() {
+            return Err(Mismatch::GuestLength {
+                expected: words.len(),
+                actual: guest.len(),
+            });
+        }
         for (index, (&expected, &actual)) in words.iter().zip(guest).enumerate() {
             if expected != actual {
                 return Err(Mismatch::GuestWord {
@@ -372,6 +382,32 @@ fn check_rejects_wrong_guest_and_gpu_words() {
         MixedWorkload::check(&result, &guest, &gpu[..3], 4),
         Err(Mismatch::GpuLength { .. })
     ));
+}
+
+#[test]
+fn check_rejects_truncated_and_oversized_guest_output() {
+    let mut workload = MixedWorkload::new();
+    let result = workload.run_cpu(4);
+    let guest = workload.guest_words(4).unwrap();
+    let gpu = expected_gpu(&expected_words(4));
+
+    assert_eq!(
+        MixedWorkload::check(&result, &guest[..3], &gpu, 4),
+        Err(Mismatch::GuestLength {
+            expected: 4,
+            actual: 3,
+        })
+    );
+    let mut oversized = guest.clone();
+    oversized.push(guest[0]);
+    assert_eq!(
+        MixedWorkload::check(&result, &oversized, &gpu, 4),
+        Err(Mismatch::GuestLength {
+            expected: 4,
+            actual: 5,
+        })
+    );
+    assert_eq!(MixedWorkload::check(&result, &guest, &gpu, 4), Ok(()));
 }
 
 #[test]
