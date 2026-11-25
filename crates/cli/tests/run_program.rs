@@ -718,16 +718,16 @@ fn a_program_using_the_buffer_forms_of_printf_runs_and_detects_a_wrong_result() 
         let run = run_program(&crt_sprintf(name), &[], &[]);
         assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
         assert_eq!(
-            run.stdout, "!\r\ncrt_sprintf: 29 of 29 checks passed\r\n",
+            run.stdout, "!\r\ncrt_sprintf: 31 of 31 checks passed\r\n",
             "{name}"
         );
         assert_eq!(run.stderr, "", "{name}");
     }
     // The control must fail its last check: the exit code is its number.
     let run = run_program(&crt_sprintf("crt-sprintf-break"), &[], &[]);
-    assert_eq!(run.code, Some(29), "control: {:?}", run.stdout);
+    assert_eq!(run.code, Some(31), "control: {:?}", run.stdout);
     assert_eq!(
         run.stdout,
-        "!\r\ncheck 29 failed: control\r\ncrt_sprintf: 28 of 29 checks passed\r\n"
+        "!\r\ncheck 31 failed: control\r\ncrt_sprintf: 30 of 31 checks passed\r\n"
     );
 }

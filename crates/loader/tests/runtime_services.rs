@@ -982,9 +982,16 @@ fn legacy_snprintf_truncates_without_a_terminator_and_returns_minus_one() {
         4
     );
     assert_eq!(buffer_bytes(&guest, SCRATCH, 6), *b"<42>\x00\x00");
-    // len == count or len > count stores count characters without a
-    // terminator and returns a negative value.
-    for count in [4u64, 3, 1] {
+    // An exact fit returns the length and leaves the next byte untouched.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCRATCH, &[0xAA; 5]).unwrap();
+    assert_eq!(
+        buffer_print(&mut guest, LEGACY, SCRATCH, 4, b"<%d>", one_slot),
+        4
+    );
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 5), *b"<42>\xAA");
+    // A shorter buffer stores count characters and returns a negative value.
+    for count in [3u64, 1] {
         let mut guest = buffer_guest();
         guest.memory.write_bytes(SCRATCH, &[0xAA; 8]).unwrap();
         assert_eq!(
@@ -1012,18 +1019,21 @@ fn legacy_snprintf_truncates_without_a_terminator_and_returns_minus_one() {
         u32::MAX as u64
     );
     assert_eq!(guest.errno(), 42);
-    // A zero count writes nothing and is a truncation. A null buffer is an
-    // invalid parameter, as is a null format; both set EINVAL.
+    // An empty result exactly fits zero bytes, with no memory access.
     let mut guest = buffer_guest();
-    guest.memory.write_bytes(SCRATCH, &[0xAA; 2]).unwrap();
+    let unmapped = 0x1000;
+    assert!(guest.memory.read_u8(unmapped).is_err());
+    assert_eq!(buffer_print(&mut guest, LEGACY, unmapped, 0, b"", &[]), 0);
     assert_eq!(
-        buffer_print(&mut guest, LEGACY, SCRATCH, 0, b"", &[]),
+        buffer_print(&mut guest, LEGACY, unmapped, 0, b"<%d>", one_slot),
         u32::MAX as u64
     );
-    assert_eq!(buffer_bytes(&guest, SCRATCH, 2), [0xAA; 2]);
     let mut guest = buffer_guest();
+    guest.set_errno(42);
+    assert_eq!(buffer_print(&mut guest, LEGACY, 0, 0, b"<%d>", one_slot), 4);
+    assert_eq!(guest.errno(), 42);
     assert_eq!(
-        buffer_print(&mut guest, LEGACY, 0, 0, b"<%d>", one_slot),
+        buffer_print(&mut guest, LEGACY, 0, 4, b"<%d>", one_slot),
         u32::MAX as u64
     );
     assert_eq!(guest.errno(), 22);
@@ -1127,6 +1137,24 @@ fn sprintf_faults_inside_the_buffer_stop_the_guest_and_nothing_leaves_it() {
         &[42],
     );
     assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
+    // If the payload fits in mapped storage but its terminator does not,
+    // the checked write faults before it changes any payload bytes.
+    for (service, options) in [
+        ("__stdio_common_vsprintf", STANDARD),
+        ("__stdio_common_vsprintf", LEGACY),
+        ("__stdio_common_vsprintf_s", MINGW_OPTIONS),
+    ] {
+        let mut guest = buffer_guest();
+        let buffer = TEXT + TEXT_LEN as u64 - 4;
+        assert!(guest.memory.read_u8(buffer + 4).is_err());
+        guest.memory.write_bytes(buffer, &[0xAA; 4]).unwrap();
+        let (_, exit) = buffer_print_with(&mut guest, service, options, buffer, 5, b"<%d>", &[42]);
+        assert!(
+            matches!(exit, ExitReason::MemoryFault(_)),
+            "{service}: {exit:?}"
+        );
+        assert_eq!(buffer_bytes(&guest, buffer, 4), [0xAA; 4]);
+    }
     // A truncated write touches neither the byte before the buffer nor the
     // first byte past it.
     let mut guest = buffer_guest();

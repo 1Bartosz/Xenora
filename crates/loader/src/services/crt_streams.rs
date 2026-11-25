@@ -191,11 +191,9 @@ fn formatted(
 ///   terminator is written whenever `count` is not zero, even when the text
 ///   does not fit. A null buffer with a zero count is the documented size
 ///   query and writes nothing.
-/// - Legacy: the result is the length only when the text and the terminator
-///   fit, and the terminator is written only then. What a null buffer or a
-///   zero count means is not documented for the legacy form; Xenora's
-///   choice is to apply the same rules, which make a zero count write
-///   nothing and return -1, and a null buffer an invalid parameter.
+/// - Legacy: an exact fit returns the length without writing a terminator.
+///   Truncation returns -1. Both forms support a size query with a null
+///   buffer and zero count.
 ///
 /// A null buffer with a nonzero count is an invalid parameter in both. The
 /// writes never leave `[buffer, buffer + count)`. A fault inside the buffer
@@ -215,44 +213,33 @@ pub(super) fn print_to_buffer(
     if standard && legacy {
         return Err(RUNTIME_LIMIT);
     }
-    if format == 0 {
+    if format == 0 || buffer == 0 && count != 0 {
         return Ok(Err(Failed(-1, EINVAL)));
     }
-    if buffer == 0 {
-        // The size query is documented for the standard form only.
-        if count != 0 || !standard {
-            return Ok(Err(Failed(-1, EINVAL)));
-        }
-    }
-    let text = match formatted(memory, options, format, locale, arguments, true)? {
+    let mut text = match formatted(memory, options, format, locale, arguments, true)? {
         // Xenora's choice for when execution continues after the invalid
         // parameter handler: nothing is written and the result is -1.
         Formatted::Invalid => return Ok(Err(Failed(-1, EINVAL))),
         Formatted::Text(text) => text,
     };
     let len = text.len() as u64;
-    if standard {
-        if count != 0 {
-            let n = len.min(count - 1);
-            memory
-                .write_bytes(buffer, &text[..n as usize])
-                .map_err(fault)?;
-            memory.write_u8(buffer + n, 0).map_err(fault)?;
-        }
+    if buffer == 0 {
         return Ok(Ok(len as i32));
     }
-    if len < count {
+    if count != 0 {
+        let capacity = count - u64::from(standard);
+        text.truncate(len.min(capacity) as usize);
+        if standard || len < count {
+            text.push(0);
+        }
         memory.write_bytes(buffer, &text).map_err(fault)?;
-        memory.write_u8(buffer + len, 0).map_err(fault)?;
-        Ok(Ok(len as i32))
-    } else {
-        memory
-            .write_bytes(buffer, &text[..count as usize])
-            .map_err(fault)?;
-        // Microsoft's page does not set errno for a truncated legacy write,
-        // so the guest's errno is left alone.
-        Ok(Ok(-1))
     }
+    // Microsoft's page does not set errno for a truncated legacy write.
+    Ok(Ok(if standard || len <= count {
+        len as i32
+    } else {
+        -1
+    }))
 }
 
 /// `__stdio_common_vsprintf_s` (#466), the secure form. Microsoft's
@@ -275,7 +262,7 @@ pub(super) fn print_to_buffer_secure(
     if buffer == 0 || count == 0 || format == 0 {
         return Ok(Err(Failed(-1, EINVAL)));
     }
-    let text = match formatted(memory, options, format, locale, arguments, true)? {
+    let mut text = match formatted(memory, options, format, locale, arguments, true)? {
         Formatted::Invalid => {
             memory.write_u8(buffer, 0).map_err(fault)?;
             return Ok(Err(Failed(-1, EINVAL)));
@@ -287,8 +274,8 @@ pub(super) fn print_to_buffer_secure(
         memory.write_u8(buffer, 0).map_err(fault)?;
         return Ok(Err(Failed(-1, ERANGE)));
     }
+    text.push(0);
     memory.write_bytes(buffer, &text).map_err(fault)?;
-    memory.write_u8(buffer + len, 0).map_err(fault)?;
     Ok(Ok(len as i32))
 }
 

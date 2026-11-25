@@ -76,11 +76,14 @@ int main(void) {
     CHECK("_snprintf fit", _snprintf(buf, 6, "<%d>", 42) == 4);
     CHECK("_snprintf fit contents", memcmp(buf, "<42>\0", 5) == 0);
     scrub();
-    CHECK("_snprintf exact is truncated", _snprintf(buf, 4, "<%d>", 42) < 0);
-    CHECK("_snprintf exact unterminated", memcmp(buf, "<42>", 4) == 0);
+    CHECK("_snprintf exact", _snprintf(buf, 4, "<%d>", 42) == 4);
+    CHECK("_snprintf exact unterminated", memcmp(buf, "<42>", 4) == 0 && (unsigned char)buf[4] == 0xAA);
     scrub();
     CHECK("_snprintf short is truncated", _snprintf(buf, 3, "<%d>", 42) < 0);
     CHECK("_snprintf short contents", memcmp(buf, "<42", 3) == 0 && (unsigned char)buf[3] == 0xAA);
+    CHECK("_snprintf size query", _snprintf(NULL, 0, "<%d>", 42) == 4);
+    scrub();
+    CHECK("_snprintf zero fits empty output", _snprintf(buf, 0, "%s", "") == 0 && (unsigned char)buf[0] == 0xAA);
 
     // sprintf_s, the secure form: a small buffer becomes the empty string.
     scrub();
