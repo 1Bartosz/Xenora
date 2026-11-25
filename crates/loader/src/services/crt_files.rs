@@ -29,6 +29,7 @@ pub(super) const ENOMEM: u32 = 12;
 pub(super) const EACCES: u32 = 13;
 pub(super) const EINVAL: u32 = 22;
 pub(super) const EMFILE: u32 = 24;
+pub(super) const ERANGE: u32 = 34;
 pub(super) const ENOSPC: u32 = 28;
 
 /// The most streams `fopen` keeps open at once.
@@ -49,6 +50,7 @@ pub(super) fn error_text(errno: u32) -> &'static str {
         EINVAL => "Invalid argument",
         EMFILE => "Too many open files",
         ENOSPC => "No space left on device",
+        ERANGE => "Result too large",
         _ => "Unknown error",
     }
 }

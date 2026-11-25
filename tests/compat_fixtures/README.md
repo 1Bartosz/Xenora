@@ -299,6 +299,23 @@ library is GPL-3.0-or-later with the GCC Runtime Library Exception. The C
 library itself is not linked: the program imports it by name, and Xenora's
 own services answer.
 
+## The buffer forms of printf
+
+`tests/compat_fixtures/crt_sprintf.c` (#466) is a hosted C program that
+formats into a buffer with `snprintf`, `sprintf`, `_snprintf` and
+`sprintf_s`, queries the needed size with a null buffer, and writes a
+character with `putchar`. Built by `build-crt-sprintf.sh` with mingw-w64
+(UCRT flavour) and `-fno-builtin`, the calls are imports of
+`api-ms-win-crt-stdio-l1-1-0.dll`. Each check compares the result and the
+bytes in and around the buffer with what Microsoft's `snprintf`,
+`_snprintf` and `sprintf_s` pages describe: termination and truncation for
+the standard, legacy and secure forms, the guards before and after the
+buffer included. It is built at `-O0` and `-O2`, and once at `-O1` with
+`CRT_SPRINTF_BREAK`, which expects a wrong length on purpose as a control.
+`crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+Provenance is as for Gate A2: the source and script are Xenora's, and the
+executables are test output that contains mingw-w64 startup code.
+
 ## C runtime mathematics
 
 `tests/compat_fixtures/crt_math.c` (#468) is a hosted C program that calls the

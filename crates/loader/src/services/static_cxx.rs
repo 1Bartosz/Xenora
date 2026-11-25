@@ -244,11 +244,12 @@ pub(super) fn register(registry: &mut ImportRegistry) {
             }
         },
     );
+    // `__stdio_common_vsprintf` is no longer a stub here: the typed registry
+    // serves it since #466.
     for (module, symbol) in [
         (KERNEL32, "FormatMessageA"),
         (UCRT, "rand_s"),
         (UCRT, "_read"),
-        (UCRT, "__stdio_common_vsprintf"),
     ] {
         registry.register_with_status(module, symbol, ServiceStatus::Stub, |_, _, _| {
             Err(UNSUPPORTED)
@@ -262,7 +263,6 @@ pub(super) fn register(registry: &mut ImportRegistry) {
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv"),
         ("api-ms-win-crt-utility-l1-1-0.dll", "rand_s"),
         ("api-ms-win-crt-stdio-l1-1-0.dll", "_read"),
-        ("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsprintf"),
     ] {
         registry.alias(api_set, UCRT, symbol);
     }

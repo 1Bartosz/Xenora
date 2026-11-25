@@ -20,7 +20,7 @@
 //! are not modelled and stop the guest with the runtime-limit fault.
 
 use super::ObjectState;
-use super::crt_files::{self, EBADF, EINVAL, FileStreams};
+use super::crt_files::{self, EBADF, EINVAL, ERANGE, FileStreams};
 use super::crt_format::{self, Floats, FormatError, Source};
 use crate::cpu::ExitReason;
 use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
@@ -43,8 +43,17 @@ pub const MAX_CAPTURED_OUTPUT: usize = 16 << 20;
 const LEGACY_WIDE_SPECIFIERS: u64 = 0x04;
 const LEGACY_THREE_DIGIT_EXPONENTS: u64 = 0x10;
 const STANDARD_ROUNDING: u64 = 0x20;
-const KNOWN_OPTIONS: u64 =
-    LEGACY_WIDE_SPECIFIERS | LEGACY_THREE_DIGIT_EXPONENTS | STANDARD_ROUNDING;
+/// `__stdio_common_vsprintf` only: which termination and result rules of the
+/// buffer forms apply (corecrt_stdio_config.h). The generated code of a
+/// mingw-w64 `snprintf` or `sprintf` passes the standard bit, and `_snprintf`
+/// the legacy one. Setting both contradicts itself and stops the guest.
+const LEGACY_VSPRINTF_NULL_TERMINATION: u64 = 0x01;
+const STANDARD_SNPRINTF_BEHAVIOR: u64 = 0x02;
+const KNOWN_OPTIONS: u64 = LEGACY_WIDE_SPECIFIERS
+    | LEGACY_THREE_DIGIT_EXPONENTS
+    | STANDARD_ROUNDING
+    | LEGACY_VSPRINTF_NULL_TERMINATION
+    | STANDARD_SNPRINTF_BEHAVIOR;
 
 /// `_IOFBF`, `_IOLBF` and `_IONBF` (stdio.h).
 const IOFBF: i32 = 0x0000;
@@ -122,6 +131,152 @@ impl Source for VaList<'_> {
     fn string(&mut self, address: u64, limit: usize) -> Result<Vec<u8>, MemoryError> {
         c_string(self.memory, address, limit as u64)
     }
+}
+
+/// What one format string and its arguments make.
+enum Formatted {
+    Text(Vec<u8>),
+    /// The format itself is invalid: `%n` or a character that has no meaning
+    /// as a type. Windows calls the invalid parameter handler; each caller
+    /// says what it does when execution continues.
+    Invalid,
+}
+
+/// Reads the format string and formats it with the arguments at `arguments`,
+/// or explains why not. Shared by the stream and the buffer forms.
+fn formatted(
+    memory: &GuestMemory,
+    options: u64,
+    format: u64,
+    locale: u64,
+    arguments: u64,
+    buffer_options: bool,
+) -> Result<Formatted, ExitReason> {
+    // The behaviour bits belong to the buffer forms; passing them to a
+    // stream form stops the guest, as an unknown bit does.
+    let known = if buffer_options {
+        KNOWN_OPTIONS
+    } else {
+        KNOWN_OPTIONS & !(LEGACY_VSPRINTF_NULL_TERMINATION | STANDARD_SNPRINTF_BEHAVIOR)
+    };
+    if options & !known != 0 || locale != 0 {
+        return Err(RUNTIME_LIMIT);
+    }
+    let template = c_string(memory, format, MAX_TRANSFER + 1).map_err(fault)?;
+    if template.len() as u64 > MAX_TRANSFER {
+        return Err(RUNTIME_LIMIT);
+    }
+    let mut source = VaList {
+        memory,
+        next: arguments,
+    };
+    let floats = Floats {
+        three_digit_exponents: options & LEGACY_THREE_DIGIT_EXPONENTS != 0,
+        standard_rounding: options & STANDARD_ROUNDING != 0,
+    };
+    match crt_format::format(&template, &mut source, floats) {
+        Ok(text) => Ok(Formatted::Text(text)),
+        Err(FormatError::Invalid) => Ok(Formatted::Invalid),
+        Err(FormatError::Unsupported | FormatError::TooLong) => Err(RUNTIME_LIMIT),
+        Err(FormatError::Fault(error)) => Err(fault(error)),
+    }
+}
+
+/// `__stdio_common_vsprintf` (#466). Which result and termination rules the
+/// option bits select is in the comment at [`STANDARD_SNPRINTF_BEHAVIOR`];
+/// the rules themselves are from Microsoft's `snprintf` and `_snprintf`
+/// pages:
+///
+/// - Standard: the result is always the length the text would have, and a
+///   terminator is written whenever `count` is not zero, even when the text
+///   does not fit. A null buffer with a zero count is the documented size
+///   query and writes nothing.
+/// - Legacy: an exact fit returns the length without writing a terminator.
+///   Truncation returns -1. Both forms support a size query with a null
+///   buffer and zero count.
+///
+/// A null buffer with a nonzero count is an invalid parameter in both. The
+/// writes never leave `[buffer, buffer + count)`. A fault inside the buffer
+/// stops the guest.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn print_to_buffer(
+    memory: &mut GuestMemory,
+    options: u64,
+    buffer: u64,
+    count: u64,
+    format: u64,
+    locale: u64,
+    arguments: u64,
+) -> Outcome<i32> {
+    let standard = options & STANDARD_SNPRINTF_BEHAVIOR != 0;
+    let legacy = options & LEGACY_VSPRINTF_NULL_TERMINATION != 0;
+    if standard && legacy {
+        return Err(RUNTIME_LIMIT);
+    }
+    if format == 0 || buffer == 0 && count != 0 {
+        return Ok(Err(Failed(-1, EINVAL)));
+    }
+    let mut text = match formatted(memory, options, format, locale, arguments, true)? {
+        // Xenora's choice for when execution continues after the invalid
+        // parameter handler: nothing is written and the result is -1.
+        Formatted::Invalid => return Ok(Err(Failed(-1, EINVAL))),
+        Formatted::Text(text) => text,
+    };
+    let len = text.len() as u64;
+    if buffer == 0 {
+        return Ok(Ok(len as i32));
+    }
+    if count != 0 {
+        let capacity = count - u64::from(standard);
+        text.truncate(len.min(capacity) as usize);
+        if standard || len < count {
+            text.push(0);
+        }
+        memory.write_bytes(buffer, &text).map_err(fault)?;
+    }
+    // Microsoft's page does not set errno for a truncated legacy write.
+    Ok(Ok(if standard || len <= count {
+        len as i32
+    } else {
+        -1
+    }))
+}
+
+/// `__stdio_common_vsprintf_s` (#466), the secure form. Microsoft's
+/// `sprintf_s` page: a null buffer, a zero count or a null format invokes the
+/// invalid parameter handler, and so does an invalid format string; a buffer
+/// too small for the text and its terminator is set to the empty string and
+/// the result is -1. When execution continues the error is `EINVAL`, or
+/// `ERANGE` for the small buffer. Xenora does not model the handler, so
+/// execution always continues.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn print_to_buffer_secure(
+    memory: &mut GuestMemory,
+    options: u64,
+    buffer: u64,
+    count: u64,
+    format: u64,
+    locale: u64,
+    arguments: u64,
+) -> Outcome<i32> {
+    if buffer == 0 || count == 0 || format == 0 {
+        return Ok(Err(Failed(-1, EINVAL)));
+    }
+    let mut text = match formatted(memory, options, format, locale, arguments, true)? {
+        Formatted::Invalid => {
+            memory.write_u8(buffer, 0).map_err(fault)?;
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        Formatted::Text(text) => text,
+    };
+    let len = text.len() as u64;
+    if len >= count {
+        memory.write_u8(buffer, 0).map_err(fault)?;
+        return Ok(Err(Failed(-1, ERANGE)));
+    }
+    text.push(0);
+    memory.write_bytes(buffer, &text).map_err(fault)?;
+    Ok(Ok(len as i32))
 }
 
 impl StandardStreams {
@@ -218,34 +373,31 @@ impl StandardStreams {
         if file == 0 || format == 0 {
             return Ok(Err(Failed(-1, EINVAL)));
         }
-        if options & !KNOWN_OPTIONS != 0 || locale != 0 {
-            return Err(RUNTIME_LIMIT);
-        }
         let stream = self.writable(file)?;
-        let template = c_string(memory, format, MAX_TRANSFER + 1).map_err(fault)?;
-        if template.len() as u64 > MAX_TRANSFER {
-            return Err(RUNTIME_LIMIT);
-        }
-        let mut source = VaList {
-            memory,
-            next: arguments,
-        };
-        let floats = Floats {
-            three_digit_exponents: options & LEGACY_THREE_DIGIT_EXPONENTS != 0,
-            standard_rounding: options & STANDARD_ROUNDING != 0,
-        };
-        let text = match crt_format::format(&template, &mut source, floats) {
-            Ok(text) => text,
-            // Windows calls the invalid parameter handler for an invalid
-            // format. Xenora's choice for when execution continues: nothing
-            // is written and the result is that of a null format.
-            Err(FormatError::Invalid) => return Ok(Err(Failed(-1, EINVAL))),
-            Err(FormatError::Unsupported | FormatError::TooLong) => return Err(RUNTIME_LIMIT),
-            Err(FormatError::Fault(error)) => return Err(fault(error)),
+        let text = match formatted(memory, options, format, locale, arguments, false)? {
+            // Xenora's choice for when execution continues after the invalid
+            // parameter handler: nothing is written and the result is that of
+            // a null format.
+            Formatted::Invalid => return Ok(Err(Failed(-1, EINVAL))),
+            Formatted::Text(text) => text,
         };
         // "A negative value if an output error occurs."
         Ok(match self.write(drive, stream, &text)? {
             Ok(()) => Ok(text.len() as i32),
+            Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `putchar`: `fputc` to `stdout`. Returns the character, or `EOF` with
+    /// `errno` set.
+    pub(super) fn put_character_stdout(
+        &mut self,
+        drive: &mut ObjectState,
+        character: i32,
+    ) -> Outcome<i32> {
+        let byte = [character as u8];
+        Ok(match self.write(drive, Stream::Output, &byte)? {
+            Ok(()) => Ok(i32::from(character as u8)),
             Err(errno) => Err(Failed(-1, errno)),
         })
     }

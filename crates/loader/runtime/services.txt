@@ -137,6 +137,42 @@ service ucrtbase.dll __stdio_common_vfprintf(options: u64, stream: ptr, format: 
     ref corecrt_stdio_config.h __stdio_common_vfprintf; Microsoft Learn, vfprintf and format specification syntax
     test formatted_output_reaches_the_captured_standard_streams
 
+# The buffer forms of printf (#466). The standard and legacy rules are from
+# Microsoft's snprintf and _snprintf pages; the secure ones from sprintf_s.
+service ucrtbase.dll __stdio_common_vsprintf(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vsprintf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null format or a null buffer with a nonzero count, or an invalid format; -1 without errno for a legacy truncation; stops the guest when both behaviour bits are set or for what is not modelled
+    ref corecrt_stdio_config.h __stdio_common_vsprintf; Microsoft Learn, snprintf and _snprintf
+    test snprintf_writes_inside_the_buffer_and_returns_the_would_be_length
+    test legacy_snprintf_truncates_without_a_terminator_and_returns_minus_one
+    test sprintf_faults_inside_the_buffer_stop_the_guest_and_nothing_leaves_it
+
+service ucrtbase.dll __stdio_common_vsprintf_s(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vsprintf_s
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null buffer, a zero count, a null or invalid format, or ERANGE when the text does not fit, and the buffer becomes empty; the invalid parameter handler is not modelled, so execution always continues
+    ref corecrt_stdio_config.h __stdio_common_vsprintf_s; Microsoft Learn, sprintf_s
+    test secure_sprintf_empties_the_buffer_and_reports_the_error
+
+service ucrtbase.dll __stdio_common_vfprintf_s(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vfprintf_s
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null stream or format or an invalid format; identical to the plain form here because %n is always invalid
+    ref corecrt_stdio_config.h __stdio_common_vfprintf_s; Microsoft Learn, vfprintf_s
+    test vfprintf_s_and_putchar_write_to_the_streams
+
+service ucrtbase.dll putchar(character: i32) -> i32
+    handler putchar
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails never: writing stdout cannot fail, as the output is captured
+    ref stdio.h putchar
+    test vfprintf_s_and_putchar_write_to_the_streams
+
 service ucrtbase.dll fwrite(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64
     handler fwrite
     status partial
