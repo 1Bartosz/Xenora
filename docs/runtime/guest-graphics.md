@@ -43,7 +43,8 @@ received it; a handle is never a host pointer.
 | `XenoraCreateCommandList` | `device`, `allocator`, `listType`, `ppList` | Creates a recording command list. `listType` must be `0`. |
 | `XenoraCreateBuffer` | `device`, `guestAddr`, `byteLength`, `ppResource` | Creates a buffer whose contents are the `byteLength` guest bytes at `guestAddr`. |
 | `XenoraCreateRenderTarget` | `device`, `width`, `height`, `ppResource` | Creates an `R8G8B8A8_UNORM` two-dimensional render target. |
-| `XenoraSetVertexBuffer` | `list`, `slot`, `resource`, `offset` | Binds a vertex buffer at `slot`. The stride is fixed at 16 bytes, one `float4` position per vertex. `slot` must be `0`. |
+| `XenoraCreateTexture2D` | `device`, `width`, `height`, `format`, `guestAddr`, `ppResource` | Creates an `R8G8B8A8_UNORM` two-dimensional texture whose pixels are the guest bytes at `guestAddr`. `guestAddr` may be `0` for a texture with no guest backing. |
+| `XenoraSetVertexBuffer` | `list`, `slot`, `resource`, `offset`, `stride` | Binds a vertex buffer at `slot`, which must be `0`. `stride` is the size of one vertex record in bytes and must be at least 16. |
 | `XenoraSetIndexBuffer` | `list`, `resource`, `offset`, `dxgiFormat` | Binds an index buffer. `dxgiFormat` is `57` (`R16_UINT`) or `42` (`R32_UINT`). |
 | `XenoraSetRenderTarget` | `list`, `resource`, `clearColor` | Binds the colour target and the clear colour. `resource` may be `0` for no target. `clearColor` is packed `R | G<<8 | B<<16 | A<<24`. |
 | `XenoraSetViewport` | `list`, `width`, `height` | Sets the viewport. Both dimensions must be in `1..=4096`. |
@@ -53,6 +54,13 @@ received it; a handle is never a host pointer.
 | `XenoraExecuteCommandLists` | `queue`, `list` | Executes a closed list. The rendered pixels are written into the bound render target. |
 | `XenoraReadbackResource` | `resource`, `guestAddr`, `byteLength` | Copies `byteLength` bytes of a resource into guest memory at `guestAddr`. |
 | `XenoraGetLastFrameInfo` | `ppInfo` | Writes four `u32`s: backend, width, height, draw count. |
+| `XenoraCreateDescriptorHeap` | `device`, `heapType`, `numDescriptors`, `ppHeap` | Creates a descriptor heap. `heapType` is `0` (`CBV_SRV_UAV`) or `1` (`SAMPLER`). |
+| `XenoraCreateShaderResourceView` | `device`, `heap`, `slot`, `resource`, `format` | Writes a shader resource view over `resource` into the heap slot. The format must equal the resource's. |
+| `XenoraCreateSampler` | `device`, `heap`, `slot`, `filter`, `addressU`, `addressV`, `addressW` | Writes a sampler into the heap slot. The filter must be `0` (point) and every address mode must be the clamp mode. |
+| `XenoraCreateRootSignature` | `device`, `srvParameter`, `samplerParameter`, `ppRootSignature` | Creates a root signature with exactly two pixel-stage descriptor tables: one for the shader resource view at root parameter index `srvParameter` and one for the sampler at `samplerParameter`. The two indices must differ. |
+| `XenoraSetDescriptorHeaps` | `list`, `srvHeap`, `samplerHeap` | Binds at most one heap of each type. A heap of `0` means no heap of that type. |
+| `XenoraSetGraphicsRootSignature` | `list`, `rootSignature` | Binds the root signature. |
+| `XenoraSetGraphicsRootDescriptorTable` | `list`, `rootParameterIndex`, `heap`, `slot` | Binds the descriptor table for one root parameter. |
 | `XenoraDestroyResource` | `resource` | Destroys a resource. |
 | `XenoraDestroyCommandList` | `list` | Destroys a command list. |
 | `XenoraDestroyCommandAllocator` | `allocator` | Destroys a command allocator. |
@@ -80,6 +88,32 @@ Destruction is ordered, and the order is enforced rather than assumed.
 
 Each refusal is an explicit error, not a silent success and not a use-after-free.
 
+## Vertex layout
+
+A vertex record is `stride` bytes. A flat draw reads three consecutive `float4`
+positions from the bound offset and ignores the stride, so a flat guest may
+bind 16-byte records. A textured draw reads a `float4` texture coordinate after
+each position and therefore needs a stride of at least 32 bytes.
+
+## Textured draws
+
+A guest that wants a sampled texture binds it in the usual order:
+
+1. Create the texture with `XenoraCreateTexture2D`, pointing at guest memory
+   that holds its pixels.
+2. Create a `CBV_SRV_UAV` descriptor heap and a `SAMPLER` descriptor heap.
+3. Create a shader resource view over the texture in a slot of the first heap,
+   and a sampler in a slot of the second.
+4. Create a root signature whose two descriptor tables hold the view and the
+   sampler.
+5. Record `XenoraSetDescriptorHeaps`, `XenoraSetGraphicsRootSignature` and one
+   `XenoraSetGraphicsRootDescriptorTable` per root parameter, then the
+   viewport, the render target, the vertex buffer and the draw.
+
+The service computes the CPU and GPU descriptor handles for a heap slot
+internally, so a guest never performs descriptor handle arithmetic and never
+sees a host pointer. A slot beyond the heap's descriptor count is refused.
+
 ## The execution path
 
 A guest draw now travels the whole way:
@@ -104,10 +138,14 @@ reference rasteriser remains the default on hosts without a GPU.
 ## Limits
 
 - One triangle per draw, one instance, no primitive restart.
-- One vertex layout: a `float4` position per vertex, stride 16.
-- Render targets are `R8G8B8A8_UNORM`, at most 64 by 64.
-- Descriptor heaps, root signatures, shader resource views and samplers exist
-  in the Rust runtime but are not yet exported to the guest.
+- Vertex records are a `float4` position, plus a `float4` texture coordinate
+  for a textured draw.
+- Render targets and textures are `R8G8B8A8_UNORM`, at most 64 by 64.
+- The sampler is point filtering with clamp addressing; that is the only
+  supported state.
+- Descriptor heaps, shader resource views, samplers and root signatures are
+  reachable, but constant buffers, upload or readback heaps, render target
+  views and depth views are not.
 - Execution is synchronous. There is no guest-visible fence or queue
   overlap yet.
 - The `x86_64` guest architecture is decoded by Xenora; the guest is not an
@@ -127,4 +165,15 @@ native ARM64. The integration test is
 cargo test --locked -p xenora-loader --test guest_graphics_path -- --nocapture
 ```
 
-The native Metal variant needs a GPU and is run by `scripts/test-gpu.sh`.
+The textured counterpart is
+[`tests/compat_fixtures/guest_textured.c`](../../tests/compat_fixtures/guest_textured.c),
+built by
+[`tests/compat_fixtures/build-guest-textured.sh`](../../tests/compat_fixtures/build-guest-textured.sh)
+and exercised by
+[`crates/loader/tests/guest_textured_path.rs`](../../crates/loader/tests/guest_textured_path.rs):
+
+```sh
+cargo test --locked -p xenora-loader --test guest_textured_path -- --nocapture
+```
+
+The native Metal variants need a GPU and are run by `scripts/test-gpu.sh`.
