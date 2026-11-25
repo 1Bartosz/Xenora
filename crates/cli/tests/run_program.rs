@@ -64,6 +64,11 @@ fn freestanding(name: &str) -> PathBuf {
     build("build-gate-a1.sh", "run-program-a1", &OUT).join(format!("{name}.exe"))
 }
 
+fn crt_sprintf(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-sprintf.sh", "run-program-crt-sprintf", &OUT).join(format!("{name}.exe"))
+}
+
 /// The SHA-256 of a file, from the host's `shasum`.
 fn digest(path: &Path) -> String {
     let output = Command::new("shasum")
@@ -704,5 +709,25 @@ fn startup_report_preserves_a_guest_exit_from_tls_before_entry() {
             r#""last_completed_stage":"tls_completed","protocol":"complete","outcome":"#,
             r#"{"kind":"guest_exit","guest_status":73,"worker_code":73}}"#,
         ),
+    );
+}
+
+#[test]
+fn a_program_using_the_buffer_forms_of_printf_runs_and_detects_a_wrong_result() {
+    for name in ["crt-sprintf-O0", "crt-sprintf-O2"] {
+        let run = run_program(&crt_sprintf(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(
+            run.stdout, "!\r\ncrt_sprintf: 29 of 29 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_sprintf("crt-sprintf-break"), &[], &[]);
+    assert_eq!(run.code, Some(29), "control: {:?}", run.stdout);
+    assert_eq!(
+        run.stdout,
+        "!\r\ncheck 29 failed: control\r\ncrt_sprintf: 28 of 29 checks passed\r\n"
     );
 }

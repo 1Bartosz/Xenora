@@ -690,6 +690,79 @@ fn print(guest: &mut Guest, stream: u64, format: &[u8], slots: &[u64]) -> u64 {
     count
 }
 
+/// The options of one `__stdio_common_vsprintf` family call, and what it
+/// returned: the result and the exit. `count` is the third argument, and the
+/// locale and the va_list pointer are the two stack slots, as the generated
+/// code of mingw-w64 passes them.
+fn buffer_print_with(
+    guest: &mut Guest,
+    symbol: &str,
+    options: u64,
+    buffer: u64,
+    count: u64,
+    format: &[u8],
+    slots: &[u64],
+) -> (u64, ExitReason) {
+    let format = place(guest, TEXT, format);
+    for (index, slot) in slots.iter().enumerate() {
+        guest
+            .memory
+            .write_u64(VA_LIST + 8 * index as u64, *slot)
+            .unwrap();
+    }
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    guest.memory.write_u64(STACK_TOP + 40, VA_LIST).unwrap();
+    let (cpu, exit) = guest.run(symbol, &[options, buffer, count, format]);
+    (cpu.get(Register::Rax) & 0xFFFF_FFFF, exit)
+}
+
+const STANDARD: u64 = MINGW_OPTIONS | 0x2;
+const LEGACY: u64 = MINGW_OPTIONS | 0x1;
+
+fn buffer_print(
+    guest: &mut Guest,
+    options: u64,
+    buffer: u64,
+    count: u64,
+    format: &[u8],
+    slots: &[u64],
+) -> u64 {
+    let (result, exit) = buffer_print_with(
+        guest,
+        "__stdio_common_vsprintf",
+        options,
+        buffer,
+        count,
+        format,
+        slots,
+    );
+    assert_eq!(
+        exit,
+        ExitReason::Halt,
+        "{}",
+        String::from_utf8_lossy(format)
+    );
+    result
+}
+
+/// The bytes at `buffer` as the guest sees them, terminator included.
+fn buffer_bytes(guest: &Guest, buffer: u64, count: usize) -> Vec<u8> {
+    let mut bytes = vec![0xCC; count];
+    guest.memory.read_bytes(buffer, &mut bytes).unwrap();
+    bytes
+}
+
+/// A guest with the text region the buffer tests write to. The scratch
+/// region is part of every guest.
+fn buffer_guest() -> Guest {
+    let mut guest = Guest::new();
+    guest
+        .memory
+        .map_region(TEXT, TEXT_LEN, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    guest
+}
+
 /// `__acrt_iob_func` (corecrt_wstdio.h) is what `stdin`, `stdout` and
 /// `stderr` expand to: indices 0, 1 and 2. A `FILE` is one pointer wide.
 #[test]
@@ -823,6 +896,296 @@ fn formatted_output_reaches_the_captured_standard_streams() {
             "{options:#x}"
         );
     }
+}
+
+#[test]
+fn snprintf_writes_inside_the_buffer_and_returns_the_would_be_length() {
+    let one_slot = &[42];
+    // A fit: the text, its terminator, and the result is the length. The
+    // guard byte after the terminator is not touched.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCRATCH, &[0xAA; 0x20]).unwrap();
+    let result = buffer_print(&mut guest, STANDARD, SCRATCH + 4, 8, b"<%d>", one_slot);
+    assert_eq!(result, 4);
+    assert_eq!(
+        buffer_bytes(&guest, SCRATCH, 16),
+        *b"\xaa\xaa\xaa\xaa<42>\x00\xaa\xaa\xaa\xaa\xaa\xaa\xaa"
+    );
+
+    // An exact fit: the terminator is the last byte of the buffer.
+    let mut guest = buffer_guest();
+    assert_eq!(
+        buffer_print(&mut guest, STANDARD, SCRATCH, 5, b"<%d>", one_slot),
+        4
+    );
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 5), *b"<42>\x00");
+
+    // One byte short, and more: the terminator is still written, over the
+    // last character, and the result is the length the text would have.
+    let mut guest = buffer_guest();
+    assert_eq!(
+        buffer_print(&mut guest, STANDARD, SCRATCH, 4, b"<%d>", one_slot),
+        4
+    );
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 4), *b"<42\x00");
+    let mut guest = buffer_guest();
+    assert_eq!(
+        buffer_print(&mut guest, STANDARD, SCRATCH, 2, b"<%d>", one_slot),
+        4
+    );
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 2), *b"<\x00");
+
+    // A zero count writes nothing, not even the terminator, and still
+    // returns the length. A null buffer with a zero count is the size query.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCRATCH, &[0xAA; 4]).unwrap();
+    assert_eq!(
+        buffer_print(&mut guest, STANDARD, SCRATCH, 0, b"<%d>", one_slot),
+        4
+    );
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 4), [0xAA; 4]);
+    let mut guest = buffer_guest();
+    assert_eq!(
+        buffer_print(&mut guest, STANDARD, 0, 0, b"<%d>", one_slot),
+        4
+    );
+
+    // sprintf passes the standard bit with a count of SIZE_MAX: no
+    // truncation is possible, as the formatter itself is bounded.
+    let mut guest = buffer_guest();
+    assert_eq!(
+        buffer_print(&mut guest, STANDARD, SCRATCH, u64::MAX, b"<%d>", one_slot),
+        4
+    );
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 5), *b"<42>\x00");
+
+    // A null buffer with a nonzero count, or a null format: -1 with EINVAL.
+    let mut guest = buffer_guest();
+    assert_eq!(
+        buffer_print(&mut guest, STANDARD, 0, 8, b"<%d>", one_slot),
+        u32::MAX as u64
+    );
+    assert_eq!(guest.errno(), 22);
+    let mut guest = buffer_guest();
+    assert_eq!(buffer_print(&mut guest, STANDARD, SCRATCH, 8, b"", &[]), 0);
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 1), *b"\x00");
+}
+
+#[test]
+fn legacy_snprintf_truncates_without_a_terminator_and_returns_minus_one() {
+    let one_slot = &[42];
+    // Microsoft's _snprintf page: len < count stores len characters, appends
+    // the terminator and returns len.
+    let mut guest = buffer_guest();
+    assert_eq!(
+        buffer_print(&mut guest, LEGACY, SCRATCH, 6, b"<%d>", one_slot),
+        4
+    );
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 6), *b"<42>\x00\x00");
+    // len == count or len > count stores count characters without a
+    // terminator and returns a negative value.
+    for count in [4u64, 3, 1] {
+        let mut guest = buffer_guest();
+        guest.memory.write_bytes(SCRATCH, &[0xAA; 8]).unwrap();
+        assert_eq!(
+            buffer_print(&mut guest, LEGACY, SCRATCH, count, b"<%d>", one_slot),
+            u32::MAX as u64,
+            "count {count}"
+        );
+        let expect: Vec<u8> = b"<42>".iter().copied().take(count as usize).collect();
+        assert_eq!(
+            buffer_bytes(&guest, SCRATCH, count as usize),
+            expect,
+            "count {count}"
+        );
+        assert_eq!(
+            buffer_bytes(&guest, SCRATCH, 8)[count as usize],
+            0xAA,
+            "count {count}"
+        );
+    }
+    // Truncation is no errno error: the guest's errno is left alone.
+    let mut guest = buffer_guest();
+    guest.set_errno(42);
+    assert_eq!(
+        buffer_print(&mut guest, LEGACY, SCRATCH, 2, b"<%d>", one_slot),
+        u32::MAX as u64
+    );
+    assert_eq!(guest.errno(), 42);
+    // A zero count writes nothing and is a truncation. A null buffer is an
+    // invalid parameter, as is a null format; both set EINVAL.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCRATCH, &[0xAA; 2]).unwrap();
+    assert_eq!(
+        buffer_print(&mut guest, LEGACY, SCRATCH, 0, b"", &[]),
+        u32::MAX as u64
+    );
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 2), [0xAA; 2]);
+    let mut guest = buffer_guest();
+    assert_eq!(
+        buffer_print(&mut guest, LEGACY, 0, 0, b"<%d>", one_slot),
+        u32::MAX as u64
+    );
+    assert_eq!(guest.errno(), 22);
+    // Both behaviour bits at once contradict each other and stop the guest.
+    let mut guest = buffer_guest();
+    let (_, exit) = buffer_print_with(
+        &mut guest,
+        "__stdio_common_vsprintf",
+        STANDARD | 0x1,
+        SCRATCH,
+        8,
+        b"x",
+        &[],
+    );
+    assert_eq!(exit, LIMIT);
+}
+
+#[test]
+fn secure_sprintf_empties_the_buffer_and_reports_the_error() {
+    let one_slot = &[42];
+    // sprintf_s passes neither behaviour bit. A fit writes the text and its
+    // terminator and returns the length; the exact fit included.
+    for count in [6u64, 5] {
+        let mut guest = buffer_guest();
+        let (result, exit) = buffer_print_with(
+            &mut guest,
+            "__stdio_common_vsprintf_s",
+            MINGW_OPTIONS,
+            SCRATCH,
+            count,
+            b"<%d>",
+            one_slot,
+        );
+        assert_eq!((result, exit), (4, ExitReason::Halt), "count {count}");
+        assert_eq!(
+            buffer_bytes(&guest, SCRATCH, 5),
+            *b"<42>\x00",
+            "count {count}"
+        );
+    }
+    // A buffer too small for the text and its terminator becomes the empty
+    // string, the result is -1 and errno is ERANGE.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCRATCH, b"abcdef\x00").unwrap();
+    let (result, exit) = buffer_print_with(
+        &mut guest,
+        "__stdio_common_vsprintf_s",
+        MINGW_OPTIONS,
+        SCRATCH,
+        4,
+        b"<%d>",
+        one_slot,
+    );
+    assert_eq!((result, exit), (u32::MAX as u64, ExitReason::Halt));
+    assert_eq!(guest.errno(), 34);
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 7), *b"\x00bcdef\x00");
+    // A null buffer or format or a zero count: -1 with EINVAL.
+    let mut guest = buffer_guest();
+    for (buffer, count) in [(0, 8), (SCRATCH, 0)] {
+        let (result, exit) = buffer_print_with(
+            &mut guest,
+            "__stdio_common_vsprintf_s",
+            MINGW_OPTIONS,
+            buffer,
+            count,
+            b"<%d>",
+            one_slot,
+        );
+        assert_eq!((result, exit), (u32::MAX as u64, ExitReason::Halt));
+        assert_eq!(guest.errno(), 22);
+    }
+    // An invalid format empties the buffer too.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCRATCH, b"abcdef\x00").unwrap();
+    let (result, exit) = buffer_print_with(
+        &mut guest,
+        "__stdio_common_vsprintf_s",
+        MINGW_OPTIONS,
+        SCRATCH,
+        8,
+        b"%n",
+        &[SCRATCH],
+    );
+    assert_eq!((result, exit), (u32::MAX as u64, ExitReason::Halt));
+    assert_eq!(guest.errno(), 22);
+    assert_eq!(buffer_bytes(&guest, SCRATCH, 7), *b"\x00bcdef\x00");
+}
+
+#[test]
+fn sprintf_faults_inside_the_buffer_stop_the_guest_and_nothing_leaves_it() {
+    // A buffer that is not mapped at all: the write faults and the guest
+    // stops instead of losing the text.
+    let mut guest = buffer_guest();
+    let (_, exit) = buffer_print_with(
+        &mut guest,
+        "__stdio_common_vsprintf",
+        STANDARD,
+        0x10,
+        8,
+        b"<%d>",
+        &[42],
+    );
+    assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
+    // A truncated write touches neither the byte before the buffer nor the
+    // first byte past it.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCRATCH, &[0xAA; 0x20]).unwrap();
+    let result = buffer_print(&mut guest, STANDARD, SCRATCH + 1, 3, b"<%d>", &[42]);
+    assert_eq!(result, 4);
+    let bytes = buffer_bytes(&guest, SCRATCH, 8);
+    assert_eq!(bytes[0], 0xAA);
+    assert_eq!(&bytes[1..4], b"<4\x00");
+    assert_eq!(bytes[4], 0xAA);
+    // And the legacy form, which writes up to count characters.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCRATCH, &[0xAA; 0x20]).unwrap();
+    let result = buffer_print(&mut guest, LEGACY, SCRATCH + 1, 2, b"<%d>", &[42]);
+    assert_eq!(result, u32::MAX as u64);
+    let bytes = buffer_bytes(&guest, SCRATCH, 8);
+    assert_eq!(bytes[0], 0xAA);
+    assert_eq!(&bytes[1..3], b"<4");
+    assert_eq!(bytes[3], 0xAA);
+}
+
+#[test]
+fn vfprintf_s_and_putchar_write_to_the_streams() {
+    let (mut guest, [_, out, _]) = stdio_guest();
+    let one = place(&mut guest, STRINGS, b"one");
+    let slots = [7, one];
+    let format = place(&mut guest, TEXT, b"%d %s\n");
+    for (index, slot) in slots.iter().enumerate() {
+        guest
+            .memory
+            .write_u64(VA_LIST + 8 * index as u64, *slot)
+            .unwrap();
+    }
+    guest.memory.write_u64(STACK_TOP + 32, VA_LIST).unwrap();
+    let (cpu, exit) = guest.run(
+        "__stdio_common_vfprintf_s",
+        &[MINGW_OPTIONS, out, format, 0],
+    );
+    assert_eq!(
+        (cpu.get(Register::Rax) & 0xFFFF_FFFF, exit),
+        (6, ExitReason::Halt)
+    );
+    // putchar returns its character and writes it. A line feed is written in
+    // text mode, as in any other output.
+    for character in [u64::from(b'A'), u64::from(b'\n')] {
+        let (cpu, exit) = guest.run("putchar", &[character]);
+        assert_eq!(
+            (cpu.get(Register::Rax) & 0xFFFF_FFFF, exit),
+            (character, ExitReason::Halt)
+        );
+    }
+    assert_eq!(guest.state.standard_output(), b"7 one\r\nA\r\n");
+    // A null format is invalid in the secure form too: -1 with EINVAL.
+    let (cpu, exit) = guest.run("__stdio_common_vfprintf_s", &[MINGW_OPTIONS, out, 0, 0]);
+    assert_eq!(
+        (cpu.get(Register::Rax) & 0xFFFF_FFFF, exit),
+        (u32::MAX as u64, ExitReason::Halt)
+    );
+    assert_eq!(guest.errno(), 22);
 }
 
 /// What `__stdio_common_vfprintf` refuses. A null stream or format returns -1

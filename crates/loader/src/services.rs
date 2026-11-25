@@ -1018,6 +1018,76 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    // The buffer forms of printf, and the secure forms (#466). They share the
+    // formatter through `crt_streams`; the stream state only serves `putchar`
+    // and `vfprintf_s`.
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn vsprintf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        buffer: u64,
+        count: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = crt_streams::print_to_buffer(
+            context.memory,
+            options,
+            buffer,
+            count,
+            format,
+            locale,
+            arguments,
+        );
+        or_errno(context, outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn vsprintf_s(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        buffer: u64,
+        count: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = crt_streams::print_to_buffer_secure(
+            context.memory,
+            options,
+            buffer,
+            count,
+            format,
+            locale,
+            arguments,
+        );
+        or_errno(context, outcome)
+    }
+
+    pub fn vfprintf_s(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        stream: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        // The secure stream form validates what the plain one validates, and
+        // `%n` is invalid in both, so they are the same here.
+        vfprintf(context, options, stream, format, locale, arguments)
+    }
+
+    pub fn putchar(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.put_character_stdout(&mut drive, character)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn fputs(context: &mut ServiceContext<'_>, text: u64, stream: u64) -> Outcome<i32> {
         let outcome = {
             let mut streams = context.state.crt_streams();
