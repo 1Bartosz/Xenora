@@ -451,218 +451,6 @@ final class FrameModel: ObservableObject {
     }
 }
 
-/// Persistent guest rendering model (Gate 3, #266; Gate 4, #276).
-@MainActor
-final class FrameLoopModel: ObservableObject {
-    @Published var state: UInt32 = UInt32(XENORA_LOOP_NONE)
-    @Published var completed: UInt32 = 0
-    @Published var frameId: UInt32 = XENORA_NO_FRAME
-    @Published var image: CGImage?
-    @Published var errorMessage: String?
-    @Published var isInteractive: Bool = false
-    /// Completed frames per second over the last half second, measured on the host.
-    @Published var hostFps: Double?
-    @Published private(set) var controller: DetectedController?
-
-    private var session: xenora_session = 0
-    private var pollTask: Task<Void, Never>?
-
-    deinit {
-        pollTask?.cancel()
-        if session != 0 {
-            _ = xenora_session_destroy(session)
-        }
-    }
-
-    var isRunning: Bool { state == UInt32(XENORA_LOOP_RUNNING) }
-    var isPaused: Bool { state == UInt32(XENORA_LOOP_PAUSED) }
-    var canStart: Bool {
-        session == 0 || state == UInt32(XENORA_LOOP_NONE) || state == UInt32(XENORA_LOOP_FINISHED)
-            || state == UInt32(XENORA_LOOP_STOPPED) || state == UInt32(XENORA_LOOP_FAILED)
-    }
-
-    var stateDescription: String {
-        switch state {
-        case UInt32(XENORA_LOOP_NONE): return "Idle"
-        case UInt32(XENORA_LOOP_RUNNING): return "Running"
-        case UInt32(XENORA_LOOP_PAUSED): return "Paused"
-        case UInt32(XENORA_LOOP_FINISHED): return "Finished"
-        case UInt32(XENORA_LOOP_STOPPED): return "Stopped"
-        case UInt32(XENORA_LOOP_FAILED): return "Failed"
-        default: return "Unknown (\(state))"
-        }
-    }
-
-    func start(frameCount: UInt32 = 300) {
-        errorMessage = nil
-        if session != 0 {
-            _ = xenora_session_destroy(session)
-            session = 0
-        }
-        var newSession: xenora_session = 0
-        let createStatus = xenora_session_create(XENORA_ABI_VERSION, &newSession)
-        guard createStatus == XENORA_OK else {
-            errorMessage = "Failed to create session (status \(createStatus))"
-            return
-        }
-        session = newSession
-        let startStatus = xenora_session_start_frame_loop(session, frameCount)
-        guard startStatus == XENORA_OK else {
-            errorMessage = "Failed to start frame loop (status \(startStatus))"
-            _ = xenora_session_destroy(session)
-            session = 0
-            return
-        }
-        isInteractive = false
-        state = UInt32(XENORA_LOOP_RUNNING)
-        completed = 0
-        frameId = XENORA_NO_FRAME
-        image = nil
-        startPolling()
-    }
-
-    func startInteractive(frameCount: UInt32 = 300) {
-        errorMessage = nil
-        if session != 0 {
-            _ = xenora_session_destroy(session)
-            session = 0
-        }
-        var newSession: xenora_session = 0
-        let createStatus = xenora_session_create(XENORA_ABI_VERSION, &newSession)
-        guard createStatus == XENORA_OK else {
-            errorMessage = "Failed to create session (status \(createStatus))"
-            return
-        }
-        session = newSession
-        let startStatus = xenora_session_start_interactive_loop(session, frameCount)
-        guard startStatus == XENORA_OK else {
-            errorMessage = "Failed to start interactive loop (status \(startStatus))"
-            _ = xenora_session_destroy(session)
-            session = 0
-            return
-        }
-        isInteractive = true
-        controller = nil
-        state = UInt32(XENORA_LOOP_RUNNING)
-        completed = 0
-        frameId = XENORA_NO_FRAME
-        image = nil
-        startPolling()
-    }
-
-    func sendInput(buttons: UInt32) {
-        sendInput(buttons: buttons, x: 0, y: 0, connected: true)
-    }
-
-    private func sendInput(
-        buttons: UInt32, x: Int16, y: Int16, connected: Bool,
-        leftTrigger: Float = 0, rightTrigger: Float = 0
-    ) {
-        guard session != 0 else { return }
-        let state = xenora_input_state(
-            buttons: buttons,
-            stick_x: x,
-            stick_y: y,
-            mouse_dx: 0,
-            mouse_dy: 0,
-            mouse_buttons: 0,
-            connected: connected ? 1 : 0,
-            reserved: 0
-        )
-        var input = xenora_controller_input(
-            state: state, left_trigger: UInt16((leftTrigger * 65535).rounded()),
-            right_trigger: UInt16((rightTrigger * 65535).rounded())
-        )
-        _ = xenora_session_send_controller_input(session, &input)
-    }
-
-    private func updateGameController() {
-        let next = pollGameController()
-        guard next != controller else { return }
-        controller = next
-        let snapshot = next?.snapshot
-        sendInput(buttons: snapshot?.buttons ?? 0, x: snapshot?.x ?? 0, y: snapshot?.y ?? 0,
-                  connected: next != nil, leftTrigger: snapshot?.leftTrigger ?? 0,
-                  rightTrigger: snapshot?.rightTrigger ?? 0)
-    }
-
-    func pause() {
-        guard session != 0 else { return }
-        _ = xenora_session_pause_frame_loop(session)
-    }
-
-    func resume() {
-        guard session != 0 else { return }
-        _ = xenora_session_resume_frame_loop(session)
-    }
-
-    func stop() {
-        guard session != 0 else { return }
-        _ = xenora_session_stop_frame_loop(session)
-    }
-
-    private func startPolling() {
-        pollTask?.cancel()
-        hostFps = nil
-        pollTask = Task { [weak self] in
-            var windowStart = Date()
-            var windowFrames: UInt32? = nil
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 16_000_000)
-                guard let self = self, self.session != 0 else { break }
-                if self.isInteractive {
-                    self.updateGameController()
-                }
-                var st: UInt32 = 0
-                var comp: UInt32 = 0
-                var fId: UInt32 = 0
-                var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
-                let code = rgba.withUnsafeMutableBufferPointer { buffer in
-                    xenora_session_frame_loop_status(
-                        self.session, &st, &comp, &fId, buffer.baseAddress, UInt64(buffer.count))
-                }
-                guard code == XENORA_OK else { break }
-                self.state = st
-                self.completed = comp
-                self.frameId = fId
-                let elapsed = Date().timeIntervalSince(windowStart)
-                if let first = windowFrames {
-                    if elapsed >= 0.5 {
-                        self.hostFps = Double(comp &- first) / elapsed
-                        windowStart = Date()
-                        windowFrames = comp
-                    }
-                } else {
-                    windowFrames = comp
-                    windowStart = Date()
-                }
-                if fId != XENORA_NO_FRAME, let provider = CGDataProvider(data: Data(rgba) as CFData) {
-                    self.image = CGImage(
-                        width: Int(XENORA_FIXTURE_FRAME_WIDTH),
-                        height: Int(XENORA_FIXTURE_FRAME_HEIGHT),
-                        bitsPerComponent: 8,
-                        bitsPerPixel: 32,
-                        bytesPerRow: Int(XENORA_FIXTURE_FRAME_WIDTH) * 4,
-                        space: CGColorSpaceCreateDeviceRGB(),
-                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                        provider: provider,
-                        decode: nil,
-                        shouldInterpolate: false,
-                        intent: .defaultIntent
-                    )
-                }
-                if st != UInt32(XENORA_LOOP_RUNNING) && st != UInt32(XENORA_LOOP_PAUSED) {
-                    // A loop that ends inside its first window still gets a rate.
-                    if let first = windowFrames, comp > first, elapsed > 0 {
-                        self.hostFps = Double(comp - first) / elapsed
-                    }
-                    break
-                }
-            }
-        }
-    }
-}
-
 /// Read-only compatibility inspection of a user-chosen file. Nothing in it is executed.
 @MainActor
 final class InspectionModel: ObservableObject {
@@ -885,12 +673,13 @@ struct ContentView: View {
                     Text("Frame #\(loop.frameId) (\(loop.completed) completed) • \(loop.stateDescription)")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                } else if let error = loop.errorMessage {
-                    Text(error).foregroundStyle(.red)
                 } else if loop.state != UInt32(XENORA_LOOP_NONE) {
                     Text("State: \(loop.stateDescription) • \(loop.completed) completed")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                }
+                if let error = loop.errorMessage {
+                    Text(error).foregroundStyle(.red)
                 }
                 HStack {
                     Button("Start 300 frames") { loop.start(frameCount: 300) }
@@ -1255,6 +1044,21 @@ if CommandLine.arguments.contains("--smoke-hud") {
     }
     print("smoke-hud: \(ok ? "ok" : "failed")")
     exit(ok ? 0 : 1)
+}
+
+// Keep injected status failures separate from the actual Metal fixtures.
+if let check = CommandLine.arguments.first(where: {
+    $0 == "--smoke-loop-lifecycle" || $0 == "--smoke-native-loop-lifecycle"
+}) {
+    Task { @MainActor in
+        let failures = check == "--smoke-loop-lifecycle"
+            ? await checkFrameLoopFailures()
+            : await checkNativeFrameLoop()
+        for failure in failures { print("\(check): FAILED \(failure)") }
+        print("\(check): \(failures.isEmpty ? "ok" : "failed")")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+    dispatchMain()
 }
 
 // `--smoke` prints the probe and exits without opening a window, for scripts and CI.
