@@ -16,6 +16,11 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var codes: [Operation: Int32] = [:]
     private var calls: [Operation] = []
     private var invalidCalls = 0
+    private var snapshot = (state: UInt32(XENORA_LOOP_FINISHED), completed: UInt32(1), frame: UInt32(0), pixel: UInt8(0))
+
+    func report(_ state: Int, completed: UInt32, frame: UInt32, pixel: UInt8) {
+        lock.withLock { snapshot = (UInt32(state), completed, frame, pixel) }
+    }
 
     func fail(_ operation: Operation, _ code: Int32) {
         lock.withLock { codes[operation] = code }
@@ -75,9 +80,12 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
         lock.withLock {
             let code = call(.status, handle)
             if code == XENORA_OK {
-                state = UInt32(XENORA_LOOP_FINISHED)
-                completed = 1
-                frame = 0
+                state = snapshot.state
+                completed = snapshot.completed
+                frame = snapshot.frame
+                if frame != XENORA_NO_FRAME {
+                    for i in rgba.indices { rgba[i] = snapshot.pixel }
+                }
             }
             return code
         }
@@ -162,12 +170,86 @@ func checkFrameLoopFailures() async -> [String] {
     let teardownAPI = ScriptedFrameLoop()
     var closing: FrameLoopModel? = FrameLoopModel(api: teardownAPI)
     closing?.startInteractive()
-    weak var weakModel = closing
+    weak let weakModel = closing
     closing = nil
     expect(weakModel == nil && teardownAPI.clean && teardownAPI.count(.destroy) == 1,
            "teardown leaked its model or session")
     try? await Task.sleep(for: .milliseconds(35))
     expect(teardownAPI.count(.status) == 0, "poll ran after teardown")
+    return failures + (await checkFramePolling())
+}
+
+@MainActor
+private final class FramePollingProbe {
+    var intervals: [Duration] = []
+    var controller: DetectedController?
+}
+
+@MainActor
+private func checkFramePolling() async -> [String] {
+    var failures: [String] = []
+    func expect(_ condition: Bool, _ message: String) {
+        if !condition { failures.append(message) }
+    }
+
+    let api = ScriptedFrameLoop()
+    let probe = FramePollingProbe()
+    let model = FrameLoopModel(
+        api: api,
+        readController: { probe.controller },
+        sleepBeforePoll: { interval in
+            probe.intervals.append(interval)
+            // Keep the heartbeat pending until a control command cancels it.
+            try await Task.sleep(for: .seconds(60))
+        }
+    )
+    let controller = DetectedController(
+        identity: ObjectIdentifier(api), name: "Smoke controller", supportsHaptics: false,
+        snapshot: ControllerSnapshot(buttons: UInt32(XENORA_INPUT_LEFT), x: 0, y: 0, leftTrigger: 0, rightTrigger: 0)
+    )
+    func pixels(_ image: CGImage?) -> Data? {
+        image?.dataProvider?.data.map { $0 as Data }
+    }
+
+    model.startInteractive()
+    expect(await waitForLoop { probe.intervals.count == 1 } && probe.intervals.last == .milliseconds(16),
+           "running loop did not schedule the running heartbeat")
+
+    probe.controller = controller
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0x22)
+    model.pause()
+    let first = model.image
+    expect(model.isPaused && first != nil && model.completed == 1 && model.controller == controller
+           && api.count(.sendInput) == 1 && api.count(.status) == 1,
+           "pause did not immediately refresh the frame and controller")
+    expect(await waitForLoop { probe.intervals.count == 2 } && probe.intervals.last == .milliseconds(250),
+           "paused loop did not replace the running heartbeat")
+
+    api.report(XENORA_LOOP_RUNNING, completed: 2, frame: 0, pixel: 0x22)
+    model.resume()
+    expect(model.isRunning && model.image === first && model.completed == 2
+           && api.count(.sendInput) == 1 && api.count(.status) == 2,
+           "resume republished the same frame or failed to refresh immediately")
+    expect(await waitForLoop { probe.intervals.count == 3 } && probe.intervals.last == .milliseconds(16),
+           "resumed loop did not replace the paused heartbeat")
+
+    probe.controller = nil
+    api.report(XENORA_LOOP_PAUSED, completed: 3, frame: 1, pixel: 0x77)
+    model.pause()
+    let second = model.image
+    let byteCount = Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4)
+    expect(model.isPaused && model.frameId == 1 && second !== first
+           && pixels(second) == Data(repeating: 0x77, count: byteCount)
+           && pixels(first) == Data(repeating: 0x22, count: byteCount),
+           "new status did not publish a separate, immutable pixel snapshot")
+    expect(model.controller == nil && api.count(.sendInput) == 2,
+           "paused interactive loop did not report the controller disconnect")
+
+    api.report(XENORA_LOOP_STOPPED, completed: 3, frame: 1, pixel: 0x77)
+    model.stop()
+    expect(model.state == XENORA_LOOP_STOPPED && model.canStart && model.image === second
+           && api.count(.status) == 4,
+           "stop did not immediately publish terminal status and retain the last frame")
     return failures
 }
 
