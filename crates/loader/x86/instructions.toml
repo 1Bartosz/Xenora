@@ -5,7 +5,7 @@
 # reviewed Rust primitives (crates/loader/src/x86_exec.rs), never here.
 # Independence: tests/x86_integer.rs never reads this file.
 #
-# A form names its opcode map ("1" or "0f"), opcode byte, optional ModRM digit,
+# A form names its opcode map ("1", "0f", "0f38" or "0f3a"), opcode byte, optional ModRM digit,
 # operand encoding, operand size and immediate. Declaring a form makes it
 # decodable; a form counts as implemented only once its operation has semantics
 # and independent tests. Forms not listed here are rejected.
@@ -21,7 +21,7 @@
 # rm = N requires the ModRM r/m field to be N. It needs register_only, so the
 # form matches exactly one ModRM byte. At most one form per opcode and digit.
 #
-# prefix is a mandatory prefix: "66", "f3" or "f2". SSE forms use size x (XMM)
+# prefix is a mandatory prefix: "66", "f3" or "f2", and "66" in maps 0f38 and 0f3a. SSE forms use size x (XMM)
 # and give the ModRM operand width in src: x = 16 bytes, q = 8, d = 4, w = 2.
 # A 16-byte memory operand must be aligned unless unaligned = true.
 #
@@ -211,6 +211,23 @@ lfence = { ref = "sdm LFENCE" }
 mfence = { ref = "sdm MFENCE" }
 sfence = { ref = "sdm SFENCE" }
 stmxcsr = { ref = "sdm STMXCSR" }
+# SSSE3
+pshufb = { ref = "sdm PSHUFB" }
+phaddw = { ref = "sdm PHADDW/PHADDD" }
+phaddd = { ref = "sdm PHADDW/PHADDD" }
+phaddsw = { ref = "sdm PHADDSW" }
+pmaddubsw = { ref = "sdm PMADDUBSW" }
+phsubw = { ref = "sdm PHSUBW/PHSUBD" }
+phsubd = { ref = "sdm PHSUBW/PHSUBD" }
+phsubsw = { ref = "sdm PHSUBSW" }
+psignb = { ref = "sdm PSIGNB/PSIGNW/PSIGND" }
+psignw = { ref = "sdm PSIGNB/PSIGNW/PSIGND" }
+psignd = { ref = "sdm PSIGNB/PSIGNW/PSIGND" }
+pmulhrsw = { ref = "sdm PMULHRSW" }
+pabsb = { ref = "sdm PABSB/PABSW/PABSD/PABSQ" }
+pabsw = { ref = "sdm PABSB/PABSW/PABSD/PABSQ" }
+pabsd = { ref = "sdm PABSB/PABSW/PABSD/PABSQ" }
+palignr = { ref = "sdm PALIGNR" }
 
 # Floating point. Every form can raise a SIMD floating-point exception.
 sqrtps = { faults = true, ref = "sdm SQRTPS" }
@@ -916,6 +933,152 @@ opcode = 0xC1
 enc = "rm_reg"
 size = "v"
 lock = true
+
+# SSSE3, XMM forms. The MMX forms, without 0x66, are not declared.
+[[form]]
+op = "pshufb"
+map = "0f38"
+prefix = "66"
+opcode = 0x00
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "phaddw"
+map = "0f38"
+prefix = "66"
+opcode = 0x01
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "phaddd"
+map = "0f38"
+prefix = "66"
+opcode = 0x02
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "phaddsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x03
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "pmaddubsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x04
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "phsubw"
+map = "0f38"
+prefix = "66"
+opcode = 0x05
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "phsubd"
+map = "0f38"
+prefix = "66"
+opcode = 0x06
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "phsubsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x07
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "psignb"
+map = "0f38"
+prefix = "66"
+opcode = 0x08
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "psignw"
+map = "0f38"
+prefix = "66"
+opcode = 0x09
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "psignd"
+map = "0f38"
+prefix = "66"
+opcode = 0x0A
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "pmulhrsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x0B
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "pabsb"
+map = "0f38"
+prefix = "66"
+opcode = 0x1C
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "pabsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x1D
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "pabsd"
+map = "0f38"
+prefix = "66"
+opcode = 0x1E
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "palignr"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0F
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
+imm = "ub"
 
 # Groups whose digits select an operation: [opcode, size, immediate, encoding].
 [[group]]

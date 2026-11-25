@@ -65,7 +65,21 @@ class GenerateX86(unittest.TestCase):
         self.rejects(self.form('op = "paddb"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "x"'), "source size")
         self.rejects(self.form('op = "paddb"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "v"\nsrc = "x"'), "XMM size")
         self.rejects(self.form('op = "movq"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "x"\nsrc = "q"\nunaligned = true'), "alignment applies")
-        self.rejects(self.form('op = "nop"\nprefix = "66"\nopcode = 0xD7\nenc = "none"\nsize = "n"'), "map 0f")
+        self.rejects(self.form('op = "nop"\nprefix = "66"\nopcode = 0xD7\nenc = "none"\nsize = "n"'), "no opcode table for prefix '66' in map 1")
+
+    def test_three_byte_maps_need_the_66_prefix(self):
+        form = 'op = "pshufb"\nmap = "{}"\n{}opcode = 0xF0\nenc = "xmm_rm"\nsize = "x"\nsrc = "x"'
+        for opcode_map in ("0f38", "0f3a"):
+            for prefix in ("", 'prefix = "f2"\n', 'prefix = "f3"\n'):
+                self.rejects(self.form(form.format(opcode_map, prefix)), f"in map {opcode_map}")
+            generate_x86.load(self.form(form.format(opcode_map, 'prefix = "66"\n')))
+        self.rejects(self.form(form.format("0f39", "")), "unknown map")
+        # A form lands in its own map's table and no other.
+        operations, forms = generate_x86.load(self.form(form.format("0f3a", 'prefix = "66"\n')))
+        index = next(i for i, f in enumerate(forms) if f["map"] == "0f3a" and f["opcode"] == 0xF0)
+        tables = generate_x86.generate(operations, forms).split("pub static ")
+        holding = [t.split(":")[0] for t in tables if f"Entry::Form({index})" in t]
+        self.assertEqual(holding, ["THREE_BYTE_3A_66"])
 
     def test_lock_needs_a_memory_destination(self):
         # Not a form without ModRM, not one whose ModRM operand is the source,

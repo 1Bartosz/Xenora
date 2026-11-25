@@ -8,7 +8,8 @@
 //! forms agree across them.
 
 use crate::x86_table::{
-    FORMS, GROUPS, ONE_BYTE, Op, TWO_BYTE, TWO_BYTE_66, TWO_BYTE_F2, TWO_BYTE_F3,
+    FORMS, GROUPS, ONE_BYTE, Op, THREE_BYTE_3A_66, THREE_BYTE_38_66, TWO_BYTE, TWO_BYTE_66,
+    TWO_BYTE_F2, TWO_BYTE_F3,
 };
 
 /// Architectural x86-64 instruction length limit, in bytes.
@@ -335,9 +336,26 @@ pub fn decode<E>(
         return Err(DecodeError::Unsupported(0xF2));
     }
     let two_byte = byte == 0x0F;
-    let opcode = if two_byte { cursor.u8()? } else { byte };
+    let mut opcode = if two_byte { cursor.u8()? } else { byte };
+    // 0F 38 and 0F 3A are escapes to maps with a third opcode byte. Every
+    // declared form there has 0x66 as its mandatory prefix, over which F2 and
+    // F3 take precedence.
+    let three_byte = match opcode {
+        0x38 if two_byte => Some(&THREE_BYTE_38_66),
+        0x3A if two_byte => Some(&THREE_BYTE_3A_66),
+        _ => None,
+    };
+    if three_byte.is_some() {
+        if !operand_size || rep || repne {
+            return Err(DecodeError::Unsupported(opcode));
+        }
+        opcode = cursor.u8()?;
+    }
     let slot = usize::from(opcode);
-    let table = if !two_byte {
+    let table = if let Some(table) = three_byte {
+        operand_size = false;
+        table
+    } else if !two_byte {
         // On a one-byte opcode F3 is PAUSE (F3 90) or REP on a string form.
         let string = matches!(
             ONE_BYTE[slot],

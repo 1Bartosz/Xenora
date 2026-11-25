@@ -135,7 +135,8 @@ packsswb packssdw packuswb pcmpgtb pcmpgtw pcmpgtd pcmpeqb pcmpeqw pcmpeqd paddb
 psubb psubw psubd psubq paddsb paddsw paddusb paddusw psubsb psubsw psubusb psubusw pmullw pmulhw
 pmulhuw pmuludq pmaddwd psadbw pavgb pavgw pminub pmaxub pminsw pmaxsw pand pandn por pxor andps
 andpd andnps andnpd orps orpd xorps xorpd unpcklps unpcklpd unpckhps unpckhpd psllw pslld psllq
-psrlw psrld psrlq psraw psrad movaps movapd movups movupd movdqa movdqu""".split()
+psrlw psrld psrlq psraw psrad pshufb phaddw phaddd phaddsw pmaddubsw phsubw phsubd phsubsw
+psignb psignw psignd pmulhrsw pabsb pabsw pabsd movaps movapd movups movupd movdqa movdqu""".split()
 
 
 def vector_cases():
@@ -164,6 +165,8 @@ def vector_cases():
     for op in "pshufd pshufhw pshuflw shufps shufpd".split():
         out += [f"{op} xmm3, xmm9, {n}" for n in (0, 27, 78, 177, 255)]
         out += [f"{op} xmm10, {wide}, 114", f"{op} xmm2, xmm2, 57"]
+    for n in (0, 1, 5, 15, 16, 17, 31, 32, 255):
+        out += [f"palignr xmm3, xmm9, {n}", f"palignr xmm10, {wide}, {n}", f"palignr xmm2, xmm2, {n}"]
     for n in (0, 3, 7):
         out += [f"pinsrw xmm9, ebx, {n}", f"pinsrw xmm3, {word}, {n}", f"pextrw r9d, xmm3, {n}"]
     out += [f"stmxcsr {dword}"]

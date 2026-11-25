@@ -32,7 +32,7 @@ FS and GS overrides together are architecturally undefined; GS applies, in both 
 
 ## Vector state
 
-XMM registers live in `CpuState::xmm`, lane 0 in the low bits, and MXCSR in `CpuState::mxcsr`. A mandatory 0x66, F3 or F2 prefix selects a form; the generator rejects an opcode where 0x66 could be both a mandatory prefix and an operand size. A 16-byte memory operand must be aligned unless its form says otherwise, and a violation exits with `GeneralProtection` before any memory access. Non-temporal stores are ordinary stores.
+XMM registers live in `CpuState::xmm`, lane 0 in the low bits, and MXCSR in `CpuState::mxcsr`. A mandatory 0x66, F3 or F2 prefix selects a form; in the 0F 38 and 0F 3A opcode maps every form needs 0x66, over which F3 and F2 take precedence; the generator rejects an opcode where 0x66 could be both a mandatory prefix and an operand size. A 16-byte memory operand must be aligned unless its form says otherwise, and a violation exits with `GeneralProtection` before any memory access. Non-temporal stores are ordinary stores.
 
 ## Floating point
 
@@ -109,7 +109,7 @@ CPUID (`0F A2`) returns a fixed table that never reads the host. It describes a 
 
 A feature bit is set only when every instruction of that feature is implemented. That is stricter than "some of it works", and it has consequences:
 
-- SSE and SSE2 are not reported, although most of their instructions exist, because parts are still rejected: RSQRTPS and MASKMOVDQU, for example. BMI1 is not reported although TZCNT exists, because ANDN does not. The x87 FPU is not reported although FNINIT exists. MMX, FXSAVE, CMPXCHG8B, the time-stamp counter and SYSRET are absent too.
+- SSE and SSE2 are not reported, although most of their instructions exist, because parts are still rejected: RSQRTPS and MASKMOVDQU, for example. SSSE3 is not reported although all its XMM forms exist, because its MMX forms do not. BMI1 is not reported although TZCNT exists, because ANDN does not. The x87 FPU is not reported although FNINIT exists. MMX, FXSAVE, CMPXCHG8B, the time-stamp counter and SYSRET are absent too.
 - The table is therefore truthful about Xenora, not plausible as hardware: every real 64-bit processor reports the FPU and SSE2. A guest that tests a bit before using a feature avoids it; a guest that assumes SSE2 because it runs in 64-bit mode still gets every form that exists and an illegal-instruction exit for one that does not.
 - A leaf that is not listed returns zeros, whatever the subleaf. Intel processors answer a leaf above the highest basic one with that leaf's data instead; software is expected to read the highest leaf first.
 
@@ -119,4 +119,4 @@ A feature bit is set only when every instruction of that feature is implemented.
 
 ## Rejected on purpose
 
-LOCK except as described above, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, LODS, CMPS, SCAS, REPE and REPNE, every x87 instruction except FNINIT, MMX, the RCP and RSQRT approximations, SSE3 and later, VEX, CMPXCHG8B and CMPXCHG16B. The DBT also refuses raw SYSCALL.
+LOCK except as described above, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, LODS, CMPS, SCAS, REPE and REPNE, every x87 instruction except FNINIT, MMX, the RCP and RSQRT approximations, SSE3, the MMX forms of SSSE3, SSE4.1 and later, VEX, CMPXCHG8B and CMPXCHG16B. The DBT also refuses raw SYSCALL.

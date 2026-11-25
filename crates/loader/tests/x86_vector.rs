@@ -11,7 +11,8 @@
 use xenora_loader::cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, Mxcsr, RFlags};
 use xenora_loader::dbt::{DbtEngine, is_native};
 use xenora_loader::memory::{GuestMemory, MemoryPermissions};
-use xenora_loader::x86_decode::decode;
+use xenora_loader::x86_decode::{DecodeError, RmOperand, decode};
+use xenora_loader::x86_table::Op;
 
 const ENTRY: u64 = 0x1000;
 const DATA: u64 = 0x2000;
@@ -234,6 +235,58 @@ fn packed(name: &str, a: &Bytes, b: &Bytes) -> Bytes {
             let product = |i: usize| negative_form(x[i], 2) * negative_form(y[i], 2);
             join(&[0, 2, 4, 6].map(|i| product(i) + product(i + 1)), 4)
         }
+        "pshufb" => {
+            let mut out = [0; 16];
+            for (to, control) in b.iter().enumerate() {
+                if *control < 128 {
+                    out[to] = a[usize::from(*control) % 16];
+                }
+            }
+            out
+        }
+        // Neighbours of the destination, then neighbours of the source.
+        "phaddw" | "phaddd" | "phaddsw" | "phsubw" | "phsubd" | "phsubsw" => {
+            let width = if name.ends_with('d') { 4 } else { 2 };
+            let lanes: Vec<i128> = [split(a, width), split(b, width)].concat();
+            let results: Vec<i128> = lanes
+                .chunks(2)
+                .map(|pair| {
+                    let (x, y) = (negative_form(pair[0], width), negative_form(pair[1], width));
+                    let value = if name.starts_with("phadd") {
+                        x + y
+                    } else {
+                        x - y
+                    };
+                    if name.ends_with("sw") {
+                        clamp(value, -32768, 32767)
+                    } else {
+                        value
+                    }
+                })
+                .collect();
+            join(&results, width)
+        }
+        // Unsigned destination bytes by signed source bytes.
+        "pmaddubsw" => {
+            let product = |i: usize| i128::from(a[i]) * negative_form(i128::from(b[i]), 1);
+            let sums: Vec<i128> = (0..8)
+                .map(|i| clamp(product(2 * i) + product(2 * i + 1), -32768, 32767))
+                .collect();
+            join(&sums, 2)
+        }
+        "psignb" | "psignw" | "psignd" => zip_signed(a, b, width, |x, y| {
+            if y < 0 {
+                -x
+            } else if y == 0 {
+                0
+            } else {
+                x
+            }
+        }),
+        "pmulhrsw" => zip_signed(a, b, 2, |x, y| {
+            ((x * y).div_euclid(1 << 14) + 1).div_euclid(2)
+        }),
+        "pabsb" | "pabsw" | "pabsd" => zip_signed(a, b, width, |_, y| if y < 0 { -y } else { y }),
         "psadbw" => {
             let difference = |i: usize| (i128::from(a[i]) - i128::from(b[i])).abs();
             join(
@@ -421,6 +474,11 @@ fn reference(m: &mut Machine, text: &str) {
                 let to = base + 2 * lane as usize;
                 out[to..to + 2].copy_from_slice(&source[from..from + 2]);
             }
+        }
+        "palignr" => {
+            // The source, the destination above it, and zeros beyond.
+            let joined = [&source[..], &old[..], &[0; 256][..]].concat();
+            out.copy_from_slice(&joined[imm.unwrap()..imm.unwrap() + 16]);
         }
         "shufpd" => {
             let low = 8 * (imm.unwrap() % 2);
@@ -682,21 +740,32 @@ fn mxcsr_resets_loads_stores_and_rejects_reserved_bits() {
 #[test]
 fn unsupported_vector_encodings_are_rejected() {
     let rejected: &[&[u8]] = &[
-        &[0x0F, 0xFC, 0xC1],             // paddb mm0, mm1 (MMX)
-        &[0x0F, 0x53, 0xC1],             // rcpps xmm0, xmm1 (approximation)
-        &[0xF3, 0x0F, 0x52, 0xC1],       // rsqrtss xmm0, xmm1 (approximation)
-        &[0x0F, 0x2D, 0xC1],             // cvtps2pi mm0, xmm1 (MMX)
-        &[0x66, 0x0F, 0x38, 0x00, 0xC1], // pshufb xmm0, xmm1
-        &[0xC5, 0xF9, 0xFC, 0xC1],       // vpaddb (VEX)
-        &[0xF2, 0xF3, 0x0F, 0x10, 0xC1], // both mandatory prefixes
-        &[0x66, 0xF3, 0x0F, 0x10, 0xC1], // 66 with a scalar move
-        &[0x66, 0x0F, 0x12, 0xC1],       // movlpd with a register source
-        &[0x0F, 0x13, 0xC1],             // movlps register store
-        &[0x66, 0x0F, 0xE7, 0xC1],       // movntdq with a register
-        &[0x66, 0x0F, 0x71, 0x11, 0x01], // psrlw with a memory operand
-        &[0x66, 0x0F, 0x71, 0xC1, 0x01], // 71 /0
-        &[0x0F, 0xAE, 0xD1],             // ldmxcsr with a register
-        &[0x66, 0x0F, 0xAE, 0x13],       // 66 with ldmxcsr
+        &[0x0F, 0xFC, 0xC1],                         // paddb mm0, mm1 (MMX)
+        &[0x0F, 0x53, 0xC1],                         // rcpps xmm0, xmm1 (approximation)
+        &[0xF3, 0x0F, 0x52, 0xC1],                   // rsqrtss xmm0, xmm1 (approximation)
+        &[0x0F, 0x2D, 0xC1],                         // cvtps2pi mm0, xmm1 (MMX)
+        &[0x0F, 0x38, 0x00, 0xC1],                   // pshufb mm0, mm1 (MMX)
+        &[0x0F, 0x3A, 0x0F, 0xC1, 0x08],             // palignr mm0, mm1, 8 (MMX)
+        &[0xF3, 0x66, 0x0F, 0x38, 0x00, 0xC1],       // F3 over the mandatory 66
+        &[0x66, 0xF2, 0x0F, 0x38, 0x00, 0xC1],       // F2 over the mandatory 66
+        &[0x66, 0xF3, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], // the same in 0F 3A
+        &[0xF0, 0x66, 0x0F, 0x38, 0x00, 0x06],       // LOCK
+        &[0x66, 0x0F, 0x38, 0x0C, 0xC1],             // unassigned without VEX
+        &[0x66, 0x0F, 0x38, 0x40, 0xC1],             // pmulld (SSE4.1)
+        &[0x66, 0x0F, 0x38, 0xDC, 0xC1],             // aesenc
+        &[0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x00],       // pclmulqdq
+        &[0x66, 0x0F, 0x3A, 0x00, 0xC1, 0x00],       // unassigned without VEX
+        &[0x66, 0x0F, 0x39, 0x00, 0xC1],             // 0F 39 is no escape
+        &[0xC5, 0xF9, 0xFC, 0xC1],                   // vpaddb (VEX)
+        &[0xF2, 0xF3, 0x0F, 0x10, 0xC1],             // both mandatory prefixes
+        &[0x66, 0xF3, 0x0F, 0x10, 0xC1],             // 66 with a scalar move
+        &[0x66, 0x0F, 0x12, 0xC1],                   // movlpd with a register source
+        &[0x0F, 0x13, 0xC1],                         // movlps register store
+        &[0x66, 0x0F, 0xE7, 0xC1],                   // movntdq with a register
+        &[0x66, 0x0F, 0x71, 0x11, 0x01],             // psrlw with a memory operand
+        &[0x66, 0x0F, 0x71, 0xC1, 0x01],             // 71 /0
+        &[0x0F, 0xAE, 0xD1],                         // ldmxcsr with a register
+        &[0x66, 0x0F, 0xAE, 0x13],                   // 66 with ldmxcsr
     ];
     for code in rejected {
         let padded = [code, &[0x90; 8][..]].concat();
@@ -711,6 +780,77 @@ fn unsupported_vector_encodings_are_rejected() {
             );
             assert_eq!(result.final_state, cpu, "{code:02X?}");
         }
+    }
+}
+
+#[test]
+fn three_byte_opcodes_decode_by_the_general_rules() {
+    let at = |code: &[u8]| {
+        decode(ENTRY, |address| {
+            code.get((address - ENTRY) as usize).copied().ok_or(())
+        })
+    };
+    // Extension bits name the high registers, REX.W is ignored, and a segment
+    // override or a repeated mandatory prefix changes nothing else.
+    for (code, reg, rm) in [
+        (&[0x66, 0x0F, 0x38, 0x00, 0xC1][..], 0, 1),
+        (&[0x66, 0x45, 0x0F, 0x38, 0x00, 0xC1], 8, 9),
+        (&[0x66, 0x48, 0x0F, 0x38, 0x00, 0xC1], 0, 1),
+        (&[0x66, 0x66, 0x0F, 0x38, 0x00, 0xC1], 0, 1),
+        (&[0x65, 0x66, 0x0F, 0x38, 0x00, 0xC1], 0, 1),
+        (&[0x66, 0x44, 0x0F, 0x3A, 0x0F, 0xC1, 0x05], 8, 1),
+    ] {
+        let insn = at(code).unwrap();
+        assert_eq!(usize::from(insn.len), code.len(), "{code:02X?}");
+        assert_eq!((insn.reg.index, insn.size), (reg, 16), "{code:02X?}");
+        assert!(
+            matches!(insn.rm, Some(RmOperand::Reg(operand)) if operand.index == rm),
+            "{code:02X?}"
+        );
+        // Every byte belongs to the instruction.
+        for length in 1..code.len() {
+            assert!(
+                matches!(at(&code[..length]), Err(DecodeError::Fetch(()))),
+                "{code:02X?} cut to {length}"
+            );
+        }
+    }
+    // Nothing is fetched after an escape that cannot start a declared form.
+    for code in [&[0x0F, 0x38][..], &[0xF3, 0x66, 0x0F, 0x3A]] {
+        assert!(
+            matches!(at(code), Err(DecodeError::Unsupported(_))),
+            "{code:02X?}"
+        );
+    }
+    // Without 0F these are byte compares, on which 66 has no effect.
+    for code in [[0x66, 0x38, 0xC1], [0x66, 0x3A, 0xC1]] {
+        let insn = at(&code).unwrap();
+        assert_eq!((insn.op, insn.size, insn.len), (Op::Cmp, 1, 3));
+    }
+    // 15 bytes are allowed and 16 are not.
+    let mut long = vec![0x66; 11];
+    long.extend([0x0F, 0x38, 0x00, 0xC1]);
+    assert_eq!(at(&long).unwrap().len, 15);
+    long.insert(0, 0x66);
+    assert!(matches!(at(&long), Err(DecodeError::TooLong)));
+}
+
+#[test]
+fn a_rip_relative_operand_counts_the_immediate() {
+    // palignr xmm1, [rip + displacement], 4: ten bytes, the last one immediate.
+    let displacement = (OPERAND as i64 - (ENTRY as i64 + 10)) as i32;
+    let mut code = vec![0x66, 0x0F, 0x3A, 0x0F, 0x0D];
+    code.extend(displacement.to_le_bytes());
+    code.push(4);
+    let machine = Random(0x77).machine();
+    let mut wanted = [0; 16];
+    wanted[..12].copy_from_slice(&machine.operand[4..]);
+    wanted[12..].copy_from_slice(&machine.xmm[1][..4]);
+    for native in [false, true] {
+        let (cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+        let result = run(native, &cpu, &mut memory, 1);
+        assert_eq!(result.exit_reason, ExitReason::StepLimitExceeded);
+        assert_eq!(result.final_state.xmm[1], u128::from_le_bytes(wanted));
     }
 }
 

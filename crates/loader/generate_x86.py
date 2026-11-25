@@ -30,9 +30,13 @@ FORM_KEYS = {"op", "map", "prefix", "opcode", "count", "digit", "enc", "size", "
              "memory_only", "register_only", "rm", "no_rex_b", "unaligned", "lock"}
 GROUP_KEYS = {"map", "opcodes", "digits", "lock"}
 FLAGS = ["cf", "zf", "sf", "of", "pf", "af"]
-MAPS = {"1": "ONE_BYTE", "0f": "TWO_BYTE"}
-# Two-byte opcode table per mandatory prefix.
-PREFIXES = {"": "TWO_BYTE", "66": "TWO_BYTE_66", "f3": "TWO_BYTE_F3", "f2": "TWO_BYTE_F2"}
+PREFIXES = {"", "66", "f3", "f2"}
+# Opcode table per opcode map and mandatory prefix. No other combination has a
+# table, so a form cannot use it.
+TABLES = {("1", ""): "ONE_BYTE", ("0f", ""): "TWO_BYTE", ("0f", "66"): "TWO_BYTE_66",
+          ("0f", "f3"): "TWO_BYTE_F3", ("0f", "f2"): "TWO_BYTE_F2",
+          ("0f38", "66"): "THREE_BYTE_38_66", ("0f3a", "66"): "THREE_BYTE_3A_66"}
+MAPS = {opcode_map for opcode_map, _ in TABLES}
 SIZES = {"b": "Byte", "v": "Variable", "q": "Quad", "y": "Wide", "n": "None", "x": "Xmm"}
 IMMS = {"": "None", "ib": "SignedByte", "iz": "SignedFull", "iv": "Full", "iw": "Word", "ub": "Byte",
         "rel8": "SignedByte", "rel32": "Signed32", "moffs": "Offset"}
@@ -202,8 +206,8 @@ def load(text):
             fail(f"{where}: LOCK needs a memory destination")
         if form.get("unaligned") and form["src"] != "x":
             fail(f"{where}: alignment applies only to 16-byte operands")
-        if form["prefix"] and form["map"] != "0f":
-            fail(f"{where}: mandatory prefixes are only supported in map 0f")
+        if (form["map"], form["prefix"]) not in TABLES:
+            fail(f"{where}: no opcode table for prefix {form['prefix']!r} in map {form['map']}")
         if form["count"] not in (1, 8, 16) or form["opcode"] % form["count"]:
             fail(f"{where}: count must be 1, 8 or 16 and aligned")
         if form["count"] == 8 and form["enc"] not in ("op_reg", "op_reg_imm"):
@@ -301,10 +305,10 @@ def generate(operations, forms):
     out += ["];", ""]
 
     groups = []
-    tables = {name: ["Entry::Unsupported"] * 256 for name in ("ONE_BYTE", *PREFIXES.values())}
+    tables = {name: ["Entry::Unsupported"] * 256 for name in TABLES.values()}
     slots = {}
     for index, form in enumerate(forms):
-        table = MAPS[form["map"]] if form["map"] == "1" else PREFIXES[form["prefix"]]
+        table = TABLES[form["map"], form["prefix"]]
         for opcode in range(form["opcode"], form["opcode"] + form["count"]):
             slots.setdefault((table, opcode), {})[form["digit"]] = index
     for (table, opcode), digits in sorted(slots.items()):

@@ -205,6 +205,51 @@
 66 41 0f e2 d9 | psrad xmm3, xmm9
 66 44 0f e2 54 be 10 | psrad xmm10, xmmword ptr [rsi + 4*rdi + 16]
 66 0f e2 d2 | psrad xmm2, xmm2
+66 41 0f 38 00 d9 | pshufb xmm3, xmm9
+66 44 0f 38 00 54 be 10 | pshufb xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 00 d2 | pshufb xmm2, xmm2
+66 41 0f 38 01 d9 | phaddw xmm3, xmm9
+66 44 0f 38 01 54 be 10 | phaddw xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 01 d2 | phaddw xmm2, xmm2
+66 41 0f 38 02 d9 | phaddd xmm3, xmm9
+66 44 0f 38 02 54 be 10 | phaddd xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 02 d2 | phaddd xmm2, xmm2
+66 41 0f 38 03 d9 | phaddsw xmm3, xmm9
+66 44 0f 38 03 54 be 10 | phaddsw xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 03 d2 | phaddsw xmm2, xmm2
+66 41 0f 38 04 d9 | pmaddubsw xmm3, xmm9
+66 44 0f 38 04 54 be 10 | pmaddubsw xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 04 d2 | pmaddubsw xmm2, xmm2
+66 41 0f 38 05 d9 | phsubw xmm3, xmm9
+66 44 0f 38 05 54 be 10 | phsubw xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 05 d2 | phsubw xmm2, xmm2
+66 41 0f 38 06 d9 | phsubd xmm3, xmm9
+66 44 0f 38 06 54 be 10 | phsubd xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 06 d2 | phsubd xmm2, xmm2
+66 41 0f 38 07 d9 | phsubsw xmm3, xmm9
+66 44 0f 38 07 54 be 10 | phsubsw xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 07 d2 | phsubsw xmm2, xmm2
+66 41 0f 38 08 d9 | psignb xmm3, xmm9
+66 44 0f 38 08 54 be 10 | psignb xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 08 d2 | psignb xmm2, xmm2
+66 41 0f 38 09 d9 | psignw xmm3, xmm9
+66 44 0f 38 09 54 be 10 | psignw xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 09 d2 | psignw xmm2, xmm2
+66 41 0f 38 0a d9 | psignd xmm3, xmm9
+66 44 0f 38 0a 54 be 10 | psignd xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 0a d2 | psignd xmm2, xmm2
+66 41 0f 38 0b d9 | pmulhrsw xmm3, xmm9
+66 44 0f 38 0b 54 be 10 | pmulhrsw xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 0b d2 | pmulhrsw xmm2, xmm2
+66 41 0f 38 1c d9 | pabsb xmm3, xmm9
+66 44 0f 38 1c 54 be 10 | pabsb xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 1c d2 | pabsb xmm2, xmm2
+66 41 0f 38 1d d9 | pabsw xmm3, xmm9
+66 44 0f 38 1d 54 be 10 | pabsw xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 1d d2 | pabsw xmm2, xmm2
+66 41 0f 38 1e d9 | pabsd xmm3, xmm9
+66 44 0f 38 1e 54 be 10 | pabsd xmm10, xmmword ptr [rsi + 4*rdi + 16]
+66 0f 38 1e d2 | pabsd xmm2, xmm2
 41 0f 28 d9 | movaps xmm3, xmm9
 44 0f 28 54 be 10 | movaps xmm10, xmmword ptr [rsi + 4*rdi + 16]
 0f 28 d2 | movaps xmm2, xmm2
@@ -362,6 +407,33 @@ f2 0f 70 d2 39 | pshuflw xmm2, xmm2, 57
 66 41 0f c6 d9 ff | shufpd xmm3, xmm9, 255
 66 44 0f c6 54 be 10 72 | shufpd xmm10, xmmword ptr [rsi + 4*rdi + 16], 114
 66 0f c6 d2 39 | shufpd xmm2, xmm2, 57
+66 41 0f 3a 0f d9 00 | palignr xmm3, xmm9, 0
+66 44 0f 3a 0f 54 be 10 00 | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 0
+66 0f 3a 0f d2 00 | palignr xmm2, xmm2, 0
+66 41 0f 3a 0f d9 01 | palignr xmm3, xmm9, 1
+66 44 0f 3a 0f 54 be 10 01 | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 1
+66 0f 3a 0f d2 01 | palignr xmm2, xmm2, 1
+66 41 0f 3a 0f d9 05 | palignr xmm3, xmm9, 5
+66 44 0f 3a 0f 54 be 10 05 | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 5
+66 0f 3a 0f d2 05 | palignr xmm2, xmm2, 5
+66 41 0f 3a 0f d9 0f | palignr xmm3, xmm9, 15
+66 44 0f 3a 0f 54 be 10 0f | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 15
+66 0f 3a 0f d2 0f | palignr xmm2, xmm2, 15
+66 41 0f 3a 0f d9 10 | palignr xmm3, xmm9, 16
+66 44 0f 3a 0f 54 be 10 10 | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 16
+66 0f 3a 0f d2 10 | palignr xmm2, xmm2, 16
+66 41 0f 3a 0f d9 11 | palignr xmm3, xmm9, 17
+66 44 0f 3a 0f 54 be 10 11 | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 17
+66 0f 3a 0f d2 11 | palignr xmm2, xmm2, 17
+66 41 0f 3a 0f d9 1f | palignr xmm3, xmm9, 31
+66 44 0f 3a 0f 54 be 10 1f | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 31
+66 0f 3a 0f d2 1f | palignr xmm2, xmm2, 31
+66 41 0f 3a 0f d9 20 | palignr xmm3, xmm9, 32
+66 44 0f 3a 0f 54 be 10 20 | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 32
+66 0f 3a 0f d2 20 | palignr xmm2, xmm2, 32
+66 41 0f 3a 0f d9 ff | palignr xmm3, xmm9, 255
+66 44 0f 3a 0f 54 be 10 ff | palignr xmm10, xmmword ptr [rsi + 4*rdi + 16], 255
+66 0f 3a 0f d2 ff | palignr xmm2, xmm2, 255
 66 44 0f c4 cb 00 | pinsrw xmm9, ebx, 0
 66 0f c4 5c be 10 00 | pinsrw xmm3, word ptr [rsi + 4*rdi + 16], 0
 66 44 0f c5 cb 00 | pextrw r9d, xmm3, 0
