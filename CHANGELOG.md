@@ -101,6 +101,13 @@ remains unsupported.
 - `dbt_bench` can also write its results as one JSON document when `XENORA_DBT_BENCH_JSON=<path>` is set (#112). The document records the host CPU, OS and architecture, the git revision and whether the tree had local changes, debug assertions, the workload and sample counts, the median, minimum, maximum, p95, p99, IQR and MIPS for the interpreter and for cold and warm DBT, and the cold DBT counters. Anything the benchmark cannot determine is `null`. The text output and the timed work are unchanged.
 - Added synthetic guest handle-lifetime regression tests (#205) for capacity reuse, stale handles, duplicate rights and lifetime, wrong object types, thread pseudo handles and failed-output nonmutation. Runtime behavior is unchanged; independent acceptance is pending.
 - Added a documented independent acceptance rule for promoting AMD RDNA2 desktop GPU (gfx1030) forms from local CPU and Metal results to `fixture verified`, including clean-commit evidence, reviewer independence, raw-log location, review-log summary, failure handling and status regeneration (#302).
+- Added `xenora-bench startup` (#178), which measures Metal startup in fresh processes and in repeated
+  submissions within one process, phase by phase (launch, device and queue, translation, library, pipeline,
+  submission, GPU, readback), with median, p90, p99 and maximum. Every sample must produce the fixture's
+  expected output, or the run stops without writing results. `docs/testing/benchmarks.md` records one
+  release run on an Apple M4: a fresh process took about 43 ms (median), 36 ms of it creating the Metal
+  device and queue, while repeated runs in one process needed about 0.2 ms of host submission. Measurement
+  only; nothing was optimized.
 - Added the VOP3A (`_e64`) encodings of eleven gfx1030 VOP2 integer forms (`v_mul_{i32_i24,hi_i32_i24,u32_u24,hi_u32_u24}`, `v_{min,max}_{i32,u32}`, `v_xnor_b32`, `v_sub_nc_u32`, `v_subrev_nc_u32`) and of the sixteen Wave32 integer compares (explicit SGPR mask destination, `s_cbranch_vccz` through `vcc_lo`, a translation error for reads of runtime-only SGPR results) as semantic-registry encoding variants, with VGPR sources only. New fixtures `vop3-integer` and `vop3-compare` with IR and MSL goldens, and an independent guide-derived oracle (`tests/validation/tests/vop3_{integer,compare}.rs`) that agrees on both reference interpreters and on native Metal. Part of #215.
 - Added `scripts/cpu-tests.sh`, which lists the default-feature workspace test targets and runs
   deterministic shards of them (`--shard K/N`), with `--check N` showing every target lands in
