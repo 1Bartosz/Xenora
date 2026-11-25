@@ -119,7 +119,7 @@ Seven more tests guard against a runtime that reports success for everything:
 
 - It is one program and one C runtime: mingw-w64 14.0.0 with GCC 16.2.0 locally. A program built with Microsoft's compiler starts differently and imports other functions; none has been tried. A larger program can need instructions and services this one does not.
 - The same source built natively with Apple clang prints the same text once carriage returns are removed. That comparison was made by hand and is not part of the test. Nothing was compared with Windows or with x86 hardware.
-- No floating point is formatted and no input is read. `printf` refuses the floating-point and wide-character conversions, and `stdin` and the `scanf` family do not exist.
+- The program formats no floating point and reads no input. `printf` has since gained the floating-point conversions (#454); it still refuses the wide-character ones, and `stdin` and the `scanf` family do not exist.
 - Most services the program calls are marked partial in the registry. No locale exists, no signal handler or exception filter is ever called, the environment table is empty, and a C stream is unbuffered and has no seek. They did what this program needs.
 - `VirtualProtect`, `VirtualQuery` and `__C_specific_handler` are stubs that stop the guest if called. The program imports them and never calls them.
 - It runs in the DBT only, on one guest thread.

@@ -118,8 +118,8 @@ service kernel32.dll GetSystemTimeAsFileTime(time: out<8>) -> void
 
 # Standard streams and formatted output for a hosted C program. Output to
 # stdout and stderr is captured, and a stream from fopen is a file. A pointer
-# that is no stream, reading stdin, and floating-point and wide conversions
-# stop the guest with the runtime-limit fault.
+# that is no stream, reading stdin, and wide-character conversions stop the
+# guest with the runtime-limit fault.
 
 service ucrtbase.dll __acrt_iob_func(index: u32) -> ptr
     handler standard_stream
