@@ -11,6 +11,7 @@
 
 mod crt;
 mod crt_callbacks;
+mod crt_startup;
 mod events;
 mod files;
 mod gdk_queue;
@@ -94,8 +95,14 @@ impl MockClock {
         }
     }
 
+    /// Move both readings forward by `intervals` 100-nanosecond ticks. Each
+    /// stops at its maximum, so neither ever runs backwards.
     pub fn advance(&self, intervals: u64) {
-        self.current.fetch_add(intervals, Ordering::SeqCst);
+        self.current
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.saturating_add(intervals))
+            })
+            .expect("clock update always returns a value");
         self.performance_count
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 Some(count.saturating_add(intervals).min(MAX_PERFORMANCE_COUNT))
@@ -201,6 +208,7 @@ pub struct ServicesState {
     atexit: Mutex<Vec<u64>>,
     /// The status the guest process exited with. Set once.
     exit_status: Mutex<Option<u32>>,
+    crt_startup: Mutex<crt_startup::CrtStartup>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -227,6 +235,7 @@ impl ServicesState {
             hooks: Arc::default(),
             atexit: Mutex::default(),
             exit_status: Mutex::default(),
+            crt_startup: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -352,6 +361,22 @@ impl ServicesState {
         } else {
             errors.insert(teb, error);
         }
+    }
+
+    fn crt_startup(&self) -> std::sync::MutexGuard<'_, crt_startup::CrtStartup> {
+        self.crt_startup.lock().expect("C runtime startup state")
+    }
+
+    /// The application type the guest passed to `_set_app_type`, zero until it
+    /// does. Nothing in the runtime depends on it.
+    pub fn crt_app_type(&self) -> i32 {
+        self.crt_startup().app_type()
+    }
+
+    /// The guest function passed to `__setusermatherr`, zero until one is. It
+    /// is never called.
+    pub fn crt_user_math_error(&self) -> u64 {
+        self.crt_startup().user_math_error()
     }
 
     /// Record a guest error and return the documented failure value.
@@ -716,6 +741,9 @@ pub(crate) mod handlers {
 
     type Outcome<T> = Result<T, ExitReason>;
 
+    /// The exit for a request the runtime does not model.
+    const RUNTIME_LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);
+
     pub fn set_process_priority_boost(
         context: &mut ServiceContext<'_>,
         process: u64,
@@ -940,6 +968,42 @@ pub(crate) mod handlers {
         Ok(true)
     }
 
+    // Stubs (#388). A program built with the mingw-w64 runtime imports these
+    // three and does not call them on a normal run: the first two serve its
+    // runtime pseudo-relocations and the third is the language handler Windows
+    // calls while dispatching a structured exception. None is modelled, so a
+    // call stops the guest with the runtime-limit fault. Returning a made-up
+    // result would let the program run on with wrong state.
+
+    pub fn virtual_protect(
+        _: &mut ServiceContext<'_>,
+        _address: u64,
+        _size: u64,
+        _protect: u32,
+        _old: OutPtr<4>,
+    ) -> Outcome<bool> {
+        Err(RUNTIME_LIMIT)
+    }
+
+    pub fn virtual_query(
+        _: &mut ServiceContext<'_>,
+        _address: u64,
+        _information: OutPtr<48>,
+        _length: u64,
+    ) -> Outcome<u64> {
+        Err(RUNTIME_LIMIT)
+    }
+
+    pub fn c_specific_handler(
+        _: &mut ServiceContext<'_>,
+        _record: u64,
+        _frame: u64,
+        _context: u64,
+        _dispatcher: u64,
+    ) -> Outcome<i32> {
+        Err(RUNTIME_LIMIT)
+    }
+
     /// The guest MXCSR is not visible to a service, so results use the default
     /// rounding and raise no guest flags; the registry marks them partial.
     const DEFAULT_MXCSR: u32 = crate::cpu::Mxcsr::RESET;
@@ -961,5 +1025,86 @@ pub(crate) mod handlers {
 
     pub fn fabsf(_: &mut ServiceContext<'_>, x: Float32) -> Outcome<Float32> {
         Ok(Float32(x.0 & !(1 << 31)))
+    }
+
+    // What a C program's startup code configures (#382). Each value is
+    // recorded and returned; `crt_startup.rs` says what does not act on it.
+
+    pub fn set_app_type(context: &mut ServiceContext<'_>, kind: i32) -> Outcome<()> {
+        context.state.crt_startup().set_app_type(kind);
+        Ok(())
+    }
+
+    pub fn set_new_mode(context: &mut ServiceContext<'_>, mode: i32) -> Outcome<i32> {
+        let previous = context.state.crt_startup().set_new_mode(mode);
+        match previous {
+            Some(previous) => Ok(previous),
+            None => {
+                crt::set_errno(context.memory, context.teb, crt::EINVAL)?;
+                Ok(-1)
+            }
+        }
+    }
+
+    pub fn configure_thread_locale(context: &mut ServiceContext<'_>, request: i32) -> Outcome<i32> {
+        let previous = context.state.crt_startup().configure_thread_locale(request);
+        match previous {
+            Some(previous) => Ok(previous),
+            None => {
+                crt::set_errno(context.memory, context.teb, crt::EINVAL)?;
+                Ok(-1)
+            }
+        }
+    }
+
+    pub fn set_user_math_error(context: &mut ServiceContext<'_>, handler: u64) -> Outcome<()> {
+        context.state.crt_startup().set_user_math_error(handler);
+        Ok(())
+    }
+
+    pub fn set_invalid_parameter_handler(
+        context: &mut ServiceContext<'_>,
+        handler: u64,
+    ) -> Outcome<u64> {
+        Ok(context
+            .state
+            .crt_startup()
+            .set_invalid_parameter_handler(handler))
+    }
+
+    pub fn file_mode_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        context
+            .state
+            .crt_startup()
+            .file_mode_address(context.memory, 0)
+    }
+
+    pub fn commit_mode_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        context
+            .state
+            .crt_startup()
+            .file_mode_address(context.memory, 1)
+    }
+
+    pub fn signal(context: &mut ServiceContext<'_>, signal: i32, handler: u64) -> Outcome<u64> {
+        let previous = context.state.crt_startup().signal(signal, handler);
+        match previous {
+            Some(previous) => Ok(previous),
+            None => {
+                crt::set_errno(context.memory, context.teb, crt::EINVAL)?;
+                // SIG_ERR is (void (*)(int))-1.
+                Ok(u64::MAX)
+            }
+        }
+    }
+
+    pub fn set_unhandled_exception_filter(
+        context: &mut ServiceContext<'_>,
+        filter: u64,
+    ) -> Outcome<u64> {
+        Ok(context
+            .state
+            .crt_startup()
+            .set_unhandled_exception_filter(filter))
     }
 }
