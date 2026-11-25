@@ -600,6 +600,15 @@ const FLAG_MOVES: &str = r"
   SDM 2A LAHF
 lahf: rax=8877665544332211 f=CPASO => rax=8877665544339711 f=*
 lahf_zero: rax=8877665544332211 f=Z => rax=8877665544334211 f=*
+lahf_carry_only: rax=ffffffffffffffff f=C => rax=ffffffffffff03ff f=*
+lahf_parity_only: rax=ffffffffffffffff f=P => rax=ffffffffffff06ff f=*
+lahf_adjust_only: rax=ffffffffffffffff f=A => rax=ffffffffffff12ff f=*
+lahf_sign_only: rax=ffffffffffffffff f=S => rax=ffffffffffff82ff f=*
+lahf_does_not_store_of: rax=ffffffffffffffff f=O => rax=ffffffffffff02ff f=*
+@ rex.w lahf
+  489f
+  SDM 2A LAHF; 2A 2.2.1.2
+lahf_rex_w_changes_nothing: rax=ffffffffffffffff f=CO => rax=ffffffffffff03ff f=*
 @ sahf; lahf
   9e 9f
   SDM 2B SAHF
@@ -608,6 +617,12 @@ sahf_ignores_bits_1_3_5: rax=ff00 f=O => rax=d700 f=CPAZSO
   9e
   SDM 2B SAHF
 sahf_clear_keeps_of: rax=2800 f=OC => f=cpazsO
+sahf_carry_only: rax=100 f=O => f=CpazsO
+sahf_parity_only: rax=400 f=O => f=cPazsO
+sahf_adjust_only: rax=1000 f=O => f=cpAzsO
+sahf_zero_only: rax=4000 f=O => f=cpaZsO
+sahf_sign_only: rax=8000 f=O => f=cpazSO
+sahf_reads_only_ah: rax=ffffffffffff00ff f=CPAZS => f=cpazso
 @ stc
   f9
   SDM 2B STC
@@ -2936,11 +2951,23 @@ dpps_mask: x1=d:3f800000,40000000,40400000,40800000 x2=d:3f800000,3f800000,3f800
 movddup_movsldup_movshdup: x2=d:7f800001,2,3,4 => x1=d:7f800001,2,7f800001,2 x3=d:7f800001,7f800001,3,3 x4=d:2,2,4,4 f=*
 ";
 
-const DEFECT_OVERLONG_INSTRUCTION: &str = r"
+const INSTRUCTION_LENGTH: &str = r"
 @ .byte 0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x01,0xd8
   !666666666666666666666666666601d8
   SDM 3A 7.15 Interrupt 13 (instruction length over 15 bytes)
 sixteen_byte_redundant_operand_size_prefixes: => ! GP
+@ .byte 0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x05,0x34,0x12
+  666666666666666666666666053412
+  SDM 2A 2.2.1 (15-byte limit); 2A ADD
+fifteen_bytes_ending_in_the_immediate_execute: rax=ffffffffffff0001 => rax=ffffffffffff1235 f=cPazso
+@ .byte 0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x05,0x34,0x12
+  !66666666666666666666666666053412
+  SDM 3A 7.15 Interrupt 13 (instruction length over 15 bytes)
+sixteenth_byte_in_the_immediate_is_gp: rax=1 => ! GP
+@ mov eax, 1; .byte 0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x05,0x34,0x12
+  b801000000 !66666666666666666666666666053412
+  SDM 3A 7.15 Interrupt 13 (instruction length over 15 bytes)
+overlong_after_an_instruction_retires_it_first: rax=ffffffffffffffff => rax=1 ! GP
 ";
 
 const PAGE_CROSSING: &str = r"
@@ -3013,7 +3040,7 @@ const GROUPS: &[(&str, &str)] = &[
     ("fp_packed_and_sticky", FP_PACKED_AND_STICKY),
     ("fp_mxcsr_and_unmasked", FP_MXCSR_AND_UNMASKED),
     ("fp_beyond_sse2", FP_BEYOND_SSE2),
-    ("defect_overlong_instruction", DEFECT_OVERLONG_INSTRUCTION),
+    ("instruction_length", INSTRUCTION_LENGTH),
     ("exact_unmasked_overflow", EXACT_UNMASKED_OVERFLOW),
     ("page_crossing", PAGE_CROSSING),
 ];
@@ -3046,8 +3073,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("haddps_hsubpd_addsubps", 0),
     ("insertps_zero_mask", 0),
     ("jecxz_tests_low_32_bits", 1),
-    ("lahf", 0),
-    ("lahf_zero", 0),
     ("lea64_addr32_truncates_effective_address", 0),
     ("lock_btc_memory", 0),
     ("lodsd_zero_extends", 1),
@@ -3092,8 +3117,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("roundps_uses_mxcsr_rc", 0),
     ("roundsd_suppress_precision", 0),
     ("roundss_imm_modes", 0),
-    ("sahf_clear_keeps_of", 0),
-    ("sahf_ignores_bits_1_3_5", 0),
 ];
 
 // ---------------------------------------------------------------------------
@@ -3872,9 +3895,8 @@ fn fp_beyond_sse2() {
 }
 
 #[test]
-#[ignore = "known defect (#155): an instruction over 15 bytes is illegal, not #GP"]
-fn defect_overlong_instruction() {
-    check_group(DEFECT_OVERLONG_INSTRUCTION);
+fn instruction_length() {
+    check_group(INSTRUCTION_LENGTH);
 }
 
 #[test]
