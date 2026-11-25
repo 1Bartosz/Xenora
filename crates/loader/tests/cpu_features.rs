@@ -228,7 +228,7 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
         ("SSSE3", 1, ECX, 9, &[0x0F, 0x38, 0x00, 0xC1]), // pshufb mm0, mm1
         ("FMA", 1, ECX, 12, &[0xC4, 0xE2, 0x71, 0x98, 0xC2]), // vfmadd132ps xmm0, xmm1, xmm2
         ("CMPXCHG16B", 1, ECX, 13, &[0x48, 0x0F, 0xC7, 0x0E]), // cmpxchg16b [rsi]
-        ("SSE4.1", 1, ECX, 19, &[0x66, 0x0F, 0x38, 0x40, 0xC1]), // pmulld xmm0, xmm1
+        ("SSE4.1", 1, ECX, 19, &[0x66, 0x0F, 0x3A, 0x08, 0xC1, 0x00]), // roundps xmm0, xmm1, 0
         ("SSE4.2", 1, ECX, 20, &[0xF2, 0x0F, 0x38, 0xF1, 0xC1]), // crc32 eax, ecx
         ("MOVBE", 1, ECX, 22, &[0x0F, 0x38, 0xF0, 0x06]), // movbe eax, [rsi]
         ("AESNI", 1, ECX, 25, &[0x66, 0x0F, 0x38, 0xDC, 0xC1]), // aesenc xmm0, xmm1

@@ -81,6 +81,22 @@ class GenerateX86(unittest.TestCase):
         holding = [t.split(":")[0] for t in tables if f"Entry::Form({index})" in t]
         self.assertEqual(holding, ["THREE_BYTE_3A_66"])
 
+    def test_a_lane_is_narrow_by_source_or_wide_by_size(self):
+        form = 'op = "pinsrb"\nmap = "0f3a"\nprefix = "66"\nopcode = 0xF0\nenc = "{}"\nimm = "ub"\n{}'
+        for encoding in ("xmm_gpr_imm", "gpr_xmm_imm"):
+            for shape in ('size = "x"', 'size = "x"\nsrc = "d"', 'size = "x"\nsrc = "x"', 'size = "y"\nsrc = "b"',
+                          'size = "v"', 'size = "q"'):
+                self.rejects(self.form(form.format(encoding, shape)), "a lane is")
+            for shape in ('size = "x"\nsrc = "b"', 'size = "x"\nsrc = "w"', 'size = "y"'):
+                generate_x86.load(self.form(form.format(encoding, shape)))
+
+    def test_ptest_is_the_only_packed_integer_operation_that_writes_flags(self):
+        operations, forms = generate_x86.load(REGISTRY)
+        writers = {form["op"] for form in forms
+                   if form["map"] in ("0f38", "0f3a") and operations[form["op"]]["writes"]}
+        self.assertEqual(writers, {"ptest"})
+        self.assertEqual(operations["ptest"]["writes"], set(generate_x86.FLAGS))
+
     def test_lock_needs_a_memory_destination(self):
         # Not a form without ModRM, not one whose ModRM operand is the source,
         # and not one that takes only a register.

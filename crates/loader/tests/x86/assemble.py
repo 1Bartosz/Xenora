@@ -167,6 +167,31 @@ def vector_cases():
         out += [f"{op} xmm10, {wide}, 114", f"{op} xmm2, xmm2, 57"]
     for n in (0, 1, 5, 15, 16, 17, 31, 32, 255):
         out += [f"palignr xmm3, xmm9, {n}", f"palignr xmm10, {wide}, {n}", f"palignr xmm2, xmm2, {n}"]
+    for op in """pmuldq pcmpeqq packusdw pminsb pminsd pminuw pminud pmaxsb pmaxsd pmaxuw pmaxud pmulld
+            phminposuw ptest""".split():
+        out += [f"{op} xmm3, xmm9", f"{op} xmm10, {wide}", f"{op} xmm2, xmm2"]
+    # XMM0 selects; it may also be the source or the destination.
+    out += ["pblendvb xmm3, xmm9, xmm0", f"pblendvb xmm10, {wide}, xmm0", "pblendvb xmm2, xmm0, xmm0",
+            "pblendvb xmm0, xmm9, xmm0"]
+    for kind, width in (("bw", quad), ("bd", dword), ("bq", word), ("wd", quad), ("wq", dword), ("dq", quad)):
+        for op in ("pmovsx", "pmovzx"):
+            out += [f"{op}{kind} xmm3, xmm9", f"{op}{kind} xmm10, {width}", f"{op}{kind} xmm2, xmm2"]
+    out.append(f"movntdqa xmm10, {wide}")
+    for op in ("pblendw", "mpsadbw"):
+        out += [f"{op} xmm3, xmm9, {n}" for n in (0, 1, 2, 3, 4, 5, 6, 7, 129, 255)]
+        out += [f"{op} xmm10, {wide}, 90", f"{op} xmm2, xmm2, 165"]
+    # ebp would be read as CH if its byte were a legacy byte register.
+    byte = "byte ptr [rsi + 4*rdi + 16]"
+    for op, regs, place in (("b", ("ebx", "r9d", "ebp"), byte), ("w", ("ebx", "r9d", "ebp"), word),
+                            ("d", ("ebx", "r9d"), dword), ("q", ("rbx", "r9"), quad)):
+        for n in (0, 1, 2, 7, 15, 31, 255):
+            for general in regs:
+                if op != "w":
+                    out.append(f"pinsr{op} xmm9, {general}, {n}")
+                    out.append(f"pextr{op} {general}, xmm9, {n}")
+            if op != "w":
+                out.append(f"pinsr{op} xmm3, {place}, {n}")
+            out.append(f"pextr{op} {place}, xmm3, {n}")
     for n in (0, 3, 7):
         out += [f"pinsrw xmm9, ebx, {n}", f"pinsrw xmm3, {word}, {n}", f"pextrw r9d, xmm3, {n}"]
     out += [f"stmxcsr {dword}"]

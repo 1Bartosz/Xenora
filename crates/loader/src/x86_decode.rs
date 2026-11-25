@@ -102,6 +102,8 @@ pub enum Encoding {
     /// General register or memory from XMM `reg`.
     GprXmm,
     XmmGprImm,
+    /// General register or memory from a lane of XMM `reg`.
+    GprXmmImm,
     /// General `reg` from XMM `rm`.
     RegXmm,
     RegXmmImm,
@@ -453,7 +455,10 @@ pub fn decode<E>(
             if form.memory_only || form.fixed_rm.is_some_and(|field| field != modrm & 7) {
                 return Err(DecodeError::Unsupported(opcode));
             }
-            rm = Some(RmOperand::Reg(register(modrm & 7, rex_b, rm_size)));
+            // A lane moves through a 32-bit or wider register, never AH to BH.
+            let lane = matches!(form.encoding, Encoding::XmmGprImm | Encoding::GprXmmImm);
+            let width = if lane { 4 } else { rm_size };
+            rm = Some(RmOperand::Reg(register(modrm & 7, rex_b, width)));
         } else {
             if form.register_only {
                 return Err(DecodeError::Unsupported(opcode));
