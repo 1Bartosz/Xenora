@@ -35,6 +35,16 @@ remains unsupported.
 
 ### Added
 - LOOP, LOOPE, LOOPNE and JRCXZ run in both engines (#396; Intel SDM Vol. 2A, LOOP/LOOPcc and Jcc). The count is RCX; the address-size prefix stays rejected, so JECXZ and the ECX-counted forms are still refused. The DBT runs them through the shared semantics and ends its block at each. The three known answers from #155 that both engines refused are now verified, with eleven more cases, and `tests/cpu_loop.rs` checks a loop that spans translated blocks against a step-by-step model for every count, ZF match point and step budget.
+- Added an opt-in, budgeted staged upload for RGBA8 textures (#144). `MetalRgba8Texture::upload_staged` fills a
+  Private-storage texture through one reused Shared staging buffer that never exceeds a `StagingBudget`. It
+  copies whole-row bands with a blit encoder and reuses the buffer only after the previous command buffer has
+  completed with status Completed. `plan_staged_upload` rejects missing, duplicate or out-of-range mip levels,
+  wrong mip sizes, short row pitches or byte buffers, and budgets smaller than one row, all before any Metal
+  object is created. A blit `read_back` returns any mip as tight RGBA8 bytes. On one Apple M4 under Metal API
+  validation, readback matched independently built patterns for every level of a padded 37×19, six-level
+  texture under four budgets, and matched the existing direct `upload`. Staging is slower than the direct path
+  (2048² with 12 mips, release build: 2.1 ms direct, 2.7 ms with a 4 MiB budget, 17.8 ms with 256 KiB), so
+  `upload` and its callers are unchanged. Not yet independently accepted.
 - Added checked, per-mip copy footprints for synthetic block-compressed texture arrays. Contributors can pack tight block rows or repack entire chains with independent row and placement alignment, and pass selected BC1–BC5 levels to the existing Metal readers (#391).
 - Added `docs/research/texture-formats.md`, an inventory of the texture formats and layouts Xenora handles (#416). For BC1–BC7, RGBA8 and Depth32Float it separates container recognition, CPU decoding, layout conversion, native Metal upload and readback, translated sampling and guest reachability, and links the implementing files, tests and public specifications. It cross-references #236/#237 and #391/PR #394 instead of opening duplicate tasks, lists console layouts, console descriptors and asset or audio containers as unknowns, and ranks three proposed follow-ups with fixture recipes and owners. Research only; no implementation changed.
 - Added File > Open Executable… with Command-O to the app (#408). It opens the same read-only file importer as the inspector's button, and the chosen file goes through the same inspection path as the button, drag and drop and Finder Open With; nothing is executed. A file-importer failure is now shown in red with the system's description instead of being ignored, a cancelled picker shows nothing, and the message clears on the next selection. `Xenora --smoke-import-result`, run by `scripts/build-app.sh`, checks cancellation, a shown failure and its clearing; it fails on the previous importer handling. Checked locally on Apple Silicon in the running app (Command-O and the menu item open the picker, cancel shows no error, a second Command-O opens it again); not yet independently reviewed.
