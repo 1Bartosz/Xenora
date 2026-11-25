@@ -354,6 +354,7 @@ remains unsupported.
 - Fixed an x86 prefix-length test that read an untracked fuzz artifact and so failed on every fresh checkout; its input is now inline.
 - Fixed agent-queue `apply_actions` crashing on comment-only decisions (claim refusals) by skipping no-op `gh issue edit` calls; accept `summary --now` after the subcommand; grant the audit job `pull-requests: read` so live audits can list open PRs (issue #180).
 - Fixed `scripts/audit/status.py` and the Python embedded in `scripts/audit/claims.sh` reading and writing tracked files in the process locale encoding instead of UTF-8: under an ASCII or cp1252 locale the status check crashed on `docs/claims.toml` or reported a spurious `xenora-progress.svg` difference. Both scripts now pass `encoding="utf-8"`, as the rest of `scripts/` does, the two write sites also pin `newline="\n"` so a Windows host cannot turn tracked LF files into CRLF when it regenerates them, and CI runs the two checks again under a non-UTF-8 locale so the requirement stays enforced.
+- The claims audit now checks tracked and unignored source files in the working tree. Ignored local files and files deleted from the working tree no longer produce spurious claim errors (#582).
 
 - Generated CRT adapters now report unsupported calls when the required guest ABI or runtime behavior is missing.
 
