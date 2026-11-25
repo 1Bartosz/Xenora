@@ -38,6 +38,10 @@ const THREAD_SUSPEND_RESUME: u32 = 2;
 /// Rights that exist only on worker thread objects.
 pub(super) const WORKER_RIGHTS: u32 = THREAD_TERMINATE | THREAD_SUSPEND_RESUME;
 const ERROR_SIGNAL_REFUSED: u32 = 156;
+const THREAD_SET_INFORMATION: u32 = 0x20;
+const THREAD_QUERY_INFORMATION: u32 = 0x40;
+/// Size of GROUP_AFFINITY: a KAFFINITY mask, a WORD group, three reserved WORDs.
+const GROUP_AFFINITY_SIZE: usize = 16;
 
 /// Each thread slot holds a guard page, the stack, a guard page and the TEB.
 const THREAD_AREA: u64 = 0x0000_0006_0000_0000;
@@ -607,6 +611,101 @@ impl ServicesState {
         }
     }
 
+    /// Rights granted by any handle that names a thread, the main thread too.
+    fn thread_rights(&self, handle: u64) -> Result<u32, u32> {
+        if handle == CURRENT_THREAD {
+            return Ok(THREAD_ALL_ACCESS);
+        }
+        let objects = self.objects.lock().expect("guest object state");
+        match objects.handles.get(&handle) {
+            Some(GuestObject::Waitable { state, access })
+                if matches!(
+                    *state.lock().expect("guest waitable state"),
+                    Waitable::Thread { .. }
+                ) =>
+            {
+                Ok(*access)
+            }
+            Some(GuestObject::Thread(access)) => Ok(*access),
+            _ => Err(ERROR_INVALID_HANDLE),
+        }
+    }
+
+    /// Processors of group 0 the guest is shown. Every thread may run on all of
+    /// them, and no other affinity is modelled.
+    fn processor_mask(&self) -> u64 {
+        let processors = self.guest_profile.processors.clamp(1, 64);
+        u64::MAX >> (64 - processors)
+    }
+
+    fn group_affinity(&self) -> [u8; GROUP_AFFINITY_SIZE] {
+        let mut affinity = [0; GROUP_AFFINITY_SIZE];
+        affinity[..8].copy_from_slice(&self.processor_mask().to_le_bytes());
+        affinity
+    }
+
+    fn get_group_affinity(
+        &self,
+        teb: u64,
+        handle: u64,
+        output: u64,
+        memory: &mut GuestMemory,
+    ) -> Result<u64, ExitReason> {
+        let access = match self.thread_rights(handle) {
+            Ok(access) => access,
+            Err(error) => return self.fail(teb, error, 0),
+        };
+        if access & THREAD_QUERY_RIGHTS == 0 {
+            return self.fail(teb, ERROR_ACCESS_DENIED, 0);
+        }
+        if memory.write_bytes(output, &self.group_affinity()).is_err() {
+            return self.fail(teb, ERROR_NOACCESS, 0);
+        }
+        Ok(1)
+    }
+
+    fn set_group_affinity(
+        &self,
+        teb: u64,
+        handle: u64,
+        requested: u64,
+        previous: u64,
+        memory: &mut GuestMemory,
+    ) -> Result<u64, ExitReason> {
+        let access = match self.thread_rights(handle) {
+            Ok(access) => access,
+            Err(error) => return self.fail(teb, error, 0),
+        };
+        let needed = THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION;
+        if access & needed != needed {
+            return self.fail(teb, ERROR_ACCESS_DENIED, 0);
+        }
+        let mut affinity = [0; GROUP_AFFINITY_SIZE];
+        if memory.read_bytes(requested, &mut affinity).is_err() {
+            return self.fail(teb, ERROR_NOACCESS, 0);
+        }
+        let mask = u64::from_le_bytes(affinity[..8].try_into().expect("eight bytes"));
+        // One group exists. The mask must name processors of it, and the
+        // reserved words must be zero.
+        let group_valid = affinity[8..].iter().all(|&byte| byte == 0);
+        if !group_valid || mask == 0 || mask & !self.processor_mask() != 0 {
+            return self.fail(teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        // Restricting a thread to fewer processors has no meaning when guest
+        // threads take turns on one host thread, so it is refused, not ignored.
+        if mask != self.processor_mask() {
+            return self.fail(teb, ERROR_NOT_SUPPORTED, 0);
+        }
+        if previous != 0
+            && memory
+                .write_bytes(previous, &self.group_affinity())
+                .is_err()
+        {
+            return self.fail(teb, ERROR_NOACCESS, 0);
+        }
+        Ok(1)
+    }
+
     /// Change another thread's suspend count and return the previous one.
     fn change_suspend(&self, teb: u64, handle: u64, resume: bool) -> Result<u64, ExitReason> {
         const FAILED: u64 = u32::MAX as u64;
@@ -725,6 +824,44 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    // The bounds of the calling thread's stack, from its TEB: the high limit is
+    // StackBase and the low limit is the bottom of the mapped stack, which is
+    // also the reservation (stacks are committed whole). It returns nothing, so
+    // an output the guest cannot write stops it with a memory fault.
+    registry.register(
+        KERNEL32,
+        "GetCurrentThreadStackLimits",
+        move |args, cpu, memory| {
+            let high = memory
+                .read_u64_bypass(cpu.gs_base + TEB_STACK_BASE)
+                .map_err(ExitReason::MemoryFault)?;
+            let low = memory
+                .read_u64_bypass(cpu.gs_base + TEB_STACK_LIMIT)
+                .map_err(ExitReason::MemoryFault)?;
+            memory
+                .write_u64(args.rcx, low)
+                .and_then(|()| memory.write_u64(args.rdx, high))
+                .map_err(ExitReason::MemoryFault)?;
+            Ok(0)
+        },
+    );
+
+    let s = Arc::clone(state);
+    registry.register(
+        KERNEL32,
+        "GetThreadGroupAffinity",
+        move |args, cpu, memory| s.get_group_affinity(cpu.gs_base, args.rcx, args.rdx, memory),
+    );
+
+    let s = Arc::clone(state);
+    registry.register(
+        KERNEL32,
+        "SetThreadGroupAffinity",
+        move |args, cpu, memory| {
+            s.set_group_affinity(cpu.gs_base, args.rcx, args.rdx, args.r8, memory)
+        },
+    );
+
     for (symbol, resume) in [("SuspendThread", false), ("ResumeThread", true)] {
         let s = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, _| {
@@ -756,6 +893,14 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "SwitchToThread",
     ] {
         registry.alias(PROCESS_THREADS_V1, KERNEL32, symbol);
+        registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
+    }
+    // Registered on kernel32.dll only: no API-set alias is claimed for these.
+    for symbol in [
+        "GetCurrentThreadStackLimits",
+        "GetThreadGroupAffinity",
+        "SetThreadGroupAffinity",
+    ] {
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
     const _: () = assert!(THREAD_ALL_ACCESS & SYNCHRONIZE != 0);
