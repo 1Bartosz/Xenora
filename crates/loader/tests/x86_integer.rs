@@ -11,7 +11,7 @@
 //! but the interpreter and the DBT must still agree on the complete state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use xenora_loader::cpu::{CpuState, ExitReason, Interpreter, RFlags};
+use xenora_loader::cpu::{CpuState, ExitReason, Interpreter, RFlags, X87State};
 use xenora_loader::dbt::{DbtEngine, is_native};
 use xenora_loader::memory::{GuestMemory, MemoryError, MemoryPermissions};
 use xenora_loader::x86_decode::decode;
@@ -67,6 +67,8 @@ struct Machine {
     /// Stack qwords at STACK_TOP - 8 and STACK_TOP.
     pushed: u64,
     top: u64,
+    /// x87 control, status and tag words.
+    x87: [u16; 3],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -274,7 +276,8 @@ struct Undefined {
     of: bool,
     pf: bool,
     af: bool,
-    /// The destination itself is undefined (BSF/BSR of zero).
+    /// The destination itself is undefined (BSF/BSR of zero, or a 16-bit
+    /// SHLD/SHRD count above 16).
     destination: bool,
 }
 
@@ -397,7 +400,7 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             write(m, places[0], (1u128 << bits) - 1 - a);
             Outcome::Done(none)
         }
-        "shl" | "shr" | "sar" | "rol" | "ror" => {
+        "shl" | "shr" | "sar" | "rol" | "ror" | "rcl" | "rcr" => {
             let count = match rest.split(", ").nth(1) {
                 Some("cl") => u32::from(m.gpr[1] as u8),
                 _ => read(m, places[1], 8) as u32,
@@ -405,13 +408,22 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             let start = read(m, places[0], bits);
             let mut value = start;
             let top = 1u128 << (bits - 1);
-            let mut carry = m.flags.cf;
-            for _ in 0..count {
+            let carry_in = m.flags.cf;
+            let mut carry = carry_in;
+            // RCL and RCR rotate through CF, so `bits + 1` steps come round again.
+            let steps = if matches!(name, "rcl" | "rcr") {
+                count % (bits + 1)
+            } else {
+                count
+            };
+            for _ in 0..steps {
                 // One step at a time, as the SDM loop does.
                 let (high, low) = (bit(value, bits - 1), bit(value, 0));
                 (value, carry) = match name {
                     "shl" => (truncate(value * 2, bits), high),
                     "rol" => (truncate(value * 2, bits) + u128::from(high), high),
+                    "rcl" => (truncate(value * 2, bits) + u128::from(carry), high),
+                    "rcr" => (value / 2 + if carry { top } else { 0 }, low),
                     "shr" => (value / 2, low),
                     "sar" => (value / 2 + if high { top } else { 0 }, low),
                     _ => (value / 2 + if low { top } else { 0 }, low),
@@ -424,7 +436,8 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                 let (msb, next) = (bit(value, bits - 1), bit(value, bits - 2));
                 if count == 1 {
                     m.flags.of = match name {
-                        "shl" | "rol" => msb != carry,
+                        "shl" | "rol" | "rcl" => msb != carry,
+                        "rcr" => bit(start, bits - 1) != carry_in,
                         "shr" => bit(start, bits - 1),
                         "sar" => false,
                         _ => msb != next,
@@ -436,6 +449,53 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                     set_result(&mut m.flags, value, bits);
                     undefined.af = true;
                     undefined.cf = name != "sar" && count >= bits;
+                }
+            }
+            Outcome::Done(undefined)
+        }
+        "shld" | "shrd" => {
+            // Intel SDM Vol. 2B, SHLD and SHRD: the count is masked to 5 bits
+            // (6 for 64-bit operands); a count above the operand size leaves
+            // the destination and the flags undefined.
+            let count = read(m, places[2], 8) as u32 % if bits == 64 { 64 } else { 32 };
+            let start = read(m, places[0], bits);
+            let mut fill = read(m, places[1], bits);
+            if count > bits {
+                return Outcome::Done(Undefined {
+                    cf: true,
+                    zf: true,
+                    sf: true,
+                    of: true,
+                    pf: true,
+                    af: true,
+                    destination: true,
+                });
+            }
+            let mut value = start;
+            let mut carry = m.flags.cf;
+            for _ in 0..count {
+                // One bit at a time: the bit leaving the destination goes to
+                // CF and the next bit of the source enters from the other end.
+                if name == "shld" {
+                    carry = bit(value, bits - 1);
+                    value = truncate(value * 2, bits) + u128::from(bit(fill, bits - 1));
+                    fill = truncate(fill * 2, bits);
+                } else {
+                    carry = bit(value, 0);
+                    value = value / 2 + if bit(fill, 0) { 1u128 << (bits - 1) } else { 0 };
+                    fill /= 2;
+                }
+            }
+            write(m, places[0], value);
+            let mut undefined = none;
+            if count != 0 {
+                m.flags.cf = carry;
+                set_result(&mut m.flags, value, bits);
+                undefined.af = true;
+                if count == 1 {
+                    m.flags.of = bit(value, bits - 1) != bit(start, bits - 1);
+                } else {
+                    undefined.of = true;
                 }
             }
             Outcome::Done(undefined)
@@ -627,7 +687,8 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                 ..none
             })
         }
-        "mov" | "movabs" => {
+        // MOVNTI stores like MOV; the non-temporal hint changes no result.
+        "mov" | "movabs" | "movnti" => {
             let value = read(m, places[1], bits);
             write(m, places[0], value);
             Outcome::Done(none)
@@ -728,7 +789,15 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             m.flags.cf = !m.flags.cf;
             Outcome::Done(none)
         }
-        "nop" | "pause" => Outcome::Done(none),
+        // The fences order memory accesses and compute nothing.
+        "nop" | "pause" | "lfence" | "mfence" | "sfence" => Outcome::Done(none),
+        "fninit" => {
+            // Intel SDM Vol. 2A, "FINIT/FNINIT", Operation: FPUControlWord :=
+            // 037FH, FPUStatusWord := 0, FPUTagWord := FFFFH. Nothing else here
+            // is x87 state.
+            m.x87 = [0x037F, 0, 0xFFFF];
+            Outcome::Done(none)
+        }
         "cpuid" => {
             // Xenora's guest CPUID contract, restated: the vendor "Xenora guest"
             // and the four features whose every instruction exists, CMOV and
@@ -838,6 +907,8 @@ impl Random {
             operand: self.value(),
             pushed: self.next(),
             top: self.value(),
+            // Any bit pattern: nothing interprets these words.
+            x87: [self.next() as u16, self.next() as u16, self.next() as u16],
         }
     }
 }
@@ -865,6 +936,12 @@ fn load(machine: &Machine, code: &[u8]) -> (CpuState, GuestMemory) {
         of: f.of,
         pf: f.pf,
         af: f.af,
+    };
+    let [control, status, tag] = machine.x87;
+    cpu.x87 = X87State {
+        control,
+        status,
+        tag,
     };
     (cpu, memory)
 }
@@ -924,14 +1001,21 @@ fn every_fixture_instruction_matches_the_reference_in_both_engines() {
                 "{text}"
             );
             assert_eq!(state.rip, ENTRY + case.code.len() as u64, "{text}");
+            let x87 = state.x87;
+            assert_eq!(
+                [x87.control, x87.status, x87.tag],
+                expected.x87,
+                "{text}: x87 words from {:04x?}",
+                machine.x87
+            );
             if !undefined.destination {
                 assert_eq!(state.gpr, expected.gpr, "{text} from {cpu:x?}");
+                assert_eq!(
+                    memory.read_u64(OPERAND).unwrap(),
+                    expected.operand,
+                    "{text} from {cpu:x?}"
+                );
             }
-            assert_eq!(
-                memory.read_u64(OPERAND).unwrap(),
-                expected.operand,
-                "{text} from {cpu:x?}"
-            );
             assert_eq!(
                 memory.read_u64(STACK_TOP - 8).unwrap(),
                 expected.pushed,
@@ -1222,10 +1306,19 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0x66, 0xE8, 0, 0],       // call rel16
         &[0x66, 0x0F, 0xC9],       // bswap cx (undefined)
         &[0x66, 0x63, 0xC1],       // 16-bit movsxd
-        &[0x41, 0x90],             // xchg r8, rax
+        &[0xF3, 0x41, 0x90],       // F3 on xchg r8, rax
         &[0x8D, 0xC0],             // lea with a register operand
+        &[0x0F, 0xAE, 0x2E],       // 0F AE /5 with a memory operand
+        &[0x0F, 0xAE, 0x36],       // 0F AE /6 with a memory operand
+        &[0x0F, 0xC3, 0xC1],       // movnti with a register destination
+        &[0x66, 0x0F, 0xC3, 0x06], // 66 with movnti
         &[0x0F, 0xA3, 0x06],       // bt [rsi], eax
-        &[0xC0, 0xD0, 0x01],       // rcl al, 1
+        &[0x9B],                   // fwait
+        &[0x9B, 0xDB, 0xE3],       // finit: fwait, then fninit
+        &[0x66, 0xDB, 0xE3],       // 66 with fninit
+        &[0xF3, 0xDB, 0xE3],       // F3 with fninit
+        &[0xF2, 0xDB, 0xE3],       // F2 with fninit
+        &[0xF0, 0xDB, 0xE3],       // lock fninit
         &[0xC6, 0xC8, 0x01],       // C6 /1
         &[0xFF, 0xF8],             // FF /7
         &[0xFE, 0xD0],             // FE /2
@@ -1255,6 +1348,81 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
             );
             assert_eq!(result.final_state, before, "{code:02X?}");
         }
+    }
+}
+
+/// FNINIT (DB E3) is the only x87 instruction. Every other ModRM byte under the
+/// eight x87 escape opcodes, D8 to DF, stops both engines and changes nothing.
+/// That includes FNINIT's neighbours of the same digit, such as FNCLEX (DB E2),
+/// and the memory forms of that digit.
+#[test]
+fn fninit_is_the_only_x87_encoding_accepted() {
+    let machine = Random(7).machine();
+    assert_ne!(
+        machine.x87,
+        [0x037F, 0, 0xFFFF],
+        "the reset must be visible"
+    );
+    let mut accepted = Vec::new();
+    for opcode in 0xD8..=0xDF_u8 {
+        for modrm in 0..=0xFF_u8 {
+            // The padding is a SIB byte and displacement for the memory forms.
+            let code = [opcode, modrm, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90];
+            for native in [false, true] {
+                let (mut cpu, mut memory) = load(&machine, &code);
+                let before = cpu.clone();
+                let data = bytes(&memory);
+                let result = if native {
+                    DbtEngine::new(16 * 1024)
+                        .unwrap()
+                        .run(&mut cpu, &mut memory, 1)
+                } else {
+                    Interpreter::new(cpu, &mut memory, 1).run()
+                };
+                let what = format!("{opcode:02X} {modrm:02X}, native {native}");
+                assert_eq!(bytes(&memory), data, "{what}");
+                if matches!(result.exit_reason, ExitReason::IllegalInstruction(_)) {
+                    assert_eq!(result.final_state, before, "{what}");
+                    continue;
+                }
+                accepted.push((opcode, modrm, native));
+                assert_eq!(result.exit_reason, ExitReason::StepLimitExceeded, "{what}");
+                // Only RIP and the three x87 words may differ.
+                let mut wanted = before;
+                wanted.rip = ENTRY + 2;
+                wanted.x87 = X87State {
+                    control: 0x037F,
+                    status: 0,
+                    tag: 0xFFFF,
+                };
+                assert_eq!(result.final_state, wanted, "{what}");
+            }
+        }
+    }
+    assert_eq!(accepted, [(0xDB, 0xE3, false), (0xDB, 0xE3, true)]);
+}
+
+/// A local rule, pinned so it cannot change unnoticed: a segment override or a
+/// REX prefix before FNINIT is accepted and has no effect, as the decoder
+/// treats them before any form without operands. It is not derived from a
+/// manual statement. The prefixes that are refused are in
+/// `undeclared_and_ambiguous_encodings_are_rejected`.
+#[test]
+fn prefixes_accepted_before_fninit_have_no_effect() {
+    let machine = Random(11).machine();
+    for prefix in [0x2E_u8, 0x64, 0x65, 0x40, 0x41, 0x48, 0x4F] {
+        let code = [prefix, 0xDB, 0xE3, 0x90];
+        let (cpu, _) = load(&machine, &code);
+        let mut wanted = cpu;
+        wanted.rip = ENTRY + 3;
+        wanted.x87 = X87State {
+            control: 0x037F,
+            status: 0,
+            tag: 0xFFFF,
+        };
+        let (state, exit, _) = run_both(&machine, &code, 1);
+        assert_eq!(exit, ExitReason::StepLimitExceeded, "{prefix:02X}");
+        assert_eq!(state, wanted, "{prefix:02X}");
     }
 }
 
@@ -1384,6 +1552,7 @@ fn bit_scans_and_bit_tests_follow_the_architecture() {
             operand: 0,
             pushed: 0,
             top: STACK_TOP,
+            x87: [0x037F, 0, 0xFFFF],
         }
     }
 
