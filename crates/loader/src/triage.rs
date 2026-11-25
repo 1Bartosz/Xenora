@@ -7,6 +7,7 @@
 use crate::pe::{ParsedPe, PeError, PeSection};
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::Path;
 
 /// High-level diagnostic report from inspecting a PE32+ binary.
@@ -51,10 +52,37 @@ impl fmt::Display for TriageReport {
     }
 }
 
+/// Why inspection of an executable file failed.
+#[derive(Debug)]
+pub enum TriageFileError {
+    /// The file could not be read.
+    Read(io::Error),
+    /// The bytes were read but could not be parsed as a PE32+ image.
+    Parse(PeError),
+}
+
+impl fmt::Display for TriageFileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(error) => write!(f, "could not read executable: {error}"),
+            Self::Parse(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for TriageFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error),
+            Self::Parse(error) => Some(error),
+        }
+    }
+}
+
 /// Inspect a PE32+ binary file from disk in read-only mode.
-pub fn triage_file<P: AsRef<Path>>(path: P) -> Result<TriageReport, PeError> {
-    let bytes = fs::read(path).map_err(|_| PeError::TooSmall)?;
-    triage_bytes(&bytes)
+pub fn triage_file<P: AsRef<Path>>(path: P) -> Result<TriageReport, TriageFileError> {
+    let bytes = fs::read(path).map_err(TriageFileError::Read)?;
+    triage_bytes(&bytes).map_err(TriageFileError::Parse)
 }
 
 /// Inspect in-memory PE32+ bytes in read-only mode.
