@@ -328,7 +328,7 @@ name first, before it runs the guest.
 `set_program_arguments` refuses an argument containing a NUL byte, arguments
 whose bytes and terminators exceed 32,767 (`MAX_PROGRAM_ARGUMENT_BYTES`, the
 documented Windows command-line limit), and a call after the guest has built
-its table. A host that never calls it gives the program one argument, the
+its table or read its command line. A host that never calls it gives the program one argument, the
 empty string, which is what ISO C specifies when no program name is
 available. An empty list gives it none.
 
@@ -345,9 +345,37 @@ What is documented, inferred and chosen:
   Mode 2 asks for wildcard expansion and none is performed. The environment
   is empty. The variables and tables are blocks from the process heap.
 
-The wide-character counterparts, `GetCommandLineA` and `GetCommandLineW`, and
-environment variables do not exist. All five services are `partial`. None of
+The wide-character counterparts and environment variables do not exist.
+`GetCommandLineA` and `GetCommandLineW` are in the next section. All five services are `partial`. None of
 this has been compared with Windows.
+
+### Startup information and command line
+
+`GetStartupInfoA` and `GetStartupInfoW` return the `STARTUPINFO` structure the
+process was started with. The host takes the place of the creating process and
+passes it with `ServicesState::set_startup_info` before the guest runs; once the
+guest has read it, a change is refused. Strings with a NUL, strings of 32,767
+UTF-16 units or more, undocumented flags, flags documented as not combinable and
+`SW_SHOWDEFAULT` as the initial show state are refused. Without host input there
+are no flags and no strings. `cb` is 104, and the reserved members are zero. The
+desktop and title pointers stay the same for the life of the process. The
+functions document no failure, so a structure that cannot be written stops the
+guest. Nothing acts on the information: there are no windows, consoles or
+standard handles, and handle values reach the guest as the host gave them.
+
+`GetCommandLineA` and `GetCommandLineW` return one string each, at a fixed
+address. It is built from the program arguments on first use, and the arguments
+cannot change after that. Arguments are quoted so that the rules in Microsoft's
+"Parsing C command-line arguments" give them back. The program name takes no
+escapes there, so a quote in it is left out. No arguments give an empty string.
+The process code page is UTF-8, which is Xenora's choice, so the narrow strings
+are UTF-8.
+
+Both resolve through `kernel32.dll` and the API sets Microsoft's pages list.
+Those pages list one set of locations for a function and its A and W names
+together, so both names resolve in each.
+`crates/loader/tests/startup_info.rs` runs original C and C++ programs through
+them. Nothing was compared with Windows.
 
 ### Guest heaps
 
