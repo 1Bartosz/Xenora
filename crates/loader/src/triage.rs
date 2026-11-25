@@ -7,7 +7,7 @@
 use crate::pe::{ParsedPe, PeError, PeSection};
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 /// High-level diagnostic report from inspecting a PE32+ binary.
@@ -79,9 +79,44 @@ impl std::error::Error for TriageFileError {
     }
 }
 
-/// Inspect a PE32+ binary file from disk in read-only mode.
+fn require_regular_file(metadata: fs::Metadata) -> io::Result<()> {
+    if metadata.is_file() {
+        Ok(())
+    } else if metadata.is_dir() {
+        Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "Is a directory",
+        ))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a regular file",
+        ))
+    }
+}
+
+fn read_executable(path: &Path) -> io::Result<Vec<u8>> {
+    // Follow symlinks, but avoid opening an input already known to be special.
+    require_regular_file(fs::metadata(path)?)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // A path may be replaced with a FIFO after the metadata check.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    require_regular_file(file.metadata()?)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Inspect a regular PE32+ binary file from disk in read-only mode.
 pub fn triage_file<P: AsRef<Path>>(path: P) -> Result<TriageReport, TriageFileError> {
-    let bytes = fs::read(path).map_err(TriageFileError::Read)?;
+    let bytes = read_executable(path.as_ref()).map_err(TriageFileError::Read)?;
     triage_bytes(&bytes).map_err(TriageFileError::Parse)
 }
 
