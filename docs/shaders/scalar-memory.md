@@ -28,7 +28,7 @@ Scalar loads can return out of order, so only `s_waitcnt lgkmcnt(0)` completes t
 
 ## Uses of a loaded SGPR
 
-A loaded value is uniform across the wave and known only at run time. The compiler accepts it as the scalar source of `v_mov_b32` and of the VOP1, VOP2 and VOPC forms whose operand rule allows an SGPR. It refuses scalar instructions that read it, including scalar compares, EXEC writes and SGPR offsets, because scalar code is still evaluated during translation (#187). The CPU reference computes those.
+A loaded value is uniform across the wave and known only at run time. The compiler accepts it as the scalar source of `v_mov_b32` and of the VOP1, VOP2 and VOPC forms whose operand rule allows an SGPR. SOPC and SOPK compares accept it too, for [run-time branches](runtime-branches.md). Other scalar instructions that read it, including EXEC writes and SGPR offsets, are refused, because scalar arithmetic is still evaluated during translation. The CPU reference computes those.
 
 ## Evidence
 

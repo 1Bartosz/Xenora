@@ -501,10 +501,8 @@ fn scalar_consumers_of_a_loaded_sgpr_are_refused_by_the_compiler() {
     let consumers: &[(&str, &[u32])] = &[
         ("s_mov_b32 s20, s8", &[0xbe94_0308]),
         ("s_add_u32 s20, s8, s20", &[0x8014_1408]),
-        ("s_cmp_eq_u32 s8, s20", &[0xbf06_1408]),
         ("s_not_b32 s20, s8", &[0xbe94_0708]),
         ("s_addk_i32 s8, 1", &[0xb788_0001]),
-        ("s_cmpk_eq_u32 s8, 1", &[0xb488_0001]),
         ("s_mov_b32 exec_lo, s8", &[0xbefe_0308]),
         ("s_buffer_load_dword s20, s[0:3], s8", &load(1, 20, 0, 8)),
     ];

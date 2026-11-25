@@ -1110,6 +1110,10 @@ fn execute_wave(
     let mut exec = u32::MAX;
     scalars[EXEC_LO] = Some(exec);
     let mut scc = None;
+    // SGPRs holding a loaded value, or one computed from such, and whether SCC
+    // came from one. Only the rules for skipped code depend on this.
+    let mut loaded = [false; 128];
+    let mut runtime_scc = false;
     // Whether VCC_LO was last written by a compare with nonzero EXEC.
     let mut lane_derived_vcc = false;
     let mut target = 0;
@@ -1132,10 +1136,12 @@ fn execute_wave(
             }
             Source::Immediate(value) => Ok(value),
         };
-        if let Some(destination) = scalar_destination(op)
-            && pending_scalars.iter().any(|(slot, _)| *slot == destination)
-        {
-            return Err(error(offset, "SGPR write before scalar load wait"));
+        let runtime = scalar_sources(op).any(|slot| loaded[slot]);
+        if let Some(destination) = scalar_destination(op) {
+            if pending_scalars.iter().any(|(slot, _)| *slot == destination) {
+                return Err(error(offset, "SGPR write before scalar load wait"));
+            }
+            loaded[destination] = runtime;
         }
         let read = |lane: usize, register: u8| {
             if register == 0 {
@@ -1236,6 +1242,7 @@ fn execute_wave(
             Op::WaitScalar => {
                 for (slot, value) in pending_scalars.drain(..) {
                     scalars[slot] = Some(value);
+                    loaded[slot] = true;
                 }
             }
             Op::WaitWrite => {
@@ -1407,14 +1414,17 @@ fn execute_wave(
                         | ScalarUnary::CountOnes
                         | ScalarUnary::Absolute
                 ) {
+                    runtime_scc = runtime;
                     scc = Some(result != 0);
                 }
             }
             Op::CompareEqual(lhs, rhs) => {
+                runtime_scc = runtime;
                 scc = Some(read_scalar(lhs)? == read_scalar(rhs)?);
             }
             // Guide 12.4: SCC = (S0 <relation> S1); no SGPR is written.
             Op::ScalarCompare(comparison, lhs, rhs) => {
+                runtime_scc = runtime;
                 scc = Some(comparison.holds(read_scalar(lhs)?, read_scalar(rhs)?));
             }
             // Guide 12.2: SDST is also the second source; SIMM16 is
@@ -1428,6 +1438,7 @@ fn execute_wave(
                         u32::from(simm16)
                     };
                     let value = read_scalar(Source::Register(dst))?;
+                    runtime_scc = runtime;
                     scc = Some(comparison.holds(value, constant));
                 } else {
                     if dst < 8 {
@@ -1444,6 +1455,7 @@ fn execute_wave(
                             let exact = i64::from(read_scalar(Source::Register(dst))? as i32)
                                 + i64::from(extended);
                             // SCC = the exact signed sum does not fit in i32.
+                            runtime_scc = runtime;
                             scc = Some(i32::try_from(exact).is_err());
                             Some(exact as u32)
                         }
@@ -1588,6 +1600,7 @@ fn execute_wave(
                         | ScalarAlu::Multiply
                         | ScalarAlu::MultiplyHigh { .. }
                 ) {
+                    runtime_scc = runtime;
                     scc = Some(flag);
                 }
             }
@@ -1679,7 +1692,8 @@ fn execute_wave(
                 if tests_vcc && scalars[VCC_LO].is_none() {
                     return Err(error(offset, "branch with uninitialized VCC_LO"));
                 }
-                if tests_vcc && lane_derived_vcc {
+                let tests_runtime_scc = condition == BranchCondition::SccZero && runtime_scc;
+                if (tests_vcc && lane_derived_vcc) || tests_runtime_scc {
                     check_runtime_region(
                         &program[position + 1..],
                         destination,
@@ -1687,6 +1701,7 @@ fn execute_wave(
                         &scalars,
                         exec,
                         pending_read.is_some() || !pending_scalars.is_empty(),
+                        tests_runtime_scc,
                         offset,
                     )?;
                 }
@@ -1748,6 +1763,28 @@ fn scalar_destination(op: Op) -> Option<usize> {
     }
 }
 
+/// The normal SGPRs a scalar operation reads, as far as their origin matters.
+fn scalar_sources(op: Op) -> impl Iterator<Item = usize> {
+    let sources = match op {
+        Op::ScalarMove(_, source) | Op::ScalarUnary(_, _, source) => [Some(source), None],
+        Op::Scalar(_, _, left, right)
+        | Op::CompareEqual(left, right)
+        | Op::ScalarCompare(_, left, right) => [Some(left), Some(right)],
+        Op::ScalarImmediate(kind, register, _) if kind != ScalarImmediate::Move => {
+            [Some(Source::Register(register)), None]
+        }
+        _ => [None, None],
+    };
+    sources
+        .into_iter()
+        .flatten()
+        .filter_map(|source| match source {
+            Source::Register(register) => Some(usize::from(register)),
+            Source::Immediate(_) => None,
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_runtime_region(
     following: &[DecodedInstruction],
     end: usize,
@@ -1755,19 +1792,38 @@ fn check_runtime_region(
     scalars: &[Option<u32>; 128],
     exec: u32,
     load_pending: bool,
+    allow_else: bool,
     branch: usize,
 ) -> Result<(), ReferenceError> {
     if load_pending {
-        return Err(error(branch, "runtime VCC branch with an outstanding load"));
+        return Err(error(branch, "runtime branch with an outstanding load"));
     }
+    // An `s_branch` that ends the skipped part makes the code up to its target
+    // an `else` part, under the same rules.
+    let mut end = end;
+    let mut has_else = false;
     let ready = |register: u8| {
         register != 0
             && registers
                 .iter()
                 .all(|lane| lane[usize::from(register)].is_some())
     };
-    for instruction in following.iter().take_while(|item| item.offset < end) {
+    for instruction in following {
         let offset = instruction.offset;
+        if offset >= end {
+            break;
+        }
+        if let Op::Branch {
+            target,
+            condition: BranchCondition::Always,
+        } = instruction.op
+            && allow_else
+            && !has_else
+            && offset + instruction.byte_len == end
+        {
+            (end, has_else) = (target, true);
+            continue;
+        }
         let (dst, vector_sources, scalar_source) = match instruction.op {
             Op::Move(dst, Source::Register(src)) => (dst, vec![src], None),
             Op::Move(dst, Source::Immediate(_)) => (dst, vec![], None),
@@ -1781,32 +1837,26 @@ fn check_runtime_region(
             _ => {
                 return Err(error(
                     offset,
-                    "runtime VCC branch skips a non-integer-vector instruction",
+                    "runtime branch skips a non-integer-vector instruction",
                 ));
             }
         };
         if !ready(dst) {
             return Err(error(
                 offset,
-                "runtime VCC branch skips a write to an uninitialized VGPR",
+                "runtime branch skips a write to an uninitialized VGPR",
             ));
         }
         if exec == 0 {
             continue;
         }
         if vector_sources.into_iter().any(|register| !ready(register)) {
-            return Err(error(
-                offset,
-                "runtime VCC branch skips an unready VGPR read",
-            ));
+            return Err(error(offset, "runtime branch skips an unready VGPR read"));
         }
         if let Some(register) = scalar_source
             && scalars[usize::from(register)].is_none()
         {
-            return Err(error(
-                offset,
-                "runtime VCC branch skips an unknown SGPR read",
-            ));
+            return Err(error(offset, "runtime branch skips an unknown SGPR read"));
         }
     }
     Ok(())

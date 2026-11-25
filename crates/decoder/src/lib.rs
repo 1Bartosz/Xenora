@@ -15,7 +15,7 @@ use xenora_isa::{
 
 use xenora_isa::meta::EncodingFamily;
 use xenora_isa::semantics::{FORM_IDS, OperandRule};
-pub use xenora_isa::semantics::{VectorBinary, VectorLowering, VectorUnary, VectorVcc};
+pub use xenora_isa::semantics::{Signedness, VectorBinary, VectorLowering, VectorUnary, VectorVcc};
 
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
 /// operand combination: the hand-written forms below followed by every form of
