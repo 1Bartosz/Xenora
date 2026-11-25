@@ -128,55 +128,61 @@ Seven more tests guard against a runtime that reports success for everything:
 
 ## Running a program from the command line
 
-`xenora run` runs two embedded fixtures and refuses every other file. A
-program you built yourself runs only when you also give the SHA-256 of the
-exact file:
+`xenora run` runs any PE32+ executable through the loader, the standard
+services and the ARM64 DBT (#439; the maintainer's decision on #257 was to
+allow any executable):
 
 ```sh
 sh tests/compat_fixtures/build-gate-a2.sh artifacts/gate-a2
-shasum -a 256 artifacts/gate-a2/gate-a2-O2.exe
 cargo run --locked -p xenora -- run --experimental \
-    --pe artifacts/gate-a2/gate-a2-O2.exe \
-    --local-sha256 <the 64 digits shasum printed> \
-    -- 2026 xenora
+    --pe artifacts/gate-a2/gate-a2-O2.exe -- 2026 xenora
 ```
 
 What follows `--` reaches the program after its own file name. The program's
 standard output and standard error are written to the host's, and the command
 exits with the program's exit status.
 
-- **What is admitted.** The file is read once, at most 64 MiB, and hashed; the
-  bytes that were hashed are the bytes that run. A file whose digest differs
-  from the one given is refused and nothing runs. Without `--local-sha256`
-  the command behaves as it did before: only the two embedded fixtures run.
+- **Which path a file takes.** One of the two embedded fixtures, given as it
+  is, keeps its own path: its draw is verified and its result is checked, as
+  before. Every other file, and any file given a digest or program arguments,
+  runs as a program. A fixture with one byte changed is a program, gets no
+  draw service, and stops at its unresolved import.
+- **An optional digest.** With `--sha256 <64 hex digits>` the file runs only
+  if its SHA-256 is the one given. The file is read once and the bytes that
+  were hashed are the bytes that run.
 - **Limits that stay.** The program runs in a separate worker process with a
   15 second wall deadline and a step limit (`--max-steps`, default 1,000,000,
-  at most 50,000,000). The fixture draw service is not registered, and the
-  guest reaches no host file: its drive is in memory and is gone when it ends.
+  at most 50,000,000). A file of more than 64 MiB is not read. The fixture
+  draw service is not registered.
 - **Exit codes.** A host exit code has eight bits and a guest status has
   thirty-two. The low eight bits are returned, except that a status other
   than zero never becomes zero (it becomes 1); whenever the two differ the
   full status is printed on standard error. 124 means the wall deadline, 125
-  any other failure: a refused file, a load error, a fault, or a step limit
-  reached before the program exited. A program that itself exits with 124 or
-  125 cannot be told apart from those by the code alone.
+  any other failure: a file that is not a loadable executable, an import
+  nobody provides, a fault, or a step limit reached before the program
+  exited. A program that itself exits with 124 or 125 cannot be told apart
+  from those by the code alone. Usage errors are 2.
 - **Output.** It is shown when the program ends, standard output first and
   then standard error, so the two are not interleaved as the program wrote
   them. A program stopped by the wall deadline shows nothing.
-- **What this is not.** The digest shows that the file is the one you meant
-  to run. It does not make the file safe: Xenora is not a hardened runtime
-  (see [`SECURITY.md`](../../SECURITY.md)). Run only original programs you
-  built from source.
+- **What this is not.** Xenora is not a hardened runtime (see
+  [`SECURITY.md`](../../SECURITY.md)): the guest's code is translated to
+  native ARM64 and run in the worker process, and nothing confines that
+  process beyond the checks the translator and the services make. Do not run
+  a file you would not otherwise trust on this machine. Most programs will
+  not run: they stop at the first import or instruction Xenora lacks. Nothing
+  here concerns a commercial game or an Xbox launch environment.
 
-`crates/cli/tests/run_local.rs` runs the real `xenora` binary on the Gate A
+`crates/cli/tests/run_program.rs` runs the real `xenora` binary on the Gate A
 programs:
 
 ```sh
-cargo test --locked -p xenora --test run_local
+cargo test --locked -p xenora --test run_program
 ```
 
 It checks the arguments the program echoes, its output and exit status at four
-optimization levels, the three controls (42, 3 and 22), a 32-bit status, a
-wrong digest, a file changed after it was hashed, a step limit that is too
-small, the trace, and refusal without the option. The wall deadline is not
-tested: no Gate A program runs for 15 seconds.
+optimization levels, the three controls (42, 3 and 22), a 32-bit status, the
+digest (wrong, one digit off, and a file changed after it was hashed), a step
+limit that is too small, the trace, a changed fixture, an import nobody
+provides, and files that are not executables. The wall deadline is not tested:
+no Gate A program runs for 15 seconds.

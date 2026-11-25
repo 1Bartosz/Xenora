@@ -4,7 +4,7 @@
 
 Xenora is experimental and is not currently represented as a security-hardened runtime. Treat shaders, binary containers, caches and native library inputs as untrusted. Do not use it to process untrusted content in a sensitive environment.
 
-`xenora run` executes two embedded fixtures only. Its `--local-sha256` option admits one further file whose SHA-256 the user states, for original programs the user built from source. The digest identifies the file; it does not make the file trustworthy.
+`xenora run` loads and executes any PE32+ executable it is given: the guest's code is translated to native ARM64 and run in a worker process with a wall deadline and a step limit. Those limits bound a run; they are not a sandbox. Do not run a file you would not otherwise trust on the machine. `--sha256` makes the command refuse a file whose digest is not the one stated; it identifies the file and does not make it trustworthy.
 
 The project does not promise a fixed security support window at this stage. Report issues against a specific revision, preferably reproduced on current `main` where safe.
 

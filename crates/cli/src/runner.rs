@@ -28,29 +28,32 @@ const TICKET: u64 = 17;
 const DRAW_RESULT: u64 = 0x42;
 const EXTENT: [usize; 2] = [4, 3];
 const EXPECTED_PIXEL: [u8; 4] = [255, 0, 0, 255];
-/// Entry step limits of a locally built program, which runs a C runtime's
-/// startup code before its own. The 15 second wall deadline still applies.
-const LOCAL_DEFAULT_STEPS: usize = 1_000_000;
-const LOCAL_MAX_STEPS: usize = 50_000_000;
-/// The largest locally built program that is read.
-const LOCAL_MAX_BYTES: u64 = 64 << 20;
-/// Exit codes of a local run that are not the guest's own, after `timeout(1)`:
-/// the wall deadline, and any other failure of the runner or the guest.
+/// Entry step limits of a program, which runs a C runtime's startup code
+/// before its own. The 15 second wall deadline still applies.
+const PROGRAM_DEFAULT_STEPS: usize = 1_000_000;
+const PROGRAM_MAX_STEPS: usize = 50_000_000;
+/// The largest program that is read.
+const PROGRAM_MAX_BYTES: u64 = 64 << 20;
+/// Exit codes of a program run that are not the guest's own, after
+/// `timeout(1)`: the wall deadline, and any other failure of the runner or
+/// the guest.
 const DEADLINE_CODE: u8 = 124;
 const FAILURE_CODE: u8 = 125;
-const USAGE: &str = "usage: xenora run --pe <trusted-fixture> --experimental [--trace] [--metal-hud] [--max-steps <1..=10000>]
-       xenora run --pe <local-program> --experimental --local-sha256 <64 hex digits> [--trace] [--max-steps <1..=50000000>] [-- <program argument>...]";
+const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--max-steps <1..=50000000>] [--sha256 <64 hex digits>] [-- <program argument>...]
+       an embedded fixture also takes --metal-hud, and its --max-steps is in 1..=10000";
 
 struct Options {
     path: PathBuf,
-    max_steps: usize,
+    max_steps: Option<usize>,
     worker: bool,
+    /// Set by the supervisor for its worker: run the file as a program, not
+    /// as an embedded fixture.
+    program: bool,
     trace: bool,
     hud: bool,
-    /// The SHA-256 the user gave for a program they built themselves. Without
-    /// it only the embedded fixtures run.
-    local: Option<[u8; 32]>,
-    /// What the local program receives after its own name.
+    /// If given, the file runs only when its SHA-256 is this.
+    digest: Option<[u8; 32]>,
+    /// What the program receives after its own name.
     arguments: Vec<String>,
 }
 
@@ -77,9 +80,10 @@ impl Options {
         let mut args = args.into_iter();
         let mut path = None;
         let mut max_steps = None;
-        let mut local = None;
+        let mut digest = None;
         let mut arguments = Vec::new();
         let (mut experimental, mut trace, mut hud, mut worker) = (false, false, false, false);
+        let mut program = false;
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--pe") if path.is_none() => {
@@ -92,11 +96,11 @@ impl Options {
                             .ok_or("--max-steps needs a number")?,
                     );
                 }
-                Some("--local-sha256") if local.is_none() => {
-                    local = Some(
+                Some("--sha256") if digest.is_none() => {
+                    digest = Some(
                         args.next()
                             .and_then(|arg| parse_sha256(arg.to_str()?))
-                            .ok_or("--local-sha256 needs 64 hexadecimal digits")?,
+                            .ok_or("--sha256 needs 64 hexadecimal digits")?,
                     );
                 }
                 Some("--") => {
@@ -112,36 +116,44 @@ impl Options {
                 Some("--trace") if !trace => trace = true,
                 Some("--metal-hud") if !hud => hud = true,
                 Some("--worker") if !worker => worker = true,
+                Some("--program") if !program => program = true,
                 _ => return Err(format!("unknown or repeated run argument {arg:?}")),
             }
         }
         if !experimental {
             return Err("run requires --experimental".into());
         }
-        let (default, limit) = if local.is_some() {
-            (LOCAL_DEFAULT_STEPS, LOCAL_MAX_STEPS)
-        } else {
-            (DEFAULT_STEPS, MAX_STEPS)
-        };
-        let max_steps = max_steps.unwrap_or(default);
-        if !(1..=limit).contains(&max_steps) {
-            return Err(format!("--max-steps must be in 1..={limit}"));
-        }
-        if local.is_none() && !arguments.is_empty() {
-            return Err("program arguments need --local-sha256".into());
-        }
-        if local.is_some() && hud {
-            return Err("--metal-hud applies to the trusted fixtures only".into());
+        if program && !worker {
+            return Err("unknown or repeated run argument \"--program\"".into());
         }
         Ok(Self {
             path: path.ok_or("missing --pe path")?,
             max_steps,
             worker,
+            program,
             trace,
             hud,
-            local,
+            digest,
             arguments,
         })
+    }
+
+    /// The entry step limit for the kind of run, or why the options do not
+    /// suit it.
+    fn steps(&self, program: bool) -> Result<usize, String> {
+        let (default, limit) = if program {
+            (PROGRAM_DEFAULT_STEPS, PROGRAM_MAX_STEPS)
+        } else {
+            (DEFAULT_STEPS, MAX_STEPS)
+        };
+        let steps = self.max_steps.unwrap_or(default);
+        if !(1..=limit).contains(&steps) {
+            return Err(format!("--max-steps must be in 1..={limit}"));
+        }
+        if program && self.hud {
+            return Err("--metal-hud applies to the embedded fixtures only".into());
+        }
+        Ok(steps)
     }
 }
 
@@ -153,16 +165,33 @@ pub fn command(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let result = match (options.worker, options.local) {
-        (true, Some(digest)) => run_local(&options, digest),
-        (true, None) => run_worker(&options).map(|()| ExitCode::SUCCESS),
-        (false, _) => launch_worker(&options),
+    // An embedded fixture, given as it is, keeps its own path: its draw is
+    // verified and its result is checked. Every other file, and any file
+    // given a digest or arguments, runs as a program.
+    let program = if options.worker {
+        options.program
+    } else {
+        options.digest.is_some()
+            || !options.arguments.is_empty()
+            || verify_fixture(&options.path).is_err()
+    };
+    let steps = match options.steps(program) {
+        Ok(steps) => steps,
+        Err(error) => {
+            eprintln!("{error}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = match (options.worker, program) {
+        (true, true) => run_program(&options, steps),
+        (true, false) => run_worker(&options, steps).map(|()| ExitCode::SUCCESS),
+        (false, _) => launch_worker(&options, program, steps),
     };
     match result {
         Ok(code) => code,
         Err(error) => {
             eprintln!("run failed: {error}");
-            if options.local.is_some() {
+            if program {
                 ExitCode::from(FAILURE_CODE)
             } else {
                 ExitCode::FAILURE
@@ -171,26 +200,33 @@ pub fn command(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     }
 }
 
-fn launch_worker(options: &Options) -> Result<ExitCode, Box<dyn Error>> {
+fn launch_worker(
+    options: &Options,
+    program: bool,
+    steps: usize,
+) -> Result<ExitCode, Box<dyn Error>> {
     let started = Instant::now();
     let mut command = Command::new(std::env::current_exe()?);
     command.args(["run", "--experimental", "--worker"]);
-    if let Some(digest) = options.local {
-        // A local program's own output is the run's output: no read-outs
-        // unless they were asked for.
+    if program {
+        // A program's own output is the run's output: no read-outs unless
+        // they were asked for.
+        command.arg("--program");
         if options.trace {
             command.arg("--trace");
         }
-        command.arg("--local-sha256").arg(hex(digest));
+        if let Some(digest) = options.digest {
+            command.arg("--sha256").arg(hex(digest));
+        }
     } else {
         command.args(["--trace", "--metal-hud"]);
     }
     command
         .arg("--max-steps")
-        .arg(options.max_steps.to_string())
+        .arg(steps.to_string())
         .arg("--pe")
         .arg(&options.path);
-    if options.local.is_some() {
+    if program {
         command.arg("--").args(&options.arguments);
     }
     let mut child = command.stdin(Stdio::null()).spawn()?;
@@ -209,7 +245,7 @@ fn launch_worker(options: &Options) -> Result<ExitCode, Box<dyn Error>> {
                 let _ = child.kill();
                 child.wait()?;
                 status?;
-                if options.local.is_some() {
+                if program {
                     eprintln!("run failed: the program exceeded the 15 second wall deadline");
                     return Ok(ExitCode::from(DEADLINE_CODE));
                 }
@@ -258,22 +294,24 @@ fn start_deadline() -> std::io::Result<()> {
         .map(drop)
 }
 
-/// Read a program the user built themselves and admit it only if its bytes
-/// have the SHA-256 the user gave. The bytes that were hashed are the bytes
-/// that run, so a change to the file afterwards cannot matter.
-fn read_local(path: &Path, expected: [u8; 32]) -> Result<Vec<u8>, Box<dyn Error>> {
-    let size = "execution denied: a local program must be a regular file of at most 64 MiB";
+/// Read a program. If the user gave a SHA-256, the file is admitted only when
+/// its bytes have it; the bytes that were hashed are the bytes that run, so a
+/// change to the file afterwards cannot matter.
+fn read_program(path: &Path, digest: Option<[u8; 32]>) -> Result<Vec<u8>, Box<dyn Error>> {
+    let size = "execution denied: a program must be a regular file of at most 64 MiB";
     let file = File::open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > LOCAL_MAX_BYTES {
+    if !metadata.is_file() || metadata.len() > PROGRAM_MAX_BYTES {
         return Err(size.into());
     }
     let mut bytes = Vec::new();
-    file.take(LOCAL_MAX_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > LOCAL_MAX_BYTES {
+    file.take(PROGRAM_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > PROGRAM_MAX_BYTES {
         return Err(size.into());
     }
-    if Sha256::digest(&bytes).as_slice() != expected {
+    if let Some(expected) = digest
+        && Sha256::digest(&bytes).as_slice() != expected
+    {
         return Err("execution denied: the file's SHA-256 is not the one given".into());
     }
     Ok(bytes)
@@ -289,20 +327,24 @@ fn host_exit_code(status: u32) -> u8 {
     }
 }
 
-/// Run a locally built program: no embedded snapshot, no draw service and no
-/// expected result. Its arguments, output and exit status are its own.
-fn run_local(options: &Options, digest: [u8; 32]) -> Result<ExitCode, Box<dyn Error>> {
+/// Run a file as a program: no embedded snapshot, no fixture draw service
+/// and no expected result. Its arguments, output and exit status are its own.
+fn run_program(options: &Options, steps: usize) -> Result<ExitCode, Box<dyn Error>> {
     start_deadline()?;
-    let bytes = read_local(&options.path, digest)?;
+    let bytes = read_program(&options.path, options.digest)?;
     let name = options
         .path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("the program's file name must be UTF-8")?;
     if options.trace {
+        let policy = if options.digest.is_some() {
+            "sha256"
+        } else {
+            "any"
+        };
         eprintln!(
-            "trace program={name} policy=sha256 entry_step_limit={} wall_limit_ms=15000",
-            options.max_steps
+            "trace program={name} policy={policy} entry_step_limit={steps} wall_limit_ms=15000"
         );
     }
     let state = Arc::new(ServicesState::new(Arc::new(SystemClock)));
@@ -319,7 +361,7 @@ fn run_local(options: &Options, digest: [u8; 32]) -> Result<ExitCode, Box<dyn Er
             tls_base: 0x300000000,
         },
         imports,
-        options.max_steps,
+        steps,
         |event| {
             if options.trace {
                 eprintln!("{}", startup_line(&event));
@@ -354,7 +396,7 @@ fn run_local(options: &Options, digest: [u8; 32]) -> Result<ExitCode, Box<dyn Er
     }
 }
 
-fn run_worker(options: &Options) -> Result<(), Box<dyn Error>> {
+fn run_worker(options: &Options, steps: usize) -> Result<(), Box<dyn Error>> {
     start_deadline()?;
     let fixture = verify_fixture(&options.path)?;
     let (name, ticket, bound_imports) = if fixture == SERVICES_FIXTURE {
@@ -365,7 +407,7 @@ fn run_worker(options: &Options) -> Result<(), Box<dyn Error>> {
     if options.trace {
         println!(
             "trace fixture={name} policy=exact-bytes entry_step_limit={} wall_limit_ms=15000",
-            options.max_steps
+            steps
         );
     }
 
@@ -419,7 +461,7 @@ fn run_worker(options: &Options) -> Result<(), Box<dyn Error>> {
             tls_base: 0x300000000,
         },
         imports,
-        options.max_steps,
+        steps,
         |event| {
             if options.trace {
                 trace_startup(event);

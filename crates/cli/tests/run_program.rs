@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `xenora run` on a program the user built: the real binary, a real hosted C
-//! program, and what a shell sees of it.
+//! `xenora run` on an executable: the real binary, real compiled C programs,
+//! and what a shell sees of them.
 //!
 //! The programs are the Gate A ones, built from source for each test process
 //! by `tests/compat_fixtures/build-gate-a2.sh` and `build-gate-a1.sh`; what
@@ -11,7 +11,9 @@
 //! arguments it passed, the variant it chose and the digest it gave. Digests
 //! come from `shasum`, not from the code under test.
 //!
-//! A missing toolchain is a failure, never a skip.
+//! A missing toolchain is a failure, never a skip. No test here needs a GPU:
+//! the embedded fixtures' own path, which draws, is exercised only up to the
+//! point where the command line is refused.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -50,12 +52,12 @@ fn build(script: &str, folder: &str, lock: &'static OnceLock<PathBuf>) -> &'stat
 
 fn hosted(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
-    build("build-gate-a2.sh", "run-local-a2", &OUT).join(format!("{name}.exe"))
+    build("build-gate-a2.sh", "run-program-a2", &OUT).join(format!("{name}.exe"))
 }
 
 fn freestanding(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
-    build("build-gate-a1.sh", "run-local-a1", &OUT).join(format!("{name}.exe"))
+    build("build-gate-a1.sh", "run-program-a1", &OUT).join(format!("{name}.exe"))
 }
 
 /// The SHA-256 of a file, from the host's `shasum`.
@@ -95,15 +97,25 @@ fn xenora(arguments: &[&str]) -> Run {
     }
 }
 
-/// Run a local program with its own digest and the given program arguments.
-fn local(path: &Path, extra: &[&str], program: &[&str]) -> Run {
-    let digest = digest(path);
-    let mut arguments = vec!["--pe", path.to_str().unwrap(), "--experimental"];
-    arguments.extend(["--local-sha256", &digest]);
-    arguments.extend(extra);
-    arguments.push("--");
-    arguments.extend(program);
-    xenora(&arguments)
+/// Run a file as a program, with options of `xenora run` and the program's
+/// own arguments.
+fn run_program(path: &Path, options: &[&str], arguments: &[&str]) -> Run {
+    let mut all = vec!["--pe", path.to_str().unwrap(), "--experimental"];
+    all.extend(options);
+    all.push("--");
+    all.extend(arguments);
+    xenora(&all)
+}
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(format!(
+        "{}/../../fixtures/pe/{name}.exe",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+}
+
+fn scratch(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{}-{name}", std::process::id()))
 }
 
 /// What the Gate A2 program prints first: its arguments, as it received them.
@@ -119,52 +131,73 @@ fn echoed(name: &str, program: &[&str]) -> String {
 }
 
 #[test]
-fn a_local_program_is_refused_without_the_flag() {
-    let path = hosted("gate-a2-O2");
-    let run = xenora(&["--pe", path.to_str().unwrap(), "--experimental"]);
-    assert_eq!(run.code, Some(1), "{}", run.stderr);
+fn a_changed_fixture_runs_as_a_program_and_not_as_the_fixture() {
+    // The same length as an embedded fixture, so only the comparison of the
+    // bytes can tell them apart. It gets no draw service and no fixture
+    // result: its import is unresolved and it never reaches its entry point.
+    let refused = "run failed: unresolved import dependency: xenora.dll!fixture_draw\n";
+    for name in ["trusted-runner", "runtime-services"] {
+        let mut bytes = std::fs::read(fixture(name)).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        let changed = scratch(&format!("{name}-changed.exe"));
+        std::fs::write(&changed, bytes).unwrap();
+        let run = xenora(&["--pe", changed.to_str().unwrap(), "--experimental"]);
+        std::fs::remove_file(&changed).unwrap();
+        assert_eq!(run.code, Some(125), "{name}: {}", run.stderr);
+        assert_eq!(run.stdout, "", "{name}");
+        assert_eq!(run.stderr, refused, "{name}");
+    }
+    // An embedded fixture given program arguments is run as a program too.
+    let run = run_program(&fixture("trusted-runner"), &[], &["argument"]);
+    assert_eq!(run.code, Some(125), "{}", run.stderr);
+    assert_eq!(run.stdout, "");
+    assert_eq!(run.stderr, refused);
+}
+
+#[test]
+fn a_file_that_is_not_an_executable_is_a_failure() {
+    let text = scratch("hello.txt");
+    std::fs::write(&text, "hello\n").unwrap();
+    let empty = scratch("empty.exe");
+    std::fs::write(&empty, "").unwrap();
+    let missing = scratch("missing.exe");
+    // A real executable, but of the host: Mach-O, not PE.
+    let host = PathBuf::from(env!("CARGO_BIN_EXE_xenora"));
+    let folder = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    for file in [&text, &empty, &missing, &host, &folder] {
+        let run = xenora(&["--pe", file.to_str().unwrap(), "--experimental"]);
+        assert_eq!(run.code, Some(125), "{file:?}: {}", run.stderr);
+        assert_eq!(run.stdout, "", "{file:?}");
+        assert!(
+            run.stderr.starts_with("run failed: "),
+            "{file:?}: {}",
+            run.stderr
+        );
+        assert_eq!(run.stderr.lines().count(), 1, "{file:?}: {}", run.stderr);
+    }
+    std::fs::remove_file(text).unwrap();
+    std::fs::remove_file(empty).unwrap();
+}
+
+#[test]
+fn an_import_nobody_provides_is_refused_before_the_entry_point() {
+    let run = run_program(&freestanding("gate-a1-missing"), &[], &[]);
+    assert_eq!(run.code, Some(125), "{}", run.stderr);
     assert_eq!(run.stdout, "");
     assert!(
         run.stderr
-            .contains("execution denied: input must match an embedded trusted PE fixture"),
+            .starts_with("run failed: unresolved import dependency: "),
         "{}",
         run.stderr
     );
 }
 
 #[test]
-fn a_fixture_with_one_byte_changed_is_refused_without_the_flag() {
-    // The same length as an embedded fixture, so only the comparison of the
-    // bytes can tell them apart. It is refused before anything is drawn.
-    for name in ["trusted-runner", "runtime-services"] {
-        let original = format!(
-            "{}/../../fixtures/pe/{name}.exe",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let mut bytes = std::fs::read(&original).unwrap();
-        *bytes.last_mut().unwrap() ^= 1;
-        let changed = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("{name}-changed-{}.exe", std::process::id()));
-        std::fs::write(&changed, bytes).unwrap();
-        let run = xenora(&["--pe", changed.to_str().unwrap(), "--experimental"]);
-        std::fs::remove_file(&changed).unwrap();
-        assert_eq!(run.code, Some(1), "{name}: {}", run.stderr);
-        assert_eq!(run.stdout, "", "{name}");
-        assert_eq!(
-            run.stderr,
-            "run failed: execution denied: input must match an embedded trusted PE fixture byte \
-             for byte\n",
-            "{name}"
-        );
-    }
-}
-
-#[test]
-fn a_local_program_runs_with_its_arguments_output_and_exit_status() {
+fn any_executable_runs_with_its_arguments_output_and_exit_status() {
     for level in ["O0", "O1", "O2", "Os"] {
         let name = format!("gate-a2-{level}");
         let program = ["2026", "xenora"];
-        let run = local(&hosted(&name), &[], &program);
+        let run = run_program(&hosted(&name), &[], &program);
         assert_eq!(run.code, Some(0), "{name}: {}", run.stderr);
         assert_eq!(run.stderr, "", "{name}");
         assert!(
@@ -180,9 +213,9 @@ fn a_local_program_runs_with_its_arguments_output_and_exit_status() {
 fn program_arguments_arrive_as_they_were_written() {
     // A space, an empty-looking option, the separator itself and words that
     // are options of `xenora run`: after `--` they are the program's.
-    for label in ["two words", "--trace", "--", "--local-sha256", "a\"b"] {
+    for label in ["two words", "--trace", "--", "--sha256", "a\"b"] {
         let program = ["7", label];
-        let run = local(&hosted("gate-a2-O1"), &[], &program);
+        let run = run_program(&hosted("gate-a2-O1"), &[], &program);
         // The program prints a quote in an argument as it is.
         assert!(
             run.stdout.starts_with(&echoed("gate-a2-O1", &program)),
@@ -218,7 +251,7 @@ fn the_exit_status_is_the_programs_own() {
         ("gate-a2-O1", &["5", ""], 14, "gate a2: check 14 failed\r\n"),
     ];
     for (name, program, status, errors) in cases {
-        let run = local(&hosted(name), &[], program);
+        let run = run_program(&hosted(name), &[], program);
         let what = format!("{name} {program:?}");
         assert_eq!(run.code, Some(status), "{what}: {}", run.stderr);
         assert_eq!(run.stderr, errors, "{what}");
@@ -235,7 +268,7 @@ fn the_exit_status_is_the_programs_own() {
 fn a_status_wider_than_eight_bits_is_reported_in_full() {
     // A host exit code has eight bits. The Gate A1 program exits with a
     // 32-bit status and prints nothing.
-    let run = local(&freestanding("gate-a1-O2"), &[], &[]);
+    let run = run_program(&freestanding("gate-a1-O2"), &[], &[]);
     assert_eq!(run.code, Some(0xA1), "{}", run.stderr);
     assert_eq!(run.stdout, "");
     assert_eq!(
@@ -245,7 +278,7 @@ fn a_status_wider_than_eight_bits_is_reported_in_full() {
 }
 
 #[test]
-fn a_wrong_digest_runs_nothing() {
+fn a_digest_pins_the_file_that_runs() {
     let path = hosted("gate-a2-O2");
     let own = digest(&path);
     // Another file's digest, one digit off, and a file changed after it was
@@ -258,16 +291,7 @@ fn a_wrong_digest_runs_nothing() {
     *bytes.last_mut().unwrap() ^= 1;
     std::fs::write(&changed, bytes).unwrap();
     for (file, given) in [(&path, &other), (&path, &near), (&changed, &own)] {
-        let run = xenora(&[
-            "--pe",
-            file.to_str().unwrap(),
-            "--experimental",
-            "--local-sha256",
-            given,
-            "--",
-            "2026",
-            "xenora",
-        ]);
+        let run = run_program(file, &["--sha256", given], &["2026", "xenora"]);
         assert_eq!(run.code, Some(125), "{file:?}: {}", run.stderr);
         assert_eq!(run.stdout, "", "{file:?}");
         assert_eq!(
@@ -275,27 +299,21 @@ fn a_wrong_digest_runs_nothing() {
             "{file:?}"
         );
     }
-    // The digest is not case sensitive, and the right one still runs.
-    let run = xenora(&[
-        "--pe",
-        path.to_str().unwrap(),
-        "--experimental",
-        "--local-sha256",
-        &own.to_uppercase(),
-        "--",
-        "2026",
-        "xenora",
-    ]);
-    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    // The right digest runs, in either case of its letters.
+    for given in [own.clone(), own.to_uppercase()] {
+        let run = run_program(&path, &["--sha256", &given], &["2026", "xenora"]);
+        assert_eq!(run.code, Some(0), "{}", run.stderr);
+        assert!(run.stdout.ends_with(ALL_PASSED), "{:?}", run.stdout);
+    }
 }
 
 #[test]
 fn a_step_limit_that_is_too_small_is_a_failure_not_an_exit() {
     let path = hosted("gate-a2-O0");
     let program = ["2026", "xenora"];
-    let whole = local(&path, &[], &program);
+    let whole = run_program(&path, &[], &program);
     assert_eq!(whole.code, Some(0), "{}", whole.stderr);
-    let run = local(&path, &["--max-steps", "5000"], &program);
+    let run = run_program(&path, &["--max-steps", "5000"], &program);
     assert_eq!(run.code, Some(125), "{}", run.stderr);
     assert_eq!(
         run.stderr,
@@ -311,23 +329,29 @@ fn a_step_limit_that_is_too_small_is_a_failure_not_an_exit() {
 #[test]
 fn the_trace_goes_to_standard_error_and_leaves_the_output_alone() {
     let path = hosted("gate-a2-O2");
-    let program = ["2026", "xenora"];
-    let plain = local(&path, &[], &program);
-    let traced = local(&path, &["--trace"], &program);
-    assert_eq!(traced.code, Some(0), "{}", traced.stderr);
-    assert_eq!(traced.stdout, plain.stdout);
-    assert!(
-        traced
-            .stderr
-            .starts_with("trace program=gate-a2-O2.exe policy=sha256 entry_step_limit=1000000 "),
-        "{}",
-        traced.stderr
-    );
-    assert!(
-        traced.stderr.contains("exit=ProcessExit(0)"),
-        "{}",
-        traced.stderr
-    );
+    let arguments = ["2026", "xenora"];
+    let plain = run_program(&path, &[], &arguments);
+    let own = digest(&path);
+    for (options, policy) in [
+        (&["--trace"][..], "any"),
+        (&["--trace", "--sha256", &own], "sha256"),
+    ] {
+        let traced = run_program(&path, options, &arguments);
+        assert_eq!(traced.code, Some(0), "{}", traced.stderr);
+        assert_eq!(traced.stdout, plain.stdout);
+        assert!(
+            traced.stderr.starts_with(&format!(
+                "trace program=gate-a2-O2.exe policy={policy} entry_step_limit=1000000 "
+            )),
+            "{}",
+            traced.stderr
+        );
+        assert!(
+            traced.stderr.contains("exit=ProcessExit(0)"),
+            "{}",
+            traced.stderr
+        );
+    }
 }
 
 #[test]
@@ -338,44 +362,57 @@ fn bad_command_lines_are_usage_errors() {
     let short = &own[..63];
     let not_hex = format!("{}g", &own[..63]);
     let signed = format!("+{}", &own[..63]);
-    let cases: [&[&str]; 8] = [
-        // Program arguments without the opt-in.
-        &["--pe", path, "--experimental", "--", "2026", "xenora"],
-        &["--pe", path, "--experimental", "--local-sha256", short],
-        &["--pe", path, "--experimental", "--local-sha256", &not_hex],
-        &["--pe", path, "--experimental", "--local-sha256", &signed],
-        &["--pe", path, "--experimental", "--local-sha256"],
-        &["--pe", path, "--local-sha256", &own],
-        &[
-            "--pe",
-            path,
-            "--experimental",
-            "--local-sha256",
-            &own,
-            "--metal-hud",
-        ],
-        &[
-            "--pe",
-            path,
-            "--experimental",
-            "--local-sha256",
-            &own,
-            "--max-steps",
-            "50000001",
-        ],
+    let embedded = fixture("trusted-runner");
+    let embedded = embedded.to_str().unwrap();
+    // (the command line, what the message names)
+    let cases: [(&[&str], &str); 10] = [
+        (
+            &["--pe", path, "--experimental", "--sha256", short],
+            "--sha256 needs",
+        ),
+        (
+            &["--pe", path, "--experimental", "--sha256", &not_hex],
+            "--sha256 needs",
+        ),
+        (
+            &["--pe", path, "--experimental", "--sha256", &signed],
+            "--sha256 needs",
+        ),
+        (
+            &["--pe", path, "--experimental", "--sha256"],
+            "--sha256 needs",
+        ),
+        (&["--pe", path], "run requires --experimental"),
+        (&["--experimental"], "missing --pe path"),
+        // The Metal read-out and the worker's own flag are not a program's.
+        (
+            &["--pe", path, "--experimental", "--metal-hud"],
+            "--metal-hud applies",
+        ),
+        (
+            &["--pe", path, "--experimental", "--program"],
+            "unknown or repeated",
+        ),
+        // Each kind of run has its own step limit; neither is unbounded. The
+        // fixture is refused here, before it would draw.
+        (
+            &["--pe", path, "--experimental", "--max-steps", "50000001"],
+            "--max-steps must be in 1..=50000000",
+        ),
+        (
+            &["--pe", embedded, "--experimental", "--max-steps", "10001"],
+            "--max-steps must be in 1..=10000",
+        ),
     ];
-    for arguments in cases {
+    for (arguments, message) in cases {
         let run = xenora(arguments);
         assert_eq!(run.code, Some(2), "{arguments:?}: {}", run.stderr);
         assert_eq!(run.stdout, "", "{arguments:?}");
+        assert!(
+            run.stderr.starts_with(message),
+            "{arguments:?}: {}",
+            run.stderr
+        );
         assert!(run.stderr.contains("usage: xenora run"), "{arguments:?}");
     }
-    // The fixtures' own step limit is what it was.
-    let run = xenora(&["--pe", path, "--experimental", "--max-steps", "10001"]);
-    assert_eq!(run.code, Some(2));
-    assert!(
-        run.stderr.contains("--max-steps must be in 1..=10000"),
-        "{}",
-        run.stderr
-    );
 }
