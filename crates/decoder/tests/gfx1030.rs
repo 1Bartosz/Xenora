@@ -821,6 +821,7 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/vop3-integer.bin"),
         include_bytes!("../../../fixtures/rdna2/vop3-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-memory.bin"),
+        include_bytes!("../../../fixtures/rdna2/runtime-branch.bin"),
         high_registers,
         &matrix,
     ] {
