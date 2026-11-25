@@ -316,8 +316,6 @@ buffer included. It is built at `-O0` and `-O2`, and once at `-O1` with
 Provenance is as for Gate A2: the source and script are Xenora's, and the
 executables are test output that contains mingw-w64 startup code.
 
-||||||| parent of b8eecb4 (Serve a bounded standard input in the C runtime)
-
 ## The standard input
 
 `tests/compat_fixtures/crt_stdin.c` (#467) is a hosted C program that reads
@@ -333,6 +331,18 @@ and no input it expects every count to be zero. It is built at `-O0` and
 count as a control. `crates/cli/tests/run_program.rs` runs all three through
 `xenora run`, and feeds one 1 MiB + 1 byte to check the refusal. Provenance
 is as for Gate A2.
+
+## C runtime file positions
+
+`tests/compat_fixtures/crt_files.c` (#493) is a hosted C program that writes
+files on Xenora's in-memory drive and moves through them with `_ftelli64`,
+`_fseeki64`, `fgetpos` and `fsetpos`, in binary and text mode, then renames
+and removes them. Every expected value follows from the bytes it writes; it
+exits with the number of the first failed check, or 0. `build-crt-files.sh`
+builds it with mingw-w64 (UCRT flavour) at `-O0` and `-O2`, and once at `-O1`
+with `CRT_FILES_BREAK`, which expects a text position without the carriage
+returns, so check 17 fails, as a control. `crates/cli/tests/run_program.rs`
+runs all three through `xenora run`. Provenance is as for Gate A2.
 
 ## C runtime mathematics
 

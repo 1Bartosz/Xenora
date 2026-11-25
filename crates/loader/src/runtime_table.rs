@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 108] = [
+pub static SERVICES: [ServiceMetadata; 114] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -305,6 +305,72 @@ pub static SERVICES: [ServiceMetadata; 108] = [
         failure: "the indicator of the standard input only; other streams report 0; -1 with errno EINVAL for a null stream",
         reference: "stdio.h feof",
         tests: &["stdin_lines_follow_iso_c_at_the_edges"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_ftelli64",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "u64",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "-1 with errno EINVAL for a null stream, or EBADF after its file was deleted; stops the guest for a standard stream or a pointer that is no stream",
+        reference: "stdio.h _ftelli64",
+        tests: &["file_positions_round_trip_and_files_are_removed_and_renamed"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_fseeki64",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }, Parameter { name: "offset", kind: "u64" }, Parameter { name: "origin", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "-1 with errno EINVAL for a null stream, an unknown origin or a position before the start, or EBADF after its file was deleted; stops the guest for a standard stream or a pointer that is no stream",
+        reference: "stdio.h _fseeki64",
+        tests: &["file_positions_round_trip_and_files_are_removed_and_renamed"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "fgetpos",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }, Parameter { name: "position", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "-1 with errno EINVAL for a null argument; stops the guest for a standard stream, a pointer that is no stream, or a position it cannot write",
+        reference: "stdio.h fgetpos",
+        tests: &["file_positions_round_trip_and_files_are_removed_and_renamed"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "fsetpos",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }, Parameter { name: "position", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "-1 with errno EINVAL for a null argument or a negative position; stops the guest for a standard stream, a pointer that is no stream, or a position it cannot read",
+        reference: "stdio.h fsetpos",
+        tests: &["file_positions_round_trip_and_files_are_removed_and_renamed"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "remove",
+        parameters: &[Parameter { name: "name", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-filesystem-l1-1-0.dll"],
+        failure: "-1 with errno ENOENT for a missing or rejected name, EACCES for a directory, EINVAL for a null or empty name",
+        reference: "stdio.h remove",
+        tests: &["file_positions_round_trip_and_files_are_removed_and_renamed"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "rename",
+        parameters: &[Parameter { name: "from", kind: "ptr" }, Parameter { name: "to", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-filesystem-l1-1-0.dll"],
+        failure: "-1 with errno ENOENT when the old name holds nothing, EACCES when the new name exists or its directory does not, EINVAL for a null or rejected name; stops the guest for a directory",
+        reference: "stdio.h rename",
+        tests: &["file_positions_round_trip_and_files_are_removed_and_renamed"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -1443,6 +1509,59 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a0 = call.u64(0)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::feof(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_ftelli64", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::_ftelli64(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_fseeki64", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let a2 = call.i32(2)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_fseeki64(&mut context, a0, a1, a2)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "fgetpos", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::fgetpos(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "fsetpos", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::fsetpos(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "remove", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::remove(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "rename", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::rename(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

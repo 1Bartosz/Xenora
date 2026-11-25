@@ -682,6 +682,20 @@ impl super::ObjectState {
         self.files.get(path).map(Vec::as_slice)
     }
 
+    /// Delete a file. False when it does not exist. Streams that have it
+    /// open keep their path, so their operations fail afterwards.
+    pub(super) fn drive_remove(&mut self, path: &str) -> bool {
+        self.files.remove(path).is_some()
+    }
+
+    /// Give a file a new name. The caller has checked that `from` is a file
+    /// and that `to` names nothing yet in an existing directory.
+    pub(super) fn drive_rename(&mut self, from: &str, to: &str) {
+        if let Some(data) = self.files.remove(from) {
+            self.files.insert(to.to_owned(), data);
+        }
+    }
+
     /// Empty a file. False when it does not exist.
     pub(super) fn drive_truncate(&mut self, path: &str) -> bool {
         self.files.get_mut(path).map(Vec::clear).is_some()

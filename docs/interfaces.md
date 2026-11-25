@@ -536,6 +536,25 @@ What is not provided, and what is Xenora's choice:
 All four services are `partial`. None of this has been compared with
 Windows.
 
+**Positions and file operations (#493).** `_ftelli64`, `_fseeki64`,
+`fgetpos` and `fsetpos` work on a stream `fopen` returned. A position is the
+byte offset in the file on the drive, in text mode too, where each line feed
+written is two bytes; `fpos_t` is the Universal CRT's `__int64`. `_fseeki64`
+takes `SEEK_SET`, `SEEK_CUR` and `SEEK_END`; a position before the start, an
+unknown origin and a null argument fail with -1 and `EINVAL`, and the
+position is unchanged. A position past the end is allowed, and a write there
+fills the gap with zero bytes. A text-mode seek to any offset is allowed,
+where Microsoft guarantees only offsets `ftell` returned. Positions of the
+standard streams are not modelled and stop the guest. `remove` deletes a
+file: `ENOENT` when it is missing or the name is rejected, `EACCES` for a
+directory. `rename` moves a file's bytes to a new name: `ENOENT` when the old
+name holds nothing, `EACCES` when the new name exists or its directory does
+not, `EINVAL` for a null or rejected name; renaming a directory is not
+modelled and stops the guest. Neither is stopped by an open stream, whose
+later operations fail with `EBADF`. `fseek`, `ftell` and `rewind` remain
+unprovided here; #312 holds them. `remove` is `implemented`, the other five
+`partial`.
+
 ### CRT integer conversion
 
 UCRT and the CRT conversion API set expose strtol, strtoul, wcstol, and

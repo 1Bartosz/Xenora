@@ -20,8 +20,9 @@
 //! are not modelled and stop the guest with the runtime-limit fault.
 
 use super::ObjectState;
-use super::crt_files::{self, EBADF, EINVAL, ERANGE, FileStreams};
+use super::crt_files::{self, EACCES, EBADF, EINVAL, ENOENT, ERANGE, FileStreams};
 use super::crt_format::{self, Floats, FormatError, Source};
+use super::files::DriveEntry;
 use crate::cpu::ExitReason;
 use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
 
@@ -152,6 +153,20 @@ fn fault(error: MemoryError) -> ExitReason {
 }
 
 /// The bytes of the C string at `address`, without its terminator.
+/// A file name argument as the drive stores it. `None` for a null pointer
+/// or a name longer than `MAX_PATH`; `Some(None)` for a name the drive
+/// rejects. A name that cannot be read stops the guest with a fault.
+fn drive_name(memory: &GuestMemory, name: u64) -> Result<Option<Option<String>>, ExitReason> {
+    if name == 0 {
+        return Ok(None);
+    }
+    let bytes = c_string(memory, name, MAX_NAME + 1).map_err(fault)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_NAME {
+        return Ok(None);
+    }
+    Ok(Some(ObjectState::drive_path(&bytes)))
+}
+
 fn c_string(memory: &GuestMemory, address: u64, limit: u64) -> Result<Vec<u8>, MemoryError> {
     let mut bytes = Vec::new();
     for offset in 0..limit {
@@ -685,6 +700,140 @@ impl StandardStreams {
             }
             _ => Err(RUNTIME_LIMIT),
         }
+    }
+
+    /// `_ftelli64`: the position of a file stream, or -1 with `EINVAL` for a
+    /// null stream. The standard streams have no position here: telling
+    /// one is not modelled and stops the guest.
+    pub(super) fn tell(&self, file: u64) -> Outcome<i64> {
+        if file == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        match self.stream(file)? {
+            Stream::File(file) => Ok(self
+                .opened
+                .tell(file)
+                .map(|position| position as i64)
+                .map_err(|errno| Failed(-1, errno))),
+            _ => Err(RUNTIME_LIMIT),
+        }
+    }
+
+    /// `_fseeki64`: 0, or -1 with `EINVAL` for a null stream, an origin
+    /// other than `SEEK_SET`, `SEEK_CUR` or `SEEK_END`, or a position before
+    /// the start. Seeking a standard stream is not modelled.
+    pub(super) fn seek(
+        &mut self,
+        drive: &ObjectState,
+        file: u64,
+        offset: i64,
+        origin: u32,
+    ) -> Outcome<i32> {
+        if file == 0 || origin > 2 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        match self.stream(file)? {
+            Stream::File(file) => Ok(self
+                .opened
+                .seek(drive, file, offset, origin)
+                .map(|()| 0)
+                .map_err(|errno| Failed(-1, errno))),
+            _ => Err(RUNTIME_LIMIT),
+        }
+    }
+
+    /// `fgetpos`: the position into the guest's `fpos_t`, an `__int64` in
+    /// the Universal CRT. 0, or -1 with `EINVAL` for a null argument. A
+    /// `fpos_t` that cannot be written stops the guest with a fault.
+    pub(super) fn get_position(
+        &self,
+        memory: &mut GuestMemory,
+        file: u64,
+        position: u64,
+    ) -> Outcome<i32> {
+        if file == 0 || position == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        match self.tell(file)? {
+            Ok(at) => {
+                memory.write_u64(position, at as u64).map_err(fault)?;
+                Ok(Ok(0))
+            }
+            Err(Failed(_, errno)) => Ok(Err(Failed(-1, errno))),
+        }
+    }
+
+    /// `fsetpos`: move to the position a `fpos_t` holds, as `_fseeki64`
+    /// from the start does.
+    pub(super) fn set_position(
+        &mut self,
+        memory: &GuestMemory,
+        drive: &ObjectState,
+        file: u64,
+        position: u64,
+    ) -> Outcome<i32> {
+        if file == 0 || position == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        let at = memory.read_u64(position).map_err(fault)? as i64;
+        self.seek(drive, file, at, 0)
+    }
+
+    /// `remove`: delete a file. 0, or -1 with `ENOENT` for a name the drive
+    /// does not hold or rejects, `EACCES` for a directory, `EINVAL` for a
+    /// null name. An open stream does not stop it, as streams take no part
+    /// in sharing here; its later operations fail with `EBADF`.
+    pub(super) fn remove_file(
+        &self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+    ) -> Outcome<i32> {
+        let Some(path) = drive_name(memory, name)? else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        let Some(path) = path else {
+            return Ok(Err(Failed(-1, ENOENT)));
+        };
+        Ok(match drive.drive_entry(&path) {
+            DriveEntry::File => {
+                drive.drive_remove(&path);
+                Ok(0)
+            }
+            DriveEntry::Directory => Err(Failed(-1, EACCES)),
+            DriveEntry::Missing { .. } => Err(Failed(-1, ENOENT)),
+        })
+    }
+
+    /// `rename`: give a file a new name. 0, or -1 with `ENOENT` when the old
+    /// name holds nothing, `EACCES` when the new name already exists or its
+    /// directory does not, `EINVAL` for a null or rejected name. Renaming a
+    /// directory is not modelled and stops the guest.
+    pub(super) fn rename_file(
+        &self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        from: u64,
+        to: u64,
+    ) -> Outcome<i32> {
+        let (Some(from), Some(to)) = (drive_name(memory, from)?, drive_name(memory, to)?) else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        let (Some(from), Some(to)) = (from, to) else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        match drive.drive_entry(&from) {
+            DriveEntry::File => {}
+            DriveEntry::Directory => return Err(RUNTIME_LIMIT),
+            DriveEntry::Missing { .. } => return Ok(Err(Failed(-1, ENOENT))),
+        }
+        Ok(match drive.drive_entry(&to) {
+            DriveEntry::Missing { parent: true } => {
+                drive.drive_rename(&from, &to);
+                Ok(0)
+            }
+            _ => Err(Failed(-1, EACCES)),
+        })
     }
 
     /// `fgets`. Returns `buffer`, or null at end of file or on an error.
