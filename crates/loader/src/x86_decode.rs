@@ -14,8 +14,9 @@ use crate::x86_table::{
 /// Architectural x86-64 instruction length limit, in bytes.
 ///
 /// An instruction may not exceed 15 bytes (Intel SDM Vol. 2A, "Instruction
-/// Length"). Sequences longer than this are not decodable and are rejected as
-/// illegal instructions.
+/// Length"). Decoding stops before a 16th byte would be fetched and reports
+/// [`DecodeError::TooLong`], a general-protection fault (Intel SDM Vol. 3A,
+/// 7.15).
 pub const MAX_INSTRUCTION_LEN: usize = 15;
 
 /// Number of leading legacy segment prefix bytes (0x64 FS, 0x65 GS) at the
@@ -47,6 +48,9 @@ pub struct Form {
     pub has_modrm: bool,
     pub memory_only: bool,
     pub register_only: bool,
+    /// The only ModRM r/m field value the form accepts. Set only on
+    /// register-only forms, so such a form matches exactly one ModRM byte.
+    pub fixed_rm: Option<u8>,
     pub no_rex_b: bool,
     /// A 16-byte memory operand may have any alignment.
     pub unaligned: bool,
@@ -122,6 +126,9 @@ pub enum Immediate {
     Word,
     /// Zero-extended byte.
     Byte,
+    /// A 64-bit absolute address, decoded into the memory operand (MOV
+    /// `A0`-`A3`, Intel SDM Vol. 2A, 2.2.1.4).
+    Offset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,24 +211,24 @@ pub enum DecodeError<E> {
     Fetch(E),
     /// No declared form matches; carries the byte that decided it.
     Unsupported(u8),
+    /// The instruction would be longer than [`MAX_INSTRUCTION_LEN`] bytes.
+    TooLong,
 }
 
 struct Cursor<F> {
     fetch: F,
     rip: u64,
     len: usize,
-    last: u8,
 }
 
 impl<E, F: FnMut(u64) -> Result<u8, E>> Cursor<F> {
     fn u8(&mut self) -> Result<u8, DecodeError<E>> {
         if self.len == MAX_INSTRUCTION_LEN {
-            return Err(DecodeError::Unsupported(self.last));
+            return Err(DecodeError::TooLong);
         }
         let byte =
             (self.fetch)(self.rip.wrapping_add(self.len as u64)).map_err(DecodeError::Fetch)?;
         self.len += 1;
-        self.last = byte;
         Ok(byte)
     }
 
@@ -260,12 +267,7 @@ pub fn decode<E>(
     rip: u64,
     fetch: impl FnMut(u64) -> Result<u8, E>,
 ) -> Result<Insn, DecodeError<E>> {
-    let mut cursor = Cursor {
-        fetch,
-        rip,
-        len: 0,
-        last: 0,
-    };
+    let mut cursor = Cursor { fetch, rip, len: 0 };
     let mut operand_size = false;
     let mut rep = false;
     let mut repne = false;
@@ -430,7 +432,7 @@ pub fn decode<E>(
         reg = register((modrm >> 3) & 7, rex_r, size);
         let mode = modrm >> 6;
         if mode == 3 {
-            if form.memory_only {
+            if form.memory_only || form.fixed_rm.is_some_and(|field| field != modrm & 7) {
                 return Err(DecodeError::Unsupported(opcode));
             }
             rm = Some(RmOperand::Reg(register(modrm & 7, rex_b, rm_size)));
@@ -463,6 +465,16 @@ pub fn decode<E>(
             }
             rm = Some(RmOperand::Mem(operand));
         }
+    } else if form.immediate == Immediate::Offset {
+        // The accumulator and the memory at an absolute address. With the
+        // default 64-bit address size the offset is eight bytes; FS or GS may
+        // override the segment as for any memory operand.
+        rm = Some(RmOperand::Mem(MemOperand {
+            base: None,
+            index: None,
+            disp: cursor.bytes(8)? as i64,
+            segment,
+        }));
     } else if matches!(form.encoding, Encoding::OpReg | Encoding::OpRegImm) {
         reg = register(opcode & 7, rex_b, size);
     } else if form.encoding == Encoding::String {
@@ -482,7 +494,7 @@ pub fn decode<E>(
     }
 
     let mut imm = match form.immediate {
-        Immediate::None => 0,
+        Immediate::None | Immediate::Offset => 0,
         Immediate::SignedByte => cursor.signed(1)?,
         Immediate::SignedFull => cursor.signed(usize::from(size.min(4)))?,
         Immediate::Signed32 => cursor.signed(4)?,
