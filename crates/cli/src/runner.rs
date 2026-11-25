@@ -3,9 +3,9 @@
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -292,7 +292,8 @@ fn launch_worker(
         command.arg("--startup-report-worker");
         Some(Collector::attach(&mut command)?)
     } else {
-        command.stdin(Stdio::null());
+        // The worker inherits the supervisor's standard input: it is the
+        // guest's, read there before the program starts.
         None
     };
     command.arg("--pe").arg(&options.path);
@@ -451,6 +452,10 @@ fn host_exit_code(status: u32) -> u8 {
     }
 }
 
+/// The most the guest's standard input holds, in bytes. Documented in
+/// docs/ as the deterministic-input limit of `xenora run`.
+pub(crate) const MAX_STANDARD_INPUT: usize = 1 << 20;
+
 /// Run a file as a program: no embedded snapshot, no fixture draw service
 /// and no expected result. Its arguments, output and exit status are its own.
 fn run_program(
@@ -490,6 +495,27 @@ fn run_program(
     let mut arguments = vec![name];
     arguments.extend(options.arguments.iter().map(String::as_str));
     state.set_program_arguments(&arguments)?;
+    // The guest's standard input is the worker's own, read in full before
+    // the program starts so that a run stays deterministic. A terminal means
+    // no input, and so does the diagnostic channel, because fd 0 is then the
+    // supervisor's socket rather than the user's pipe. Input past the limit
+    // is refused now, not truncated silently.
+    let input = if options.report_worker || std::io::stdin().is_terminal() {
+        Vec::new()
+    } else {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take((MAX_STANDARD_INPUT + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_STANDARD_INPUT {
+            return Err(format!(
+                "the standard input exceeds the {MAX_STANDARD_INPUT} byte limit; feed it less, as a run must stay deterministic"
+            )
+            .into());
+        }
+        bytes
+    };
+    state.set_standard_input(&input);
     let mut imports = ImportRegistry::new();
     register_standard_services(&mut imports, Arc::clone(&state));
     let mut entered = false;

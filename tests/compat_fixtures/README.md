@@ -316,6 +316,24 @@ buffer included. It is built at `-O0` and `-O2`, and once at `-O1` with
 Provenance is as for Gate A2: the source and script are Xenora's, and the
 executables are test output that contains mingw-w64 startup code.
 
+||||||| parent of b8eecb4 (Serve a bounded standard input in the C runtime)
+
+## The standard input
+
+`tests/compat_fixtures/crt_stdin.c` (#467) is a hosted C program that reads
+lines from its standard input with a buffer of 8 and checks what ISO C says
+at the edges. Built by `build-crt-stdin.sh` with mingw-w64 (UCRT flavour)
+and `-fno-builtin`, the calls are imports of `api-ms-win-crt-stdio-l1-1-0.dll`.
+The host pipes a fixed input: two short lines in CR LF, one line longer than
+the buffer, and a last line with no newline; the checks count the reads, the
+bytes after the text-mode replacement, the line feeds and any surviving
+carriage return, and the end-of-file indicator. With the argument `empty`
+and no input it expects every count to be zero. It is built at `-O0` and
+`-O2`, and once at `-O1` with `CRT_STDIN_BREAK`, which expects a wrong read
+count as a control. `crates/cli/tests/run_program.rs` runs all three through
+`xenora run`, and feeds one 1 MiB + 1 byte to check the refusal. Provenance
+is as for Gate A2.
+
 ## C runtime mathematics
 
 `tests/compat_fixtures/crt_math.c` (#468) is a hosted C program that calls the

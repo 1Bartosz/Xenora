@@ -79,6 +79,55 @@ pub(super) struct StandardStreams {
     opened: FileStreams,
     /// Guest blocks that the services returning memory hand out.
     scratch: Scratch,
+    /// What the guest reads from `stdin` (#467).
+    input: Input,
+}
+
+/// The standard input: bytes the host supplied before the run, after the
+/// text-mode replacement of CR LF with LF. It is bounded so that a run stays
+/// deterministic; the limit is the CLI's, not the runtime's.
+#[derive(Default)]
+struct Input {
+    bytes: Vec<u8>,
+    position: usize,
+    /// The end-of-file indicator: set when a read meets the end, cleared by
+    /// nothing here because there is no `rewind` or `clearerr` yet.
+    eof: bool,
+}
+
+impl Input {
+    /// One character, or none at the end. Meeting the end sets the
+    /// indicator, even when characters came before it in the same read.
+    fn character(&mut self) -> Option<u8> {
+        match self.bytes.get(self.position) {
+            Some(&byte) => {
+                self.position += 1;
+                Some(byte)
+            }
+            None => {
+                self.eof = true;
+                None
+            }
+        }
+    }
+
+    /// `fgets`: at most `limit` characters, stopping after a line feed,
+    /// which is kept. Nothing at the end of file.
+    fn line(&mut self, limit: usize) -> Option<Vec<u8>> {
+        let mut line = Vec::new();
+        while line.len() < limit {
+            match self.character() {
+                Some(byte) => {
+                    line.push(byte);
+                    if byte == b'\n' {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        if line.is_empty() { None } else { Some(line) }
+    }
 }
 
 /// Guest blocks in the process heap that the C runtime services which return
@@ -527,6 +576,49 @@ impl StandardStreams {
         }
     }
 
+    /// `getchar`: one character from the standard input, or `EOF` at the
+    /// end. Text mode is applied when the input is supplied, so a character
+    /// here is already after the replacement.
+    pub(super) fn character_stdin(&mut self) -> i32 {
+        match self.input.character() {
+            Some(byte) => i32::from(byte),
+            None => -1,
+        }
+    }
+
+    /// `feof`: the end-of-file indicator of the stream. Only the standard
+    /// input can end here; the captured output streams cannot be read, and
+    /// file streams do not expose theirs yet.
+    pub(super) fn end_of_file(&mut self, file: u64) -> Outcome<i32> {
+        if file == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        match self.stream(file)? {
+            Stream::Input => Ok(Ok(i32::from(self.input.eof))),
+            _ => Ok(Ok(0)),
+        }
+    }
+
+    /// The bytes the guest reads from `stdin`, before any text-mode
+    /// replacement. A CR LF pair becomes one line feed; a CR alone stays.
+    pub(super) fn set_input(&mut self, bytes: &[u8]) {
+        let mut translated = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'\r' && bytes.get(at + 1) == Some(&b'\n') {
+                // The CR of a pair is dropped; the LF is pushed next round.
+            } else {
+                translated.push(bytes[at]);
+            }
+            at += 1;
+        }
+        self.input = Input {
+            bytes: translated,
+            position: 0,
+            eof: false,
+        };
+    }
+
     /// `fflush`. A null stream means every open stream. Nothing is ever held
     /// back, so there is nothing to do.
     pub(super) fn flush(&self, file: u64) -> Result<i32, ExitReason> {
@@ -607,21 +699,20 @@ impl StandardStreams {
         if buffer == 0 || file == 0 || count <= 0 {
             return Ok(Err(Failed(0, EINVAL)));
         }
-        let file = match self.stream(file)? {
-            Stream::File(file) => file,
-            // Reading the standard input is not modelled.
-            Stream::Input => return Err(RUNTIME_LIMIT),
+        // Up to count - 1 characters, and then the terminator.
+        let limit = ((count - 1) as u64).min(MAX_TRANSFER) as usize;
+        let line = match self.stream(file)? {
+            Stream::File(file) => match self.opened.read_line(drive, file, limit) {
+                Ok(line) => line,
+                Err(errno) => return Ok(Err(Failed(0, errno))),
+            },
+            Stream::Input => self.input.line(limit),
             // The output streams cannot be read.
             Stream::Output | Stream::Error => return Ok(Err(Failed(0, EBADF))),
         };
-        // Up to count - 1 characters, and then the terminator.
-        let limit = ((count - 1) as u64).min(MAX_TRANSFER) as usize;
-        let mut line = match self.opened.read_line(drive, file, limit) {
-            Ok(Some(line)) => line,
-            // End of file with nothing read: null, and the buffer is left
-            // alone.
-            Ok(None) => return Ok(Ok(0)),
-            Err(errno) => return Ok(Err(Failed(0, errno))),
+        // End of file with nothing read: null, and the buffer is left alone.
+        let Some(mut line) = line else {
+            return Ok(Ok(0));
         };
         line.push(0);
         memory.write_bytes(buffer, &line).map_err(fault)?;

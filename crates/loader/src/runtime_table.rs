@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 106] = [
+pub static SERVICES: [ServiceMetadata; 108] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -280,9 +280,31 @@ pub static SERVICES: [ServiceMetadata; 106] = [
         result: "ptr",
         status: ServiceStatus::Partial,
         aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
-        failure: "null at end of file; null with errno EINVAL or EBADF; stops the guest for stdin or a pointer that is no stream",
+        failure: "null at end of file; null with errno EINVAL or EBADF; stops the guest for a pointer that is no stream",
         reference: "stdio.h fgets",
-        tests: &["fgets_reads_lines_within_its_count"],
+        tests: &["fgets_reads_lines_within_its_count", "stdin_lines_follow_iso_c_at_the_edges"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "getchar",
+        parameters: &[],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "EOF at end of input; the input is what the host supplied, never interactive",
+        reference: "stdio.h getchar",
+        tests: &["stdin_lines_follow_iso_c_at_the_edges"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "feof",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "the indicator of the standard input only; other streams report 0; -1 with errno EINVAL for a null stream",
+        reference: "stdio.h feof",
+        tests: &["stdin_lines_follow_iso_c_at_the_edges"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -1406,6 +1428,21 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a2 = call.u64(2)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::fgets(&mut context, a0, a1, a2)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "getchar", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let _ = args;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::getchar(&mut context)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "feof", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::feof(&mut context, a0)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

@@ -116,6 +116,88 @@ fn run_program(path: &Path, options: &[&str], arguments: &[&str]) -> Run {
     xenora(&all)
 }
 
+/// Run a program with bytes piped to its standard input, the way a user
+/// does in a shell.
+fn run_program_with_input(path: &Path, arguments: &[&str], input: &[u8]) -> Run {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut all = vec!["--pe", path.to_str().unwrap(), "--experimental", "--"];
+    all.extend(arguments);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_xenora"))
+        .arg("run")
+        .args(&all)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn xenora");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input)
+        .expect("write input");
+    let output = child.wait_with_output().expect("run xenora");
+    Run {
+        code: output.status.code(),
+        stdout: String::from_utf8(output.stdout).expect("ASCII output"),
+        stderr: String::from_utf8(output.stderr).expect("ASCII output"),
+    }
+}
+
+fn crt_stdin(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-stdin.sh", "run-program-crt-stdin", &OUT).join(format!("{name}.exe"))
+}
+
+/// The fixed input the fixture expects: two short lines in CR LF, one line
+/// longer than its buffer, and a last line with no newline.
+const STDIN_INPUT: &[u8] = b"alpha\r\nbeta\r\n0123456789\r\nlast";
+
+#[test]
+fn a_program_reading_lines_from_standard_input_counts_them_with_input_and_without() {
+    for level in ["O0", "O2"] {
+        let path = crt_stdin(&format!("crt-stdin-{level}"));
+        let run = run_program_with_input(&path, &[], STDIN_INPUT);
+        assert_eq!(run.code, Some(0), "err:{}", run.stderr);
+        assert!(
+            run.stdout.contains("crt_stdin: 7 of 7 checks passed"),
+            "{}",
+            run.stdout
+        );
+        let run = run_program_with_input(&path, &["empty"], b"");
+        assert_eq!(run.code, Some(0), "{}", run.stderr);
+        assert!(
+            run.stdout.contains("crt_stdin: 5 of 5 checks passed"),
+            "{}",
+            run.stdout
+        );
+    }
+}
+
+#[test]
+fn a_wrong_line_count_is_detected_and_input_beyond_the_limit_is_refused() {
+    let path = crt_stdin("crt-stdin-break");
+    let run = run_program_with_input(&path, &[], STDIN_INPUT);
+    assert_eq!(run.code, Some(7), "out:{} err:{}", run.stdout, run.stderr);
+    assert!(
+        run.stdout.contains("check 7 failed: control"),
+        "{}",
+        run.stdout
+    );
+    // One byte more than the limit is refused before the program starts:
+    // none of its output appears.
+    let input = vec![b'x'; 1_048_577];
+    let run = run_program_with_input(&crt_stdin("crt-stdin-O2"), &[], &input);
+    assert_ne!(run.code, Some(0));
+    assert!(
+        run.stderr.contains("exceeds the 1048576 byte limit"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stdout.contains("crt_stdin"), "{}", run.stdout);
+}
+
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(format!(
         "{}/../../fixtures/pe/{name}.exe",
