@@ -118,14 +118,30 @@ class GenerateX86(unittest.TestCase):
         rejected = [({"map": '"1"'}, "unknown map"), ({"prefix": '"67"'}, "unknown prefix"),
                     ({"length": '"512"'}, "unknown length"), ({"length": None}, "unknown length"),
                     ({"w": '"2"'}, "unknown w"), ({"op": '"nothing"'}, "unknown op"), ({"lock": "true"}, "unknown keys"),
-                    ({"opcode": "0x100"}, "out of range"), ({"enc": '"gpr_xmm"', "src": None}, "no source"),
+                    ({"opcode": "0x100"}, "out of range"), ({"enc": '"gpr_xmm"', "src": None}, "no register"),
                     ({"src": None}, "source size"), ({"src": '"q"', "aligned": "true"}, "alignment"),
                     ({"memory_only": "true", "register_only": "true"}, "contradict"),
                     ({"enc": '"rm_xmm"'}, "a store takes no source"),
                     ({"enc": '"none"', "src": None, "nds": None, "digit": "1"}, "without ModRM"),
-                    ({"digit": "8"}, "a digit is 0-7")]
+                    ({"digit": "8"}, "a digit is 0-7"),
+                    ({"enc": '"gpr_xmm_imm"', "src": '"b"'}, "no register"),
+                    ({"enc": '"reg_xmm_imm"'}, "no register"), ({"enc": '"xmm_rm_length"'}, "no register"),
+                    ({"enc": '"xmm_gpr_imm"'}, "a lane is"), ({"enc": '"xmm_gpr_imm"', "src": '"x"'}, "a lane is"),
+                    ({"enc": '"gpr_xmm_imm"', "src": '"q"', "nds": None}, "a lane is"),
+                    ({"enc": '"rm_imm_xmm"'}, "needs VEX.vvvv and a register"),
+                    ({"enc": '"rm_imm_xmm"', "register_only": "true", "nds": None}, "needs VEX.vvvv and a register")]
         for changes, message in rejected:
             self.rejects(self.vex(**changes), message)
+
+    def test_vex_immediates_follow_the_encoding(self):
+        for enc, changes in (("rm_imm_xmm", {"register_only": "true"}), ("xmm_rm_length", {"nds": None}),
+                             ("xmm_gpr_imm", {"src": '"w"'}), ("gpr_xmm_imm", {"src": None, "nds": None}),
+                             ("reg_xmm_imm", {"nds": None}), ("xmm_rm_imm", {})):
+            form = generate_x86.load(self.vex(enc=f'"{enc}"', **changes))[1][-1]
+            self.assertEqual(form["imm"], "ub", enc)
+        for enc, changes in (("xmm_rm", {}), ("xmm_gpr", {"src": None}), ("reg_xmm", {"nds": None})):
+            form = generate_x86.load(self.vex(enc=f'"{enc}"', **changes))[1][-1]
+            self.assertEqual(form["imm"], "", enc)
 
     def test_vex_forms_overlap_only_if_every_field_does(self):
         twice = lambda **second: self.vex() + self.vex(**second)[len(REGISTRY):]

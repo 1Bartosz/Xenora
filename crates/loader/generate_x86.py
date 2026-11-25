@@ -81,10 +81,12 @@ ENCS = {
     "reg_xmm": ("RegXmm", True, {""}),
     "reg_xmm_imm": ("RegXmmImm", True, {"ub"}),
 }
-# VEX encodings: the operand size, and whether VEX.vvvv may name a source.
+# VEX encodings: the operand size, and whether VEX.vvvv may name a register.
 VEX_ENCS = {"none": ("n", False), "rm": ("n", False), "xmm_rm": ("x", True), "rm_xmm": ("x", True),
-            "xmm_rm_imm": ("x", True), "rm_xmm_imm": ("x", False), "xmm_gpr": ("y", False),
-            "gpr_xmm": ("y", False), "reg_xmm": ("y", False)}
+            "xmm_rm_imm": ("x", True), "rm_xmm_imm": ("x", False), "xmm_gpr": ("y", True),
+            "gpr_xmm": ("y", False), "reg_xmm": ("y", False), "xmm_rm_length": ("y", False),
+            "rm_imm_xmm": ("x", True), "xmm_gpr_imm": ("y", True), "gpr_xmm_imm": ("y", False),
+            "reg_xmm_imm": ("y", False)}
 VEX_MAPS = {"0f": 1, "0f38": 2, "0f3a": 3}
 VEX_PREFIXES = {"": 0, "66": 1, "f3": 2, "f2": 3}
 VEX_LENGTHS = {"128": False, "256": True, "any": None}
@@ -303,7 +305,7 @@ def load_vex(entry, operations):
         fail(f"{where}: opcode out of range")
     size, sources = VEX_ENCS[form["enc"]]
     if form["nds"] and not sources:
-        fail(f"{where}: {form['enc']} takes no source from VEX.vvvv")
+        fail(f"{where}: {form['enc']} takes no register from VEX.vvvv")
     if form["memory_only"] and form["register_only"]:
         fail(f"{where}: memory_only and register_only contradict")
     modrm = ENCS[form["enc"]][1]
@@ -311,13 +313,21 @@ def load_vex(entry, operations):
         fail(f"{where}: operand restriction without ModRM")
     if form["digit"] is not None and not 0 <= form["digit"] <= 7:
         fail(f"{where}: a digit is 0-7")
-    if (form["src"] == "") != (form["enc"] in ("none", "xmm_gpr", "gpr_xmm")):
+    # A lane exchanged with a general register or memory is a fixed width by
+    # source, or that of the general operand.
+    lane = form["enc"] in ("xmm_gpr_imm", "gpr_xmm_imm")
+    if lane and form["src"] not in ("b", "w", "d", ""):
+        fail(f"{where}: a lane is a byte, word, doubleword or the general operand")
+    if not lane and (form["src"] == "") != (form["enc"] in ("none", "xmm_gpr", "gpr_xmm")):
         fail(f"{where}: source size does not match the encoding")
     if form["aligned"] and form["src"] not in ("v", "x"):
         fail(f"{where}: alignment applies only to whole vectors")
     if form["enc"] == "rm_xmm" and form["nds"] and not form["register_only"]:
         fail(f"{where}: a store takes no source from VEX.vvvv")
-    form.update(size=size, imm="ub" if form["enc"].endswith("_imm") else "", count=1, rm=None,
+    # A shift by an immediate writes VEX.vvvv and has its source in a register.
+    if form["enc"] == "rm_imm_xmm" and not (form["nds"] and form["register_only"]):
+        fail(f"{where}: {form['enc']} needs VEX.vvvv and a register operand")
+    form.update(size=size, imm="ub" if ENCS[form["enc"]][2] == {"ub"} else "", count=1, rm=None,
                 unaligned=not form["aligned"])
     form["vex"] = {
         "key": VEX_MAPS[form["map"]] << 10 | VEX_PREFIXES[form["prefix"]] << 8 | form["opcode"],

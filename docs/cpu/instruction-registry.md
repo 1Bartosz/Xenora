@@ -40,12 +40,22 @@ C4 and C5 always start a VEX prefix in 64-bit mode. The registry lists VEX forms
 
 - A VEX-encoded instruction clears its destination above the vector length. A legacy SSE instruction keeps bits 255:128, which live in `CpuState::ymm_high`.
 - Memory operands may have any alignment. VMOVAPS, VMOVAPD, VMOVDQA, VMOVNTPS, VMOVNTPD, VMOVNTDQ and VMOVNTDQA need that of the operand, 16 or 32 bytes.
-- 66, F2, F3, LOCK or REX before VEX, an opcode map other than 1 to 3, a vector length or W without a form, and VEX.vvvv other than 1111b on a form without that source are illegal instructions. A REX that a segment override makes ineffective is refused too.
+- 66, F2, F3, LOCK or REX before VEX, an opcode map other than 1 to 3, a vector length or W without a form, and VEX.vvvv other than 1111b on a form without that operand are illegal instructions. A REX that a segment override makes ineffective is refused too.
 - Scalar forms ignore VEX.L, where the manual says so.
 
-Implemented: VMOVAPS, VMOVAPD, VMOVUPS, VMOVUPD, VMOVDQA, VMOVDQU, VLDDQU, VMOVNTPS, VMOVNTPD, VMOVNTDQ, VMOVNTDQA, VMOVSS, VMOVSD, VMOVD, VMOVQ, VMOVLPS, VMOVLPD, VMOVHPS, VMOVHPD, VMOVHLPS, VMOVLHPS, VMOVMSKPS, VMOVMSKPD, VMOVDDUP, VMOVSLDUP, VMOVSHDUP, bitwise logic, VBROADCASTSS, VBROADCASTSD, VBROADCASTF128, VINSERTF128, VEXTRACTF128, VPERM2F128, VPERMILPS, VPERMILPD, VLDMXCSR, VSTMXCSR, VZEROUPPER and VZEROALL. The packed integer forms are 128-bit, as in AVX. VMASKMOVPS, VMASKMOVPD, VPMOVMSKB, VMASKMOVDQU, VPMOVSX and VPMOVZX are not among them. Every VEX form runs on the shared semantics in both engines. CPUID reports neither AVX nor OSXSAVE, and XGETBV is refused. An exception context holds the low halves only, like the Windows `CONTEXT` without extended state, so restoring one leaves the upper halves as they are.
+Implemented: VMOVAPS, VMOVAPD, VMOVUPS, VMOVUPD, VMOVDQA, VMOVDQU, VLDDQU, VMOVNTPS, VMOVNTPD, VMOVNTDQ, VMOVNTDQA, VMOVSS, VMOVSD, VMOVD, VMOVQ, VMOVLPS, VMOVLPD, VMOVHPS, VMOVHPD, VMOVHLPS, VMOVLHPS, VMOVMSKPS, VMOVMSKPD, VMOVDDUP, VMOVSLDUP, VMOVSHDUP, bitwise logic, VBROADCASTSS, VBROADCASTSD, VBROADCASTF128, VINSERTF128, VEXTRACTF128, VPERM2F128, VPERMILPS, VPERMILPD, VLDMXCSR, VSTMXCSR, VZEROUPPER, VZEROALL, and the VEX form of every other legacy instruction in the registry that has one. The packed integer, insert, extract and string forms are 128-bit, as in AVX. Refused are VRCPPS, VRSQRTPS and their scalar forms, VHADDPS, VHSUBPS, VADDSUBPS and their double forms, VTESTPS, VTESTPD, VMASKMOVPS, VMASKMOVPD, VMASKMOVDQU, AES, PCLMULQDQ, AVX2, FMA, F16C and BMI.
 
-`tests/x86_avx.rs` runs each form against a reference that works on byte arrays from assembly text.
+- A 256-bit form of a legacy operation computes both halves as that operation does. The exceptions of both halves are collected before any is reported. VDPPS computes the low half first, as the operation section of the Intel SDM lists them, and stops there on an unmasked exception.
+- Scalar forms take the bits above the result from VEX.vvvv.
+- The VEX compares have 32 predicates. Their reserved immediate bits 7:5 are ignored, as are bits 7:3 in the legacy forms, which is a local rule.
+- VBLENDVPS, VBLENDVPD and VPBLENDVB name the selecting register in bits 7:4 of the immediate and ignore bits 3:0.
+- A shift by an immediate writes the register of VEX.vvvv.
+- VEX.W selects RAX and RDX as the lengths of VPCMPESTRI and VPCMPESTRM.
+- The scalar forms accept either VEX.L. The manual marks them as ignoring it, and advises against setting it.
+
+Every VEX form runs on the shared semantics in both engines. CPUID reports neither AVX nor OSXSAVE, and XGETBV is refused. An exception context holds the low halves only, like the Windows `CONTEXT` without extended state, so restoring one leaves the upper halves as they are.
+
+`tests/x86_avx.rs` covers the rules of encodings, and runs the forms of `tests/x86/avx.txt` against a reference that works on byte arrays from assembly text. `tests/x86_avx_forms.rs` runs those of `avx_forms.txt` against the references and committed vectors of the legacy forms.
 
 ## String compares
 

@@ -1098,8 +1098,9 @@ fn every_declared_form_is_executed_by_a_fixture() {
     let vector = include_str!("x86/vector.txt");
     let float = include_str!("x86/float.txt");
     let avx = include_str!("x86/avx.txt");
-    let lines = FIXTURE.lines().chain(vector.lines());
-    for line in lines.chain(float.lines()).chain(avx.lines()) {
+    let forms = include_str!("x86/avx_forms.txt");
+    let lines = FIXTURE.lines().chain(vector.lines()).chain(float.lines());
+    for line in lines.chain(avx.lines()).chain(forms.lines()) {
         let (hex, _) = line.split_once(" | ").unwrap();
         let code: Vec<u8> = hex
             .split(' ')

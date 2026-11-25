@@ -73,7 +73,7 @@ pub struct VexForm {
     pub wide: Option<bool>,
     /// Memory width in bytes: 0 is the vector length, 255 the general operand.
     pub memory: u8,
-    /// VEX.vvvv names a source. Otherwise it must be all ones.
+    /// VEX.vvvv names a register. Otherwise it must be all ones.
     pub nds: bool,
 }
 
@@ -82,7 +82,8 @@ pub struct VexForm {
 pub struct Vex {
     /// Vector length in bytes: 16 or 32.
     pub length: u8,
-    /// Register of the further source, if the form takes one.
+    /// Register named by VEX.vvvv: a further source, or the destination of a shift
+    /// by an immediate.
     pub source: Option<u8>,
 }
 
@@ -343,7 +344,7 @@ fn memory_operand<E, F: FnMut(u64) -> Result<u8, E>>(
 
 /// Decode a VEX-encoded instruction after its first prefix byte (Intel SDM Vol. 2A,
 /// 2.3). A form the registry does not declare, a set bit that must be clear and
-/// VEX.vvvv on a form without that source are rejected.
+/// VEX.vvvv on a form without that operand are rejected.
 fn decode_vex<E, F: FnMut(u64) -> Result<u8, E>>(
     mut cursor: Cursor<F>,
     first: u8,

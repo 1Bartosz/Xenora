@@ -5,9 +5,11 @@
 //! `tests/x86/avx.txt` pairs LLVM encodings with Intel-syntax text. The reference
 //! below reads only the text and works on byte arrays, following the operation
 //! sections of the Intel SDM Vol. 2. It shares nothing with the registry, decoder or
-//! production semantics. Which encodings are invalid is written here from the SDM's
+//! production semantics. The forms of `tests/x86/avx_forms.txt` have their results
+//! checked in `x86_avx_forms.rs` and take part here in the rules of encodings. Which encodings are invalid is written here from the SDM's
 //! opcode tables and Vol. 2A, 2.3 and 2.4.
 
+use std::collections::BTreeSet;
 use xenora_loader::cpu::{CpuState, ExecutionResult, ExitReason, Interpreter, Mxcsr, RFlags};
 use xenora_loader::dbt::{DbtEngine, is_native};
 use xenora_loader::memory::{GuestMemory, MemoryError, MemoryPermissions};
@@ -82,6 +84,29 @@ fn cases() -> Vec<Case> {
     parse(include_str!("x86/avx.txt"))
 }
 
+/// [`cases`] and one case of each mnemonic, operand kinds and vector length of the VEX
+/// forms of legacy instructions.
+fn all_cases() -> Vec<Case> {
+    let mut seen = BTreeSet::new();
+    let mut all = cases();
+    for case in parse(include_str!("x86/avx_forms.txt")) {
+        let kinds: Vec<&str> = case
+            .operands()
+            .into_iter()
+            .map(|text| {
+                let end = text.find(|c: char| c.is_ascii_digit() || c == ' ');
+                &text[..end.unwrap_or(text.len())]
+            })
+            .collect();
+        // VEXTRACTPS and its like use ebx and r9d.
+        if seen.insert((case.name(), kinds)) {
+            all.push(case);
+        }
+    }
+    assert!(all.len() > 1000, "{}", all.len());
+    all
+}
+
 fn at(code: &[u8]) -> Result<Insn, DecodeError<()>> {
     decode(ENTRY, |address| {
         code.get((address - ENTRY) as usize).copied().ok_or(())
@@ -123,7 +148,8 @@ impl Random {
             gpr,
             ymm,
             operand,
-            mxcsr: (self.next() & 0xFFFF) as u32,
+            // Every exception is masked.
+            mxcsr: (self.next() & 0xFFFF) as u32 | 0x1F80,
         }
     }
 }
@@ -144,6 +170,8 @@ fn width(text: &str) -> usize {
         "xmmword" => 16,
         "qword" => 8,
         "dword" => 4,
+        "word" => 2,
+        "byte" => 1,
         other => panic!("width {other}"),
     }
 }
@@ -500,23 +528,43 @@ fn three_byte(code: &[u8], wide: bool) -> Vec<u8> {
 fn fixed_w0(name: &str) -> bool {
     name.starts_with("vbroadcast")
         || name.starts_with("vpermil")
-        || ["vinsertf128", "vextractf128", "vperm2f128"].contains(&name)
+        || name.starts_with("vblendv")
+        || ["vinsertf128", "vextractf128", "vperm2f128", "vpblendvb"].contains(&name)
+}
+
+/// Forms where W is the size of a general operand, or of the lengths of a string.
+fn sized_by_w(case: &Case) -> bool {
+    let name = case.name();
+    let general = case.text.contains(" r") || case.text.contains(" e");
+    name == "vmovd"
+        || name == "vmovq" && general
+        || name.starts_with("vcvtsi2")
+        || name.ends_with("2si")
+        || name.starts_with("vpcmpestr")
+        || ["vpinsrd", "vpinsrq", "vpextrd", "vpextrq"].contains(&name)
+}
+
+/// Scalar floating point, whose forms ignore VEX.L.
+fn is_scalar(name: &str) -> bool {
+    let scalar = name.ends_with("ss") || name.ends_with("sd");
+    scalar && !name.starts_with("vp") && name != "vbroadcastss" && name != "vbroadcastsd"
+        || name.ends_with("2si")
+        || name.starts_with("vcvtsi2")
 }
 
 #[test]
 fn the_three_byte_prefix_and_an_ignored_w_change_nothing() {
     let mut random = Random(0x3B17);
     let mut ignored = 0;
-    for case in cases() {
+    for case in all_cases() {
         let name = case.name();
         let machine = random.machine();
         let (cpu, _) = load(&machine, &case.code, READ_WRITE);
         for native in [false, true] {
             let plain = outcome(native, &cpu, &case.code, &machine.operand);
             assert_eq!(plain.0, ExitReason::StepLimitExceeded, "{}", case.text);
-            // VMOVD and VMOVQ with a general register use W as the operand size.
-            let sized = ["vmovd", "vmovq"].contains(&name) && case.code[0] == 0xC4;
-            if !sized {
+            // A W that is set selects the operand size.
+            if case.code[0] == 0xC5 || case.code[2] & 0x80 == 0 {
                 let long = three_byte(&case.code, false);
                 assert_eq!(
                     outcome(native, &cpu, &long, &machine.operand),
@@ -525,7 +573,6 @@ fn the_three_byte_prefix_and_an_ignored_w_change_nothing() {
                     case.text
                 );
             }
-            let general = case.text.contains(" r") || case.text.contains(" e");
             if fixed_w0(name) {
                 let wide = three_byte(&case.code, true);
                 let (exit, state, _) = outcome(native, &cpu, &wide, &machine.operand);
@@ -535,7 +582,7 @@ fn the_three_byte_prefix_and_an_ignored_w_change_nothing() {
                     case.text
                 );
                 assert_eq!(state.xmm, cpu.xmm);
-            } else if !(name == "vmovd" || name == "vmovq" && general) {
+            } else if !sized_by_w(&case) {
                 let wide = three_byte(&case.code, true);
                 assert_eq!(
                     outcome(native, &cpu, &wide, &machine.operand),
@@ -547,7 +594,7 @@ fn the_three_byte_prefix_and_an_ignored_w_change_nothing() {
             }
         }
     }
-    assert!(ignored > 200, "{ignored}");
+    assert!(ignored > 1500, "{ignored}");
 }
 
 fn refused(code: &[u8], what: &str) {
@@ -569,7 +616,7 @@ fn refused(code: &[u8], what: &str) {
 /// opcode, also with a segment override in between.
 #[test]
 fn prefixes_before_vex_are_invalid() {
-    for case in cases() {
+    for case in all_cases() {
         for prefix in [0x66, 0xF2, 0xF3, 0xF0].into_iter().chain(0x40..=0x4F) {
             refused(&[&[prefix][..], &case.code].concat(), case.text);
         }
@@ -591,17 +638,19 @@ fn prefixes_before_vex_are_invalid() {
 #[test]
 fn an_unused_vvvv_must_be_all_ones() {
     let (mut unused, mut used) = (0, 0);
-    for case in cases() {
+    for case in all_cases() {
         let (position, _) = layout(&case.code);
         let registers = case
             .operands()
             .iter()
             .filter(|text| text.parse::<u32>().is_err())
             .count();
+        // A shift by an immediate writes the register of VEX.vvvv.
+        let shifts = case.name().starts_with("vpsll") || case.name().starts_with("vpsr");
         for vvvv in 0..15u8 {
             let mut code = case.code.clone();
             code[position] = code[position] & !0x78 | vvvv << 3;
-            if registers < 3 {
+            if registers < 3 && !shifts {
                 refused(&code, case.text);
                 unused += 1;
             } else {
@@ -610,7 +659,7 @@ fn an_unused_vvvv_must_be_all_ones() {
             }
         }
     }
-    assert!(unused > 400 && used > 300, "{unused} {used}");
+    assert!(unused > 2000 && used > 8000, "{unused} {used}");
 }
 
 /// Forms defined for one vector length only, from the SDM opcode columns. For AVX,
@@ -626,13 +675,13 @@ fn a_vector_length_without_a_form_is_invalid() {
         "vmovhpd",
         "vmovhlps",
         "vmovlhps",
-        "vpand",
-        "vpandn",
-        "vpor",
-        "vpxor",
         "vmovntdqa",
         "vldmxcsr",
         "vstmxcsr",
+        "vinsertps",
+        "vextractps",
+        "vmpsadbw",
+        "vdppd",
     ];
     let only_256 = [
         "vbroadcastsd",
@@ -641,11 +690,13 @@ fn a_vector_length_without_a_form_is_invalid() {
         "vextractf128",
         "vperm2f128",
     ];
-    for case in cases() {
+    for case in all_cases() {
         let (position, _) = layout(&case.code);
         let mut code = case.code.clone();
         code[position] ^= 4;
-        if only_128.contains(&case.name()) || only_256.contains(&case.name()) {
+        let name = case.name();
+        let integer = name.starts_with("vp") && !name.starts_with("vperm") && name != "vptest";
+        if integer || only_128.contains(&name) || only_256.contains(&name) {
             refused(&code, case.text);
         } else {
             assert!(at(&code).is_ok(), "{}", case.text);
@@ -653,14 +704,16 @@ fn a_vector_length_without_a_form_is_invalid() {
     }
 }
 
-/// Scalar moves ignore VEX.L.
+/// Scalar forms ignore VEX.L.
 #[test]
-fn scalar_moves_ignore_the_length() {
+fn scalar_forms_ignore_the_length() {
     let mut random = Random(0x716);
-    for case in cases() {
-        if !["vmovss", "vmovsd"].contains(&case.name()) {
+    let mut checked = 0;
+    for case in all_cases() {
+        if !is_scalar(case.name()) {
             continue;
         }
+        checked += 1;
         let machine = random.machine();
         let (cpu, _) = load(&machine, &case.code, READ_WRITE);
         let mut long = case.code.clone();
@@ -674,6 +727,7 @@ fn scalar_moves_ignore_the_length() {
             );
         }
     }
+    assert!(checked > 150, "{checked}");
 }
 
 #[test]
@@ -684,8 +738,27 @@ fn undeclared_vex_encodings_are_rejected() {
         &[0xC4, 0xE5, 0x78, 0x28, 0xC1],       // map 5, whose low bits are those of map 1
         &[0xC4, 0xF1, 0x78, 0x28, 0xC1],       // map 17
         &[0xC4, 0xFF, 0x78, 0x28, 0xC1],       // map 31
-        &[0xC5, 0xF0, 0x58, 0xC2],             // vaddps (not implemented)
-        &[0xC5, 0xF9, 0xFC, 0xC1],             // vpaddb
+        &[0xC5, 0xF8, 0x53, 0xC1],             // vrcpps (not implemented)
+        &[0xC5, 0xFB, 0x7C, 0xC1],             // vhaddps (not implemented)
+        &[0xC4, 0xE2, 0x79, 0x0E, 0xC1],       // vtestps (not implemented)
+        &[0xC4, 0xE2, 0x71, 0x2C, 0x01],       // vmaskmovps (not implemented)
+        &[0xC5, 0xF9, 0xF7, 0xC1],             // vmaskmovdqu (not implemented)
+        &[0xC4, 0xE2, 0x71, 0xDC, 0xC2],       // vaesenc
+        &[0xC4, 0xE3, 0x71, 0x44, 0xC2, 0],    // vpclmulqdq
+        &[0xC5, 0xF5, 0xFC, 0xC1],             // vpaddb ymm (AVX2)
+        &[0xC5, 0xFD, 0x70, 0xC1, 0x1B],       // vpshufd ymm (AVX2)
+        &[0xC5, 0xF5, 0x71, 0xF1, 0x01],       // vpsllw ymm by an immediate (AVX2)
+        &[0xC5, 0xFD, 0xD7, 0xC1],             // vpmovmskb ymm (AVX2)
+        &[0xC4, 0xE3, 0x75, 0x4C, 0xC2, 0x30], // vpblendvb ymm (AVX2)
+        &[0xC5, 0xF1, 0x71, 0x31, 0x01],       // vpsllw of memory
+        &[0xC5, 0xF1, 0x71, 0xC9, 0x01],       // 0F 71 /1
+        &[0xC5, 0xF9, 0xC5, 0x01, 0x01],       // vpextrw from memory
+        &[0xC5, 0xF9, 0xD7, 0x01],             // vpmovmskb from memory
+        &[0xC4, 0xE2, 0x79, 0x10, 0xC1],       // the legacy opcode of pblendvb
+        &[0xC4, 0xE2, 0x79, 0x14, 0xC1],       // the legacy opcode of blendvps
+        &[0xC5, 0xF0, 0x2A, 0xC1],             // cvtpi2ps
+        &[0xC5, 0xF8, 0x2D, 0xC1],             // cvtps2pi
+        &[0xC5, 0xF1, 0x73, 0xE1, 0x01],       // 0F 73 /4
         &[0xC5, 0xFA, 0x28, 0xC1],             // F3 0F 28
         &[0xC5, 0xF8, 0x2B, 0xC1],             // vmovntps with a register
         &[0xC5, 0xF9, 0xE7, 0xC1],             // vmovntdq with a register
@@ -714,7 +787,7 @@ fn undeclared_vex_encodings_are_rejected() {
 
 #[test]
 fn decoding_fetches_exactly_the_instruction() {
-    for case in cases() {
+    for case in all_cases() {
         let insn = at(&case.code).unwrap();
         assert_eq!(usize::from(insn.len), case.code.len(), "{}", case.text);
         for length in 1..case.code.len() {
@@ -835,26 +908,28 @@ fn a_rip_relative_operand_counts_the_immediate() {
 fn only_the_listed_operands_must_be_aligned() {
     let mut random = Random(0xA116);
     let mut seen = [0, 0];
-    for case in cases().into_iter().filter(Case::has_memory) {
+    for case in all_cases().into_iter().filter(Case::has_memory) {
         let aligned = needs_alignment(case.name());
         for offset in [1, 2, 4, 8, 16, 24, 31] {
             let mut machine = random.machine();
             machine.gpr[6] = DATA + offset;
-            // The reference sees the bytes at the moved operand.
-            let mut expected = machine.clone();
             let (cpu, mut memory) = load(&machine, &case.code, READ_WRITE);
-            let before = data(&memory);
-            let place = 32 + offset as usize;
-            expected.operand.copy_from_slice(&before[place..place + 32]);
             if case.name() == "vldmxcsr" {
                 // Keep the reserved bits of the moved operand clear.
                 memory
                     .write_bytes(OPERAND + offset, &[0x80, 0x1F, 0, 0])
                     .unwrap();
-                expected.operand[..4].copy_from_slice(&[0x80, 0x1F, 0, 0]);
             }
             let start = data(&memory);
-            reference(&mut expected, case.text);
+            let place = 32 + offset as usize;
+            // The same bytes at an aligned address give the result.
+            let mut plain = cpu.clone();
+            plain.gpr[6] = DATA;
+            let operand: [u8; 32] = start[place..place + 32].try_into().unwrap();
+            let (exit, mut wanted, after) = outcome(false, &plain, &case.code, &operand);
+            assert_eq!(exit, ExitReason::StepLimitExceeded, "{}", case.text);
+            wanted.gpr[6] = machine.gpr[6];
+            wanted.rip += case.code.len() as u64;
             let fails = aligned && !(OPERAND + offset).is_multiple_of(case.width());
             for native in [false, true] {
                 memory.write_bytes(DATA, &start).unwrap();
@@ -869,29 +944,16 @@ fn only_the_listed_operands_must_be_aligned() {
                     assert_eq!(result.final_state, cpu, "{}", case.text);
                     assert_eq!(data(&memory), start, "{}", case.text);
                 } else {
-                    let (wanted, _) = load(&expected, &case.code, READ_WRITE);
-                    let state = result.final_state;
                     assert_eq!(
                         result.exit_reason,
                         ExitReason::StepLimitExceeded,
                         "{}",
                         case.text
                     );
-                    assert_eq!(
-                        (state.xmm, state.ymm_high),
-                        (wanted.xmm, wanted.ymm_high),
-                        "{}",
-                        case.text
-                    );
-                    assert_eq!(
-                        (state.gpr, state.mxcsr),
-                        (wanted.gpr, wanted.mxcsr),
-                        "{}",
-                        case.text
-                    );
+                    assert_eq!(result.final_state, wanted, "{}", case.text);
                     let mut bytes = start.clone();
                     if case.is_store() {
-                        bytes[place..place + 32].copy_from_slice(&expected.operand);
+                        bytes[place..place + 32].copy_from_slice(&after[32..64]);
                     }
                     assert_eq!(data(&memory), bytes, "{}", case.text);
                 }
@@ -911,7 +973,7 @@ const EXECUTE_ONLY: MemoryPermissions = MemoryPermissions {
 #[test]
 fn faults_name_the_access_and_the_first_bad_byte() {
     let end = DATA + 0x100;
-    for case in cases().into_iter().filter(Case::has_memory) {
+    for case in all_cases().into_iter().filter(Case::has_memory) {
         let (text, store, width) = (case.text, case.is_store(), case.width());
         let mut tries = vec![
             (0x9000, READ_WRITE, Some(0x9000)),
@@ -921,7 +983,9 @@ fn faults_name_the_access_and_the_first_bad_byte() {
         if !needs_alignment(case.name()) {
             // All but the last byte, and only the first one, are mapped.
             tries.push((end - width + 1, READ_WRITE, Some(end)));
-            tries.push((end - 1, READ_WRITE, Some(end)));
+            if width > 1 {
+                tries.push((end - 1, READ_WRITE, Some(end)));
+            }
         }
         for (address, permissions, unmapped) in tries {
             let mut machine = Random(0x3C).machine();
@@ -967,14 +1031,14 @@ fn faults_name_the_access_and_the_first_bad_byte() {
 #[test]
 fn non_canonical_operands_are_general_protection_faults() {
     const LIMIT: u64 = 0x0000_8000_0000_0000;
-    for case in cases().into_iter().filter(Case::has_memory) {
+    for case in all_cases().into_iter().filter(Case::has_memory) {
         let width = case.width();
         for address in [
             LIMIT,
             0xFFFF_7FFF_FFFF_FFE0,
             1 << 63,
             LIMIT - width + 1,
-            LIMIT - 1,
+            LIMIT - width.min(2) + 1,
         ] {
             let mut machine = Random(0x3D).machine();
             machine.gpr[6] = address.wrapping_sub(32);
@@ -996,7 +1060,7 @@ fn non_canonical_operands_are_general_protection_faults() {
 #[test]
 fn segment_overrides_add_their_base() {
     let mut random = Random(0xF5);
-    for case in cases().into_iter().filter(Case::has_memory) {
+    for case in all_cases().into_iter().filter(Case::has_memory) {
         let machine = random.machine();
         let (mut cpu, _) = load(&machine, &case.code, READ_WRITE);
         (cpu.fs_base, cpu.gs_base) = (0x1_0003, 0x2_0003);
@@ -1090,8 +1154,8 @@ fn alternative_encodings_match_the_reference() {
     }
 }
 
-/// No form here reads or writes the status flags, so those of an earlier
-/// instruction must survive in the DBT.
+/// The status flags of an earlier instruction survive every form that does not
+/// compare.
 #[test]
 fn flags_survive_every_form() {
     let added = RFlags {
@@ -1102,7 +1166,13 @@ fn flags_survive_every_form() {
         pf: true,
         af: true,
     };
-    for case in cases() {
+    for case in all_cases() {
+        if ["vptest", "vcomi", "vucomi", "vpcmpestr", "vpcmpistr"]
+            .iter()
+            .any(|stem| case.name().starts_with(stem))
+        {
+            continue;
+        }
         let code = [&[0x01, 0xC8][..], &case.code, &[0x89, 0xD2, 0xF4]].concat(); // add eax, ecx
         let mut machine = Random(0xADD).machine();
         (machine.gpr[0], machine.gpr[1]) = (0xFFFF_FFFF, 1);
@@ -1118,7 +1188,7 @@ fn flags_survive_every_form() {
 
 #[test]
 fn mixed_vex_legacy_and_integer_sequences_agree() {
-    let vex = cases();
+    let vex = all_cases();
     let legacy: Vec<Case> = parse(include_str!("x86/vector.txt"));
     let integers: Vec<Case> = parse(include_str!("x86/integer.txt"))
         .into_iter()

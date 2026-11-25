@@ -8,13 +8,16 @@
 //! name a further source, and memory may have any alignment unless the form says
 //! otherwise. Every instruction is all-or-nothing.
 
-use crate::cpu::{CpuState, ExitReason, Mxcsr};
+use crate::cpu::{CpuState, ExitReason, Mxcsr, RFlags};
 use crate::memory::GuestMemory;
 use crate::x86_decode::{Encoding, Insn, RmOperand, Vex};
 use crate::x86_exec::{
     address, canonical_access, read_mem, read_reg, rm_operand, write_mem, write_reg,
 };
-use crate::x86_simd::{lane, packed};
+use crate::x86_float;
+use crate::x86_simd::{
+    controlled, execute_legacy, insert_general, lane, lane_immediate, packed, select, shift_by,
+};
 use crate::x86_table::{FORMS, Op};
 
 /// The low and high halves of a 256-bit vector.
@@ -122,6 +125,7 @@ pub(crate) fn execute(
     let in_memory = insn.memory().is_some();
     // The first source: VEX.vvvv, or nothing for a form without one.
     let first = vex.source.map_or([0; 2], |index| read_ymm(cpu, index));
+    let halves = usize::from(length / 16);
     match (insn.op, insn.encoding) {
         (Op::Vzeroupper, _) => cpu.ymm_high = [0; 16],
         (Op::Vzeroall, _) => {
@@ -165,6 +169,40 @@ pub(crate) fn execute(
                 out | sign << index
             });
             write_reg(cpu, insn.reg, insn.size, signs);
+        }
+        // The result is a general register, memory or flags, as in the legacy form.
+        (_, Encoding::RegXmm | Encoding::GprXmmImm | Encoding::RegXmmImm)
+        | (
+            Op::Comiss | Op::Comisd | Op::Ucomiss | Op::Ucomisd | Op::Pcmpestri | Op::Pcmpistri,
+            _,
+        ) => execute_legacy(cpu, memory, insn)?,
+        (Op::Pcmpestrm | Op::Pcmpistrm, _) => {
+            execute_legacy(cpu, memory, insn)?;
+            cpu.ymm_high[0] = 0;
+        }
+        (Op::Ptest, _) => {
+            let source = read_source(cpu, memory, insn)?;
+            let value = read_ymm(cpu, reg);
+            cpu.flags = RFlags {
+                zf: (0..halves).all(|half| value[half] & source[half] == 0),
+                cf: (0..halves).all(|half| !value[half] & source[half] == 0),
+                ..RFlags::default()
+            };
+        }
+        (Op::Cvtsi2ss | Op::Cvtsi2sd, _) => {
+            let result = x86_float::from_general(cpu, memory, insn, first[0])?;
+            write_ymm(cpu, reg, [result, 0], 16);
+        }
+        (_, Encoding::XmmGprImm) => {
+            let result = insert_general(cpu, memory, insn, first[0])?;
+            write_ymm(cpu, reg, [result, 0], 16);
+        }
+        // VEX.vvvv names the destination.
+        (op, Encoding::RmImmXmm) => {
+            let target = vex.source.ok_or(ExitReason::IllegalInstruction(0))?;
+            let source = read_source(cpu, memory, insn)?;
+            let result = source.map(|half| shift_by(op, half, insn.imm));
+            write_ymm(cpu, target, result, length);
         }
         // Loads and stores of part of a vector. VMOVHLPS and VMOVLHPS are the
         // register forms of VMOVLPS and VMOVHPS.
@@ -230,15 +268,16 @@ pub(crate) fn execute(
         }
         (op, encoding) => {
             let source = read_source(cpu, memory, insn)?;
-            let imm = insn.imm;
+            let imm = lane_immediate(insn);
+            if let Some(result) = x86_float::vector(cpu, op, first, source, length, imm)? {
+                write_ymm(cpu, reg, result, length);
+                return Ok(());
+            }
             let result = match (op, encoding) {
                 (
                     Op::Movaps | Op::Movups | Op::Movdqa | Op::Movdqu | Op::Movntdqa | Op::Lddqu,
                     _,
                 ) => source,
-                (Op::Pand | Op::Pandn | Op::Por | Op::Pxor, _) => {
-                    [0, 1].map(|half| packed(op, first[half], source[half]))
-                }
                 (Op::Movddup, _) => source.map(|half| doubles(half, |_| 0)),
                 (Op::Movsldup, _) => source.map(|half| singles(half, |index| index & !1)),
                 (Op::Movshdup, _) => source.map(|half| singles(half, |index| index | 1)),
@@ -272,6 +311,24 @@ pub(crate) fn execute(
                         (lane(source[half], 64, index) >> 1 & 1) as u32
                     })
                 }),
+                // The sign bits of a fourth register select the source.
+                (Op::Pblendvb | Op::Blendvps | Op::Blendvpd, _) => {
+                    let control = read_ymm(cpu, (imm >> 4) as u8);
+                    [0, 1].map(|half| select(op, first[half], source[half], control[half]))
+                }
+                (_, Encoding::XmmRmImm) => {
+                    // Immediate bits for the low half only; others serve both.
+                    let used = match op {
+                        Op::Blendps => 4,
+                        Op::Blendpd | Op::Shufpd => 2,
+                        _ => 0,
+                    };
+                    [0, 1].map(|half| {
+                        let imm = imm >> (used * half);
+                        controlled(op, first[half], source[half], imm)
+                    })
+                }
+                (_, Encoding::XmmRm) => [0, 1].map(|half| packed(op, first[half], source[half])),
                 _ => return Err(ExitReason::IllegalInstruction(0)),
             };
             write_ymm(cpu, reg, result, length);
