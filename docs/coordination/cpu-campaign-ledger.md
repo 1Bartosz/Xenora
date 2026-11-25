@@ -28,16 +28,18 @@ owners and gaps that still need a focused issue or original guest fixture.
   revision `ece8991` passed seven original C exception tests and both C++
   exception tests. The same main with [#479] applied passed eleven C
   exception tests and failed both C++ tests with guest status `0xc0000005`.
-  Three original CLI startup-report cases passed on the combined tree.
+  The same eleven C passes and two C++ failures reproduced when [#479]
+  was applied to `c76e974`. Three original CLI startup-report cases
+  passed on the earlier combined tree.
 - With LLDB, the uncaught C++ fixture reached the TLS return address
   `0xffffffffffff0000` before entry. [#479] routed that fetch through the
   exception dispatcher and latched a process exit. Stopping at the expected
   callback return before fetch is the proposed prerequisite. The DBT file
   overlaps [#499], so the fix needs coordination with both contributors.
-- The two canonical semaphore services and their four API-set aliases
-  belong to [#512]. Its guest fixture derives wait, release and count
-  expectations from the public Win32 documentation and is built at
-  `-O0`, `-O1`, `-O2` and `-Os`.
+- [#519] adds the two canonical services and four API-set aliases for
+  [#512]. The original guest fixture passed at `-O0`, `-O1`, `-O2`
+  and `-Os`. The workspace run for #519 passed 1,191 tests with 39
+  ignored. The PR is open.
 - Original cross-family fixtures exist for the
   [hosted multithreaded C++ program][#438] and the
   [guest-to-Metal workload][#433]. The campaign still needs additional
@@ -82,6 +84,7 @@ owners and gaps that still need a focused issue or original guest fixture.
 [#505]: https://github.com/ranveersoni98/Xenora/pull/505
 [#508]: https://github.com/ranveersoni98/Xenora/pull/508
 [#512]: https://github.com/ranveersoni98/Xenora/issues/512
+[#519]: https://github.com/ranveersoni98/Xenora/pull/519
 
 ## Continuation checkpoint
 
