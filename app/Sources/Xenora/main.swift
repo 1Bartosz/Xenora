@@ -2,7 +2,8 @@
 //
 // Native shell over the versioned C interface. "Run trusted fixture" executes the
 // bundled trusted PE fixture (x86-64 translated to ARM64; its draw request is rendered
-// by native Metal) and shows the verified read-back frame. No other executable can run.
+// by native Metal) and shows the verified read-back frame. Any other executable runs
+// through the bundled `xenora run` worker (ProgramRun.swift).
 
 import AppKit
 import AVFoundation
@@ -411,12 +412,24 @@ final class FrameModel: ObservableObject {
     @Published var runningTextured = false
     @Published var audioVfsFrame: AudioVfsFrame?
     @Published var runningAudioVfs = false
+    /// Host wall time of the latest run of each fixture, measured here, for the HUD.
+    @Published var frameMs: Double?
+    @Published var texturedMs: Double?
+    @Published var audioVfsMs: Double?
+
+    private static func timed<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> (T, Double) {
+        await Task.detached {
+            let started = Date()
+            let value = body()
+            return (value, Date().timeIntervalSince(started) * 1000)
+        }.value
+    }
 
     func run() {
         running = true
         Task {
             // The fixture blocks while it executes and renders, so keep it off the main thread.
-            frame = await Task.detached { GuestFrame.run() }.value
+            (frame, frameMs) = await Self.timed { GuestFrame.run() }
             running = false
         }
     }
@@ -424,7 +437,7 @@ final class FrameModel: ObservableObject {
     func runTextured() {
         runningTextured = true
         Task {
-            texturedFrame = await Task.detached { TexturedFrame.run() }.value
+            (texturedFrame, texturedMs) = await Self.timed { TexturedFrame.run() }
             runningTextured = false
         }
     }
@@ -432,7 +445,7 @@ final class FrameModel: ObservableObject {
     func runAudioVfs() {
         runningAudioVfs = true
         Task {
-            audioVfsFrame = await Task.detached { AudioVfsFrame.run() }.value
+            (audioVfsFrame, audioVfsMs) = await Self.timed { AudioVfsFrame.run() }
             runningAudioVfs = false
         }
     }
@@ -447,6 +460,8 @@ final class FrameLoopModel: ObservableObject {
     @Published var image: CGImage?
     @Published var errorMessage: String?
     @Published var isInteractive: Bool = false
+    /// Completed frames per second over the last half second, measured on the host.
+    @Published var hostFps: Double?
     @Published private(set) var controller: DetectedController?
 
     private var session: xenora_session = 0
@@ -588,7 +603,10 @@ final class FrameLoopModel: ObservableObject {
 
     private func startPolling() {
         pollTask?.cancel()
+        hostFps = nil
         pollTask = Task { [weak self] in
+            var windowStart = Date()
+            var windowFrames: UInt32? = nil
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 16_000_000)
                 guard let self = self, self.session != 0 else { break }
@@ -607,6 +625,17 @@ final class FrameLoopModel: ObservableObject {
                 self.state = st
                 self.completed = comp
                 self.frameId = fId
+                let elapsed = Date().timeIntervalSince(windowStart)
+                if let first = windowFrames {
+                    if elapsed >= 0.5 {
+                        self.hostFps = Double(comp &- first) / elapsed
+                        windowStart = Date()
+                        windowFrames = comp
+                    }
+                } else {
+                    windowFrames = comp
+                    windowStart = Date()
+                }
                 if fId != XENORA_NO_FRAME, let provider = CGDataProvider(data: Data(rgba) as CFData) {
                     self.image = CGImage(
                         width: Int(XENORA_FIXTURE_FRAME_WIDTH),
@@ -623,6 +652,10 @@ final class FrameLoopModel: ObservableObject {
                     )
                 }
                 if st != UInt32(XENORA_LOOP_RUNNING) && st != UInt32(XENORA_LOOP_PAUSED) {
+                    // A loop that ends inside its first window still gets a rate.
+                    if let first = windowFrames, comp > first, elapsed > 0 {
+                        self.hostFps = Double(comp - first) / elapsed
+                    }
                     break
                 }
             }
@@ -635,6 +668,8 @@ final class FrameLoopModel: ObservableObject {
 final class InspectionModel: ObservableObject {
     static let shared = InspectionModel()
     @Published var fileName: String?
+    /// The inspected file, which the Run action runs.
+    @Published var url: URL?
     @Published var report = ""
     @Published var status: Int32 = Int32(XENORA_OK)
     @Published var busy = false
@@ -678,6 +713,8 @@ final class InspectionModel: ObservableObject {
         let request = latestRequest
         selectionError = nil
         fileName = url.lastPathComponent
+        self.url = url
+        ProgramRunModel.shared.clear()
         report = ""
         status = Int32(XENORA_OK)
         busy = true
@@ -753,7 +790,7 @@ struct InspectorView: View {
                 }
                 .frame(minHeight: 160, maxHeight: 320)
             }
-            Text("Opened files are inspected only. Running them is not available.")
+            Text("Inspection is read-only; nothing in the file runs until you choose Run below.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -765,12 +802,25 @@ struct ContentView: View {
     @ObservedObject var model: FrameModel
     @ObservedObject var loop: FrameLoopModel
     @ObservedObject var inspection = InspectionModel.shared
+    @ObservedObject var programRun = ProgramRunModel.shared
+    @ObservedObject var hud = HudSettings.shared
     private var frame: GuestFrame? { model.frame }
+
+    private func ms(_ value: Double?) -> String {
+        value.map { String(format: "host run %.1f ms", $0) } ?? "host run -"
+    }
     private var running: Bool { model.running }
 
     var body: some View {
         Form {
             InspectorView(model: inspection)
+            ProgramRunView(url: inspection.url, model: programRun, hud: hud)
+            Section("Display") {
+                Toggle("Show Metal HUD", isOn: $hud.enabled)
+                Text("Overlays the Metal device, frame size, frame counters and host-measured timings on guest frames. Program runs get startup stage traces instead, because they have no draw path yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Guest display") {
                 if let image = frame?.image {
                     Image(decorative: image, scale: 1)
@@ -778,6 +828,7 @@ struct ContentView: View {
                         .interpolation(.none)
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 240)
+                        .metalHud(hud.enabled, ["\(frame!.width)x\(frame!.height) offscreen, 1 draw", ms(model.frameMs)])
                         .accessibilityLabel("Guest frame, \(frame!.width) by \(frame!.height) pixels")
                     Text("Guest code ran, its draw was rendered by native Metal, and all \(frame!.width * frame!.height) pixels matched the fixture shader's output.")
                         .font(.callout)
@@ -792,6 +843,7 @@ struct ContentView: View {
                         .interpolation(.none)
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 160)
+                        .metalHud(hud.enabled, ["2x2 textured", ms(model.texturedMs)])
                         .accessibilityLabel("Textured guest frame, 2 by 2 pixels")
                     Text("Textured fixture ran: persistent texture created, dynamically updated, rendered on Metal, and retired.")
                         .font(.callout)
@@ -803,6 +855,7 @@ struct ContentView: View {
                         .interpolation(.none)
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 160)
+                        .metalHud(hud.enabled, ["2x2 audio/VFS", ms(model.audioVfsMs)])
                         .accessibilityLabel("Audio/VFS guest frame, 2 by 2 pixels")
                     Text("Audio/VFS fixture ran: asset.bin loaded through sandboxed VFS, \(model.audioVfsFrame!.samples) audio samples queued (\(model.audioVfsFrame!.totalAudioBytes) bytes), texture rendered on Metal.")
                         .font(.callout)
@@ -824,6 +877,10 @@ struct ContentView: View {
                         .interpolation(.none)
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 240)
+                        .metalHud(hud.enabled, [
+                            "\(XENORA_FIXTURE_FRAME_WIDTH)x\(XENORA_FIXTURE_FRAME_HEIGHT) frame #\(loop.frameId), \(loop.completed) completed",
+                            loop.hostFps.map { String(format: "%.1f frames/s (host)", $0) } ?? "frames/s -",
+                        ])
                         .accessibilityLabel("Guest frame #\(loop.frameId)")
                     Text("Frame #\(loop.frameId) (\(loop.completed) completed) • \(loop.stateDescription)")
                         .font(.callout)
@@ -867,7 +924,7 @@ struct ContentView: View {
             LabeledContent("Interface version", value: "\(probe.abiVersion)")
             LabeledContent("Trusted fixture sections", value: "\(probe.sections)")
             LabeledContent("Trusted fixture entry RVA", value: String(format: "0x%X", probe.entryRVA))
-            Text("Only the bundled trusted fixtures (single-frame, frame-loop, and interactive guest) can run. Presentation uses read-back Metal frames. Arbitrary executables are not available yet.")
+            Text("The bundled fixtures run in the app. Other executables run through the bundled xenora runner and show their output; they do not draw yet. Presentation uses read-back Metal frames.")
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
@@ -885,6 +942,7 @@ struct ContentView: View {
 
 struct XenoraApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @ObservedObject var hud = HudSettings.shared
     let model = FrameModel()
     let loop = FrameLoopModel()
 
@@ -894,6 +952,10 @@ struct XenoraApp: App {
                 CommandGroup(after: .newItem) {
                     Button("Open Executable…") { InspectionModel.shared.requestImport() }
                         .keyboardShortcut("o")
+                }
+                CommandGroup(after: .toolbar) {
+                    Toggle("Show Metal HUD", isOn: $hud.enabled)
+                        .keyboardShortcut("h", modifiers: [.command, .shift])
                 }
             }
     }
@@ -1133,6 +1195,65 @@ if CommandLine.arguments.contains("--smoke-import-result") {
         return failures.isEmpty
     }
     print("smoke-import-result: \(ok ? "ok" : "failed")")
+    exit(ok ? 0 : 1)
+}
+
+// `--smoke-run-program <file> <exit status> <last stage or -> <stderr text> [-- <args>]` runs a
+// file through the bundled worker with tracing on, as the Run button does with the
+// HUD on, and checks what the app would show. It needs no GPU for a program run.
+if let flag = CommandLine.arguments.firstIndex(of: "--smoke-run-program") {
+    let values = CommandLine.arguments
+    guard flag + 4 < values.count, let expectedExit = Int32(values[flag + 2]) else {
+        print("smoke-run-program: usage: --smoke-run-program <file> <exit> <stage|-> <stderr text>")
+        exit(2)
+    }
+    let file = URL(fileURLWithPath: values[flag + 1])
+    let expectedStage = values[flag + 3] == "-" ? nil : values[flag + 3]
+    let programArguments = values.firstIndex(of: "--").map { Array(values[($0 + 1)...]) } ?? []
+    var failures: [String] = []
+    let traced = ProgramRunner.run(file, trace: true, programArguments: programArguments)
+    if traced.exitStatus != expectedExit { failures.append("exit \(String(describing: traced.exitStatus))") }
+    if traced.lastStage != expectedStage { failures.append("stage \(traced.lastStage ?? "none")") }
+    if !traced.standardError.contains(values[flag + 4]) { failures.append("stderr \(traced.standardError)") }
+    // Without the HUD the same run is untraced.
+    let plain = ProgramRunner.run(file, trace: false, programArguments: programArguments)
+    if plain.exitStatus != expectedExit || plain.lastStage != nil { failures.append("untraced run differs") }
+    // A missing runner is reported, not crashed on.
+    let missing = ProgramRunner.run(file, trace: false, worker: nil)
+    if missing.launchError == nil { failures.append("missing runner not reported") }
+    for failure in failures { print("smoke-run-program: FAILED \(failure)") }
+    print("smoke-run-program: \(traced.summary) \(failures.isEmpty ? "ok" : "failed")")
+    exit(failures.isEmpty ? 0 : 1)
+}
+
+// `--smoke-hud` checks that the Metal HUD setting is off by default, persists, and
+// turns tracing on for program runs. It needs no GPU and opens no window.
+if CommandLine.arguments.contains("--smoke-hud") {
+    let ok = MainActor.assumeIsolated { () -> Bool in
+        let suite = "local.xenora.smoke-hud.\(ProcessInfo.processInfo.processIdentifier)"
+        guard let defaults = UserDefaults(suiteName: suite) else { return false }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var failures: [String] = []
+        let first = HudSettings(defaults: defaults)
+        if first.enabled { failures.append("on by default") }
+        first.enabled = true
+        if !HudSettings(defaults: defaults).enabled { failures.append("on does not persist") }
+        first.enabled = false
+        if HudSettings(defaults: defaults).enabled { failures.append("off does not persist") }
+        let file = URL(fileURLWithPath: "/nonexistent/program.exe")
+        let on = ProgramRunner.arguments(for: file, trace: true, programArguments: ["a b", "c"])
+        if on != ["run", "--experimental", "--trace", "--pe", file.path, "--", "a b", "c"] {
+            failures.append("traced arguments \(on)")
+        }
+        let off = ProgramRunner.arguments(for: file, trace: false, programArguments: [])
+        if off != ["run", "--experimental", "--pe", file.path] { failures.append("plain arguments \(off)") }
+        if ProgramRunner.lastStage(in: "x\ntrace stage=mapped base=1\ntrace stage=relocated n=0\nrun failed") != "relocated" {
+            failures.append("stage parsing")
+        }
+        for failure in failures { print("smoke-hud: FAILED \(failure)") }
+        return failures.isEmpty
+    }
+    print("smoke-hud: \(ok ? "ok" : "failed")")
     exit(ok ? 0 : 1)
 }
 

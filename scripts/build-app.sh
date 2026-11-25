@@ -16,6 +16,9 @@ command -v swift >/dev/null || fail "swift not found; install the Xcode command 
 target=aarch64-apple-darwin
 # Match the app's LSMinimumSystemVersion so the static library links cleanly.
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p xenora-ffi --target "$target"
+# The `xenora run` worker the app's Run action launches, so a run from the app
+# gets the same worker process, wall deadline and step limit as the command line.
+MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p xenora --target "$target"
 swift build --package-path app -c release --arch arm64 \
     -Xlinker -L -Xlinker "$root/target/$target/release"
 
@@ -23,6 +26,7 @@ bundle="$root/build/Xenora.app"
 rm -rf "$bundle"
 mkdir -p "$bundle/Contents/MacOS"
 cp "$(swift build --package-path app -c release --arch arm64 --show-bin-path)/Xenora" "$bundle/Contents/MacOS/Xenora"
+cp "$root/target/$target/release/xenora" "$bundle/Contents/MacOS/xenora-cli"
 cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -48,23 +52,31 @@ cat > "$bundle/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-# Ad-hoc signature for local development only. No entitlements are requested:
-# this build executes no guest code, so it needs no JIT entitlement.
+# Ad-hoc signature for local development only. No entitlements are requested.
+# The bundled worker translates guest code into JIT memory; without the hardened
+# runtime an ad-hoc signed executable needs no JIT entitlement for that.
 codesign --force --sign - "$bundle"
 
 binary="$bundle/Contents/MacOS/Xenora"
-[ "$(lipo -archs "$binary")" = arm64 ] || fail "executable is not arm64-only: $(lipo -archs "$binary")"
-file "$binary"
-otool -L "$binary"
-# Only system libraries may be linked: anything else would be a host dependency
-# shipped or expected outside macOS, which this bundle does not carry.
-for dependency in $(otool -L "$binary" | tail -n +2 | awk '{print $1}'); do
-    case "$dependency" in
-        /System/Library/*|/usr/lib/*) ;;
-        *) fail "executable links a non-system library: $dependency" ;;
-    esac
+for executable in "$binary" "$bundle/Contents/MacOS/xenora-cli"; do
+    [ "$(lipo -archs "$executable")" = arm64 ] || fail "executable is not arm64-only: $(lipo -archs "$executable")"
+    file "$executable"
+    otool -L "$executable"
+    # Only system libraries may be linked: anything else would be a host dependency
+    # shipped or expected outside macOS, which this bundle does not carry.
+    for dependency in $(otool -L "$executable" | tail -n +2 | awk '{print $1}'); do
+        case "$dependency" in
+            /System/Library/*|/usr/lib/*) ;;
+            *) fail "$executable links a non-system library: $dependency" ;;
+        esac
+    done
 done
 "$binary" --smoke
 "$binary" --smoke-inspection-order
 "$binary" --smoke-import-result
+"$binary" --smoke-hud
+# A program run through the bundled worker, as the Run action does it: the
+# fixture binds no ordinary import, so it stops after relocation. No GPU needed.
+"$binary" --smoke-run-program "$root/fixtures/pe/delay-imports.exe" 125 relocated \
+    "unresolved import dependency: fixture-ordinary.dll!OrdinaryByName"
 echo "build-app: built $bundle"

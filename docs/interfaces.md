@@ -874,3 +874,27 @@ interpolated palette entries differently (171/84 against 170/85, measured
 on an M5 Pro), so the tests use endpoint colours only. Pipeline
 state objects do not exist yet, so the backend, not the guest, chooses the
 pixel shader. These entry points are not yet wired to guest imports.
+
+## Native app: running an executable and the Metal HUD
+
+`Xenora.app` runs a chosen executable only through the `xenora run` worker,
+which `scripts/build-app.sh` bundles as `Contents/MacOS/xenora-cli` (not
+`xenora`: the default macOS file system ignores case, so that name would be
+the app's own `Xenora`). The Run action passes `run --experimental --pe
+<file>`, then `--trace` when the Metal HUD is on, then `--` and the program
+arguments typed in the window. The worker's separate process, 15-second wall
+deadline and step limit apply exactly as on the command line, and the app
+adds no execution path of its own. The app shows the worker's exit status
+(the program's own; 124 is the wall deadline, 125 any other runner or guest
+failure, 2 a refused command line), the last `trace stage=` it printed, and
+up to 256 KiB of each output stream. `XENORA_CLI` names another worker, for
+`swift run`.
+
+The Metal HUD switch (View > Show Metal HUD, Shift-Command-H, or the Display
+section) is off by default and is stored in the app's defaults as
+`MetalHUDEnabled`. It overlays the Metal device, frame size, frame counters
+and host-measured timings on fixture frames. A program run has no draw path
+yet and `xenora run` takes `--metal-hud` for the embedded fixtures only, so
+for a program the switch turns on tracing instead. Apple's Metal Performance
+HUD cannot attach to these frames, which are read back from offscreen Metal
+targets and drawn as images.
