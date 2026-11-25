@@ -263,6 +263,18 @@ pextrb = { ref = "sdm PEXTRB/PEXTRD/PEXTRQ" }
 pextrd = { ref = "sdm PEXTRB/PEXTRD/PEXTRQ" }
 pinsrb = { ref = "sdm PINSRB/PINSRD/PINSRQ" }
 pinsrd = { ref = "sdm PINSRB/PINSRD/PINSRQ" }
+blendps = { ref = "sdm BLENDPS" }
+blendpd = { ref = "sdm BLENDPD" }
+blendvps = { ref = "sdm BLENDVPS" }
+blendvpd = { ref = "sdm BLENDVPD" }
+insertps = { ref = "sdm INSERTPS" }
+extractps = { ref = "sdm EXTRACTPS" }
+roundps = { faults = true, ref = "sdm ROUNDPS" }
+roundpd = { faults = true, ref = "sdm ROUNDPD" }
+roundss = { faults = true, ref = "sdm ROUNDSS" }
+roundsd = { faults = true, ref = "sdm ROUNDSD" }
+dpps = { faults = true, ref = "sdm DPPS" }
+dppd = { faults = true, ref = "sdm DPPD" }
 
 # Floating point. Every form can raise a SIMD floating-point exception.
 sqrtps = { faults = true, ref = "sdm SQRTPS" }
@@ -1437,6 +1449,124 @@ prefix = "66"
 opcode = 0x22
 enc = "xmm_gpr_imm"
 size = "y"
+imm = "ub"
+
+[[form]]
+op = "roundps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x08
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
+imm = "ub"
+
+[[form]]
+op = "roundpd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x09
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
+imm = "ub"
+
+[[form]]
+op = "roundss"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0A
+enc = "xmm_rm_imm"
+size = "x"
+src = "d"
+imm = "ub"
+
+[[form]]
+op = "roundsd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0B
+enc = "xmm_rm_imm"
+size = "x"
+src = "q"
+imm = "ub"
+
+[[form]]
+op = "blendps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0C
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
+imm = "ub"
+
+[[form]]
+op = "blendpd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0D
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
+imm = "ub"
+
+[[form]]
+op = "blendvps"
+map = "0f38"
+prefix = "66"
+opcode = 0x14
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "blendvpd"
+map = "0f38"
+prefix = "66"
+opcode = 0x15
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "extractps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x17
+enc = "gpr_xmm_imm"
+size = "x"
+src = "d"
+imm = "ub"
+
+[[form]]
+op = "insertps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x21
+enc = "xmm_rm_imm"
+size = "x"
+src = "d"
+imm = "ub"
+
+[[form]]
+op = "dpps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x40
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
+imm = "ub"
+
+[[form]]
+op = "dppd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x41
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
 imm = "ub"
 
 # Groups whose digits select an operation: [opcode, size, immediate, encoding].

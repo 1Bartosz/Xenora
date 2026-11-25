@@ -3066,12 +3066,10 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("cmpxchg8b_not_equal", 0),
     ("crc32c_byte_and_qword_forms_agree", 0),
     ("crc32c_check_string", 0),
-    ("dpps_mask", 0),
     ("enter_leave_round_trip", 0),
     ("fifteen_byte_instruction_executes", 0),
     ("fs_addr32_truncates_before_adding_base", 0),
     ("haddps_hsubpd_addsubps", 0),
-    ("insertps_zero_mask", 0),
     ("jecxz_tests_low_32_bits", 1),
     ("lea64_addr32_truncates_effective_address", 0),
     ("lodsd_zero_extends", 1),
@@ -3079,7 +3077,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("lodsw_preserves_upper48", 1),
     ("maskmovdqu_selects_bytes", 0),
     ("movddup_movsldup_movshdup", 0),
-    ("pblendw_blendps", 1),
     ("pcmpeqq_pcmpgtq", 1),
     ("push16_moves_rsp_by_two", 0),
     ("pushfq_popfq_status_round_trip", 0),
@@ -3096,9 +3093,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("repne_scasb_finds_byte", 1),
     ("repne_scasb_finds_byte_df_clear", 0),
     ("repne_scasd_exhausts_count", 1),
-    ("roundps_uses_mxcsr_rc", 0),
-    ("roundsd_suppress_precision", 0),
-    ("roundss_imm_modes", 0),
 ];
 
 // ---------------------------------------------------------------------------

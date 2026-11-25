@@ -480,6 +480,14 @@ f2 0f 70 d2 39 | pshuflw xmm2, xmm2, 57
 66 44 0f 38 10 54 be 10 | pblendvb xmm10, xmmword ptr [rsi + 4*rdi + 16], xmm0
 66 0f 38 10 d0 | pblendvb xmm2, xmm0, xmm0
 66 41 0f 38 10 c1 | pblendvb xmm0, xmm9, xmm0
+66 41 0f 38 14 d9 | blendvps xmm3, xmm9, xmm0
+66 44 0f 38 14 54 be 10 | blendvps xmm10, xmmword ptr [rsi + 4*rdi + 16], xmm0
+66 0f 38 14 d0 | blendvps xmm2, xmm0, xmm0
+66 41 0f 38 14 c1 | blendvps xmm0, xmm9, xmm0
+66 41 0f 38 15 d9 | blendvpd xmm3, xmm9, xmm0
+66 44 0f 38 15 54 be 10 | blendvpd xmm10, xmmword ptr [rsi + 4*rdi + 16], xmm0
+66 0f 38 15 d0 | blendvpd xmm2, xmm0, xmm0
+66 41 0f 38 15 c1 | blendvpd xmm0, xmm9, xmm0
 66 41 0f 38 20 d9 | pmovsxbw xmm3, xmm9
 66 44 0f 38 20 54 be 10 | pmovsxbw xmm10, qword ptr [rsi + 4*rdi + 16]
 66 0f 38 20 d2 | pmovsxbw xmm2, xmm2
@@ -541,6 +549,95 @@ f2 0f 70 d2 39 | pshuflw xmm2, xmm2, 57
 66 41 0f 3a 42 d9 ff | mpsadbw xmm3, xmm9, 255
 66 44 0f 3a 42 54 be 10 5a | mpsadbw xmm10, xmmword ptr [rsi + 4*rdi + 16], 90
 66 0f 3a 42 d2 a5 | mpsadbw xmm2, xmm2, 165
+66 41 0f 3a 0c d9 00 | blendps xmm3, xmm9, 0
+66 41 0f 3a 0c d9 01 | blendps xmm3, xmm9, 1
+66 41 0f 3a 0c d9 02 | blendps xmm3, xmm9, 2
+66 41 0f 3a 0c d9 03 | blendps xmm3, xmm9, 3
+66 41 0f 3a 0c d9 04 | blendps xmm3, xmm9, 4
+66 41 0f 3a 0c d9 05 | blendps xmm3, xmm9, 5
+66 41 0f 3a 0c d9 06 | blendps xmm3, xmm9, 6
+66 41 0f 3a 0c d9 07 | blendps xmm3, xmm9, 7
+66 41 0f 3a 0c d9 08 | blendps xmm3, xmm9, 8
+66 41 0f 3a 0c d9 09 | blendps xmm3, xmm9, 9
+66 41 0f 3a 0c d9 0a | blendps xmm3, xmm9, 10
+66 41 0f 3a 0c d9 0b | blendps xmm3, xmm9, 11
+66 41 0f 3a 0c d9 0c | blendps xmm3, xmm9, 12
+66 41 0f 3a 0c d9 0d | blendps xmm3, xmm9, 13
+66 41 0f 3a 0c d9 0e | blendps xmm3, xmm9, 14
+66 41 0f 3a 0c d9 0f | blendps xmm3, xmm9, 15
+66 41 0f 3a 0c d9 ff | blendps xmm3, xmm9, 255
+66 44 0f 3a 0c 54 be 10 0a | blendps xmm10, xmmword ptr [rsi + 4*rdi + 16], 10
+66 0f 3a 0c d2 01 | blendps xmm2, xmm2, 1
+66 41 0f 3a 0d d9 00 | blendpd xmm3, xmm9, 0
+66 41 0f 3a 0d d9 01 | blendpd xmm3, xmm9, 1
+66 41 0f 3a 0d d9 02 | blendpd xmm3, xmm9, 2
+66 41 0f 3a 0d d9 03 | blendpd xmm3, xmm9, 3
+66 41 0f 3a 0d d9 ff | blendpd xmm3, xmm9, 255
+66 44 0f 3a 0d 54 be 10 02 | blendpd xmm10, xmmword ptr [rsi + 4*rdi + 16], 2
+66 0f 3a 0d d2 01 | blendpd xmm2, xmm2, 1
+66 41 0f 3a 21 d9 00 | insertps xmm3, xmm9, 0
+66 44 0f 3a 21 54 be 10 00 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 0
+66 0f 3a 21 d2 00 | insertps xmm2, xmm2, 0
+66 41 0f 3a 21 d9 10 | insertps xmm3, xmm9, 16
+66 44 0f 3a 21 54 be 10 10 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 16
+66 0f 3a 21 d2 10 | insertps xmm2, xmm2, 16
+66 41 0f 3a 21 d9 20 | insertps xmm3, xmm9, 32
+66 44 0f 3a 21 54 be 10 20 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 32
+66 0f 3a 21 d2 20 | insertps xmm2, xmm2, 32
+66 41 0f 3a 21 d9 30 | insertps xmm3, xmm9, 48
+66 44 0f 3a 21 54 be 10 30 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 48
+66 0f 3a 21 d2 30 | insertps xmm2, xmm2, 48
+66 41 0f 3a 21 d9 40 | insertps xmm3, xmm9, 64
+66 44 0f 3a 21 54 be 10 40 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 64
+66 0f 3a 21 d2 40 | insertps xmm2, xmm2, 64
+66 41 0f 3a 21 d9 51 | insertps xmm3, xmm9, 81
+66 44 0f 3a 21 54 be 10 51 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 81
+66 0f 3a 21 d2 51 | insertps xmm2, xmm2, 81
+66 41 0f 3a 21 d9 62 | insertps xmm3, xmm9, 98
+66 44 0f 3a 21 54 be 10 62 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 98
+66 0f 3a 21 d2 62 | insertps xmm2, xmm2, 98
+66 41 0f 3a 21 d9 98 | insertps xmm3, xmm9, 152
+66 44 0f 3a 21 54 be 10 98 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 152
+66 0f 3a 21 d2 98 | insertps xmm2, xmm2, 152
+66 41 0f 3a 21 d9 a0 | insertps xmm3, xmm9, 160
+66 44 0f 3a 21 54 be 10 a0 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 160
+66 0f 3a 21 d2 a0 | insertps xmm2, xmm2, 160
+66 41 0f 3a 21 d9 c7 | insertps xmm3, xmm9, 199
+66 44 0f 3a 21 54 be 10 c7 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 199
+66 0f 3a 21 d2 c7 | insertps xmm2, xmm2, 199
+66 41 0f 3a 21 d9 e4 | insertps xmm3, xmm9, 228
+66 44 0f 3a 21 54 be 10 e4 | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 228
+66 0f 3a 21 d2 e4 | insertps xmm2, xmm2, 228
+66 41 0f 3a 21 d9 fe | insertps xmm3, xmm9, 254
+66 44 0f 3a 21 54 be 10 fe | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 254
+66 0f 3a 21 d2 fe | insertps xmm2, xmm2, 254
+66 41 0f 3a 21 d9 ff | insertps xmm3, xmm9, 255
+66 44 0f 3a 21 54 be 10 ff | insertps xmm10, dword ptr [rsi + 4*rdi + 16], 255
+66 0f 3a 21 d2 ff | insertps xmm2, xmm2, 255
+66 44 0f 3a 17 cb 00 | extractps ebx, xmm9, 0
+66 45 0f 3a 17 c9 00 | extractps r9d, xmm9, 0
+66 44 0f 3a 17 cd 00 | extractps ebp, xmm9, 0
+66 0f 3a 17 5c be 10 00 | extractps dword ptr [rsi + 4*rdi + 16], xmm3, 0
+66 44 0f 3a 17 cb 01 | extractps ebx, xmm9, 1
+66 45 0f 3a 17 c9 01 | extractps r9d, xmm9, 1
+66 44 0f 3a 17 cd 01 | extractps ebp, xmm9, 1
+66 0f 3a 17 5c be 10 01 | extractps dword ptr [rsi + 4*rdi + 16], xmm3, 1
+66 44 0f 3a 17 cb 02 | extractps ebx, xmm9, 2
+66 45 0f 3a 17 c9 02 | extractps r9d, xmm9, 2
+66 44 0f 3a 17 cd 02 | extractps ebp, xmm9, 2
+66 0f 3a 17 5c be 10 02 | extractps dword ptr [rsi + 4*rdi + 16], xmm3, 2
+66 44 0f 3a 17 cb 03 | extractps ebx, xmm9, 3
+66 45 0f 3a 17 c9 03 | extractps r9d, xmm9, 3
+66 44 0f 3a 17 cd 03 | extractps ebp, xmm9, 3
+66 0f 3a 17 5c be 10 03 | extractps dword ptr [rsi + 4*rdi + 16], xmm3, 3
+66 44 0f 3a 17 cb 04 | extractps ebx, xmm9, 4
+66 45 0f 3a 17 c9 04 | extractps r9d, xmm9, 4
+66 44 0f 3a 17 cd 04 | extractps ebp, xmm9, 4
+66 0f 3a 17 5c be 10 04 | extractps dword ptr [rsi + 4*rdi + 16], xmm3, 4
+66 44 0f 3a 17 cb ff | extractps ebx, xmm9, 255
+66 45 0f 3a 17 c9 ff | extractps r9d, xmm9, 255
+66 44 0f 3a 17 cd ff | extractps ebp, xmm9, 255
+66 0f 3a 17 5c be 10 ff | extractps dword ptr [rsi + 4*rdi + 16], xmm3, 255
 66 44 0f 3a 20 cb 00 | pinsrb xmm9, ebx, 0
 66 44 0f 3a 14 cb 00 | pextrb ebx, xmm9, 0
 66 45 0f 3a 20 c9 00 | pinsrb xmm9, r9d, 0
