@@ -452,6 +452,46 @@ mod tests {
     }
 
     #[test]
+    fn entry_point_uses_the_half_open_mapped_section_range() {
+        let mut bytes = FIXTURE.to_vec();
+        let optional_header = read_u32(&bytes, 0x3c) as usize + 24;
+        let entry_field = optional_header + 16..optional_header + 20;
+        let text = section_table(&bytes);
+        let contents_end = read_u32(&bytes, text + 12) + read_u32(&bytes, text + 16);
+
+        // The mapped span includes the raw bytes beyond the declared virtual size.
+        bytes[text + 8..text + 12].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[entry_field.clone()].copy_from_slice(&(contents_end - 1).to_le_bytes());
+        assert!(ParsedPe::parse(&bytes).is_ok());
+
+        // Start a non-executable section immediately after the executable one.
+        let rdata = text + SECTION_HEADER_SIZE;
+        bytes[rdata + 12..rdata + 16].copy_from_slice(&contents_end.to_le_bytes());
+        bytes[entry_field.clone()].copy_from_slice(&contents_end.to_le_bytes());
+        assert_eq!(
+            ParsedPe::parse(&bytes).unwrap_err(),
+            PeError::InvalidEntryPoint
+        );
+
+        // A zero-length executable section at the entry cannot admit it or
+        // make the nonempty ranges overlap, even out of table order.
+        let empty_rva = contents_end + 1;
+        let empty = rdata + 2 * SECTION_HEADER_SIZE;
+        bytes[empty + 8..empty + 12].copy_from_slice(&0_u32.to_le_bytes());
+        bytes[empty + 12..empty + 16].copy_from_slice(&empty_rva.to_le_bytes());
+        bytes[empty + 16..empty + 20].copy_from_slice(&0_u32.to_le_bytes());
+        bytes[empty + 36..empty + 40].copy_from_slice(&IMAGE_SCN_MEM_EXECUTE.to_le_bytes());
+        bytes[entry_field.clone()].copy_from_slice(&empty_rva.to_le_bytes());
+        assert_eq!(
+            ParsedPe::parse(&bytes).unwrap_err(),
+            PeError::InvalidEntryPoint
+        );
+
+        bytes[entry_field].copy_from_slice(&(contents_end - 1).to_le_bytes());
+        assert!(ParsedPe::parse(&bytes).is_ok());
+    }
+
+    #[test]
     fn overlapping_sections_are_rejected_regardless_of_table_order() {
         let mut bytes = FIXTURE.to_vec();
         let first = section_table(&bytes);

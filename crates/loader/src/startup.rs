@@ -90,10 +90,7 @@ pub fn run_synthetic_startup_with_observer(
         observe,
         #[cfg(test)]
         |_| {},
-        |engine, memory, entry_cpu, budget| {
-            let mut entry_cpu = entry_cpu.clone();
-            engine.run(&mut entry_cpu, memory, budget)
-        },
+        DbtEngine::run,
     )
 }
 
@@ -123,7 +120,7 @@ pub fn run_synthetic_startup_scheduled(
         |_| {},
         #[cfg(test)]
         |_| {},
-        move |engine, memory, entry_cpu, budget| match crate::scheduler::Scheduler::new(
+        move |engine, entry_cpu, memory, budget| match crate::scheduler::Scheduler::new(
             std::sync::Arc::clone(&state),
             quantum,
         )
@@ -180,8 +177,8 @@ fn run_startup_with(
     #[cfg(test)] mut stage_finished: impl FnMut(StartupStage),
     run_entry: impl FnOnce(
         &mut DbtEngine,
+        &mut CpuState,
         &mut crate::memory::GuestMemory,
-        &CpuState,
         usize,
     ) -> ExecutionResult,
 ) -> Result<StartupResult, Box<dyn std::error::Error>> {
@@ -338,7 +335,7 @@ fn run_startup_with(
     memory.write_u64_bypass(layout.stack_top - 40, crate::imports::ENTRY_RETURN)?;
     let mut entry_cpu = CpuState::new(image.entry_point, layout.stack_top - 40);
     entry_cpu.gs_base = teb_base;
-    let execution = run_entry(&mut engine, memory, &entry_cpu, entry_budget);
+    let execution = run_entry(&mut engine, &mut entry_cpu, memory, entry_budget);
     #[cfg(test)]
     stage_finished(StartupStage::RunEntry);
     Ok(StartupResult {
@@ -572,7 +569,7 @@ mod tests {
                         totals[stage as usize] += (now - previous).as_nanos() as f64;
                         previous = now;
                     },
-                    |engine, memory, entry, budget| engine.run(&mut entry.clone(), memory, budget),
+                    DbtEngine::run,
                 )
                 .unwrap_or_else(|error| panic!("{fixture} synthetic startup: {error}"));
                 check(&result);
