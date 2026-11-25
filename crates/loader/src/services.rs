@@ -1157,6 +1157,60 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _ftelli64(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<u64> {
+        let outcome = context.state.crt_streams().tell(stream);
+        or_errno(context, outcome).map(|position| position as u64)
+    }
+
+    pub fn _fseeki64(
+        context: &mut ServiceContext<'_>,
+        stream: u64,
+        offset: u64,
+        origin: i32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.seek(&drive, stream, offset as i64, origin as u32)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fgetpos(context: &mut ServiceContext<'_>, stream: u64, position: u64) -> Outcome<i32> {
+        let outcome = context
+            .state
+            .crt_streams()
+            .get_position(context.memory, stream, position);
+        or_errno(context, outcome)
+    }
+
+    pub fn fsetpos(context: &mut ServiceContext<'_>, stream: u64, position: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.set_position(context.memory, &drive, stream, position)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn remove(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.remove_file(context.memory, &mut drive, name)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn rename(context: &mut ServiceContext<'_>, from: u64, to: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.rename_file(context.memory, &mut drive, from, to)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn perror(context: &mut ServiceContext<'_>, message: u64) -> Outcome<()> {
         let address = context
             .memory

@@ -54,6 +54,11 @@ fn hosted(name: &str) -> PathBuf {
     build("build-gate-a2.sh", "run-program-a2", &OUT).join(format!("{name}.exe"))
 }
 
+fn crt_files(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-files.sh", "run-program-crt-files", &OUT).join(format!("{name}.exe"))
+}
+
 fn crt_math(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
     build("build-crt-math.sh", "run-program-crt-math", &OUT).join(format!("{name}.exe"))
@@ -336,6 +341,25 @@ fn a_program_using_math_h_gets_its_results_from_the_runtime() {
     assert_eq!(
         run.stdout,
         "check 67 failed: atan2\r\ncrt_math: 109 of 110 checks passed\r\n"
+    );
+}
+
+#[test]
+fn a_program_moving_through_files_and_renaming_them_passes_its_checks() {
+    for name in ["crt-files-O0", "crt-files-O2"] {
+        let run = run_program(&crt_files(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(
+            run.stdout, "crt_files: 28 of 28 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    let run = run_program(&crt_files("crt-files-break"), &[], &[]);
+    assert_eq!(run.code, Some(17), "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "check 17 failed: text position counts the CR\r\ncrt_files: 27 of 28 checks passed\r\n"
     );
 }
 

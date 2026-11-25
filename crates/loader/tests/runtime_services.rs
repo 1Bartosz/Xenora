@@ -1221,6 +1221,151 @@ fn vfprintf_s_and_putchar_write_to_the_streams() {
 /// the invalid parameter handler on Windows; here it returns the same -1 and
 /// writes nothing. What the runtime does not model stops the guest. In every
 /// case nothing reaches either stream.
+/// `_ftelli64`, `_fseeki64`, `fgetpos` and `fsetpos` on a file stream, and
+/// `remove` and `rename` on the drive (#493). Expected values are derived
+/// from the Microsoft pages for each function and the bytes written here.
+#[test]
+fn file_positions_round_trip_and_files_are_removed_and_renamed() {
+    const EACCES: u32 = 13;
+    const POS: u64 = TEXT + 0x3000;
+    const OTHER: u64 = TEXT + 0x1400;
+    let (mut guest, [stdin, _, _]) = stdio_guest();
+    store(&mut guest, "pos.bin", b"0123456789");
+    let file = opened(&mut guest, "pos.bin", "rb");
+    let minus_one = u64::MAX;
+    // A new stream is at the start; a line read moves it.
+    assert_eq!(guest.call("_ftelli64", &[file]), 0);
+    assert_eq!(line(&mut guest, file, 5).unwrap(), b"0123");
+    assert_eq!(guest.call("_ftelli64", &[file]), 4);
+    // fgetpos stores the position; fsetpos goes back to it after a seek.
+    assert_eq!(guest.call("fgetpos", &[file, POS]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.memory.read_u64(POS).unwrap(), 4);
+    assert_eq!(guest.call("_fseeki64", &[file, 0, 2]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_ftelli64", &[file]), 10);
+    assert_eq!(line(&mut guest, file, 8), None, "at the end");
+    assert_eq!(guest.call("fsetpos", &[file, POS]) & 0xFFFF_FFFF, 0);
+    assert_eq!(line(&mut guest, file, 3).unwrap(), b"45");
+    // SEEK_CUR with a negative offset, and SEEK_END backwards.
+    assert_eq!(
+        guest.call("_fseeki64", &[file, (-3i64) as u64, 1]) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(guest.call("_ftelli64", &[file]), 3);
+    assert_eq!(
+        guest.call("_fseeki64", &[file, (-1i64) as u64, 2]) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(line(&mut guest, file, 8).unwrap(), b"9");
+    // Before the start, an unknown origin and null arguments: -1, EINVAL,
+    // and the position is unchanged.
+    for args in [[file, (-11i64) as u64, 2], [file, 0, 3], [0, 0, 0]] {
+        guest.set_errno(0);
+        assert_eq!(
+            guest.call("_fseeki64", &args) & 0xFFFF_FFFF,
+            minus_one & 0xFFFF_FFFF,
+            "{args:x?}"
+        );
+        assert_eq!(guest.errno(), STDIO_EINVAL, "{args:x?}");
+    }
+    assert_eq!(guest.call("_ftelli64", &[file]), 10);
+    guest.set_errno(0);
+    assert_eq!(guest.call("_ftelli64", &[0]), minus_one);
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    for symbol in ["fgetpos", "fsetpos"] {
+        for args in [[0, POS], [file, 0]] {
+            guest.set_errno(0);
+            assert_eq!(
+                guest.call(symbol, &args) & 0xFFFF_FFFF,
+                minus_one & 0xFFFF_FFFF
+            );
+            assert_eq!(guest.errno(), STDIO_EINVAL, "{symbol} {args:x?}");
+        }
+    }
+    // A negative stored position is refused like a seek before the start.
+    guest.memory.write_u64(POS, (-1i64) as u64).unwrap();
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("fsetpos", &[file, POS]) & 0xFFFF_FFFF,
+        minus_one & 0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    // A seek past the end is allowed, and a write there fills the gap.
+    let writer = opened(&mut guest, "gap.bin", "w+b");
+    assert_eq!(guest.call("_fseeki64", &[writer, 3, 0]) & 0xFFFF_FFFF, 0);
+    write(&mut guest, writer, b"Z");
+    assert_eq!(guest.call("_fseeki64", &[writer, 0, 0]) & 0xFFFF_FFFF, 0);
+    // The line holds NUL bytes, so it is read from memory, not as a string.
+    assert_eq!(guest.call("fgets", &[LINE, 8, writer]), LINE);
+    let mut gap = [0xFFu8; 5];
+    guest.memory.read_bytes(LINE, &mut gap).unwrap();
+    assert_eq!(gap, *b"\0\0\0Z\0");
+    close(&mut guest, writer);
+    // Positions of a standard stream, an unwritable fpos_t and a pointer that
+    // is no stream stop the guest.
+    assert_eq!(guest.run("_ftelli64", &[stdin]).1, LIMIT);
+    assert_eq!(guest.run("_fseeki64", &[stdin, 0, 0]).1, LIMIT);
+    assert_eq!(guest.run("_ftelli64", &[TEXT]).1, LIMIT);
+    let exit = guest.run("fgetpos", &[file, 0x9_0000_0000]).1;
+    assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
+
+    // rename: the old name holds nothing afterwards, the new one the bytes.
+    guest.memory.write_bytes(NAME, b"pos.bin\0").unwrap();
+    guest.memory.write_bytes(OTHER, b"moved.bin\0").unwrap();
+    assert_eq!(guest.call("rename", &[NAME, OTHER]) & 0xFFFF_FFFF, 0);
+    // The stream that had the old name open now fails.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_fseeki64", &[file, 0, 2]) & 0xFFFF_FFFF,
+        minus_one & 0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    close(&mut guest, file);
+    let moved = opened(&mut guest, "moved.bin", "rb");
+    assert_eq!(line(&mut guest, moved, 16).unwrap(), b"0123456789");
+    close(&mut guest, moved);
+    // The old name is gone, a target that exists is refused, and so is a
+    // target in a directory that does not exist.
+    let failures: [(&[u8], &[u8], u32); 4] = [
+        (b"pos.bin\0", b"x.bin\0", ENOENT),
+        (b"moved.bin\0", b"gap.bin\0", EACCES),
+        (b"moved.bin\0", b"nodir\\x.bin\0", EACCES),
+        (b"\0", b"x.bin\0", STDIO_EINVAL),
+    ];
+    for (from, to, errno) in failures {
+        guest.memory.write_bytes(NAME, from).unwrap();
+        guest.memory.write_bytes(OTHER, to).unwrap();
+        guest.set_errno(0);
+        assert_eq!(
+            guest.call("rename", &[NAME, OTHER]) & 0xFFFF_FFFF,
+            minus_one & 0xFFFF_FFFF
+        );
+        assert_eq!(guest.errno(), errno, "{from:?} -> {to:?}");
+    }
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("rename", &[0, OTHER]) & 0xFFFF_FFFF,
+        minus_one & 0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+
+    // remove: once, then ENOENT; a null name is EINVAL.
+    guest.memory.write_bytes(NAME, b"moved.bin\0").unwrap();
+    assert_eq!(guest.call("remove", &[NAME]) & 0xFFFF_FFFF, 0);
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("remove", &[NAME]) & 0xFFFF_FFFF,
+        minus_one & 0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), ENOENT);
+    assert_eq!(open(&mut guest, "moved.bin", "rb"), 0, "the file is gone");
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("remove", &[0]) & 0xFFFF_FFFF,
+        minus_one & 0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+}
+
 #[test]
 fn stdin_lines_follow_iso_c_at_the_edges() {
     // fgets on the standard input: lines end at a line feed that is kept,

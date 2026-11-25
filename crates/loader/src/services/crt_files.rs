@@ -13,9 +13,10 @@
 //! translated into single line feeds on input", and "CTRL+Z is interpreted as
 //! an end-of-file character on input".
 //!
-//! Nothing is buffered: a write reaches the drive at once. There is no
-//! seeking, so the only positions are the start, the end, and wherever the
-//! last read or write left off.
+//! Nothing is buffered: a write reaches the drive at once. A position is the
+//! byte offset in the file on the drive, in text mode too, so a position
+//! that `_ftelli64` or `fgetpos` returned can be given back to `_fseeki64` or
+//! `fsetpos` ("fseek, _fseeki64", "ftell, _ftelli64", "fgetpos", "fsetpos").
 
 use super::ObjectState;
 use super::files::DriveEntry;
@@ -226,6 +227,42 @@ impl FileStreams {
 
     /// `fgets`: up to `limit` characters, ending after a newline. `None` is
     /// end of file with nothing read.
+    /// The position of a stream: where its next read takes place, or its
+    /// next write unless it appends.
+    pub(super) fn tell(&self, file: u64) -> Result<u64, u32> {
+        self.open
+            .get(&file)
+            .map(|stream| stream.position)
+            .ok_or(EBADF)
+    }
+
+    /// Move a stream to `offset` from the start (`origin` 0), the current
+    /// position (1) or the end of the file (2). A position before the start
+    /// is `EINVAL`; one past the end is allowed, and a write there fills the
+    /// gap with zeros. A stream whose file was deleted fails with `EBADF`.
+    pub(super) fn seek(
+        &mut self,
+        drive: &ObjectState,
+        file: u64,
+        offset: i64,
+        origin: u32,
+    ) -> Result<(), u32> {
+        let stream = self.open.get_mut(&file).ok_or(EBADF)?;
+        let base = match origin {
+            0 => 0,
+            1 => stream.position,
+            2 => drive.drive_file(&stream.path).ok_or(EBADF)?.len() as u64,
+            _ => return Err(EINVAL),
+        };
+        let target = i128::from(base) + i128::from(offset);
+        if !(0..=i128::from(i64::MAX)).contains(&target) {
+            return Err(EINVAL);
+        }
+        drive.drive_file(&stream.path).ok_or(EBADF)?;
+        stream.position = target as u64;
+        Ok(())
+    }
+
     pub(super) fn read_line(
         &mut self,
         drive: &ObjectState,
