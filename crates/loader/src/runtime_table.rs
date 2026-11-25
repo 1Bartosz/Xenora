@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 47] = [
+pub static SERVICES: [ServiceMetadata; 54] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -250,6 +250,83 @@ pub static SERVICES: [ServiceMetadata; 47] = [
         failure: "never",
         reference: "stdio.h perror",
         tests: &["perror_writes_the_message_and_the_error_text_to_stderr"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "fputc",
+        parameters: &[Parameter { name: "character", kind: "i32" }, Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream",
+        reference: "stdio.h fputc",
+        tests: &["fputc_writes_one_character_to_a_stream"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "strerror",
+        parameters: &[Parameter { name: "code", kind: "i32" }],
+        result: "ptr",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-runtime-l1-1-0.dll"],
+        failure: "never; the message is valid until the next call",
+        reference: "string.h strerror",
+        tests: &["strerror_names_the_error_numbers_the_runtime_uses"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "localeconv",
+        parameters: &[],
+        result: "ptr",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-locale-l1-1-0.dll"],
+        failure: "stops the guest when the block cannot be allocated",
+        reference: "corecrt_locale.h localeconv and struct lconv",
+        tests: &["localeconv_returns_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "mbrtowc",
+        parameters: &[Parameter { name: "output", kind: "ptr" }, Parameter { name: "count", kind: "u64" }, Parameter { name: "character", kind: "i32" }, Parameter { name: "state", kind: "ptr" }],
+        result: "u64",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-convert-l1-1-0.dll"],
+        failure: "(size_t)-1 for a byte that is not a character of the C locale; errno is not set",
+        reference: "Microsoft Learn, mbrtowc; the registry declares the multibyte character by value",
+        tests: &["mbrtowc_and_wcrtomb_convert_the_characters_of_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "wcrtomb",
+        parameters: &[Parameter { name: "output", kind: "ptr" }, Parameter { name: "character", kind: "u32" }, Parameter { name: "state", kind: "ptr" }],
+        result: "u64",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-convert-l1-1-0.dll"],
+        failure: "(size_t)-1 for a wide character the C locale cannot represent; errno is not set",
+        reference: "Microsoft Learn, wcrtomb",
+        tests: &["mbrtowc_and_wcrtomb_convert_the_characters_of_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_lock_file",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }, Parameter { name: "mode", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-filesystem-l1-1-0.dll"],
+        failure: "-1 with errno EBADF for a null stream; stops the guest for a pointer that is no stream",
+        reference: "corecrt_file.h _lock_file",
+        tests: &["locking_a_stream_succeeds_and_a_null_stream_fails"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_unlock_file",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-filesystem-l1-1-0.dll"],
+        failure: "-1 with errno EBADF for a null stream; stops the guest for a pointer that is no stream",
+        reference: "corecrt_file.h _unlock_file",
+        tests: &["locking_a_stream_succeeds_and_a_null_stream_fails"],
     },
     ServiceMetadata {
         library: "kernel32.dll",
@@ -720,6 +797,68 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let () = handlers::perror(&mut context, a0)?;
         Ok(0)
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "fputc", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::fputc(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "strerror", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::strerror(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "localeconv", ServiceStatus::Partial, move |args, cpu, memory| {
+        let _ = args;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::localeconv(&mut context)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "mbrtowc", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let a2 = call.i32(2)?;
+        let a3 = call.u64(3)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::mbrtowc(&mut context, a0, a1, a2, a3)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "wcrtomb", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u32(1)?;
+        let a2 = call.u64(2)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::wcrtomb(&mut context, a0, a1, a2)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_lock_file", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.i32(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_lock_file(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_unlock_file", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_unlock_file(&mut context, a0)?;
+        Ok(result.place(cpu))
     });
     let s = state.clone();
     registry.register_with_status("kernel32.dll", "GetLastError", ServiceStatus::Partial, move |args, cpu, memory| {

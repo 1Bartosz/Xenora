@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 47 |
-| Generated adapters | 47 |
-| Unique handler implementations | 47 |
+| Services with a declared ABI | 54 |
+| Generated adapters | 54 |
+| Unique handler implementations | 54 |
 | Implemented | 7 |
-| Partial | 37 |
+| Partial | 44 |
 | Stub | 3 |
-| Conformance-tested through guest dispatch | 47 |
-| API-set aliases (not services) | 47 |
+| Conformance-tested through guest dispatch | 54 |
+| API-set aliases (not services) | 54 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -40,6 +40,13 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!fclose` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream; stops the guest for a standard stream or a pointer that is no stream |
 | `ucrtbase.dll!fgets` | `(buffer: ptr, count: i32, stream: ptr) -> ptr` | partial | null at end of file; null with errno EINVAL or EBADF; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!perror` | `(message: ptr) -> void` | partial | never |
+| `ucrtbase.dll!fputc` | `(character: i32, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
+| `ucrtbase.dll!strerror` | `(code: i32) -> ptr` | partial | never; the message is valid until the next call |
+| `ucrtbase.dll!localeconv` | `() -> ptr` | partial | stops the guest when the block cannot be allocated |
+| `ucrtbase.dll!mbrtowc` | `(output: ptr, count: u64, character: i32, state: ptr) -> u64` | partial | (size_t)-1 for a byte that is not a character of the C locale; errno is not set |
+| `ucrtbase.dll!wcrtomb` | `(output: ptr, character: u32, state: ptr) -> u64` | partial | (size_t)-1 for a wide character the C locale cannot represent; errno is not set |
+| `ucrtbase.dll!_lock_file` | `(stream: ptr, mode: i32) -> i32` | partial | -1 with errno EBADF for a null stream; stops the guest for a pointer that is no stream |
+| `ucrtbase.dll!_unlock_file` | `(stream: ptr) -> i32` | partial | -1 with errno EBADF for a null stream; stops the guest for a pointer that is no stream |
 | `kernel32.dll!GetLastError` | `() -> u32` | partial | never |
 | `kernel32.dll!SetLastError` | `(code: u32) -> void` | partial | never |
 | `ucrtbase.dll!__p___argc` | `() -> ptr` | partial | stops the guest when the variable cannot be allocated |

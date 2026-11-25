@@ -42,6 +42,18 @@ limitations = "One triangle per draw, one instance, a float4 position plus an op
 test = "cargo test --locked -p xenora-loader --features gpu-tests --test guest_graphics_path --test guest_textured_path"
 
 [[feature]]
+id = "guest-cpp-path"
+implementation = "implemented"
+correctness = "guest-cpp-program-passed"
+hardware_verification = "not-applicable"
+claims = ["CLAIM-GUEST-CPP-PATH"]
+architecture = "arm64 macOS"
+semantics = "A hosted C++ guest runs its constructors, standard library containers, threads, thread-local storage and file input and output through the loader and the ARM64 dynamic binary translation"
+metal_mapping = "Not applicable; this milestone exercises the guest CPU and runtime, not the GPU"
+limitations = "C++ exceptions and stack unwinding are not implemented and are not exercised; the program is built with -fno-exceptions and -fno-rtti. One worker thread, one guest at a time under the deterministic cooperative scheduler, and a bounded command-line and file environment."
+test = "cargo test --locked -p xenora-loader --test guest_cpp_path"
+
+[[feature]]
 id = "xbox-execution"
 implementation = "unsupported"
 correctness = "untested"

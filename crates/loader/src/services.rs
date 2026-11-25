@@ -16,6 +16,7 @@ mod crt_files;
 mod crt_format;
 mod crt_startup;
 mod crt_streams;
+mod cxx;
 mod events;
 mod files;
 mod gdk_queue;
@@ -215,6 +216,10 @@ pub struct ServicesState {
     pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
     atexit: Mutex<Vec<u64>>,
+    /// Emulated thread-local storage: the block each guest thread owns for
+    /// each thread-local variable, keyed by the guest thread and then by the
+    /// address of the variable's descriptor.
+    pub(crate) emutls: Mutex<BTreeMap<u64, BTreeMap<u64, u64>>>,
     /// The status the guest process exited with. Set once.
     exit_status: Mutex<Option<u32>>,
     crt_startup: Mutex<crt_startup::CrtStartup>,
@@ -245,6 +250,7 @@ impl ServicesState {
             threads: Mutex::default(),
             hooks: Arc::default(),
             atexit: Mutex::default(),
+            emutls: Mutex::default(),
             exit_status: Mutex::default(),
             crt_startup: Mutex::default(),
             winsock: Mutex::default(),
@@ -548,6 +554,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_conversions(registry);
     crt_callbacks::register(registry, &state);
     heap::register(registry, &state);
+    cxx::register(registry, &state);
 
     let s = state.clone();
     registry.register(
@@ -1309,4 +1316,8 @@ pub(crate) mod handlers {
             .crt_startup()
             .set_unhandled_exception_filter(filter))
     }
+
+    // The Universal C runtime services that a C++ guest's runtime imports.
+    // Their implementations are in `crt.rs` and `crt_streams.rs`.
+    pub use super::crt::{_lock_file, _unlock_file, fputc, localeconv, mbrtowc, strerror, wcrtomb};
 }

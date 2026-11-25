@@ -67,6 +67,50 @@ The runner prints the guest's exit value and returns a nonzero host status
 for load or interpreter faults. The gate compares both outcomes. These
 fixtures exercise synthetic commands and local Apple Silicon readback.
 
+## A hosted C++ program
+
+`guest_cpp.cpp` is an original C++ program that uses the C++ runtime as an
+ordinary program does. It has a namespace-scope object with a constructor and
+a destructor, a function-local static that is constructed on first use, a
+`std::vector<int>` sorted with `std::sort` and a comparator, a `std::string`
+compared with `memcmp`, a table of function pointers called through the
+table, a base class and a derived class whose virtual method is called
+through a base pointer, a `thread_local` variable, a second guest thread
+created with `CreateThread` and waited for with `WaitForSingleObject`, a file
+it writes with `fprintf` and reads back with `fgets`, and an `atexit`
+registration. It prints ten lines and exits with the number of the first check
+that fails.
+
+`build-guest-cpp.sh [output directory]` builds it. `cargo test -p xenora-loader
+--test guest_cpp_path` runs that script and then runs the result through
+`run_synthetic_startup_scheduled`, the standard services and the DBT. No built
+executable is committed: the test builds from source every time, in CI too.
+The test fails, and does not skip, when the compiler is missing.
+
+Compiler configuration:
+
+| Step | Command |
+| --- | --- |
+| Compile and link | `x86_64-w64-mingw32-g++ -O<level> -fno-rtti -fno-exceptions -fno-threadsafe-statics -o <name>.exe guest_cpp.cpp` |
+
+It is built at `-O0`, `-O1`, `-O2` and `-Os`, and once more as a control that
+imports a service no Xenora service provides, so the loader must refuse the
+image before the entry point runs.
+
+`-fno-exceptions` and `-fno-rtti` are deliberate. Xenora implements no C++
+exception machinery, so an exception would need a guest-side SEH unwinder
+rather than a service, and run-time type information would need the
+libstdc++ type-info vtables. `std::thread` is not used either: it needs
+`libwinpthread-1.dll` and its eighteen pthread entry points, where the Win32
+thread API the loader already implements with its deterministic cooperative
+scheduler is enough.
+
+Tools. `MINGW_GXX` defaults to Homebrew's mingw-w64 when it is installed and
+otherwise to the `x86_64-w64-mingw32-g++` on `PATH`. As with the other
+mingw-built fixtures, the script requires the compiler driver, the compiler
+proper, the assembler and the linker, and every library they load that is a
+file on disk, to be ARM64, and checks each with `file` and `lipo -archs`.
+
 ## Gate A1: a C program with no C library
 
 `gate_a1.c` is an original C program that links no C library. It imports
