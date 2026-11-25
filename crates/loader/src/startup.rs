@@ -199,6 +199,13 @@ fn run_startup_with(
     observe(StartupEvent::Relocated {
         applied_dir64: relocations.applied_dir64,
     });
+    crate::exceptions::register_exception_directory(
+        bytes,
+        layout.image_base,
+        pe.size_of_image,
+        memory,
+    )
+    .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, why))?;
     let bound_imports = imports.bind_imports(&pe, bytes, layout.image_base, memory)?;
     observe(StartupEvent::ImportsBound {
         count: bound_imports,

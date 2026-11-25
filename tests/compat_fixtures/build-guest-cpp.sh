@@ -142,3 +142,11 @@ done
 # runtime service provides, so the loader must refuse the image before the
 # entry point runs.
 "$gxx" -O1 $cxxflags -o guest-cpp-missing.exe guest-cpp-O1.o xenora_missing.lib
+
+# The exception fixture (#447) is built with exceptions and RTTI, and links
+# GCC's unwinder and C++ runtime statically so they run as guest code and call
+# the guest runtime's exception services.
+for level in O0 O1 O2 Os; do
+    "$gxx" "-$level" -Wall -Wextra -Werror -static-libstdc++ -static-libgcc \
+        -o "guest-cpp-exceptions-$level.exe" "$root/tests/compat_fixtures/guest_cpp_exceptions.cpp"
+done

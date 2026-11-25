@@ -97,10 +97,11 @@ It is built at `-O0`, `-O1`, `-O2` and `-Os`, and once more as a control that
 imports a service no Xenora service provides, so the loader must refuse the
 image before the entry point runs.
 
-`-fno-exceptions` and `-fno-rtti` are deliberate. Xenora implements no C++
-exception machinery, so an exception would need a guest-side SEH unwinder
-rather than a service, and run-time type information would need the
-libstdc++ type-info vtables. `std::thread` is not used either: it needs
+`-fno-exceptions` and `-fno-rtti` are deliberate for this program: it links
+the C++ runtime dynamically, and the guest runtime provides that runtime's
+functions as services, which have no exception machinery or type-info
+vtables. Exceptions are exercised by the next program, which links the C++
+runtime statically. `std::thread` is not used either: it needs
 `libwinpthread-1.dll` and its eighteen pthread entry points, where the Win32
 thread API the loader already implements with its deterministic cooperative
 scheduler is enough.
@@ -110,6 +111,29 @@ otherwise to the `x86_64-w64-mingw32-g++` on `PATH`. As with the other
 mingw-built fixtures, the script requires the compiler driver, the compiler
 proper, the assembler and the linker, and every library they load that is a
 file on disk, to be ARM64, and checks each with `file` and `lipo -archs`.
+
+## A C++ program that throws
+
+`guest_cpp_exceptions.cpp` is an original C++ program that throws and
+catches (#447). It throws an `int`; a `std::runtime_error` five calls deep,
+each frame owning an object whose destructor counts; a `std::logic_error`
+that a handler rethrows with `throw;`; a plain class caught with
+`catch (...)`; a second exception from inside a handler; and an exception
+through a frame with an 8 KiB stack array while two `double` values live
+across the throwing call. It prints one line per check and returns the
+number of checks that failed. Given the argument `uncaught`, it throws an
+exception nobody catches.
+
+`build-guest-cpp.sh` builds it too, at `-O0`, `-O1`, `-O2` and `-Os`:
+
+| Step | Command |
+| --- | --- |
+| Compile and link | `x86_64-w64-mingw32-g++ -O<level> -Wall -Wextra -Werror -static-libstdc++ -static-libgcc -o guest-cpp-exceptions-<level>.exe guest_cpp_exceptions.cpp` |
+
+Static linking puts GCC's SEH unwinder and C++ personality into the
+executable as guest code, so the program needs the operating system's
+exception services rather than C++ runtime services. `cargo test -p
+xenora-loader --test guest_cpp_exceptions` builds and runs it.
 
 ## Gate A1: a C program with no C library
 

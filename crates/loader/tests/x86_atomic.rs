@@ -96,7 +96,7 @@ fn low(bits: u32) -> u64 {
 }
 
 #[test]
-fn lock_is_accepted_only_on_xadd_and_cmpxchg_with_a_memory_destination() {
+fn lock_is_accepted_only_on_lockable_forms_with_a_memory_destination() {
     let accepted: &[&[u8]] = &[
         &[0xF0, 0x0F, 0xC1, 0x0E],       // lock xadd [rsi], ecx
         &[0xF0, 0x0F, 0xB1, 0x0E],       // lock cmpxchg [rsi], ecx
@@ -104,6 +104,10 @@ fn lock_is_accepted_only_on_xadd_and_cmpxchg_with_a_memory_destination() {
         &[0xF0, 0x66, 0x0F, 0xC1, 0x0E], // the same with LOCK first
         &[0x65, 0xF0, 0x0F, 0xB0, 0x0E], // lock cmpxchg gs:[rsi], cl
         &[0xF0, 0x48, 0x0F, 0xC1, 0x0E], // lock xadd [rsi], rcx
+        &[0xF0, 0x01, 0x0E],             // lock add [rsi], ecx
+        &[0xF0, 0x83, 0x06, 0x01],       // lock add dword [rsi], 1
+        &[0xF0, 0x29, 0x0E],             // lock sub [rsi], ecx
+        &[0xF0, 0x80, 0x36, 0xFF],       // lock xor byte [rsi], 0xff
     ];
     for code in accepted {
         let lock = code.iter().position(|byte| *byte == 0xF0).unwrap();
@@ -143,8 +147,10 @@ fn lock_is_accepted_only_on_xadd_and_cmpxchg_with_a_memory_destination() {
     let rejected: &[&[u8]] = &[
         &[0xF0, 0x0F, 0xC1, 0xC8], // lock xadd eax, ecx: register destination
         &[0xF0, 0x0F, 0xB1, 0xCB], // lock cmpxchg ebx, ecx: register destination
-        &[0xF0, 0x01, 0x0E],       // lock add [rsi], ecx: outside the locked subset
-        &[0xF0, 0x87, 0x0E],       // lock xchg [rsi], ecx: outside the locked subset
+        &[0xF0, 0x01, 0xC8],       // lock add eax, ecx: register destination
+        &[0xF0, 0x39, 0x0E],       // lock cmp [rsi], ecx: CMP writes nothing
+        &[0xF0, 0x83, 0x3E, 0x01], // lock cmp dword [rsi], 1
+        &[0xF0, 0x87, 0x0E],       // lock xchg [rsi], ecx: not implemented
         &[0xF0, 0x0F, 0xC7, 0x0E], // lock cmpxchg8b [rsi]: not implemented
         &[0xF0, 0x8B, 0x06],       // lock mov eax, [rsi]: never lockable
         &[0xF0, 0x90],             // lock nop

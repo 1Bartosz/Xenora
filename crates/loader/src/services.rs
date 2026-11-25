@@ -25,6 +25,7 @@ mod heap;
 mod modules;
 mod platform_fixture;
 mod process;
+mod static_cxx;
 mod synch;
 pub mod sysinfo;
 mod task_fixture;
@@ -449,6 +450,8 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crate::runtime_table::register(registry, &state);
     registry.hooks = Some(Arc::clone(&state.hooks));
     threads::register(registry, &state);
+    static_cxx::register(registry);
+    crate::exceptions::register(registry);
 
     let s = state.clone();
     registry.register(KERNEL32, "GetThreadId", move |args, cpu, mem| {

@@ -1326,7 +1326,7 @@ fn faulting_read_modify_write_changes_nothing() {
 #[test]
 fn undeclared_and_ambiguous_encodings_are_rejected() {
     let rejected: &[&[u8]] = &[
-        &[0xF0, 0x01, 0x0E],       // lock add [rsi], ecx
+        &[0xF0, 0x39, 0x0E],       // lock cmp [rsi], ecx: CMP writes nothing
         &[0xF2, 0x90],             // repne nop
         &[0xF3, 0xC3],             // rep ret
         &[0xF2, 0xA4],             // repne movsb
