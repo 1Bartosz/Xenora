@@ -17,6 +17,7 @@ mod gdk_queue;
 mod heap;
 mod modules;
 mod platform_fixture;
+mod process;
 mod synch;
 pub mod sysinfo;
 mod task_fixture;
@@ -198,6 +199,8 @@ pub struct ServicesState {
     pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
     atexit: Mutex<Vec<u64>>,
+    /// The status the guest process exited with. Set once.
+    exit_status: Mutex<Option<u32>>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -223,6 +226,7 @@ impl ServicesState {
             threads: Mutex::default(),
             hooks: Arc::default(),
             atexit: Mutex::default(),
+            exit_status: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -244,6 +248,76 @@ impl ServicesState {
     /// The scheduling policy recorded for the synthetic process.
     pub fn priority_boost_disabled(&self) -> bool {
         self.priority_boost_disabled.load(Ordering::SeqCst)
+    }
+
+    /// The status the guest process exited with, once it has exited.
+    pub fn exit_status(&self) -> Option<u32> {
+        *self.exit_status.lock().expect("guest exit status")
+    }
+
+    /// How many guest handles are open: kernel objects, sockets and task
+    /// queues, which are kept in three separate tables.
+    pub fn open_handle_count(&self) -> usize {
+        let objects = self
+            .objects
+            .lock()
+            .expect("guest object state")
+            .handles
+            .len();
+        let sockets = self
+            .winsock
+            .lock()
+            .expect("guest Winsock state")
+            .open_count();
+        let queues = self
+            .gdk_queues
+            .lock()
+            .expect("GDK queue handle table")
+            .open_count();
+        objects + sockets + queues
+    }
+
+    /// A file on the synthetic `C:` drive, named as the guest names it.
+    pub fn file_contents(&self, path: &str) -> Option<Vec<u8>> {
+        let path = path.replace('/', "\\").to_ascii_lowercase();
+        let name = path.strip_prefix("c:\\").unwrap_or(&path);
+        self.objects
+            .lock()
+            .expect("guest object state")
+            .files
+            .get(name)
+            .cloned()
+    }
+
+    /// End the guest process. The first exit decides the status; a later one
+    /// reports it again and changes nothing.
+    ///
+    /// Every guest handle is closed: kernel objects, sockets and task queues.
+    /// Files stay on the synthetic drive, guest memory stays mapped for the
+    /// host to inspect, and `atexit` functions are not run.
+    fn exit_process(&self, status: u32) -> u32 {
+        let mut exited = self.exit_status.lock().expect("guest exit status");
+        if let Some(first) = *exited {
+            return first;
+        }
+        *exited = Some(status);
+        // The three table locks are taken one at a time, never nested.
+        self.objects
+            .lock()
+            .expect("guest object state")
+            .handles
+            .clear();
+        self.winsock
+            .lock()
+            .expect("guest Winsock state")
+            .close_all();
+        self.winsock_changed.notify_all();
+        self.gdk_queues
+            .lock()
+            .expect("GDK queue handle table")
+            .close_all();
+        self.gdk_queue_changed.notify_all();
+        status
     }
 
     /// Read the last-error value for a guest thread's TEB.
@@ -630,6 +704,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     platform_fixture::register(registry, &state);
     gdk_queue::register(registry, &state);
     modules::register(registry, &state);
+    process::register(registry, &state);
 }
 
 /// Implementations behind the generated adapters. A failure the guest can

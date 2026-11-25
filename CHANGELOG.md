@@ -99,6 +99,8 @@ remains unsupported.
 
 - Added guest module lookup and named symbol resolution for built-in Kernel32 and UCRT services.
 
+- Added process exit and the first Gate A milestone, A1 (#329). `kernel32.dll!ExitProcess` stops the guest with the new `ExitReason::ProcessExit(status)`, carrying all 32 bits of the status, and never ends the host; a returning entry point does the same with EAX. The exit closes every guest handle, including Winsock sockets and task-queue handles, and the engine that ran the guest executes nothing further. A TLS callback that exits ends startup with that exit as its outcome, and the remaining callbacks and the entry point do not run. Startup reserves the page holding the return addresses the engine intercepts, so an image mapped over them is refused. `atexit` functions are not run. A1 is an original C program with no C library linked (`tests/compat_fixtures/gate_a1.c`): `crates/loader/tests/gate_a1.rs` builds it from source with clang and an LLD on every run, executes it through the loader, the standard services and the DBT at `-O0`, `-O1`, `-O2` and `-Os`, and checks its exit status, its report, its files and its memory against values recomputed in Rust. `docs/testing/gate-a.md` records what A1 shows and that Gate A stays open until the hosted milestone, A2, passes. Verified locally with two compilers; awaiting independent review.
+
 - Added same-process guest file handle duplication with a shared file position.
 
 - Added guest file and directory enumeration with typed search handles.
