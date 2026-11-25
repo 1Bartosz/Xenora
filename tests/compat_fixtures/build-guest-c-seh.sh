@@ -11,8 +11,10 @@
 # Tools, native to the host:
 #   CLANG     a clang with the x86_64-pc-windows-msvc target. Default:
 #             Homebrew LLVM if installed, otherwise the one on PATH.
-#   LLD_LINK  an lld-link. Default: Homebrew lld if installed, otherwise the
-#             one on PATH.
+#   LLD_LINK  an lld-link. Default: Homebrew lld, then the lld-link beside a
+#             Homebrew LLVM, then lld-link on PATH, then the rust-lld that
+#             ships in the active Rust toolchain, as build-gate-a1.sh does. A
+#             CI runner has only the last of these.
 #
 # -fasync-exceptions makes clang treat a CPU fault inside __try as catchable;
 # without it no handler covers the faulting instruction. The program has no C
@@ -29,14 +31,35 @@ if [ -z "$clang" ]; then
     clang=/opt/homebrew/opt/llvm/bin/clang
     [ -x "$clang" ] || clang=$(command -v clang || true)
 fi
+flavor=
 linker=${LLD_LINK:-}
 if [ -z "$linker" ]; then
-    linker=/opt/homebrew/opt/lld/bin/lld-link
-    [ -x "$linker" ] || linker=$(command -v lld-link || true)
+    prefixes="/opt/homebrew /usr/local"
+    if command -v brew >/dev/null 2>&1; then
+        prefixes="$(brew --prefix 2>/dev/null || true) $prefixes"
+    fi
+    for prefix in $prefixes; do
+        for candidate in "$prefix/opt/lld/bin/lld-link" "$prefix/opt/llvm/bin/lld-link"; do
+            if [ -z "$linker" ] && [ -x "$candidate" ]; then
+                linker=$candidate
+            fi
+        done
+    done
+fi
+if [ -z "$linker" ]; then
+    linker=$(command -v lld-link 2>/dev/null || true)
+fi
+if [ -z "$linker" ] && command -v rustc >/dev/null 2>&1; then
+    host=$(rustc -vV | sed -n 's/^host: //p')
+    candidate="$(rustc --print sysroot)/lib/rustlib/$host/bin/rust-lld"
+    if [ -x "$candidate" ]; then
+        linker=$candidate
+        flavor="-flavor link"
+    fi
 fi
 for tool in "$clang" "$linker"; do
     if [ -z "$tool" ] || [ ! -x "$tool" ]; then
-        echo "missing tool: clang and lld-link are required (set CLANG and LLD_LINK)" >&2
+        echo "missing tool: clang and an lld-link are required (set CLANG and LLD_LINK, or 'brew install llvm lld')" >&2
         exit 1
     fi
 done
@@ -62,12 +85,15 @@ if [ "$(uname -s)" = Darwin ]; then
         done
     done
 fi
+# $flavor is empty or two words on purpose.
+# shellcheck disable=SC2086
+link() { "$linker" $flavor "$@"; }
 
 mkdir -p "$out"
 cd "$out"
 {
     "$clang" --version | head -1
-    "$linker" --version | head -1
+    link --version | head -1
 } > toolchain.txt
 
 # Import libraries for the four imported services. xenora_seh.dll is not a
@@ -89,7 +115,7 @@ EXPORTS
     xenora_note
 DEF
 for module in kernel32 ucrtbase xenora_seh; do
-    "$linker" /lib /machine:x64 "/def:$module.def" "/out:$module.lib" > /dev/null
+    link /lib /machine:x64 "/def:$module.def" "/out:$module.lib" > /dev/null
 done
 
 for level in O0 O1 O2; do
@@ -99,7 +125,7 @@ for level in O0 O1 O2; do
         "$clang" --target=x86_64-pc-windows-msvc "-$level" -fasync-exceptions \
             -ffreestanding -fno-stack-protector -Wall -Wextra -Werror \
             -Wno-unused-function "-DCASE=$case" -c "$src" -o "$name.obj"
-        "$linker" /entry:entry /subsystem:console /nodefaultlib /machine:x64 \
+        link /entry:entry /subsystem:console /nodefaultlib /machine:x64 \
             "/out:$name.exe" "$name.obj" kernel32.lib ucrtbase.lib xenora_seh.lib \
             > /dev/null
     done

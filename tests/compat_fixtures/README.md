@@ -180,6 +180,10 @@ import libraries made from definition files and no C runtime:
 
 `-fasync-exceptions` makes a CPU fault inside `__try` catchable. `cargo test
 -p xenora-loader --test guest_c_seh` builds and runs every case.
+The script finds its linker as `build-gate-a1.sh` does: `LLD_LINK`, Homebrew
+`lld`, the `lld-link` beside a Homebrew LLVM, `lld-link` on `PATH`, then the
+`rust-lld` in the active Rust toolchain, so a machine with only Rust and a
+clang can build the cases.
 
 ## Gate A1: a C program with no C library
 
