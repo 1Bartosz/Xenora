@@ -35,6 +35,7 @@ remains unsupported.
 - Added a Python 3 fallback for `timeout` in `scripts/test-gpu.sh`, so the native Metal suite runs on stock macOS without GNU coreutils while preserving bounded execution and the usual timeout exit status.
 
 ### Added
+- MOV between the accumulator and a 64-bit absolute address (`A0`-`A3`, `movabs` in LLVM syntax) now runs in the interpreter and the DBT (#428). The decoder turns the eight-byte offset into an ordinary memory operand, which FS or GS may override, so the existing MOV semantics and the DBT's native lowering apply. The address-size prefix (`67`, a four-byte offset) stays rejected.
 - LOOP, LOOPE, LOOPNE and JRCXZ run in both engines (#396; Intel SDM Vol. 2A, LOOP/LOOPcc and Jcc). The count is RCX; the address-size prefix stays rejected, so JECXZ and the ECX-counted forms are still refused. The DBT runs them through the shared semantics and ends its block at each. The three known answers from #155 that both engines refused are now verified, with eleven more cases, and `tests/cpu_loop.rs` checks a loop that spans translated blocks against a step-by-step model for every count, ZF match point and step budget.
 - Added an opt-in, budgeted staged upload for RGBA8 textures (#144). `MetalRgba8Texture::upload_staged` fills a
   Private-storage texture through one reused Shared staging buffer that never exceeds a `StagingBudget`. It

@@ -126,6 +126,9 @@ pub enum Immediate {
     Word,
     /// Zero-extended byte.
     Byte,
+    /// A 64-bit absolute address, decoded into the memory operand (MOV
+    /// `A0`-`A3`, Intel SDM Vol. 2A, 2.2.1.4).
+    Offset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -462,6 +465,16 @@ pub fn decode<E>(
             }
             rm = Some(RmOperand::Mem(operand));
         }
+    } else if form.immediate == Immediate::Offset {
+        // The accumulator and the memory at an absolute address. With the
+        // default 64-bit address size the offset is eight bytes; FS or GS may
+        // override the segment as for any memory operand.
+        rm = Some(RmOperand::Mem(MemOperand {
+            base: None,
+            index: None,
+            disp: cursor.bytes(8)? as i64,
+            segment,
+        }));
     } else if matches!(form.encoding, Encoding::OpReg | Encoding::OpRegImm) {
         reg = register(opcode & 7, rex_b, size);
     } else if form.encoding == Encoding::String {
@@ -481,7 +494,7 @@ pub fn decode<E>(
     }
 
     let mut imm = match form.immediate {
-        Immediate::None => 0,
+        Immediate::None | Immediate::Offset => 0,
         Immediate::SignedByte => cursor.signed(1)?,
         Immediate::SignedFull => cursor.signed(usize::from(size.min(4)))?,
         Immediate::Signed32 => cursor.signed(4)?,
