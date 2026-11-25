@@ -28,21 +28,24 @@ const TICKET: u64 = 17;
 const DRAW_RESULT: u64 = 0x42;
 const EXTENT: [usize; 2] = [4, 3];
 const EXPECTED_PIXEL: [u8; 4] = [255, 0, 0, 255];
-/// Entry step limits of a program, which runs a C runtime's startup code
-/// before its own. The 15 second wall deadline still applies.
-const PROGRAM_DEFAULT_STEPS: usize = 1_000_000;
-const PROGRAM_MAX_STEPS: usize = 50_000_000;
+/// The longest wall deadline a program may be given with `--wall-seconds`.
+/// Its default is `WALL_LIMIT`, and it has no step limit unless one is given.
+const MAX_WALL_SECONDS: u64 = 3600;
+/// How long the supervisor waits past a program's deadline for the worker to
+/// show the program's output and stop on its own.
+const DEADLINE_GRACE: Duration = Duration::from_secs(2);
 /// Exit codes of a program run that are not the guest's own, after
 /// `timeout(1)`: the wall deadline, and any other failure of the runner or
 /// the guest.
 const DEADLINE_CODE: u8 = 124;
 const FAILURE_CODE: u8 = 125;
-const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--max-steps <1..=50000000>] [--sha256 <64 hex digits>] [-- <program argument>...]
-       an embedded fixture also takes --metal-hud, and its --max-steps is in 1..=10000";
+const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [-- <program argument>...]
+       an embedded fixture takes --metal-hud instead of --wall-seconds, and its --max-steps is in 1..=10000";
 
 struct Options {
     path: PathBuf,
     max_steps: Option<usize>,
+    wall_seconds: Option<u64>,
     worker: bool,
     /// Set by the supervisor for its worker: run the file as a program, not
     /// as an embedded fixture.
@@ -82,6 +85,7 @@ impl Options {
         let mut arguments = Vec::new();
         let (mut experimental, mut trace, mut hud, mut worker) = (false, false, false, false);
         let mut program = false;
+        let mut wall_seconds = None;
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--pe") if path.is_none() => {
@@ -92,6 +96,13 @@ impl Options {
                         args.next()
                             .and_then(|arg| arg.to_str()?.parse::<usize>().ok())
                             .ok_or("--max-steps needs a number")?,
+                    );
+                }
+                Some("--wall-seconds") if wall_seconds.is_none() => {
+                    wall_seconds = Some(
+                        args.next()
+                            .and_then(|arg| arg.to_str()?.parse::<u64>().ok())
+                            .ok_or("--wall-seconds needs a number")?,
                     );
                 }
                 Some("--sha256") if digest.is_none() => {
@@ -127,6 +138,7 @@ impl Options {
         Ok(Self {
             path: path.ok_or("missing --pe path")?,
             max_steps,
+            wall_seconds,
             worker,
             program,
             trace,
@@ -136,22 +148,34 @@ impl Options {
         })
     }
 
-    /// The entry step limit for the kind of run, or why the options do not
-    /// suit it.
-    fn steps(&self, program: bool) -> Result<usize, String> {
-        let (default, limit) = if program {
-            (PROGRAM_DEFAULT_STEPS, PROGRAM_MAX_STEPS)
-        } else {
-            (DEFAULT_STEPS, MAX_STEPS)
-        };
-        let steps = self.max_steps.unwrap_or(default);
-        if !(1..=limit).contains(&steps) {
-            return Err(format!("--max-steps must be in 1..={limit}"));
+    /// The entry step limit and the wall deadline for the kind of run, or why
+    /// the options do not suit it. A program has no step limit unless one is
+    /// given: its wall deadline is what bounds it.
+    fn limits(&self, program: bool) -> Result<(usize, Duration), String> {
+        if !program {
+            let steps = self.max_steps.unwrap_or(DEFAULT_STEPS);
+            if !(1..=MAX_STEPS).contains(&steps) {
+                return Err(format!("--max-steps must be in 1..={MAX_STEPS}"));
+            }
+            if self.wall_seconds.is_some() {
+                return Err("--wall-seconds applies to a program, not an embedded fixture".into());
+            }
+            return Ok((steps, WALL_LIMIT));
         }
-        if program && self.hud {
+        if self.max_steps == Some(0) {
+            return Err("--max-steps must be at least 1".into());
+        }
+        let wall = self.wall_seconds.unwrap_or(WALL_LIMIT.as_secs());
+        if !(1..=MAX_WALL_SECONDS).contains(&wall) {
+            return Err(format!("--wall-seconds must be in 1..={MAX_WALL_SECONDS}"));
+        }
+        if self.hud {
             return Err("--metal-hud applies to the embedded fixtures only".into());
         }
-        Ok(steps)
+        Ok((
+            self.max_steps.unwrap_or(usize::MAX),
+            Duration::from_secs(wall),
+        ))
     }
 }
 
@@ -173,17 +197,17 @@ pub fn command(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             || !options.arguments.is_empty()
             || verify_fixture(&options.path).is_err()
     };
-    let steps = match options.steps(program) {
-        Ok(steps) => steps,
+    let (steps, wall) = match options.limits(program) {
+        Ok(limits) => limits,
         Err(error) => {
             eprintln!("{error}\n{USAGE}");
             return ExitCode::from(2);
         }
     };
     let result = match (options.worker, program) {
-        (true, true) => run_program(&options, steps),
+        (true, true) => run_program(&options, steps, wall),
         (true, false) => run_worker(&options, steps).map(|()| ExitCode::SUCCESS),
-        (false, _) => launch_worker(&options, program, steps),
+        (false, _) => launch_worker(&options, program, steps, wall),
     };
     match result {
         Ok(code) => code,
@@ -202,8 +226,12 @@ fn launch_worker(
     options: &Options,
     program: bool,
     steps: usize,
+    wall: Duration,
 ) -> Result<ExitCode, Box<dyn Error>> {
     let started = Instant::now();
+    // A program's worker stops itself at the deadline, after showing what the
+    // program wrote. The supervisor steps in only if it does not.
+    let limit = if program { wall + DEADLINE_GRACE } else { wall };
     let mut command = Command::new(std::env::current_exe()?);
     command.args(["run", "--experimental", "--worker"]);
     if program {
@@ -219,11 +247,17 @@ fn launch_worker(
     } else {
         command.args(["--trace", "--metal-hud"]);
     }
-    command
-        .arg("--max-steps")
-        .arg(steps.to_string())
-        .arg("--pe")
-        .arg(&options.path);
+    if program {
+        command
+            .arg("--wall-seconds")
+            .arg(wall.as_secs().to_string());
+        if let Some(steps) = options.max_steps {
+            command.arg("--max-steps").arg(steps.to_string());
+        }
+    } else {
+        command.arg("--max-steps").arg(steps.to_string());
+    }
+    command.arg("--pe").arg(&options.path);
     if program {
         command.arg("--").args(&options.arguments);
     }
@@ -236,7 +270,7 @@ fn launch_worker(
                     None => Err(format!("worker terminated: {status}").into()),
                 };
             }
-            Ok(None) if started.elapsed() < WALL_LIMIT => {
+            Ok(None) if started.elapsed() < limit => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             status => {
@@ -244,7 +278,7 @@ fn launch_worker(
                 child.wait()?;
                 status?;
                 if program {
-                    eprintln!("run failed: the program exceeded the 15 second wall deadline");
+                    eprintln!("{}", deadline_message(wall));
                     return Ok(ExitCode::from(DEADLINE_CODE));
                 }
                 return Err("experimental worker exceeded its 15 second wall deadline".into());
@@ -280,13 +314,35 @@ fn hex(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn start_deadline() -> std::io::Result<()> {
+fn deadline_message(wall: Duration) -> String {
+    format!(
+        "run failed: the program exceeded the {} second wall deadline",
+        wall.as_secs()
+    )
+}
+
+/// What a program's deadline needs: the state that holds its output, and the
+/// lock the run takes before it writes that output itself.
+type Finishing = (Arc<ServicesState>, Arc<Mutex<()>>);
+
+/// Stop the process at the wall deadline. For a program, what it had written
+/// is shown first. The supervisor also enforces the deadline; the worker
+/// keeps its own in case it is invoked directly.
+fn start_deadline(wall: Duration, program: Option<Finishing>) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("xenora-deadline".into())
-        .spawn(|| {
-            std::thread::sleep(WALL_LIMIT);
-            // The supervisor also enforces this deadline. The worker retains
-            // its own deadline if it is invoked directly.
+        .spawn(move || {
+            std::thread::sleep(wall);
+            if let Some((state, finishing)) = program {
+                // A run that has ended holds this lock while it writes its
+                // own output and exits; then this waits and writes nothing.
+                let _turn = finishing.lock();
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(&state.standard_output());
+                let _ = stdout.flush();
+                let _ = std::io::stderr().write_all(&state.standard_error());
+                eprintln!("{}", deadline_message(wall));
+            }
             std::process::exit(i32::from(DEADLINE_CODE));
         })
         .map(drop)
@@ -327,8 +383,14 @@ fn host_exit_code(status: u32) -> u8 {
 
 /// Run a file as a program: no embedded snapshot, no fixture draw service
 /// and no expected result. Its arguments, output and exit status are its own.
-fn run_program(options: &Options, steps: usize) -> Result<ExitCode, Box<dyn Error>> {
-    start_deadline()?;
+fn run_program(
+    options: &Options,
+    steps: usize,
+    wall: Duration,
+) -> Result<ExitCode, Box<dyn Error>> {
+    let state = Arc::new(ServicesState::new(Arc::new(SystemClock)));
+    let finishing = Arc::new(Mutex::new(()));
+    start_deadline(wall, Some((Arc::clone(&state), Arc::clone(&finishing))))?;
     let bytes = read_program(&options.path, options.digest)?;
     let name = options
         .path
@@ -341,11 +403,14 @@ fn run_program(options: &Options, steps: usize) -> Result<ExitCode, Box<dyn Erro
         } else {
             "any"
         };
+        let step_limit = options
+            .max_steps
+            .map_or_else(|| "none".to_owned(), |steps| steps.to_string());
         eprintln!(
-            "trace program={name} policy={policy} entry_step_limit={steps} wall_limit_ms=15000"
+            "trace program={name} policy={policy} entry_step_limit={step_limit} wall_limit_ms={}",
+            wall.as_millis()
         );
     }
-    let state = Arc::new(ServicesState::new(Arc::new(SystemClock)));
     let mut arguments = vec![name];
     arguments.extend(options.arguments.iter().map(String::as_str));
     state.set_program_arguments(&arguments)?;
@@ -366,7 +431,9 @@ fn run_program(options: &Options, steps: usize) -> Result<ExitCode, Box<dyn Erro
             }
         },
     );
-    // Whatever the program wrote is shown, however the run ended.
+    // Whatever the program wrote is shown, however the run ended. From here
+    // the deadline no longer writes it.
+    let _turn = finishing.lock();
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&state.standard_output())?;
     stdout.flush()?;
@@ -395,7 +462,7 @@ fn run_program(options: &Options, steps: usize) -> Result<ExitCode, Box<dyn Erro
 }
 
 fn run_worker(options: &Options, steps: usize) -> Result<(), Box<dyn Error>> {
-    start_deadline()?;
+    start_deadline(WALL_LIMIT, None)?;
     let fixture = verify_fixture(&options.path)?;
     let (name, ticket, bound_imports) = if fixture == SERVICES_FIXTURE {
         ("runtime-services", 23, 3)

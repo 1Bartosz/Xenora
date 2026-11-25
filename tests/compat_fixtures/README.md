@@ -206,6 +206,9 @@ Compiler configuration:
 It is built at `-O0`, `-O1`, `-O2` and `-Os`, and three more times at `-O1` as
 controls: `GATE_BREAK` (one wrong expectation), `GATE_EXIT` (`exit(42)` half
 way) and `GATE_ABORT` (`abort()` half way).
+One further build, `GATE_SPIN`, prints its arguments, counts to the first one
+and ends; given 0 it never ends. It also writes one line to standard error. The gate does not run it;
+`crates/cli/tests/run_program.rs` uses it to test the limits of `xenora run`.
 
 Tools. `MINGW_GCC` defaults to Homebrew's mingw-w64 when it is installed and
 otherwise to the `x86_64-w64-mingw32-gcc` on `PATH`. The toolchain must use
