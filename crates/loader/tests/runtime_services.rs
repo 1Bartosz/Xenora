@@ -1222,6 +1222,92 @@ fn vfprintf_s_and_putchar_write_to_the_streams() {
 /// writes nothing. What the runtime does not model stops the guest. In every
 /// case nothing reaches either stream.
 #[test]
+fn stdin_lines_follow_iso_c_at_the_edges() {
+    // fgets on the standard input: lines end at a line feed that is kept,
+    // CR LF pairs arrive as one line feed, a last line without a newline is
+    // a line, and null at end of file.
+    let stdin_lines = |input: &[u8]| {
+        let (mut guest, [stdin, _, _]) = stdio_guest();
+        guest.state.set_standard_input(input);
+        let mut lines = Vec::new();
+        loop {
+            let result = guest.call("fgets", &[SCRATCH, 16, stdin]);
+            if result == 0 {
+                break;
+            }
+            let mut bytes = Vec::new();
+            for at in 0..16u64 {
+                match guest.memory.read_u8(SCRATCH + at).unwrap() {
+                    0 => break,
+                    byte => bytes.push(byte),
+                }
+            }
+            lines.push(bytes);
+        }
+        (guest, lines)
+    };
+    // Two lines, one in CR LF, and a last line without a newline.
+    let (_guest, lines) = stdin_lines(b"one\r\ntwo\nthree");
+    assert_eq!(
+        lines,
+        [
+            b"one\n".as_slice(),
+            b"two\n".as_slice(),
+            b"three".as_slice()
+        ]
+    );
+    // The indicator is set only when a read meets the end.
+    let (mut guest, [stdin, _, _]) = stdio_guest();
+    assert_eq!(guest.call("feof", &[stdin]), 0);
+    guest.state.set_standard_input(b"x\n");
+    assert_eq!(guest.call("fgets", &[SCRATCH, 16, stdin]), SCRATCH);
+    // The read stopped at the line feed, before the end: no indicator yet.
+    assert_eq!(guest.call("feof", &[stdin]), 0);
+    assert_eq!(guest.call("fgets", &[SCRATCH, 16, stdin]), 0);
+    assert_ne!(guest.call("feof", &[stdin]), 0, "a read met the end");
+    // An empty input is end of file at once.
+    let (mut guest, [stdin, _, _]) = stdio_guest();
+    assert_eq!(guest.call("fgets", &[SCRATCH, 16, stdin]), 0);
+    assert_ne!(guest.call("feof", &[stdin]), 0);
+    // A line longer than the buffer comes in pieces of count - 1 characters,
+    // without losing any.
+    let mut pieces = Vec::new();
+    let (mut guest, [stdin, _, _]) = stdio_guest();
+    guest.state.set_standard_input(b"abcdefghij\n");
+    loop {
+        if guest.call("fgets", &[SCRATCH, 5, stdin]) == 0 {
+            break;
+        }
+        let mut bytes = Vec::new();
+        for at in 0..5u64 {
+            match guest.memory.read_u8(SCRATCH + at).unwrap() {
+                0 => break,
+                byte => bytes.push(byte),
+            }
+        }
+        pieces.push(bytes);
+    }
+    assert_eq!(
+        pieces,
+        [b"abcd".as_slice(), b"efgh".as_slice(), b"ij\n".as_slice()]
+    );
+    // A CR alone is not translated away.
+    let (_guest, lines) = stdin_lines(b"a\rb\n");
+    assert_eq!(lines, [b"a\rb\n".as_slice()]);
+    // getchar reads one character after the same replacement, then EOF.
+    // feof of an output stream is 0; of a null stream -1 with EINVAL.
+    let (mut guest, [stdin, out, _]) = stdio_guest();
+    guest.state.set_standard_input(b"\r\nq");
+    assert_eq!(guest.call("getchar", &[]), u64::from(b'\n'));
+    assert_eq!(guest.call("getchar", &[]), u64::from(b'q'));
+    assert_eq!(guest.call("getchar", &[]) & 0xFFFF_FFFF, u32::MAX as u64);
+    assert_ne!(guest.call("feof", &[stdin]), 0);
+    assert_eq!(guest.call("feof", &[out]), 0);
+    assert_eq!(guest.call("feof", &[0]) & 0xFFFF_FFFF, u32::MAX as u64);
+    assert_eq!(guest.errno(), 22);
+}
+
+#[test]
 fn formatted_output_refuses_what_it_cannot_print_correctly() {
     let (mut guest, [input, out, _]) = stdio_guest();
     let quiet = |guest: &Guest| {
@@ -1802,8 +1888,10 @@ fn fgets_reads_lines_within_its_count() {
         guest.set_errno(0);
     }
     close(&mut guest, writer);
-    // Standard input, a closed stream and a pointer that never was one.
-    for stream in [input, writer, TEXT] {
+    // A closed stream and a pointer that never was one. Standard input is
+    // served since #467: with no input supplied the read is end of file.
+    assert_eq!(guest.call("fgets", &[LINE, 96, input]), 0);
+    for stream in [writer, TEXT] {
         assert_eq!(
             guest.run("fgets", &[LINE, 96, stream]).1,
             LIMIT,

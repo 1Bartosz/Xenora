@@ -463,6 +463,15 @@ mode or size. An invalid format, which includes `%n` because Windows
 disables it by default, also returns -1 with `EINVAL` and writes nothing;
 on Windows the invalid parameter handler runs first.
 
+The standard input is the bytes the host supplies before the run, read in
+full by `xenora run` up to 1 MiB; more is a command-line error before
+anything executes, never a silent truncation. A terminal, or fd 0 already
+serving the diagnostic channel, means no input. Text mode applies when the
+input is stored: a CR LF pair becomes one line feed, a CR alone stays. The
+end-of-file indicator follows ISO C: a read that meets the end sets it, so
+a last line without a newline sets it while one that ends at a line feed
+does not. `scanf` and wide input are not provided.
+
 Everything else that is not modelled stops the guest with the runtime-limit
 fault and writes nothing, so that nothing is printed wrongly: the
 floating-point types (`e`, `f`, `g`, `a`), wide characters and strings (`C`,
@@ -511,8 +520,8 @@ What is not provided, and what is Xenora's choice:
 
 - **Not provided:** the mode characters `x`, `c`, `n`, `N`, `S`, `R`, `T`,
   `D` and `ccs=`, which are refused; `fread`, `fseek`, `ftell`, `rewind`,
-  `feof`, `ferror`, `fscanf`; reading `stdin` and closing a standard stream,
-  which stop the guest.
+  `ferror`, `fscanf`, `feof` of a file stream, and closing a standard
+  stream, which stop the guest.
 - **No buffering.** A write reaches the drive at once, so the rule that a
   `+` stream needs `fflush` or a seek between writing and reading does not
   apply.

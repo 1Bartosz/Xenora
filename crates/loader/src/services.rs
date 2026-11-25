@@ -277,6 +277,14 @@ impl ServicesState {
     /// The strings reach the guest as their bytes; no code page is applied.
     /// A host that never calls this gives the program one argument, the empty
     /// string. An empty slice gives it none.
+    /// Give a hosted C program the bytes it reads from `stdin`, before the
+    /// run. Text mode is applied when they are stored: CR LF pairs become
+    /// one line feed. Calling it after the guest started has no effect on
+    /// what it already read, so hosts should call it before running.
+    pub fn set_standard_input(&self, bytes: &[u8]) {
+        self.crt_streams().set_input(bytes);
+    }
+
     pub fn set_program_arguments(&self, arguments: &[&str]) -> Result<(), ProgramArgumentsError> {
         self.crt_arguments().supply(arguments)
     }
@@ -1094,6 +1102,15 @@ pub(crate) mod handlers {
             let mut drive = context.state.objects.lock().expect("guest object state");
             streams.put_string(context.memory, &mut drive, text, stream)
         };
+        or_errno(context, outcome)
+    }
+
+    pub fn getchar(context: &mut ServiceContext<'_>) -> Outcome<i32> {
+        Ok(context.state.crt_streams().character_stdin())
+    }
+
+    pub fn feof(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().end_of_file(stream);
         or_errno(context, outcome)
     }
 
