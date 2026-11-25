@@ -91,6 +91,9 @@ def cases():
                 f"mov {mem(bits)}, {reg(2, bits)}", f"mov {reg(14, bits)}, 0x5a",
                 f"mov {mem(bits)}, 0x5a", f"xchg {reg(3, bits)}, {reg(9, bits)}",
                 f"xchg {mem(bits)}, {reg(2, bits)}"]
+        # A0-A3: the accumulator and an absolute address, the memory operand's.
+        out += [f"movabs {reg(0, bits)}, {PTR[bits]} ptr [0x2020]",
+                f"movabs {PTR[bits]} ptr [0x2020], {reg(0, bits)}"]
     for op in ("xadd", "cmpxchg"):
         for bits in (8, 16, 32, 64):
             # Destination RAX always matches the accumulator; a register with

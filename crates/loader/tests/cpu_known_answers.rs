@@ -1472,6 +1472,84 @@ c6_reg_field_1_is_ud: rdi=D m0=aaaaaaaa => ! UD
 c7_reg_field_1_is_ud: rdi=D m0=aaaaaaaa => ! UD
 ";
 
+/// MOV between the accumulator and a 64-bit absolute address, `A0`-`A3`
+/// (#428). The address follows the opcode in place of ModRM, eight bytes with
+/// the default address size, and FS or GS may override the segment.
+const MOV_MOFFS: &str = r"
+@ movabs rax, [0x500000]
+  48a10000500000000000
+  SDM 2B MOV; 2A 2.2.1.4
+mov_moffs64_load: rax=0 m0=0102030405060708 => rax=0807060504030201 f=*
+@ movabs [0x500003], al
+  a20300500000000000
+  SDM 2B MOV; 2A 2.2.1.4
+mov_moffs8_store: rax=77 m0=00000000 => m0=00000077 f=*
+@ movabs al, byte ptr [0x500001]
+  a00100500000000000
+  SDM 2B MOV; 1 3.4.1.1
+moffs8_load_keeps_upper_bits: rax=1122334455667788 m0=00ab => rax=11223344556677ab f=*
+@ movabs ax, word ptr [0x500000]
+  66a10000500000000000
+  SDM 2B MOV; 1 3.4.1.1
+moffs16_load_keeps_upper_bits: rax=1122334455667788 m0=3412 => rax=1122334455661234 f=*
+@ movabs eax, dword ptr [0x500000]
+  a10000500000000000
+  SDM 2B MOV; 1 3.4.1.1
+moffs32_load_zero_extends: rax=ffffffffffffffff m0=78563412 => rax=12345678 f=*
+@ movabs byte ptr [0x500003], al
+  a20300500000000000
+  SDM 2B MOV
+moffs8_store_writes_one_byte: rax=ffffffffffffff5a m0=1111111111 => m0=1111115a11 f=*
+@ movabs word ptr [0x500002], ax
+  66a30200500000000000
+  SDM 2B MOV
+moffs16_store: rax=1122334455667788 m0=0000000000000000 => m0=0000887700000000 f=*
+@ movabs dword ptr [0x500004], eax
+  a30400500000000000
+  SDM 2B MOV
+moffs32_store: rax=1122334455667788 m0=0000000000000000 => m0=0000000088776655 f=*
+@ movabs qword ptr [0x500001], rax
+  48a30100500000000000
+  SDM 2B MOV
+moffs64_store_unaligned: rax=1122334455667788 m0=ff00000000000000ff => m0=ff8877665544332211 f=*
+@ .byte 0x49,0xa1,0x00,0x00,0x50,0x00,0x00,0x00,0x00,0x00
+  49a10000500000000000
+  SDM 2A 2.2.1.2; 2B MOV
+moffs_rex_b_selects_no_register: rax=0 r8=5 m0=0102030405060708 => rax=0807060504030201 f=*
+@ movabs rax, qword ptr fs:[0x28]
+  6448a12800000000000000
+  SDM 3A 3.4.4; 2B MOV
+fs_moffs64_load: rax=0 fs28=0102030405060708 => rax=0807060504030201 f=*
+@ movabs eax, dword ptr gs:[0x10]
+  65a11000000000000000
+  SDM 3A 3.4.4; 2B MOV
+gs_moffs32_load: rax=ffffffffffffffff gs10=78563412 => rax=12345678 f=*
+@ movabs byte ptr gs:[0xfffffffffffffff0], al
+  65a2f0ffffffffffffff
+  SDM 3A 3.4.4; 2B MOV
+gs_moffs8_store_wraps_below_the_base: rax=5a gsbase=GSB+20 gs10=00 => gs10=5a f=*
+@ movabs eax, dword ptr [0x502000]
+  !a10020500000000000
+  SDM 3A 7.15 Interrupt 14
+moffs_load_unmapped: rax=5 => ! PFR U
+@ movabs byte ptr [0x520000], al
+  !a20000520000000000
+  SDM 3A 7.15 Interrupt 14
+moffs_store_readonly_page: rax=5a => ! PFW R
+@ movabs rax, qword ptr [0x501ffc]
+  !48a1fc1f500000000000
+  SDM 3A 5.7 (the address with no translation); 3A 7.15 Interrupt 14
+moffs_load_crossing_into_unmapped_page: rax=5 => ! PFR U
+@ movabs rax, qword ptr [0x800000000000]
+  !48a10000000000800000
+  SDM 1 3.3.7.1; 2B MOV
+moffs_noncanonical_load_faults: rax=5 => ! GP
+@ movabs qword ptr [0x800000000000], rax
+  !48a30000000000800000
+  SDM 1 3.3.7.1; 2B MOV
+moffs_noncanonical_store_faults: rax=5 => ! GP
+";
+
 const DECODING: &str = r"
 @ mov eax, [ebx]
   678b03
@@ -1529,14 +1607,6 @@ lock_on_cmp_is_ud: rdi=D => ! UD
   !488dc3
   SDM 2A LEA
 lea_register_source_is_ud: => ! UD
-@ movabs rax, [0x500000]
-  48a10000500000000000
-  SDM 2B MOV; 2A 2.2.1.4
-mov_moffs64_load: rax=0 m0=0102030405060708 => rax=0807060504030201 f=*
-@ movabs [0x500003], al
-  a20300500000000000
-  SDM 2B MOV; 2A 2.2.1.4
-mov_moffs8_store: rax=77 m0=00000000 => m0=00000077 f=*
 @ add qword ptr fs:[rax+rbx*2+0x100], 0x11223344
   64488184580001000044332211
   SDM 3A 3.4.4; 2A 2.2.1
@@ -2952,6 +3022,7 @@ const GROUPS: &[(&str, &str)] = &[
     ("stack_and_calls", STACK_AND_CALLS),
     ("strings", STRINGS),
     ("fs_gs", FS_GS),
+    ("mov_moffs", MOV_MOFFS),
     ("decoding", DECODING),
     ("fences", FENCES),
     ("x87_init", X87_INIT),
@@ -3008,8 +3079,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("lodsd_zero_extends_df_clear", 0),
     ("lodsw_preserves_upper48", 1),
     ("maskmovdqu_selects_bytes", 0),
-    ("mov_moffs64_load", 0),
-    ("mov_moffs8_store", 0),
     ("movddup_movsldup_movshdup", 0),
     ("mpsadbw", 0),
     ("pabs_min_is_unchanged", 0),
@@ -3733,6 +3802,11 @@ fn strings() {
 #[test]
 fn fs_gs() {
     check_group(FS_GS);
+}
+
+#[test]
+fn mov_moffs() {
+    check_group(MOV_MOFFS);
 }
 
 #[test]
