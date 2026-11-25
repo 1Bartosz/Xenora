@@ -20,7 +20,7 @@ Ending a thread releases its memory and slot and drops its last error, TLS and F
 
 ## Services
 
-`CreateThread`, `ExitThread`, `TerminateThread`, `GetExitCodeThread`, `SuspendThread`, `ResumeThread`, `SwitchToThread`, and thread handles in `GetThreadId`, `OpenThread`, `DuplicateHandle`, `CloseHandle`, `WaitForSingleObject` and `WaitForMultipleObjects`. Blocking waits with timeouts work for threads, events, semaphores and mutexes. A wait keeps the objects it was given when it blocked. A mutex whose owner ended is reported once as abandoned.
+`CreateThread`, `ExitThread`, `TerminateThread`, `GetExitCodeThread`, `SuspendThread`, `ResumeThread`, `SwitchToThread`, `GetCurrentThreadStackLimits`, `GetThreadGroupAffinity`, `SetThreadGroupAffinity`, and thread handles in `GetThreadId`, `OpenThread`, `DuplicateHandle`, `CloseHandle`, `WaitForSingleObject` and `WaitForMultipleObjects`. Blocking waits with timeouts work for threads, events, semaphores and mutexes. A wait keeps the objects it was given when it blocked. A mutex whose owner ended is reported once as abandoned.
 
 Critical sections, SRW locks, condition variables and one-time initialization block only the calling thread:
 
@@ -31,6 +31,8 @@ Critical sections, SRW locks, condition variables and one-time initialization bl
 - A lock held by an ended thread, a slim lock acquired again by its holder, and an initialization abandoned by an ended thread are never released. Waiting for them is reported as a deadlock once nothing else can run.
 
 `Sleep` and `SleepEx` delay only the calling thread. Zero gives up the rest of the turn, and `INFINITE` sleeps until the thread is terminated.
+
+`GetCurrentThreadStackLimits` reads the bounds from the calling thread's TEB. Affinity has one group whose mask is every processor the guest is shown; setting that mask succeeds, a processor or group that does not exist fails with `ERROR_INVALID_PARAMETER`, and a narrower mask fails with `ERROR_NOT_SUPPORTED`. `TerminateProcess` and `GetExitCodeProcess` (in `services/process.rs`) accept only the current-process pseudo-handle and fail with `ERROR_INVALID_HANDLE` for any other; `TerminateProcess` ends the guest as `ExitProcess` does and never touches a host process. `tests/compat_fixtures/process_lifecycle.c` exercises them (`crates/loader/tests/process_lifecycle.rs`).
 
 All are partial. Without an attached scheduler `CreateThread` fails with `ERROR_NOT_SUPPORTED` and waits behave as before.
 

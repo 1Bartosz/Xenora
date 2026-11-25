@@ -9,6 +9,9 @@ exact revision and known limitations.
 Guest execution uses original, purpose-built test programs. Commercial Xbox game execution
 remains unsupported.
 
+### Added
+- Partial kernel32 services `TerminateProcess`, `GetExitCodeProcess`, `GetCurrentThreadStackLimits`, `GetThreadGroupAffinity` and `SetThreadGroupAffinity` (#475). `TerminateProcess` ends only the modelled guest process, through the current-process pseudo-handle, and fails with `ERROR_INVALID_HANDLE` for any other handle; no host process is touched. Stack limits come from the calling guest thread's TEB. Affinity reports one group holding every processor the guest is shown; narrower masks are refused with `ERROR_NOT_SUPPORTED`. An original C fixture built at `-O0`, `-O1`, `-O2` and `-Os` exercises them under the guest thread scheduler. Locally tested only; not independently reviewed.
+
 ### Changed
 - The decoder accepts `LOCK` on the memory-destination forms of ADD, OR, ADC, SBB, AND, SUB and XOR, as Intel SDM Vol. 2 lists them, not only on XADD and CMPXCHG (#447). libstdc++ uses `lock add` and `lock sub` for reference counts. `LOCK` on CMP, on a register destination and on XCHG is still refused. Locked instructions now always run on the shared semantics rather than native ARM64 code, so atomicity has one place to live once guest threads run concurrently; today they run one at a time, so a locked read-modify-write is already indivisible.
 - Static probe exports now check every destination before writing, preserve the ignored development directories and publish complete files by rename. Future persistent caches use a separate per-user location outside Git checkouts (#413).

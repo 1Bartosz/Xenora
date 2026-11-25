@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Process termination.
+//! Process termination and exit codes.
+//!
+//! The only process the guest can name is its own, through the
+//! current-process pseudo-handle. No service here reaches a host process.
 
-use super::{KERNEL32, ServicesState};
+use super::{CURRENT_PROCESS, ERROR_INVALID_HANDLE, ERROR_NOACCESS, KERNEL32, ServicesState};
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use std::sync::Arc;
@@ -12,6 +15,9 @@ const UCRT: &str = "ucrtbase.dll";
 const CRT_RUNTIME_API: &str = "api-ms-win-crt-runtime-l1-1-0.dll";
 /// The exit code `abort` ends the process with (Microsoft Learn, "abort").
 const ABORT_STATUS: u32 = 3;
+/// GetExitCodeProcess result while the process runs (Microsoft Learn,
+/// "GetExitCodeProcess").
+const STILL_ACTIVE: u32 = 259;
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     // ExitProcess does not return (processthreadsapi.h). It stops the guest
@@ -24,6 +30,38 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     });
     registry.alias(PROCESS_THREADS_API, KERNEL32, "ExitProcess");
     registry.set_status(KERNEL32, "ExitProcess", ServiceStatus::Partial);
+
+    // TerminateProcess on the current-process pseudo-handle ends the guest with
+    // that status, as ExitProcess does, and does not return. There is no other
+    // process object, so any other handle fails with ERROR_INVALID_HANDLE. It is
+    // partial: Windows would not notify DLLs, and neither does this, but there
+    // are also no other processes it could end.
+    let s = Arc::clone(state);
+    registry.register(KERNEL32, "TerminateProcess", move |args, cpu, _| {
+        if args.rcx != CURRENT_PROCESS {
+            return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        }
+        // The status is a UINT, the low half of the second argument.
+        Err(ExitReason::ProcessExit(s.exit_process(args.rdx as u32)))
+    });
+
+    // A running process has no exit code yet, so the guest, which only runs
+    // while its process does, always reads STILL_ACTIVE for itself.
+    let s = Arc::clone(state);
+    registry.register(KERNEL32, "GetExitCodeProcess", move |args, cpu, memory| {
+        if args.rcx != CURRENT_PROCESS {
+            return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        }
+        if memory.write_u32(args.rdx, STILL_ACTIVE).is_err() {
+            return s.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+        }
+        Ok(1)
+    });
+
+    for symbol in ["TerminateProcess", "GetExitCodeProcess"] {
+        registry.alias(PROCESS_THREADS_API, KERNEL32, symbol);
+        registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
+    }
 
     // _exit ends the process without calling the functions registered with
     // atexit (Microsoft Learn, "exit, _Exit, _exit"). `exit`, which does call
