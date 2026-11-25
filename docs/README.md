@@ -48,12 +48,14 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Test inventory comparison](testing/test-inventory.md) — Detect missing or newly ignored Cargo tests across commits.
 - [Persistent resource and translated rendering acceptance](testing/x9-acceptance.md) — Pinned upstream tests, native ARM64 results and unsupported cases.
 - [Baseline acceptance](testing/phase-02-baseline.md), [Phase 01 assurance](testing/phase01-assurance.md), and [independent reviews](testing/review-log.md) — Candidate-specific results and release findings.
+- [Gate A: a compiled C program](testing/gate-a.md) — The two milestones, what the A1 test checks and what it does not show.
 - [Mutation testing](testing/mutation.md) and [benchmark protocol](testing/benchmarks.md) — Test sensitivity, benchmark inputs, and timing requirements.
 
 ## Research and engineering decisions
 
 - [Public sources](research/sources.md), [RDNA 2 notes](research/rdna2.md), and [Xbox GPU evidence](research/xbox-gpu.md) — Specifications, evidence scope, and unknown console behavior.
 - [Shader inputs](research/shader-containers.md) and [risk register](risk-register.md) — Input provenance and unresolved engineering risks.
+- [Texture format inventory](research/texture-formats.md) — Formats and layouts by stage (decode, layout, native upload, sampling, guest), their public specifications, unknowns and ranked follow-ups.
 - [Synthetic integration and upstream evidence](research/synthetic-integration.md) — Audited source snapshots and remaining commercial startup prerequisites.
 
 ## Security, licensing, and contributions
