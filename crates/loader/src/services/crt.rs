@@ -190,6 +190,8 @@ pub(super) fn register(registry: &mut ImportRegistry) {
         registry.alias(CRT_STRING_API, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
     }
+    // The mingw-w64 C runtime imports `memcpy` through this API set.
+    registry.alias("api-ms-win-crt-private-l1-1-0.dll", UCRT, "memcpy");
 }
 
 const ENOMEM: u32 = 12;
