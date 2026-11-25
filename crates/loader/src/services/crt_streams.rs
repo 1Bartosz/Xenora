@@ -64,6 +64,19 @@ pub(super) struct StandardStreams {
     error: Vec<u8>,
     /// The streams `fopen` has open.
     opened: FileStreams,
+    /// Guest blocks that the services returning memory hand out.
+    scratch: Scratch,
+}
+
+/// Guest blocks in the process heap that the C runtime services which return
+/// memory write into. A block stays valid until the next call that fills it
+/// again, which is what the documentation of `strerror` asks for.
+#[derive(Default)]
+struct Scratch {
+    /// The block `strerror` writes its message into, and its size.
+    message: Option<(u64, u64)>,
+    /// The block `localeconv` returns.
+    locale: Option<u64>,
 }
 
 /// What a service returns when it fails with a result and an `errno` value:
@@ -283,6 +296,75 @@ impl StandardStreams {
             Ok(()) => Ok(0),
             Err(errno) => Err(Failed(-1, errno)),
         })
+    }
+
+    /// `fputc`. Writes the character converted to `unsigned char` to the
+    /// stream and returns it, or `EOF` with `errno` set.
+    pub(super) fn put_character(
+        &mut self,
+        drive: &mut ObjectState,
+        character: i32,
+        file: u64,
+    ) -> Outcome<i32> {
+        if file == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        let stream = self.writable(file)?;
+        let byte = [character as u8];
+        Ok(match self.write(drive, stream, &byte)? {
+            Ok(()) => Ok(i32::from(character as u8)),
+            Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `_lock_file` and `_unlock_file`. The lock itself does nothing, and
+    /// that is a consequence of the execution model rather than a swallowed
+    /// error: Xenora's guest scheduler runs one guest thread at a time, so
+    /// two guest threads can never hold the same stream at once.
+    pub(super) fn lock(&self, file: u64) -> Outcome<i32> {
+        if file == 0 {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        // A pointer that is no stream is not modelled.
+        self.stream(file)?;
+        Ok(Ok(0))
+    }
+
+    /// A guest block of at least `size` bytes that a service writes into.
+    /// The same block is used again until a larger one is needed.
+    pub(super) fn message_block(
+        &mut self,
+        memory: &mut GuestMemory,
+        size: u64,
+    ) -> Result<u64, ExitReason> {
+        if let Some((address, capacity)) = self.scratch.message
+            && capacity >= size
+        {
+            return Ok(address);
+        }
+        let address = memory
+            .map_heap_allocation(PROCESS_HEAP, size.max(1) as usize)
+            .map_err(fault)?;
+        self.scratch.message = Some((address, size));
+        Ok(address)
+    }
+
+    /// The guest block `localeconv` returns. It is filled once and stays.
+    pub(super) fn locale_block(
+        &mut self,
+        memory: &mut GuestMemory,
+        size: u64,
+    ) -> Result<u64, ExitReason> {
+        match self.scratch.locale {
+            Some(address) => Ok(address),
+            None => {
+                let address = memory
+                    .map_heap_allocation(PROCESS_HEAP, size.max(1) as usize)
+                    .map_err(fault)?;
+                self.scratch.locale = Some(address);
+                Ok(address)
+            }
+        }
     }
 
     /// `fflush`. A null stream means every open stream. Nothing is ever held

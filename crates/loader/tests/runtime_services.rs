@@ -3050,3 +3050,241 @@ fn inspection_reports_exactly_what_binding_resolves() {
     );
     assert_eq!(report.imports[4].symbol, "Ordinal#1");
 }
+
+/// The NUL-terminated string at `address` in guest memory.
+fn guest_string(memory: &GuestMemory, address: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut at = address;
+    loop {
+        match memory.read_u8(at).unwrap() {
+            0 => break,
+            byte => bytes.push(byte),
+        }
+        at += 1;
+    }
+    bytes
+}
+
+/// A guest that imports one symbol from one module, so that the import table
+/// a program built with mingw-w64 has can be bound and run.
+fn aliased_guest(module: &'static str, symbol: &'static str) -> (DbtEngine, GuestMemory) {
+    let image = build(&[(module, Symbol::Name(symbol))]);
+    let pe = ParsedPe::parse(&image.bytes).unwrap();
+    let mut memory = pe.load_into_memory(&image.bytes).unwrap().memory;
+    memory
+        .map_region(SCRATCH, 0x100, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    memory
+        .map_region(STACK, 0x1000, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let (mut registry, _, _) = standard_with_state(0x01DA_0000_1234_5678);
+    let bound = registry
+        .bind_imports(&pe, &image.bytes, BASE, &mut memory)
+        .unwrap();
+    assert_eq!(bound, 1, "{module}!{symbol}");
+    let mut engine = DbtEngine::new(256 * 1024).unwrap();
+    engine.set_import_registry(registry);
+    (engine, memory)
+}
+
+/// `fputc` "writes the character converted to unsigned char to the stream and
+/// returns it", and returns `EOF` with `errno` set on an error (Microsoft
+/// Learn, fputc). The standard streams are text-mode streams, where "each
+/// line feed is replaced with a carriage return-line feed pair".
+#[test]
+fn fputc_writes_one_character_to_a_stream() {
+    let (mut guest, [input, out, err]) = stdio_guest();
+    assert_eq!(guest.call("fputc", &[u64::from(b'A'), out]), 65);
+    assert_eq!(guest.state.standard_output(), b"A");
+    // A line feed becomes a carriage return and a line feed.
+    assert_eq!(guest.call("fputc", &[u64::from(b'\n'), out]), 10);
+    assert_eq!(guest.state.standard_output(), b"A\r\n");
+    // stderr keeps its own buffer.
+    assert_eq!(guest.call("fputc", &[u64::from(b'!'), err]), 33);
+    assert_eq!(guest.state.standard_error(), b"!");
+    // The character is converted to unsigned char.
+    assert_eq!(guest.call("fputc", &[u64::from(u32::MAX), out]), 255);
+    assert_eq!(guest.state.standard_output()[3..], [0xFF]);
+
+    // A null stream is an error.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("fputc", &[u64::from(b'A'), 0]) & 0xFFFF_FFFF,
+        STDIO_MINUS_ONE
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    guest.set_errno(0);
+    // stdin cannot be written to, and a pointer that is no stream is not
+    // modelled.
+    for stream in [input, TEXT, out + 4, 16] {
+        assert_eq!(
+            guest.run("fputc", &[u64::from(b'A'), stream]).1,
+            LIMIT,
+            "{stream:#x}"
+        );
+    }
+    assert_eq!(guest.state.standard_output().len(), 4);
+    assert_eq!(guest.errno(), 0);
+}
+
+/// `strerror` "returns a pointer to the message that describes the error
+/// number" (Microsoft Learn, strerror). The message stays valid until the
+/// next call. The runtime names the error numbers it uses the way `perror`
+/// names them.
+#[test]
+fn strerror_names_the_error_numbers_the_runtime_uses() {
+    let mut guest = Guest::new();
+    for (code, text) in [
+        (2i32, &b"No such file or directory"[..]),
+        (5, &b"Input/output error"[..]),
+        (9, &b"Bad file descriptor"[..]),
+        (12, &b"Not enough space"[..]),
+        (13, &b"Permission denied"[..]),
+        (22, &b"Invalid argument"[..]),
+        (28, &b"No space left on device"[..]),
+        (999, &b"Unknown error"[..]),
+        (-1, &b"Unknown error"[..]),
+    ] {
+        let address = guest.call("strerror", &[code as u64]);
+        assert_ne!(address, 0, "code {code}");
+        assert_eq!(guest_string(&guest.memory, address), text, "code {code}");
+    }
+}
+
+/// `localeconv` "gets detailed information about numeric formatting for the
+/// current locale" (Microsoft Learn, localeconv). Only the C locale is
+/// modelled: its decimal point is ".", its thousands separator and its
+/// grouping are empty, and the C locale has no monetary formatting, so every
+/// numeric member is `CHAR_MAX`, the value of a member the current locale
+/// does not provide.
+#[test]
+fn localeconv_returns_the_c_locale() {
+    let mut guest = Guest::new();
+    let address = guest.call("localeconv", &[]);
+    assert_ne!(address, 0);
+    let pointer = |index: u64| guest.memory.read_u64(address + 8 * index).unwrap();
+    let text = |at: u64| guest_string(&guest.memory, at);
+    assert_eq!(text(pointer(0)), b".");
+    for index in 1..10 {
+        assert_eq!(text(pointer(index)), b"", "member {index}");
+    }
+    for index in 0..8 {
+        assert_eq!(
+            guest.memory.read_u8(address + 80 + index).unwrap(),
+            127,
+            "member {index}"
+        );
+    }
+}
+
+/// The C locale is single-byte, so one byte is one character. `mbrtowc`
+/// "returns the number of bytes in the multibyte character", or `(size_t)-1`
+/// if it is not a valid multibyte character (Microsoft Learn, mbrtowc);
+/// `wcrtomb` "returns the number of bytes written", or `(size_t)-1` if the
+/// wide character cannot be represented (Microsoft Learn, wcrtomb). The
+/// `mbstate_t` is not used in the C locale.
+#[test]
+fn mbrtowc_and_wcrtomb_convert_the_characters_of_the_c_locale() {
+    let mut guest = Guest::new();
+    guest
+        .memory
+        .map_region(TEXT, TEXT_LEN, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let wide = TEXT;
+    let narrow = TEXT + 0x100;
+    let state = TEXT + 0x200;
+    let untouched = 0x1234_5678_9ABC_DEF0;
+    guest.memory.write_u64(state, untouched).unwrap();
+
+    // A byte of the basic character set is one wide character.
+    assert_eq!(guest.call("mbrtowc", &[wide, 1, u64::from(b'A'), 0]), 1);
+    assert_eq!(guest.memory.read_u32(wide).unwrap(), u32::from(b'A'));
+    // A byte above the basic character set is not a character of the C locale.
+    assert_eq!(guest.call("mbrtowc", &[wide, 1, 0x80, 0]), u64::MAX);
+    // The null character is a character of no bytes.
+    assert_eq!(guest.call("mbrtowc", &[wide, 1, 0, 0]), 0);
+    assert_eq!(guest.memory.read_u32(wide).unwrap(), 0);
+    // Nothing to convert.
+    assert_eq!(guest.call("mbrtowc", &[wide, 0, u64::from(b'A'), 0]), 0);
+    // The conversion happens without a place to put it.
+    assert_eq!(guest.call("mbrtowc", &[0, 1, u64::from(b'A'), 0]), 1);
+    // The state is left alone.
+    assert_eq!(guest.call("mbrtowc", &[wide, 1, u64::from(b'A'), state]), 1);
+    assert_eq!(guest.memory.read_u64(state).unwrap(), untouched);
+
+    // A wide character of the basic character set is one byte.
+    assert_eq!(guest.call("wcrtomb", &[narrow, u64::from(b'A'), 0]), 1);
+    assert_eq!(guest.memory.read_u8(narrow).unwrap(), b'A');
+    // A wide character the C locale cannot represent.
+    assert_eq!(guest.call("wcrtomb", &[narrow, 0x100, 0]), u64::MAX);
+    // The conversion happens without a place to put it.
+    assert_eq!(guest.call("wcrtomb", &[0, u64::from(b'A'), 0]), 1);
+    // The state is left alone.
+    assert_eq!(guest.call("wcrtomb", &[narrow, u64::from(b'A'), state]), 1);
+    assert_eq!(guest.memory.read_u64(state).unwrap(), untouched);
+}
+
+/// `_lock_file` "returns 0 if the file is locked successfully" and -1 with
+/// `errno` set to `EBADF` for an invalid file (Microsoft Learn, _lock_file).
+/// The lock itself does nothing: Xenora's guest scheduler runs one guest
+/// thread at a time, so two guest threads can never hold the same stream at
+/// once.
+#[test]
+fn locking_a_stream_succeeds_and_a_null_stream_fails() {
+    let (mut guest, [input, out, _]) = stdio_guest();
+    // The mode of the lock does not change the result.
+    for mode in [0u64, 1, 2] {
+        assert_eq!(guest.call("_lock_file", &[out, mode]) & 0xFFFF_FFFF, 0);
+        assert_eq!(guest.call("_unlock_file", &[out]) & 0xFFFF_FFFF, 0);
+    }
+    // A stream that cannot be written to can still be locked.
+    assert_eq!(guest.call("_lock_file", &[input, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_unlock_file", &[input]) & 0xFFFF_FFFF, 0);
+
+    // A null stream is an invalid file.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_lock_file", &[0, 0]) & 0xFFFF_FFFF,
+        STDIO_MINUS_ONE
+    );
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_unlock_file", &[0]) & 0xFFFF_FFFF,
+        STDIO_MINUS_ONE
+    );
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    // A pointer that is no stream is not modelled.
+    for stream in [TEXT, out + 4, 16] {
+        assert_eq!(
+            guest.run("_lock_file", &[stream, 0]).1,
+            LIMIT,
+            "{stream:#x}"
+        );
+        assert_eq!(guest.run("_unlock_file", &[stream]).1, LIMIT, "{stream:#x}");
+    }
+    assert_eq!(guest.errno(), 0);
+}
+
+/// The API set a program built with mingw-w64 imports `memmove` from
+/// forwards it to `ucrtbase.dll`, so a guest that imports it that way binds
+/// and runs.
+#[test]
+fn memmove_binds_through_the_private_api_set() {
+    const PRIVATE: &str = "api-ms-win-crt-private-l1-1-0.dll";
+    let (mut engine, mut memory) = aliased_guest(PRIVATE, "memmove");
+    let source = SCRATCH;
+    let destination = SCRATCH + 0x40;
+    memory.write_bytes(source, b"moved").unwrap();
+    let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA), STACK_TOP);
+    cpu.set(Register::Rcx, destination);
+    cpu.set(Register::Rdx, source);
+    cpu.set(Register::R8, 5);
+    let result = engine.run(&mut cpu, &mut memory, 8);
+    assert_eq!(result.exit_reason, ExitReason::Halt);
+    let moved: Vec<u8> = (0..5)
+        .map(|index| memory.read_u8(destination + index).unwrap())
+        .collect();
+    assert_eq!(moved, b"moved");
+}

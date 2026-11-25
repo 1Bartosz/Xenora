@@ -772,6 +772,39 @@ compare function. Colour and the stored depth are both read back.
 These passes are checked on the GPU with Metal validation against expectations
 derived independently from the public semantics; synthetic fixtures only.
 
+## Hosted C++ guests and the cooperative scheduler
+
+`run_synthetic_startup` runs the guest's entry point directly on the calling
+thread, so a guest that called `CreateThread` was refused with
+`ERROR_NOT_SUPPORTED`: the thread services require a scheduler, because they
+run a guest thread and let it wait for another.
+
+`run_synthetic_startup_scheduled` runs the same startup under the
+[deterministic cooperative scheduler](../crates/loader/src/scheduler.rs). The
+entry point and every thread it creates take turns, one guest thread at a
+time, and share one instruction budget. The state passed to it must be the one
+the import registry was built with, because the scheduler finds the guest's
+threads through it. A guest that exits the process still reports its own exit
+status.
+
+A hosted C++ guest additionally needs the C++ runtime services. `libstdc++-6.dll`
+provides `operator new` and `operator delete`, which reuse the same guest heap
+the C runtime's `malloc` and `free` use, `std::string`'s out-of-line
+`_M_dispose` and `_S_copy`, and libstdc++'s error paths. Those error paths are
+noreturn functions: Xenora implements no C++ exception machinery, so they stop
+the guest with the runtime-limit fault instead of returning.
+
+`libgcc_s_seh-1.dll!__emutls_get_address` provides GCC's emulated
+thread-local storage. The compiler emits a descriptor holding one variable's
+size and alignment and passes the descriptor's address; the runtime returns the
+calling thread's own block for that descriptor, so two guest threads never
+share a thread-local variable.
+
+C++ exceptions and stack unwinding are **not** implemented. They need a
+guest-side SEH unwinder that walks the guest stack through its
+`RUNTIME_FUNCTION` tables, not a service, so a C++ guest is built with
+`-fno-exceptions` until that milestone lands.
+
 ## Guest graphics command path
 
 `xenora_graphics.dll` exposes the graphics runtime to guest code, so a guest

@@ -203,6 +203,66 @@ service ucrtbase.dll perror(message: ptr) -> void
     ref stdio.h perror
     test perror_writes_the_message_and_the_error_text_to_stderr
 
+# The Universal C runtime services that a C++ guest's runtime imports. Only
+# the C locale is modelled: its characters are the basic character set, its
+# decimal point is "." and its thousands separator and grouping are empty.
+
+service ucrtbase.dll fputc(character: i32, stream: ptr) -> i32
+    handler fputc
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream
+    ref stdio.h fputc
+    test fputc_writes_one_character_to_a_stream
+
+service ucrtbase.dll strerror(code: i32) -> ptr
+    handler strerror
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails never; the message is valid until the next call
+    ref string.h strerror
+    test strerror_names_the_error_numbers_the_runtime_uses
+
+service ucrtbase.dll localeconv() -> ptr
+    handler localeconv
+    status partial
+    alias api-ms-win-crt-locale-l1-1-0.dll
+    fails stops the guest when the block cannot be allocated
+    ref corecrt_locale.h localeconv and struct lconv
+    test localeconv_returns_the_c_locale
+
+service ucrtbase.dll mbrtowc(output: ptr, count: u64, character: i32, state: ptr) -> u64
+    handler mbrtowc
+    status partial
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails (size_t)-1 for a byte that is not a character of the C locale; errno is not set
+    ref Microsoft Learn, mbrtowc; the registry declares the multibyte character by value
+    test mbrtowc_and_wcrtomb_convert_the_characters_of_the_c_locale
+
+service ucrtbase.dll wcrtomb(output: ptr, character: u32, state: ptr) -> u64
+    handler wcrtomb
+    status partial
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails (size_t)-1 for a wide character the C locale cannot represent; errno is not set
+    ref Microsoft Learn, wcrtomb
+    test mbrtowc_and_wcrtomb_convert_the_characters_of_the_c_locale
+
+service ucrtbase.dll _lock_file(stream: ptr, mode: i32) -> i32
+    handler _lock_file
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EBADF for a null stream; stops the guest for a pointer that is no stream
+    ref corecrt_file.h _lock_file
+    test locking_a_stream_succeeds_and_a_null_stream_fails
+
+service ucrtbase.dll _unlock_file(stream: ptr) -> i32
+    handler _unlock_file
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EBADF for a null stream; stops the guest for a pointer that is no stream
+    ref corecrt_file.h _unlock_file
+    test locking_a_stream_succeeds_and_a_null_stream_fails
+
 service kernel32.dll GetLastError() -> u32
     handler get_last_error
     status partial
