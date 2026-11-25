@@ -21,7 +21,7 @@
 
 use super::ObjectState;
 use super::crt_files::{self, EBADF, EINVAL, FileStreams};
-use super::crt_format::{self, FormatError, Source};
+use super::crt_format::{self, Floats, FormatError, Source};
 use crate::cpu::ExitReason;
 use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
 
@@ -36,11 +36,15 @@ const MAX_NAME: u64 = 260;
 /// The most each captured stream keeps. Writing past it stops the guest.
 pub const MAX_CAPTURED_OUTPUT: usize = 16 << 20;
 
-/// Option bits of `__stdio_common_vfprintf` (corecrt_stdio_config.h) that do
-/// not change anything this engine formats: the wide-specifier bit concerns
-/// the wide functions, and the exponent and rounding bits concern floating
-/// point. Any other bit stops the guest.
-const IGNORED_OPTIONS: u64 = 0x04 | 0x10 | 0x20;
+/// Option bits of `__stdio_common_vfprintf` (corecrt_stdio_config.h). The
+/// wide-specifier bit concerns the wide functions and changes nothing this
+/// engine formats. The other two say how floating point is written. Any
+/// other bit stops the guest.
+const LEGACY_WIDE_SPECIFIERS: u64 = 0x04;
+const LEGACY_THREE_DIGIT_EXPONENTS: u64 = 0x10;
+const STANDARD_ROUNDING: u64 = 0x20;
+const KNOWN_OPTIONS: u64 =
+    LEGACY_WIDE_SPECIFIERS | LEGACY_THREE_DIGIT_EXPONENTS | STANDARD_ROUNDING;
 
 /// `_IOFBF`, `_IOLBF` and `_IONBF` (stdio.h).
 const IOFBF: i32 = 0x0000;
@@ -214,7 +218,7 @@ impl StandardStreams {
         if file == 0 || format == 0 {
             return Ok(Err(Failed(-1, EINVAL)));
         }
-        if options & !IGNORED_OPTIONS != 0 || locale != 0 {
+        if options & !KNOWN_OPTIONS != 0 || locale != 0 {
             return Err(RUNTIME_LIMIT);
         }
         let stream = self.writable(file)?;
@@ -226,7 +230,11 @@ impl StandardStreams {
             memory,
             next: arguments,
         };
-        let text = match crt_format::format(&template, &mut source) {
+        let floats = Floats {
+            three_digit_exponents: options & LEGACY_THREE_DIGIT_EXPONENTS != 0,
+            standard_rounding: options & STANDARD_ROUNDING != 0,
+        };
+        let text = match crt_format::format(&template, &mut source, floats) {
             Ok(text) => text,
             // Windows calls the invalid parameter handler for an invalid
             // format. Xenora's choice for when execution continues: nothing

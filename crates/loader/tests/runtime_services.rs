@@ -765,6 +765,40 @@ fn formatted_output_reaches_the_captured_standard_streams() {
     assert_eq!(expected.len(), 50);
     assert_eq!(fresh.state.standard_output(), expected);
 
+    // A double is one slot of the va_list too: its bits, between an int and
+    // a string. 0.1 is not exact, and prints as its nearest decimal.
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let one = place(&mut fresh, STRINGS, b"one");
+    let slots = [
+        7,
+        3.25f64.to_bits(),
+        one,
+        0.1f64.to_bits(),
+        (-1e100f64).to_bits(),
+    ];
+    let text: &[u8] = b"%d %.2f %s %g %e";
+    let expected: &[u8] = b"7 3.25 one 0.1 -1.000000e+100";
+    assert_eq!(print(&mut fresh, out, text, &slots), 29);
+    assert_eq!(expected.len(), 29);
+    assert_eq!(fresh.state.standard_output(), expected);
+
+    // The option bits that concern floating point. With the three-digit
+    // exponent bit the e style has three; without the standard rounding bit
+    // no floating point is printed and the guest stops, while a call that
+    // formats none is unaffected.
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let slots = [1.5f64.to_bits()];
+    let (count, exit) = print_with(&mut fresh, MINGW_OPTIONS | 0x10, out, b"%e", &slots);
+    assert_eq!((count, exit), (13, ExitReason::Halt));
+    assert_eq!(fresh.state.standard_output(), b"1.500000e+000");
+    for options in [0x04, 0x00, 0x14] {
+        let (count, exit) = print_with(&mut fresh, options, out, b" %d", &[7]);
+        assert_eq!((count, exit), (2, ExitReason::Halt), "{options:#x}");
+        let (_, exit) = print_with(&mut fresh, options, out, b"%f", &slots);
+        assert_eq!(exit, LIMIT, "{options:#x}");
+    }
+    assert_eq!(fresh.state.standard_output(), b"1.500000e+000 7 7 7");
+
     // Several line feeds in one call, text with none, and an empty format.
     let (mut guest, [_, out, _]) = stdio_guest();
     assert_eq!(print(&mut guest, out, b"a\n\nb\n", &[]), 5);
@@ -826,8 +860,9 @@ fn formatted_output_refuses_what_it_cannot_print_correctly() {
     }
     quiet(&guest);
 
-    // Floating point and wide strings are valid and not modelled.
-    for format in [&b"%f"[..], b"ok %d then %g", b"%ls", b"%S", b"%lc"] {
+    // Wide characters and strings are valid and not modelled, and nothing
+    // before them is written.
+    for format in [&b"%ls"[..], b"ok %d then %S", b"%f then %lc", b"%S", b"%lc"] {
         let (_, exit) = print_with(&mut guest, MINGW_OPTIONS, out, format, &[1, 2]);
         assert_eq!(exit, LIMIT, "{}", String::from_utf8_lossy(format));
     }
