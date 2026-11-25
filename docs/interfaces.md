@@ -533,7 +533,8 @@ See Microsoft's [event object documentation](https://learn.microsoft.com/windows
 ### Locks, one-time initialization and thread-local storage
 
 These services keep their state in the runtime and key ownership by guest
-TEB. These objects do not block through the guest scheduler yet, so any call that would block stops the
+TEB. With an attached scheduler a call that has to wait blocks only the calling
+guest thread ([guest threads](runtime/threads.md)). Without one it stops the
 guest with the runtime-limit fault (`IllegalInstruction(0xFE)`) rather than
 reporting success. Guest code reaches that fault by entering a critical
 section owned by another thread, acquiring a held SRW lock, or beginning a
@@ -541,7 +542,7 @@ one-time initialization that another thread has pending.
 
 - Critical sections use the x64 `RTL_CRITICAL_SECTION` layout from
   `winnt.h`. Initialization writes the 40-byte structure. `LockCount` is -1
-  when free and -2 when held; the runtime also updates `RecursionCount` and
+  when free and -2 when held, also while threads wait; the runtime also updates `RecursionCount` and
   `OwningThread`. The owner may enter recursively. `TryEnterCriticalSection`
   returns FALSE when another thread owns it. Leaving a section the caller
   does not own, or using one that was never initialized, stops the guest.
@@ -551,8 +552,13 @@ one-time initialization that another thread has pending.
   recursive. Releasing a mode the caller does not hold stops the guest.
 - Condition variables check that the caller holds the named lock. A
   zero-timeout sleep returns FALSE with `ERROR_TIMEOUT` and leaves the lock
-  held in its original mode. Longer sleeps return `ERROR_NOT_SUPPORTED`.
-  Wake calls do nothing, because no thread can be sleeping.
+  held in its original mode. With a scheduler, longer sleeps release the lock,
+  block and return with it held again: TRUE when woken, FALSE with
+  `ERROR_TIMEOUT` otherwise. `WakeConditionVariable` wakes the thread that has
+  slept longest, and `WakeAllConditionVariable` wakes all. A wake-up with no
+  sleeper is not remembered. Sleeping with a section entered more than once
+  stops the guest. Without a scheduler longer sleeps return
+  `ERROR_NOT_SUPPORTED`.
 - `InitOnceBeginInitialize` and `InitOnceComplete` support the synchronous
   mode, `INIT_ONCE_CHECK_ONLY` and `INIT_ONCE_INIT_FAILED`. The completed
   context is stored in the `INIT_ONCE` word, so later calls read it back.
@@ -599,10 +605,11 @@ separately, for diagnostics.
 - `QueryUnbiasedInterruptTime` reports 100 ns ticks since the service state
   was created.
 - `Sleep` and `SleepEx` suspend the calling thread through the clock, so the
-  mock clock advances instead of waiting. No APCs exist, so an alertable sleep
-  always returns zero. `INFINITE` and sleeps longer than 10 seconds stop the
-  guest with the runtime-limit fault, because a single guest thread could not
-  be woken.
+  mock clock advances instead of waiting. With a scheduler other guest threads
+  run meanwhile, zero gives up the rest of the turn, and any duration is
+  accepted. No APCs exist, so an alertable sleep always returns zero. Without a
+  scheduler, `INFINITE` and sleeps longer than 10 seconds stop the guest with
+  the runtime-limit fault, because a single guest thread could not be woken.
 
 ### Services that call guest code
 
