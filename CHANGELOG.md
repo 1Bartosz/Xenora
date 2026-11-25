@@ -138,6 +138,8 @@ remains unsupported.
 
 - Added nested guest directories and checked file deletion on the synthetic drive.
 
+- Added the second Gate A milestone, A2 (#419): an original hosted C program, `tests/compat_fixtures/gate_a2.c`, built from source by the new test `crates/loader/tests/gate_a2.rs` with the mingw-w64 C runtime (UCRT) and run through the loader, the standard services and the ARM64 DBT. The runtime's own startup code runs before `main`. The program takes `argc` and `argv`, sorts heap data with `qsort`, prints with `printf`, writes a report with `fprintf` and reads it back with `fgets`, registers a function with `atexit` and returns from `main`. At `-O0`, `-O1`, `-O2` and `-Os` it ends with exit status 0, and its captured output and its report match, byte for byte, text recomputed in Rust. Seven more tests cover other arguments, four wrong command lines, a step budget that is too small, and control variants that end in a failed check, in `exit(42)` and in `abort()`. The test needs mingw-w64 on the host and fails, not skips, without it, so the CI workflow now installs it. Nothing from mingw-w64 is stored in the repository. Local runs used mingw-w64 14.0.0 with GCC 16.2.0. This is one program and one C runtime, compared by hand with a native build of the same source and not with Windows or x86 hardware; `docs/testing/gate-a.md` lists what it does not show. Awaiting independent review.
+
 - Added file seeking and end-of-file resizing on the synthetic guest drive.
 
 - Added a bounded synthetic guest drive with synchronous file open, read, write, and size queries.
