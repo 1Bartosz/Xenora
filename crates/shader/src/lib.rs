@@ -113,6 +113,12 @@ impl fmt::Display for Value {
 #[derive(Clone, Copy)]
 enum Op {
     Load,
+    /// One word of a scalar buffer load: `input[word]`, or the register's old
+    /// value where the dispatch has no such word. Wave-uniform.
+    ScalarLoad {
+        word: u32,
+        old: Value,
+    },
     Constant(u32),
     Binary(Binary, Value, Value),
     Unary(VectorUnary, Value),
@@ -171,6 +177,7 @@ impl Op {
     fn operands(self) -> Vec<Value> {
         match self {
             Self::Load | Self::Constant(_) | Self::ScalarBranch { .. } => Vec::new(),
+            Self::ScalarLoad { old, .. } => vec![old],
             Self::Binary(_, left, right) => vec![left, right],
             Self::Unary(_, source) => vec![source],
             Self::MergeLanes {
@@ -205,6 +212,9 @@ impl Op {
     fn expression(self, name: &dyn Fn(Value) -> String, index: &str, lane: &str) -> String {
         match self {
             Self::Load => format!("input[{index}]"),
+            Self::ScalarLoad { word, old } => {
+                format!("{word}u < grid ? input[{word}u] : {}", name(old))
+            }
             Self::Constant(value) => format!("0x{value:08x}u"),
             Self::Unary(op, source) => {
                 let src = name(source);
@@ -526,10 +536,13 @@ pub fn compile_with(
 
     let disassembly = decoded.iter().map(|line| format!("{line}\n")).collect();
     let mut ir = String::new();
-    let has_mask = operations
-        .iter()
-        .any(|(_, operation)| matches!(operation, Op::LaneMask { .. } | Op::CarryMask { .. }));
-    let grid = if has_mask {
+    let reads_grid = operations.iter().any(|(_, operation)| {
+        matches!(
+            operation,
+            Op::LaneMask { .. } | Op::CarryMask { .. } | Op::ScalarLoad { .. }
+        )
+    });
+    let grid = if reads_grid {
         ",\n    uint grid [[threads_per_grid]]"
     } else {
         ""
@@ -562,6 +575,10 @@ pub fn compile_with(
                     "uint {dest} = {};",
                     operation.expression(&thread, "index", "")
                 ),
+            ),
+            Op::ScalarLoad { word, old } => (
+                format!("{dest} = load.uniform.u32 input[{word}], {old}"),
+                format!("uint {dest} = {};", operation.expression(&thread, "", "")),
             ),
             Op::Constant(value) => (
                 format!("{dest} = const.u32 0x{value:08x}"),
@@ -784,6 +801,16 @@ enum ScalarValue {
     Uninitialized,
     Known(u32),
     RuntimeMask,
+    /// A wave-uniform value known only at run time.
+    Runtime(Value),
+    /// The destination of a scalar load without a completed wait.
+    Pending(Value),
+}
+
+fn scalar_load_pending(scalars: &[ScalarValue]) -> bool {
+    scalars
+        .iter()
+        .any(|value| matches!(value, ScalarValue::Pending(_)))
 }
 
 fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, Op)>, CompileError> {
@@ -825,6 +852,9 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             Instruction::BufferStoreDword {
                 index, resource, ..
             } if (index, resource) != (0, 4) => "unsupported resource or buffer index",
+            Instruction::ScalarBufferLoad { resource, .. } if resource != 0 => {
+                "unsupported resource or buffer index"
+            }
             Instruction::Export { .. }
             | Instruction::Interpolate { .. }
             | Instruction::ImageSampleLz { .. } => {
@@ -935,10 +965,24 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 Some(ScalarValue::RuntimeMask) => Err(error(
                     "scalar source reads a runtime-only SGPR compare mask",
                 )),
+                Some(ScalarValue::Runtime(_)) => {
+                    Err(error("scalar source reads a run-time loaded SGPR"))
+                }
+                Some(ScalarValue::Pending(_)) => Err(error(
+                    "scalar source reads an SGPR pending a scalar load wait",
+                )),
                 Some(ScalarValue::Uninitialized) | None => {
                     Err(error("scalar source has no known value"))
                 }
             },
+        };
+        // A wave-uniform operand of a vector instruction.
+        let read_uniform = |register: u8, operations: &mut Vec<_>, facts: &mut Vec<_>| {
+            if let Some(ScalarValue::Runtime(value)) = scalars.get(usize::from(register)) {
+                return Ok(*value);
+            }
+            let bits = read_scalar(ScalarSource::Register(register))?;
+            Ok(constant(operations, facts, offset, bits))
         };
         let read_vector = |source, operations: &mut Vec<_>, facts: &mut Vec<_>| {
             Ok(match source {
@@ -954,10 +998,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         }
                     }
                 }
-                VectorSource::Scalar(register) => {
-                    let bits = read_scalar(ScalarSource::Register(register))?;
-                    constant(operations, facts, offset, bits)
-                }
+                VectorSource::Scalar(register) => read_uniform(register, operations, facts)?,
                 VectorSource::Immediate(bits) => constant(operations, facts, offset, bits),
             })
         };
@@ -1002,6 +1043,16 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 ));
             }
         }
+        if let Instruction::ScalarUnary { dst, .. }
+        | Instruction::ScalarAlu { dst, .. }
+        | Instruction::ScalarImmediate { dst, .. }
+        | Instruction::VectorCompareVop3 { sdst: dst, .. } = instruction.instruction
+            && matches!(scalars.get(usize::from(dst)), Some(ScalarValue::Pending(_)))
+        {
+            return Err(error(
+                "instruction writes an SGPR pending a scalar load wait",
+            ));
+        }
         let next = Value(operations.len());
         let (dest, operation) = match instruction.instruction {
             Instruction::BufferLoadDword { data, .. } => {
@@ -1025,6 +1076,50 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             }
             Instruction::WaitStore => {
                 store_pending = false;
+                continue;
+            }
+            // docs/shaders/scalar-memory.md.
+            Instruction::ScalarBufferLoad {
+                dst,
+                offset: immediate,
+                soffset,
+                dwords,
+                ..
+            } => {
+                if dst < 8 {
+                    return Err(error("scalar load would modify a resource descriptor"));
+                }
+                let extra = match soffset {
+                    Some(register) => read_scalar(ScalarSource::Register(register))?,
+                    None => 0,
+                };
+                let first = (u64::from(immediate) + u64::from(extra)) / 4;
+                let mut loaded = Vec::new();
+                for index in 0..dwords {
+                    let old = read_uniform(dst + index, &mut operations, &mut facts)?;
+                    let word = first + u64::from(index);
+                    loaded.push(match u32::try_from(word) {
+                        Ok(word) if word < u32::MAX => {
+                            let value = Value(operations.len());
+                            operations.push((offset, Op::ScalarLoad { word, old }));
+                            facts.push(KnownBits::UNKNOWN);
+                            value
+                        }
+                        // Beyond any dispatch: the word is not loaded.
+                        _ => old,
+                    });
+                }
+                for (slot, value) in (usize::from(dst)..).zip(loaded) {
+                    scalars[slot] = ScalarValue::Pending(value);
+                }
+                continue;
+            }
+            Instruction::WaitScalarLoad => {
+                for slot in &mut scalars {
+                    if let ScalarValue::Pending(value) = *slot {
+                        *slot = ScalarValue::Runtime(value);
+                    }
+                }
                 continue;
             }
             Instruction::MoveB32 {
@@ -1074,7 +1169,27 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 )?);
                 continue;
             }
-            // SGPR values are wave-uniform and known during translation.
+            Instruction::MoveB32 {
+                dst,
+                src: VectorSource::Scalar(register),
+            } if let ScalarValue::Runtime(value) = scalars[usize::from(register)] => {
+                let slot = usize::from(dst);
+                if dst == 0 || pending_load.is_some_and(|(register, _)| register == slot) {
+                    return Err(error(
+                        "move writes the index register or replaces a pending load",
+                    ));
+                }
+                registers[slot] = Some(merge_lanes(
+                    &mut operations,
+                    &mut facts,
+                    offset,
+                    exec,
+                    value,
+                    registers[slot],
+                )?);
+                continue;
+            }
+            // Other SGPR values are wave-uniform and known during translation.
             Instruction::MoveB32 {
                 dst,
                 src: VectorSource::Scalar(register),
@@ -1183,6 +1298,9 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         ScalarValue::RuntimeMask => {
                             return Err(error("SOPK reads a runtime-only SGPR compare mask"));
                         }
+                        ScalarValue::Runtime(_) | ScalarValue::Pending(_) => {
+                            return Err(error("SOPK reads a run-time loaded SGPR"));
+                        }
                         ScalarValue::Uninitialized => {
                             return Err(error("SOPK reads an uninitialized SGPR"));
                         }
@@ -1248,8 +1366,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     let left = match src0 {
                         VectorSource::Register(base) => read(base + 1)?,
                         VectorSource::Scalar(base) => {
-                            let bits = read_scalar(ScalarSource::Register(base + 1))?;
-                            constant(&mut operations, &mut facts, bits)
+                            read_uniform(base + 1, &mut operations, &mut facts)?
                         }
                         VectorSource::Immediate(bits) => {
                             let high = ((bits as i32) >> 31) as u32;
@@ -1274,8 +1391,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         }
                     }
                     VectorSource::Scalar(register) => {
-                        let bits = read_scalar(ScalarSource::Register(register))?;
-                        constant(&mut operations, &mut facts, bits)
+                        read_uniform(register, &mut operations, &mut facts)?
                     }
                     VectorSource::Immediate(bits) => constant(&mut operations, &mut facts, bits),
                 };
@@ -1321,7 +1437,11 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         continue;
                     }
                     SoppControlOp::EndProgram => {
-                        if !stored || store_pending || pending_load.is_some() {
+                        if !stored
+                            || store_pending
+                            || pending_load.is_some()
+                            || scalar_load_pending(&scalars)
+                        {
                             return Err(error(
                                 "termination requires one completed store and no pending loads",
                             ));
@@ -1336,6 +1456,11 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                             if pending_load.is_some() {
                                 return Err(error(
                                     "a runtime s_cbranch_vccz requires no outstanding vector load",
+                                ));
+                            }
+                            if scalar_load_pending(&scalars) {
+                                return Err(error(
+                                    "a runtime s_cbranch_vccz requires no outstanding scalar load",
                                 ));
                             }
                             region = Some((target, mask, registers));
@@ -1580,6 +1705,10 @@ fn equivalent_value(
 fn map_uses(operation: Op, map: impl Fn(Value) -> Value) -> Op {
     match operation {
         Op::Load | Op::Constant(_) | Op::ScalarBranch { .. } => operation,
+        Op::ScalarLoad { word, old } => Op::ScalarLoad {
+            word,
+            old: map(old),
+        },
         Op::Binary(operator, left, right) => Op::Binary(operator, map(left), map(right)),
         Op::Unary(operator, source) => Op::Unary(operator, map(source)),
         Op::MergeLanes {
