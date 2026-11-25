@@ -48,6 +48,15 @@ pub enum Op {
     },
     WaitRead,
     WaitWrite,
+    /// SMEM `S_BUFFER_LOAD_DWORD`, `_X2` and `_X4` into consecutive SGPRs.
+    ScalarLoad {
+        data: u8,
+        resource: u8,
+        offset: u32,
+        register: Option<u8>,
+        dwords: u8,
+    },
+    WaitScalar,
     Move(u8, Source),
     Add(u8, u8, u8),
     ScalarMove(u8, Source),
@@ -527,6 +536,12 @@ pub fn execute(code: &[u8], input: &[u32]) -> Result<Vec<u32>, ReferenceError> {
                     "store outside synthetic binding ABI",
                 ));
             }
+            Op::ScalarLoad { resource, .. } if resource != 0 => {
+                return Err(error(
+                    instruction.offset,
+                    "scalar load outside synthetic binding ABI",
+                ));
+            }
             _ => {}
         }
     }
@@ -540,7 +555,7 @@ pub fn execute(code: &[u8], input: &[u32]) -> Result<Vec<u32>, ReferenceError> {
     // wave has absent lanes, which contribute 0 to compare masks.
     let mut output = Vec::with_capacity(input.len());
     for wave in input.chunks(32) {
-        output.extend(execute_wave(&program, wave)?);
+        output.extend(execute_wave(&program, wave, input)?);
     }
     Ok(output)
 }
@@ -599,6 +614,47 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                 (op, 8)
             }
             [0x70, 0x3f, 0x8c, 0xbf, ..] => (Op::WaitRead, 4),
+            [0x7f, 0xc0, 0x8c, 0xbf, ..] => (Op::WaitScalar, 4),
+            [_, _, 0x20 | 0x24 | 0x28, 0xf4] => {
+                return Err(error(offset, "truncated scalar load"));
+            }
+            // SMEM (guide 13.2.1): byte 3 is the encoding and opcode bits 6-7,
+            // byte 2 the other opcode bits with GLC clear, SBASE and SDATA
+            // across bytes 0 and 1. An even SBASE is an aligned quad.
+            [
+                low,
+                middle @ 0..=0x1f,
+                opcode @ (0x20 | 0x24 | 0x28),
+                0xf4,
+                first,
+                second,
+                third @ 0..=0x0f,
+                selector,
+                ..,
+            ] if low & 1 == 0 && selector & 1 == 0 => {
+                let dwords = 1 << ((opcode >> 2) & 3);
+                let data = (middle << 2) | (low >> 6);
+                let resource = (low & 0x3f) * 2;
+                if data % dwords != 0 || data + dwords > 106 || resource > 100 {
+                    return Err(error(offset, "unsupported scalar load registers"));
+                }
+                let register = match selector >> 1 {
+                    125 => None,
+                    register @ 0..=105 => Some(register),
+                    _ => return Err(error(offset, "unsupported scalar load offset")),
+                };
+                let immediate = u32::from_le_bytes([*first, *second, *third, 0]);
+                (
+                    Op::ScalarLoad {
+                        data,
+                        resource,
+                        offset: immediate,
+                        register,
+                        dwords,
+                    },
+                    8,
+                )
+            }
             [0x00, 0x00, 0xfd, 0xbb, ..] => (Op::WaitWrite, 4),
             [0x00, 0x00, 0x81, 0xbf, ..] => (Op::End, 4),
             [
@@ -1041,7 +1097,13 @@ const EXEC_LO: usize = 126;
 
 /// Runs one Wave32 wave in lockstep. Scalar state is shared by the lanes;
 /// VGPRs, transfers and outputs are per lane.
-fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32>, ReferenceError> {
+/// `input` is the wave's words and `buffer` those of the whole dispatch, which a
+/// scalar load addresses.
+fn execute_wave(
+    program: &[DecodedInstruction],
+    input: &[u32],
+    buffer: &[u32],
+) -> Result<Vec<u32>, ReferenceError> {
     let lanes = input.len();
     let mut registers = vec![[None::<u32>; 256]; lanes];
     let mut scalars = [None; 128];
@@ -1052,6 +1114,8 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
     let mut lane_derived_vcc = false;
     let mut target = 0;
     let mut pending_read = None;
+    // Destinations of scalar loads without a completed wait, and their values.
+    let mut pending_scalars: Vec<(usize, u32)> = Vec::new();
     let mut pending_write = vec![None; lanes];
     let mut output = vec![None; lanes];
     for (position, &DecodedInstruction { offset, op, .. }) in program.iter().enumerate() {
@@ -1059,10 +1123,20 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
             continue;
         }
         let read_scalar = |source| match source {
-            Source::Register(reg) => scalars[usize::from(reg)]
-                .ok_or_else(|| error(offset, "read from uninitialized SGPR")),
+            Source::Register(register) => {
+                let index = usize::from(register);
+                if pending_scalars.iter().any(|(slot, _)| *slot == index) {
+                    return Err(error(offset, "SGPR read before scalar load wait"));
+                }
+                scalars[index].ok_or_else(|| error(offset, "read from uninitialized SGPR"))
+            }
             Source::Immediate(value) => Ok(value),
         };
+        if let Some(destination) = scalar_destination(op)
+            && pending_scalars.iter().any(|(slot, _)| *slot == destination)
+        {
+            return Err(error(offset, "SGPR write before scalar load wait"));
+        }
         let read = |lane: usize, register: u8| {
             if register == 0 {
                 return Err(error(offset, "v0 is reserved for the resource index"));
@@ -1130,6 +1204,38 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                     for (lane, &word) in input.iter().enumerate() {
                         results[lane] = Some((dst, word));
                     }
+                }
+            }
+            Op::ScalarLoad {
+                data,
+                offset: immediate,
+                register,
+                dwords,
+                ..
+            } => {
+                if data < 8 {
+                    return Err(error(offset, "write to a reserved resource SGPR"));
+                }
+                let extra = match register {
+                    Some(register) => read_scalar(Source::Register(register))?,
+                    None => 0,
+                };
+                // Guide 7.2.1: the two low bits of the address are ignored.
+                let byte = u64::from(immediate) + u64::from(extra);
+                let mut values = Vec::new();
+                for index in 0..u64::from(dwords) {
+                    let slot = usize::from(data) + index as usize;
+                    let old = read_scalar(Source::Register(slot as u8))?;
+                    // Guide 7.5: an out-of-range word is not loaded.
+                    let word = usize::try_from(byte / 4 + index).ok();
+                    let value = word.and_then(|word| buffer.get(word)).copied();
+                    values.push((slot, value.unwrap_or(old)));
+                }
+                pending_scalars.extend(values);
+            }
+            Op::WaitScalar => {
+                for (slot, value) in pending_scalars.drain(..) {
+                    scalars[slot] = Some(value);
                 }
             }
             Op::WaitWrite => {
@@ -1580,7 +1686,7 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                         &registers,
                         &scalars,
                         exec,
-                        pending_read.is_some(),
+                        pending_read.is_some() || !pending_scalars.is_empty(),
                         offset,
                     )?;
                 }
@@ -1598,7 +1704,10 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
                 }
             }
             Op::End => {
-                if pending_read.is_some() || pending_write.iter().any(Option::is_some) {
+                if !pending_scalars.is_empty()
+                    || pending_read.is_some()
+                    || pending_write.iter().any(Option::is_some)
+                {
                     return Err(error(offset, "outstanding transfer at termination"));
                 }
                 return output
@@ -1625,6 +1734,20 @@ fn execute_wave(program: &[DecodedInstruction], input: &[u32]) -> Result<Vec<u32
 /// on a lane-derived VCC_LO may hold only integer vector ALU instructions
 /// whose destinations and sources are ready at the branch. Checked on the
 /// code itself, whether or not the branch is taken.
+/// The normal SGPR an operation writes, apart from a scalar load.
+fn scalar_destination(op: Op) -> Option<usize> {
+    match op {
+        Op::ScalarMove(dst, _)
+        | Op::ScalarUnary(_, dst, _)
+        | Op::Scalar(_, dst, ..)
+        | Op::CompareVop3(dst, ..) => Some(usize::from(dst)),
+        Op::ScalarImmediate(kind, dst, _) if !matches!(kind, ScalarImmediate::Compare(_)) => {
+            Some(usize::from(dst))
+        }
+        _ => None,
+    }
+}
+
 fn check_runtime_region(
     following: &[DecodedInstruction],
     end: usize,
