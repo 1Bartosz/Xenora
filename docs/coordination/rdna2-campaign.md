@@ -117,10 +117,10 @@ available.
 | Work | Owner or assignment |
 | --- | --- |
 | [#215](https://github.com/ranveersoni98/Xenora/issues/215), registry and shared semantic infrastructure | elforeign. Agree family scopes and shared changes before claiming work. |
-| [#187](https://github.com/ranveersoni98/Xenora/issues/187), bounded runtime-uniform branches | jelly013, building on #511. |
+| [#187](https://github.com/ranveersoni98/Xenora/issues/187), bounded runtime-uniform branches | jelly013, PR [#536](https://github.com/ranveersoni98/Xenora/pull/536), stacked on #511. |
 | [#189](https://github.com/ranveersoni98/Xenora/issues/189), scalar buffer reads | jelly013, PR #511. |
-| [#188](https://github.com/ranveersoni98/Xenora/issues/188), bounded loops | Unclaimed at kickoff. Agree the control-flow and termination contract with #187 and confirm scope before a claim. |
-| [#190](https://github.com/ranveersoni98/Xenora/issues/190), vector multiply-add | Unclaimed at kickoff. First proposed batch is Wave32 `v_fma_f32` with three VGPR inputs and modifiers clear, pending agreement on the registry and shared paths. |
+| [#188](https://github.com/ranveersoni98/Xenora/issues/188), bounded loops | Unclaimed. Jelly confirmed that #188 can build on #536. Start with one uniform back edge, no outstanding loads and an explicit iteration bound. Confirm scope with the maintainer before claiming. |
+| [#190](https://github.com/ranveersoni98/Xenora/issues/190), vector multiply-add | Unclaimed at kickoff. First proposed batch is Wave32 `v_fma_f32` with three VGPR inputs and modifiers clear, pending agreement with elforeign and the maintainer. Jelly confirmed that the VOP3 and float rules are outside #511 and #536. |
 | [#302](https://github.com/ranveersoni98/Xenora/issues/302), independent acceptance | vedantdadhich21 claimed the policy work. The guide landed in [#332](https://github.com/ranveersoni98/Xenora/pull/332). Confirm the independence rule and pass ownership with the maintainer before promoting rows. |
 
 Kickoff subagents reviewed the inventory independently and researched the
@@ -190,3 +190,4 @@ raw gate output under ignored `artifacts/`.
 | --- | --- | --- |
 | 2026-11-25 17:59 GMT | `c76e974f14c5807ce71ed50da9808b59e4c40d2c` | Kickoff. Reviewed main and the open PRs, including #511. |
 | 2026-11-25 18:03 GMT | `c76e974f14c5807ce71ed50da9808b59e4c40d2c` | Before the roadmap PR. Main unchanged. The focused CPU and native Metal baseline ran on this commit. |
+| 2026-11-25 18:21 GMT | `c76e974f14c5807ce71ed50da9808b59e4c40d2c` | #536 is open on top of #511. Its focused suite passed on M2 Max, including 2,120 cases in 2,116 Metal programs with validation. Main coverage is unchanged. |
