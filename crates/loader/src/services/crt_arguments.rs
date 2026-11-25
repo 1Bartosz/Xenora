@@ -40,7 +40,8 @@ pub enum ProgramArgumentsError {
     /// The arguments and their terminators exceed
     /// [`MAX_PROGRAM_ARGUMENT_BYTES`].
     TooLong,
-    /// The guest has already built `__argv`; it would not see a change.
+    /// The guest has already built `__argv` or read its command line; it would
+    /// not see a change.
     AlreadyConfigured,
 }
 
@@ -72,6 +73,7 @@ pub(super) struct CrtArguments {
     /// Guest address of the block holding `__argc`, `__argv` and `_environ`.
     variables: Option<u64>,
     configured: bool,
+    command_line_read: bool,
     environment_initialized: bool,
 }
 
@@ -81,7 +83,7 @@ fn fault(error: MemoryError) -> ExitReason {
 
 impl CrtArguments {
     pub(super) fn supply(&mut self, arguments: &[&str]) -> Result<(), ProgramArgumentsError> {
-        if self.configured {
+        if self.configured || self.command_line_read {
             return Err(ProgramArgumentsError::AlreadyConfigured);
         }
         if arguments.iter().any(|argument| argument.contains('\0')) {
@@ -98,6 +100,18 @@ impl CrtArguments {
                 .collect(),
         );
         Ok(())
+    }
+
+    /// The arguments as text, for the command line. They cannot change after
+    /// that. With no host input there is one, the empty program name.
+    pub(super) fn for_command_line(&mut self) -> Vec<String> {
+        self.command_line_read = true;
+        let default = [Vec::new()];
+        let arguments = self.supplied.as_deref().unwrap_or(&default);
+        arguments
+            .iter()
+            .map(|argument| String::from_utf8_lossy(argument).into_owned())
+            .collect()
     }
 
     /// Guest address of one of the three variables. They are allocated

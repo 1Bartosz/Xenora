@@ -67,6 +67,25 @@ The runner prints the guest's exit value and returns a nonzero host status
 for load or interpreter faults. The gate compares both outcomes. These
 fixtures exercise synthetic commands and local Apple Silicon readback.
 
+## Process startup programs
+
+`startup_info.c` is an original C program with no C library linked. It reads its
+startup information and command line, narrow and wide, checks that a second read
+gives the same, splits the command line by Microsoft's documented rules after
+trying its splitter on their six examples, saves what it found on the synthetic
+`C:` drive and exits with 0x5157. A failed check exits with its number.
+`startup_info.cpp` is an original hosted C++ program whose global constructor
+reads the same before `main`. It uses the public Windows headers, so its layout
+assertions are independent of the structure declared in the C program.
+
+`build-startup-info.sh [output directory]` builds both with mingw-w64 at `-O0`,
+`-O1`, `-O2` and `-Os`. `MINGW_GCC` names the compiler. Three more builds of the C
+program are controls: `STARTUP_BREAK` expects a wrong size, one imports the four
+functions from API sets, and one names an API set Microsoft's
+pages do not list and must be refused before entry. `cargo test -p xenora-loader --test startup_info` runs
+the script and the programs, and fails when the compiler is missing. No
+executable is committed.
+
 ## A hosted C++ program
 
 `guest_cpp.cpp` is an original C++ program that uses the C++ runtime as an

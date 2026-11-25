@@ -25,6 +25,7 @@ mod heap;
 mod modules;
 mod platform_fixture;
 mod process;
+mod startup_info;
 mod static_cxx;
 mod synch;
 pub mod sysinfo;
@@ -35,6 +36,7 @@ mod winsock;
 use crate::runtime::HResult;
 pub use crt_arguments::{MAX_PROGRAM_ARGUMENT_BYTES, ProgramArgumentsError};
 pub use crt_streams::MAX_CAPTURED_OUTPUT;
+pub use startup_info::{ProcessStartupInfo, StartupInfoError};
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -211,6 +213,7 @@ pub struct ServicesState {
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
     crt_arguments: Mutex<crt_arguments::CrtArguments>,
+    startup: Mutex<startup_info::StartupState>,
     synch: Mutex<synch::Synch>,
     crt_streams: Mutex<crt_streams::StandardStreams>,
     pub(crate) threads: Mutex<threads::ThreadTable>,
@@ -246,6 +249,7 @@ impl ServicesState {
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
             crt_arguments: Mutex::default(),
+            startup: Mutex::default(),
             synch: Mutex::default(),
             crt_streams: Mutex::default(),
             threads: Mutex::default(),
@@ -266,7 +270,8 @@ impl ServicesState {
     }
     /// Give a hosted C program the arguments its `main` receives in `argv`,
     /// program name first. Call it before running the guest: the C runtime's
-    /// startup code builds `argv` once, and a call after that is refused.
+    /// startup code builds `argv` once, and a call after that, or after the
+    /// guest has read its command line, is refused.
     ///
     /// The strings reach the guest as their bytes; no code page is applied.
     /// A host that never calls this gives the program one argument, the empty
@@ -782,6 +787,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     task_fixture::register(registry, &state);
     platform_fixture::register(registry, &state);
     gdk_queue::register(registry, &state);
+    startup_info::register(registry, &state);
     modules::register(registry, &state);
     process::register(registry, &state);
 }
