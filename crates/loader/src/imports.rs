@@ -205,7 +205,15 @@ pub const ENTRY_RETURN: u64 = CALLBACK_RETURN - IMPORT_TRAMPOLINE_STRIDE;
 /// would never run.
 pub const RETURN_SENTINEL_PAGE: u64 = ENTRY_RETURN & !0xFFF;
 const _: () = assert!(CALLBACK_RETURN & !0xFFF == RETURN_SENTINEL_PAGE);
+/// Nested guest callbacks allowed in one guest thread.
 const MAX_CALLBACK_DEPTH: usize = 32;
+
+fn callback_depth(memory: &GuestMemory, teb: u64) -> usize {
+    memory
+        .callback_frames
+        .range((teb, 0)..=(teb, u64::MAX))
+        .count()
+}
 
 pub(crate) struct GuestCallback {
     pub(crate) entry: u64,
@@ -273,6 +281,8 @@ pub(crate) struct CallbackFrame {
 
 /// Registry for resolving and binding import symbols to guest trampoline VAs.
 pub struct ImportRegistry {
+    /// Set by the standard services so a call can end the caller's turn.
+    pub(crate) hooks: Option<Arc<crate::services::threads::SchedulerHooks>>,
     // (lower-case module, name) -> service index. Symbol names keep their case.
     services: HashMap<(String, ImportName), usize>,
     handlers: Vec<ServiceDescriptor>,
@@ -291,6 +301,7 @@ impl Default for ImportRegistry {
 impl ImportRegistry {
     pub fn new() -> Self {
         Self {
+            hooks: None,
             services: HashMap::new(),
             handlers: Vec::new(),
             callback_dispatchers: HashMap::new(),
@@ -618,7 +629,7 @@ impl ImportRegistry {
         args: [u64; 4],
     ) -> Result<(), ExitReason> {
         let key = (cpu.gs_base, slot + 8);
-        if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
+        if callback_depth(memory, cpu.gs_base) >= MAX_CALLBACK_DEPTH
             || memory.callback_frames.contains_key(&key)
         {
             return Err(ExitReason::ServiceAbiViolation);
@@ -751,7 +762,7 @@ impl ImportRegistry {
         }
         if let Some(dispatcher) = self.callback_dispatchers.get(&service_idx) {
             let key = (cpu.gs_base, after);
-            if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
+            if callback_depth(memory, cpu.gs_base) >= MAX_CALLBACK_DEPTH
                 || memory.callback_frames.contains_key(&key)
             {
                 return Err(ExitReason::ServiceAbiViolation);
@@ -792,6 +803,9 @@ impl ImportRegistry {
         cpu.set(Register::Rax, value);
         cpu.set(Register::Rsp, after);
         cpu.rip = ret_addr;
+        if self.hooks.as_ref().is_some_and(|h| h.switch_requested()) {
+            return Err(ExitReason::GuestYield);
+        }
         Ok(())
     }
 }

@@ -77,6 +77,38 @@ fn an_exited_guest_runs_nothing_further() {
     assert_eq!(guest.state.exit_status(), Some(3));
 }
 
+/// Under the guest thread scheduler the engine runs in slices. A process exit
+/// from the scheduled main thread stops the schedule with that exit as its
+/// reason, and sets the engine's exit latch through the sliced entry point, so
+/// nothing runs afterwards. The scheduler has no outcome of its own for a
+/// process exit and reports it as the reason of a `Fault`.
+#[test]
+fn exit_process_under_the_scheduler_ends_the_run() {
+    use xenora_loader::scheduler::Outcome;
+    for quantum in [1, 64, 1_000_000] {
+        let mut guest = Guest::new(IMPORTS, &[]);
+        assert_ne!(guest.call("CreateEventW", &[0, 1, 0, 0]), 0);
+        let report = guest.scheduled("ExitProcess", &[0xAAAA_BBBB_0000_0015], quantum, 10_000);
+        assert!(
+            matches!(
+                report.outcome,
+                Outcome::Fault {
+                    reason: ExitReason::ProcessExit(0x15),
+                    ..
+                }
+            ),
+            "quantum {quantum}: {:?}",
+            report.outcome
+        );
+        assert_eq!(guest.state.exit_status(), Some(0x15));
+        assert_eq!(guest.state.open_handle_count(), 0);
+        // The engine is latched: an unsliced run executes nothing either.
+        let (_, exit) = guest.run("SetLastError", &[5]);
+        assert_eq!(exit, ExitReason::ProcessExit(0x15), "quantum {quantum}");
+        assert_eq!(guest.state.last_error(THREAD_A), 0);
+    }
+}
+
 #[test]
 fn the_first_exit_decides_the_status() {
     // Two calls of the service itself, with no engine in between to stop the

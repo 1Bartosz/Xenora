@@ -197,6 +197,33 @@ impl Guest {
         (cpu.get(Register::Rax), result.exit_reason)
     }
 
+    /// Call an import as the main thread of a scheduled run: the engine runs
+    /// in slices of `quantum` instructions under the guest thread scheduler.
+    pub fn scheduled(
+        &mut self,
+        symbol: &str,
+        args: &[u64],
+        quantum: usize,
+        budget: usize,
+    ) -> xenora_loader::scheduler::ScheduleReport {
+        let index = self
+            .imports
+            .iter()
+            .position(|(_, name)| *name == symbol)
+            .unwrap_or_else(|| panic!("{symbol} is not imported"));
+        let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index as u64, STACK_TOP);
+        cpu.gs_base = self.teb;
+        for (register, value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(register, *value);
+        }
+        xenora_loader::scheduler::Scheduler::new(Arc::clone(&self.state), quantum)
+            .run(&mut self.engine, &mut self.memory, &cpu, budget)
+            .expect("the scheduler attaches")
+    }
+
     pub fn call(&mut self, symbol: &str, args: &[u64]) -> u64 {
         let (rax, exit) = self.run(symbol, args);
         assert_eq!(exit, ExitReason::Halt, "{symbol}");
