@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Semantic primitives for the SSE and SSE2 moves and packed integer forms.
+//! Semantic primitives for the SSE, SSE2 and SSSE3 moves and packed integer forms.
 //!
 //! Lane 0 is the least significant. Every instruction is all-or-nothing and none
 //! changes RFLAGS. Floating-point arithmetic is in [`crate::x86_float`].
@@ -129,6 +129,27 @@ fn shift_bytes(value: u128, count: u64, left: bool) -> u128 {
     }
 }
 
+/// Combine neighbouring lanes: those of `a` give the low half of the result,
+/// those of `b` the high half. `f` gets the lower lane first.
+fn horizontal(a: u128, b: u128, bits: u32, f: impl Fn(i64, i64) -> i64) -> u128 {
+    let half = 64 / bits;
+    build(bits, |index| {
+        let source = if index < half { a } else { b };
+        let at = 2 * (index % half);
+        let value = |at| signed(lane(source, bits, at), bits);
+        f(value(at), value(at + 1)) as u64
+    })
+}
+
+/// `low` with `high` above it, shifted right by `count` bytes. Zeros follow.
+fn align_right(high: u128, low: u128, count: u64) -> u128 {
+    match count {
+        0 => low,
+        1..=15 => low >> (8 * count) | high << (128 - 8 * count),
+        _ => shift_bytes(high, count - 16, false),
+    }
+}
+
 /// Result of a two-source packed operation.
 fn packed(op: Op, a: u128, b: u128) -> u128 {
     match op {
@@ -172,6 +193,29 @@ fn packed(op: Op, a: u128, b: u128) -> u128 {
             let product = |at| signed(lane(a, 16, at), 16) * signed(lane(b, 16, at), 16);
             (product(2 * index) + product(2 * index + 1)) as u64
         }),
+        Op::Pshufb => build(8, |index| match lane(b, 8, index) {
+            control if control & 0x80 != 0 => 0,
+            control => lane(a, 8, (control & 15) as u32),
+        }),
+        Op::Phaddw => horizontal(a, b, 16, |x, y| x + y),
+        Op::Phaddd => horizontal(a, b, 32, |x, y| x + y),
+        Op::Phaddsw => horizontal(a, b, 16, |x, y| saturate(x + y, 16)),
+        Op::Phsubw => horizontal(a, b, 16, |x, y| x - y),
+        Op::Phsubd => horizontal(a, b, 32, |x, y| x - y),
+        Op::Phsubsw => horizontal(a, b, 16, |x, y| saturate(x - y, 16)),
+        // Unsigned destination bytes by signed source bytes.
+        Op::Pmaddubsw => build(16, |index| {
+            let product = |at| lane(a, 8, at) as i64 * signed(lane(b, 8, at), 8);
+            saturate(product(2 * index) + product(2 * index + 1), 16) as u64
+        }),
+        Op::Psignb => map_signed(a, b, 8, |x, y| x * y.signum()),
+        Op::Psignw => map_signed(a, b, 16, |x, y| x * y.signum()),
+        Op::Psignd => map_signed(a, b, 32, |x, y| x * y.signum()),
+        Op::Pmulhrsw => map_signed(a, b, 16, |x, y| (((x * y) >> 14) + 1) >> 1),
+        // The most negative value has no positive counterpart and stays.
+        Op::Pabsb => map_signed(0, b, 8, |_, y| y.abs()),
+        Op::Pabsw => map_signed(0, b, 16, |_, y| y.abs()),
+        Op::Pabsd => map_signed(0, b, 32, |_, y| y.abs()),
         Op::Psadbw => build(64, |half| {
             (0..8)
                 .map(|at| lane(a, 8, 8 * half + at).abs_diff(lane(b, 8, 8 * half + at)))
@@ -388,6 +432,7 @@ pub(crate) fn execute(
                 Op::Pshuflw => shuffle_16(source, imm, 0),
                 Op::Pshufhw => shuffle_16(source, imm, 4),
                 Op::Shufps => shuffle_32(old, source, imm),
+                Op::Palignr => align_right(old, source, imm),
                 _ => build(64, |index| {
                     let from = if index == 0 { old } else { source };
                     lane(from, 64, (imm >> index & 1) as u32)
