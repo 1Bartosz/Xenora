@@ -788,8 +788,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     platform_fixture::register(registry, &state);
     gdk_queue::register(registry, &state);
     startup_info::register(registry, &state);
-    modules::register(registry, &state);
     process::register(registry, &state);
+    // Last: the module catalog lists every service registered before it.
+    modules::register(registry, &state);
 }
 
 /// Implementations behind the generated adapters. A failure the guest can

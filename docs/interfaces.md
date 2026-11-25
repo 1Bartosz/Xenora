@@ -537,14 +537,35 @@ clamps the result and sets ERANGE. Scans have a 1 MiB input budget. The long-lon
 Microsoft's _strtoi64, _strtoui64, _wcstoi64, and _wcstoui64 apply the
 same rules with 64-bit results.
 
-### Built-in guest modules
+### Guest modules
 
-GetModuleHandleA and GetModuleHandleW recognize synthetic Kernel32 and UCRT
-module names and their registered API-set aliases. GetProcAddress resolves
-case-sensitive named exports to guest service trampolines. The registry
-captures built-in bindings at standard service registration and excludes
-stubs. Missing names and unsupported ordinals fail explicitly. These APIs
-expose synthetic module handles and never load host libraries.
+The program's module handle is the base address its image was loaded at.
+`GetModuleHandleA` and `GetModuleHandleW` return it for a null name, and
+otherwise recognize the built-in Kernel32, KernelBase and UCRT modules and the
+API sets registered for Kernel32 and the UCRT. Names compare without case, and
+`.dll` is appended to a name without a dot. Paths and the program's own file name
+are not recognized. Built-in handles are identities without an image.
+
+`GetModuleHandleExA` and `GetModuleHandleExW` also count a reference, pin the
+module, leave the count alone, or find the module by an address. Pinning cannot
+be combined with an unchanged count. The address may lie anywhere in the program's
+image; a built-in module contains only its handle. The program, Kernel32 and
+KernelBase stay loaded whatever the count; the UCRT is unloaded with its last
+reference unless it was pinned. `FreeLibrary` releases only references that were
+counted.
+
+`K32GetModuleInformation`, and `GetModuleInformation` of `psapi.dll`, give the
+program's base, `SizeOfImage` and entry point. They refuse built-in modules with
+`ERROR_NOT_SUPPORTED` and any process but the current one. Microsoft documents no
+error codes for these functions; the ones used are Xenora's choice.
+
+`GetProcAddress` resolves case-sensitive names and ordinals of built-in modules to
+guest service trampolines. The catalog is built after every other standard service
+is registered and leaves out stubs. The program's own export table is not read.
+KernelBase exports only what Microsoft lists for it here. The services resolve
+through the API sets on Microsoft's pages. No host library is ever loaded.
+`crates/loader/tests/modules.rs` runs original C and C++ programs through them;
+nothing was compared with Windows.
 
 ### Synthetic guest files
 

@@ -118,6 +118,14 @@ impl MappedRegion {
     }
 }
 
+/// Where the program's own image is: its handle, size and entry point.
+#[derive(Clone, Copy)]
+pub(crate) struct MainImage {
+    pub(crate) base: u64,
+    pub(crate) size: u32,
+    pub(crate) entry_point: u64,
+}
+
 /// Guest virtual memory address space.
 #[derive(Default, Clone)]
 pub struct GuestMemory {
@@ -128,6 +136,8 @@ pub struct GuestMemory {
     crt_errno: std::collections::BTreeMap<u64, u64>,
     pub(crate) callback_frames:
         std::collections::BTreeMap<(u64, u64), crate::imports::CallbackFrame>,
+    /// The program's image, for module services.
+    pub(crate) main_image: Option<MainImage>,
     /// Function tables of the mapped images, for exception dispatch.
     pub(crate) function_tables: Vec<crate::exceptions::FunctionTable>,
     /// Exception dispatches waiting for a guest handler, by TEB and stack slot.
