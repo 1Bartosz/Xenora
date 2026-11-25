@@ -639,6 +639,27 @@ final class InspectionModel: ObservableObject {
     @Published var status: Int32 = Int32(XENORA_OK)
     @Published var busy = false
     @Published var importing = false
+    /// Why the last file selection could not be used, shown until the next selection.
+    @Published var selectionError: String?
+
+    /// Shows the read-only file importer, from the button or File > Open Executable….
+    func requestImport() {
+        selectionError = nil
+        importing = true
+    }
+
+    /// Handles the importer's completion. A cancelled picker is not a failure.
+    func importFinished(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            inspect(url)
+        case .failure(let error):
+            if let cocoa = error as? CocoaError, cocoa.code == .userCancelled {
+                return
+            }
+            selectionError = "The selected file could not be opened: \(error.localizedDescription)"
+        }
+    }
 
     /// Reads and reports one file off the main thread. Replaceable only for the
     /// `--smoke-inspection-order` check.
@@ -655,6 +676,7 @@ final class InspectionModel: ObservableObject {
     func inspect(_ url: URL) {
         latestRequest &+= 1
         let request = latestRequest
+        selectionError = nil
         fileName = url.lastPathComponent
         report = ""
         status = Int32(XENORA_OK)
@@ -711,8 +733,11 @@ struct InspectorView: View {
     var body: some View {
         Section("Executable inspection (read-only)") {
             HStack {
-                Button("Open Executable…") { model.importing = true }
+                Button("Open Executable…") { model.requestImport() }
                 Text("or drop a file on this window").foregroundStyle(.secondary)
+            }
+            if let error = model.selectionError {
+                Text(error).foregroundStyle(.red)
             }
             if let name = model.fileName {
                 LabeledContent("File", value: model.busy ? "\(name) (inspecting…)" : name)
@@ -847,7 +872,7 @@ struct ContentView: View {
         }
         .formStyle(.grouped)
         .fileImporter(isPresented: $inspection.importing, allowedContentTypes: [.item]) { result in
-            if case .success(let url) = result { inspection.inspect(url) }
+            inspection.importFinished(result)
         }
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first, url.isFileURL else { return false }
@@ -865,6 +890,12 @@ struct XenoraApp: App {
 
     var body: some Scene {
         WindowGroup("Xenora") { ContentView(model: model, loop: loop) }
+            .commands {
+                CommandGroup(after: .newItem) {
+                    Button("Open Executable…") { InspectionModel.shared.requestImport() }
+                        .keyboardShortcut("o")
+                }
+            }
     }
 }
 
@@ -1078,6 +1109,29 @@ if CommandLine.arguments.contains("--smoke-inspection-order") {
         exit(failures.isEmpty ? 0 : 1)
     }
     dispatchMain()
+// `--smoke-import-result` checks how a file-importer result reaches the inspector:
+// a cancelled picker shows nothing, a failure is shown, and a new selection clears it.
+// No file is opened or read.
+if CommandLine.arguments.contains("--smoke-import-result") {
+    let ok = MainActor.assumeIsolated { () -> Bool in
+        var failures: [String] = []
+        let model = InspectionModel()
+        model.importFinished(.failure(CocoaError(.userCancelled)))
+        if model.selectionError != nil || model.fileName != nil { failures.append("cancel shows a message") }
+        model.importFinished(.failure(CocoaError(.fileReadNoPermission)))
+        if model.selectionError == nil || model.fileName != nil { failures.append("failure is not shown") }
+        model.requestImport()
+        if model.selectionError != nil || !model.importing { failures.append("reopening keeps the old message") }
+        model.importFinished(.failure(CocoaError(.fileReadNoPermission)))
+        model.inspect(URL(fileURLWithPath: "/nonexistent/import-result-check"))
+        if model.selectionError != nil || model.fileName != "import-result-check" {
+            failures.append("a new selection keeps the old message")
+        }
+        for failure in failures { print("smoke-import-result: FAILED \(failure)") }
+        return failures.isEmpty
+    }
+    print("smoke-import-result: \(ok ? "ok" : "failed")")
+    exit(ok ? 0 : 1)
 }
 
 // `--smoke` prints the probe and exits without opening a window, for scripts and CI.

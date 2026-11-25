@@ -1084,6 +1084,8 @@ f3 4c 0f bd 54 be 10 | lzcnt r10, qword ptr [rsi + 4*rdi + 16]
 c6 44 be 10 5a | mov byte ptr [rsi + 4*rdi + 16], 0x5a
 41 86 d9 | xchg bl, r9b
 86 54 be 10 | xchg byte ptr [rsi + 4*rdi + 16], dl
+a0 20 20 00 00 00 00 00 00 | movabs al, byte ptr [0x2020]
+a2 20 20 00 00 00 00 00 00 | movabs byte ptr [0x2020], al
 66 44 89 cb | mov bx, r9w
 66 44 8b 54 be 10 | mov r10w, word ptr [rsi + 4*rdi + 16]
 66 89 54 be 10 | mov word ptr [rsi + 4*rdi + 16], dx
@@ -1091,6 +1093,8 @@ c6 44 be 10 5a | mov byte ptr [rsi + 4*rdi + 16], 0x5a
 66 c7 44 be 10 5a 00 | mov word ptr [rsi + 4*rdi + 16], 0x5a
 66 41 87 d9 | xchg bx, r9w
 66 87 54 be 10 | xchg word ptr [rsi + 4*rdi + 16], dx
+66 a1 20 20 00 00 00 00 00 00 | movabs ax, word ptr [0x2020]
+66 a3 20 20 00 00 00 00 00 00 | movabs word ptr [0x2020], ax
 44 89 cb | mov ebx, r9d
 44 8b 54 be 10 | mov r10d, dword ptr [rsi + 4*rdi + 16]
 89 54 be 10 | mov dword ptr [rsi + 4*rdi + 16], edx
@@ -1098,6 +1102,8 @@ c6 44 be 10 5a | mov byte ptr [rsi + 4*rdi + 16], 0x5a
 c7 44 be 10 5a 00 00 00 | mov dword ptr [rsi + 4*rdi + 16], 0x5a
 41 87 d9 | xchg ebx, r9d
 87 54 be 10 | xchg dword ptr [rsi + 4*rdi + 16], edx
+a1 20 20 00 00 00 00 00 00 | movabs eax, dword ptr [0x2020]
+a3 20 20 00 00 00 00 00 00 | movabs dword ptr [0x2020], eax
 4c 89 cb | mov rbx, r9
 4c 8b 54 be 10 | mov r10, qword ptr [rsi + 4*rdi + 16]
 48 89 54 be 10 | mov qword ptr [rsi + 4*rdi + 16], rdx
@@ -1105,6 +1111,8 @@ c7 44 be 10 5a 00 00 00 | mov dword ptr [rsi + 4*rdi + 16], 0x5a
 48 c7 44 be 10 5a 00 00 00 | mov qword ptr [rsi + 4*rdi + 16], 0x5a
 49 87 d9 | xchg rbx, r9
 48 87 54 be 10 | xchg qword ptr [rsi + 4*rdi + 16], rdx
+48 a1 20 20 00 00 00 00 00 00 | movabs rax, qword ptr [0x2020]
+48 a3 20 20 00 00 00 00 00 00 | movabs qword ptr [0x2020], rax
 0f c0 cb | xadd bl, cl
 45 0f c0 e1 | xadd r9b, r12b
 0f c0 d0 | xadd al, dl
@@ -1185,6 +1193,8 @@ b7 21 | mov bh, 0x21
 f8 | clc
 f9 | stc
 f5 | cmc
+9f | lahf
+9e | sahf
 90 | nop
 0f a2 | cpuid
 0f 1f 40 08 | nop dword ptr [rax + 8]
@@ -1192,6 +1202,7 @@ f3 90 | pause
 0f ae e8 | lfence
 0f ae f0 | mfence
 0f ae f8 | sfence
+db e3 | fninit
 0f c3 5c be 10 | movnti dword ptr [rsi + 4*rdi + 16], ebx
 48 0f c3 5c be 10 | movnti qword ptr [rsi + 4*rdi + 16], rbx
 44 0f c3 4c be 10 | movnti dword ptr [rsi + 4*rdi + 16], r9d
