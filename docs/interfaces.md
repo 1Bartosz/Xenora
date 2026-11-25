@@ -66,8 +66,34 @@ returns owned words after command completion or a stage-specific error.
 fixture, guest memory addresses, a service registry and an entry instruction
 budget. It maps and rebases the image, binds imports, initializes thread-local
 storage, invokes its callbacks and runs the entry point. The fixture entry point
-uses a Win64-aligned stack and terminates with HLT. The result includes the loaded
-guest memory and the entry execution outcome.
+uses a Win64-aligned stack. It may end with HLT, call `ExitProcess`, or return.
+The result includes the loaded guest memory and the entry execution outcome.
+
+A guest ends its process through `kernel32.dll!ExitProcess`, also reachable as
+`api-ms-win-core-processthreads-l1-1-0.dll!ExitProcess`. Execution stops with
+`ExitReason::ProcessExit(status)`, where the status is the full 32-bit value
+the guest passed. Only the guest stops: the host process is not ended. A
+returning entry point does the same with EAX as the status, which matches
+Windows while the process has one thread. The exit closes every guest handle:
+kernel objects, Winsock sockets and task-queue handles, which
+`ServicesState::open_handle_count` counts together. Files stay on the synthetic `C:` drive, guest memory stays mapped so the host
+can inspect it, and `atexit` functions are not run: that belongs to the C
+runtime's `exit`, which is not implemented. `ServicesState::exit_status`
+reports the status. After an exit the `DbtEngine` that ran the guest executes
+no further guest instruction and answers every later `run` with the same
+`ProcessExit`. A service callback that was in progress is never resumed.
+
+A TLS callback may end the process too. Startup then reports the exit as its
+outcome, with the status, and runs neither the remaining callbacks nor the
+entry point; `StartupResult::tls_callbacks` counts the callbacks that finished.
+Any other stop inside a TLS callback is still a startup error.
+
+The engine recognises two return addresses, one under the entry point and one
+under a guest callback, before it executes anything at them. Both are in the
+4 KiB page at `imports::RETURN_SENTINEL_PAGE`, which startup reserves with no
+access. An image or layout that covers that page is refused, and a guest
+allocation there fails. The import trampolines above that page are intercepted
+in the same way and are not reserved.
 
 Loading an image maps its headers as well as its sections. The first
 `SizeOfHeaders` bytes of the file are mapped read-only at the image base, in
@@ -477,6 +503,33 @@ initialization use `api-ms-win-core-synch-l1-2-0`; SLists use
 `api-ms-win-core-interlocked-l1-1-0`; TLS uses
 `api-ms-win-core-processthreads-l1-1-0`; and FLS uses
 `api-ms-win-core-fibers-l1-1-0`.
+
+### C runtime startup configuration
+
+A C program's startup code configures the C runtime before `main`. Nine
+services record what it sets and return what their public documentation says.
+They are declared in the typed registry (`docs/runtime/services.md`), all
+`partial`, because nothing acts on a recorded value:
+
+| Service | Returns | Not provided |
+| --- | --- | --- |
+| `_set_app_type(type)` | nothing | Nothing depends on the type |
+| `_set_new_mode(mode)` | the previous mode; -1 and `errno` `EINVAL` unless the mode is 0 or 1 | `malloc` never calls a new handler |
+| `_configthreadlocale(request)` | the setting before the call (1 enabled, 2 disabled; a program starts disabled); -1 and `errno` `EINVAL` unless the request is 0, 1 or 2 | There is no locale |
+| `__setusermatherr(handler)` | nothing | The handler is never called |
+| `_set_invalid_parameter_handler(handler)` | the previous handler, null at first | No service calls it for an invalid argument |
+| `__p__fmode()`, `__p__commode()` | the address of the guest `int` `_fmode` (initially `_O_TEXT`, `0x4000`, as documented) or `_commode` (initially 0; its documentation gives no initial value) | Nothing reads either until stdio exists |
+| `signal(sig, handler)` | the previous handler, `SIG_DFL` at first; `SIG_ERR` and `errno` `EINVAL` for a signal other than `SIGINT`, `SIGILL`, `SIGFPE`, `SIGSEGV`, `SIGTERM` and `SIGABRT` | No signal is ever raised. One table serves the process |
+| `SetUnhandledExceptionFilter(filter)` | the previous filter, null at first | No exception reaches it |
+
+`_fmode` and `_commode` share one 8-byte block allocated from the process heap
+on the first call to either. `ServicesState::crt_app_type` and
+`ServicesState::crt_user_math_error` let a host read the two values no service
+returns. `signal.h` also defines `SIGBREAK` and `SIGABRT_COMPAT`, which the
+documentation of `signal` does not list; they are refused, and whether Windows
+accepts them was not checked. `memcpy` also resolves through
+`api-ms-win-crt-private-l1-1-0.dll`, the API set the mingw-w64 runtime imports
+it from. None of this has been compared with Windows.
 
 ## Synthetic tiled textures
 
