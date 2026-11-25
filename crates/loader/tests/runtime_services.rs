@@ -2097,6 +2097,851 @@ fn floating_arguments_and_results_use_xmm_registers() {
     assert_eq!(float("fabsf", garbage | 0xBF80_0000) as u32, 0x3F80_0000); // -1
 }
 
+// The rest of math.h (#468). Expected values are not computed by the code
+// under test: the exact functions' by hand from IEC 60559 (cross-checked with
+// Python's `fractions`), the host functions' with mpmath 1.4.1 at 200 bits and
+// rounded once to the nearest double or float.
+
+/// Calls a math service with up to two float arguments and returns XMM0.
+fn math_call(guest: &mut Guest, symbol: &str, arguments: &[u64], integers: &[u64]) -> u128 {
+    let junk = 0xDEAD_BEEF_0BAD_F00D_u128 << 64;
+    for (lane, bits) in guest.xmm.iter_mut().zip(arguments) {
+        *lane = junk | u128::from(*bits);
+    }
+    let (cpu, exit) = guest.run(symbol, integers);
+    assert_eq!(exit, ExitReason::Halt, "{symbol}");
+    cpu.xmm[0]
+}
+
+fn math64(guest: &mut Guest, symbol: &str, arguments: &[f64]) -> u64 {
+    let bits: Vec<u64> = arguments.iter().map(|x| x.to_bits()).collect();
+    math_call(guest, symbol, &bits, &[0x4022_0000_0000_0000]) as u64
+}
+
+fn math32(guest: &mut Guest, symbol: &str, arguments: &[f32]) -> u32 {
+    let bits: Vec<u64> = arguments
+        .iter()
+        .map(|x| u64::from(x.to_bits()) | 0xDEAD_0000_0000)
+        .collect();
+    math_call(guest, symbol, &bits, &[]) as u32
+}
+
+/// Distance in units in the last place between two doubles of the same sign.
+fn ulps64(a: u64, b: u64) -> u64 {
+    assert_eq!(a >> 63, b >> 63, "{a:#018X} {b:#018X}");
+    a.abs_diff(b)
+}
+
+fn ulps32(a: u32, b: u32) -> u32 {
+    assert_eq!(a >> 31, b >> 31, "{a:#010X} {b:#010X}");
+    a.abs_diff(b)
+}
+
+#[test]
+fn crt_math_exact_functions_match_hand_derived_values() {
+    let mut guest = Guest::new();
+    let neg_zero = (-0.0f64).to_bits();
+    let cases: &[(&str, &[f64], u64)] = &[
+        ("ceil", &[-0.5], neg_zero),
+        ("ceil", &[1.000_000_000_000_000_2], 2.0f64.to_bits()),
+        ("floor", &[-0.5], (-1.0f64).to_bits()),
+        (
+            "floor",
+            &[4_503_599_627_370_495.5],
+            4_503_599_627_370_495.0f64.to_bits(),
+        ),
+        ("trunc", &[-1.9], (-1.0f64).to_bits()),
+        ("trunc", &[-0.3], neg_zero),
+        // Ties away from zero, and the largest double below 0.5.
+        ("round", &[0.5], 1.0f64.to_bits()),
+        ("round", &[-2.5], (-3.0f64).to_bits()),
+        ("round", &[0.499_999_999_999_999_94], 0),
+        (
+            "round",
+            &[4_503_599_627_370_497.0],
+            4_503_599_627_370_497.0f64.to_bits(),
+        ),
+        // Ties to even.
+        ("rint", &[2.5], 2.0f64.to_bits()),
+        ("rint", &[3.5], 4.0f64.to_bits()),
+        ("rint", &[-0.5], neg_zero),
+        ("nearbyint", &[0.5], 0),
+        ("nearbyint", &[-1.5], (-2.0f64).to_bits()),
+        ("copysign", &[3.0, -0.0], (-3.0f64).to_bits()),
+        ("copysign", &[-3.0, 0.0], 3.0f64.to_bits()),
+        ("fmod", &[5.5, 2.0], 1.5f64.to_bits()),
+        ("fmod", &[-5.5, 2.0], (-1.5f64).to_bits()),
+        ("fmod", &[-4.0, 2.0], neg_zero),
+        ("fmod", &[0.1, 1e-300], 0x0177_350D_4134_AEC0),
+        ("fmod", &[1e308, 1e-308], 0x0002_8401_CF53_D610),
+        ("remainder", &[5.0, 2.0], 1.0f64.to_bits()),
+        ("remainder", &[7.0, 2.0], (-1.0f64).to_bits()),
+        ("remainder", &[-7.0, 2.0], 1.0f64.to_bits()),
+        ("remainder", &[6.5, 1.0], 0.5f64.to_bits()),
+        ("remainder", &[7.5, 1.0], (-0.5f64).to_bits()),
+        ("remainder", &[-4.0, 2.0], neg_zero),
+        ("remainder", &[1e300, 7e-300], 0x81AC_E4A3_2878_D880),
+        // MAX = 2^1024 - 2^971 is nearer 2 * 2^1023 than 1 * 2^1023.
+        (
+            "remainder",
+            &[f64::MAX, 2f64.powi(1023)],
+            (-(2f64.powi(971))).to_bits(),
+        ),
+        ("fdim", &[3.0, 1.0], 2.0f64.to_bits()),
+        ("fdim", &[1.0, 3.0], 0),
+        ("fdim", &[f64::MAX, -f64::MAX], f64::INFINITY.to_bits()),
+        ("fmax", &[-0.0, 0.0], 0),
+        ("fmax", &[0.0, -0.0], 0),
+        ("fmax", &[-1.0, 2.0], 2.0f64.to_bits()),
+        ("fmin", &[0.0, -0.0], neg_zero),
+        ("fmin", &[-0.0, 0.0], neg_zero),
+        ("fmin", &[-1.0, 2.0], (-1.0f64).to_bits()),
+    ];
+    for (symbol, arguments, expected) in cases {
+        let actual = math64(&mut guest, symbol, arguments);
+        assert_eq!(actual, *expected, "{symbol}{arguments:?}: {actual:#018X}");
+    }
+    let cases32: &[(&str, &[f32], u32)] = &[
+        ("ceilf", &[1.5], 2.0f32.to_bits()),
+        ("ceilf", &[-0.5], (-0.0f32).to_bits()),
+        ("floorf", &[-1.5], (-2.0f32).to_bits()),
+        ("roundf", &[-0.5], (-1.0f32).to_bits()),
+        ("roundf", &[0.499_999_97], 0),
+        ("fmodf", &[5.5, 2.0], 1.5f32.to_bits()),
+        ("fmodf", &[-7.0, 0.75], (-0.25f32).to_bits()),
+    ];
+    for (symbol, arguments, expected) in cases32 {
+        let actual = math32(&mut guest, symbol, arguments);
+        assert_eq!(actual, *expected, "{symbol}{arguments:?}: {actual:#010X}");
+    }
+}
+
+#[test]
+fn crt_math_special_values_follow_annex_f() {
+    let mut guest = Guest::new();
+    let (inf, nan) = (f64::INFINITY, f64::NAN);
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    let pi = std::f64::consts::PI;
+    // ISO C Annex F (F.10) special cases, as values.
+    let cases: &[(&str, &[f64], f64)] = &[
+        ("acos", &[1.0], 0.0),
+        ("asin", &[-0.0], -0.0),
+        ("atan", &[-0.0], -0.0),
+        ("atan", &[-inf], -half_pi),
+        ("atan2", &[0.0, -0.0], pi),
+        ("atan2", &[-0.0, -0.0], -pi),
+        ("atan2", &[-0.0, 0.0], -0.0),
+        ("atan2", &[1.0, -inf], pi),
+        ("atan2", &[-1.0, inf], -0.0),
+        ("atan2", &[inf, 5.0], half_pi),
+        ("atan2", &[inf, inf], std::f64::consts::FRAC_PI_4),
+        ("cos", &[-0.0], 1.0),
+        ("sin", &[-0.0], -0.0),
+        ("tan", &[-0.0], -0.0),
+        ("cosh", &[-0.0], 1.0),
+        ("cosh", &[-inf], inf),
+        ("sinh", &[-0.0], -0.0),
+        ("sinh", &[-inf], -inf),
+        ("tanh", &[-0.0], -0.0),
+        ("tanh", &[-inf], -1.0),
+        ("cbrt", &[-0.0], -0.0),
+        ("cbrt", &[-inf], -inf),
+        ("exp", &[-0.0], 1.0),
+        ("exp", &[-inf], 0.0),
+        ("exp", &[inf], inf),
+        ("exp", &[710.0], inf),
+        ("exp2", &[-inf], 0.0),
+        ("exp2", &[1024.0], inf),
+        ("exp2", &[-1074.0], f64::from_bits(1)),
+        ("expm1", &[-0.0], -0.0),
+        ("expm1", &[-inf], -1.0),
+        ("log", &[-0.0], -inf),
+        ("log", &[1.0], 0.0),
+        ("log", &[inf], inf),
+        ("log10", &[0.0], -inf),
+        ("log10", &[1000.0], 3.0),
+        ("log2", &[-0.0], -inf),
+        ("log2", &[f64::from_bits(1)], -1074.0),
+        ("log1p", &[-0.0], -0.0),
+        ("log1p", &[-1.0], -inf),
+        ("log1p", &[inf], inf),
+        ("erf", &[-0.0], -0.0),
+        ("erf", &[-inf], -1.0),
+        ("tgamma", &[0.0], inf),
+        ("tgamma", &[-0.0], -inf),
+        ("tgamma", &[inf], inf),
+        ("tgamma", &[5.0], 24.0),
+        ("tgamma", &[172.0], inf),
+        ("hypot", &[-0.0, -0.0], 0.0),
+        ("hypot", &[-inf, nan], inf),
+        ("hypot", &[nan, inf], inf),
+        ("hypot", &[-5.0, 0.0], 5.0),
+        ("pow", &[nan, -0.0], 1.0),
+        ("pow", &[1.0, nan], 1.0),
+        ("pow", &[-1.0, -inf], 1.0),
+        ("pow", &[-0.0, -3.0], -inf),
+        ("pow", &[0.0, -2.0], inf),
+        ("pow", &[-0.0, 3.0], -0.0),
+        ("pow", &[-2.0, 3.0], -8.0),
+        ("pow", &[0.5, -inf], inf),
+        ("pow", &[-inf, -3.0], -0.0),
+        ("pow", &[inf, -1.0], 0.0),
+        ("ceil", &[-inf], -inf),
+        ("floor", &[-0.0], -0.0),
+        ("trunc", &[inf], inf),
+        ("round", &[-0.0], -0.0),
+        ("rint", &[-inf], -inf),
+        ("nearbyint", &[-0.0], -0.0),
+        ("fmod", &[-0.0, 3.0], -0.0),
+        ("fmod", &[2.5, -inf], 2.5),
+        ("remainder", &[-0.0, 3.0], -0.0),
+        ("remainder", &[2.5, inf], 2.5),
+        ("fmax", &[nan, -1.0], -1.0),
+        ("fmin", &[-1.0, nan], -1.0),
+        ("fdim", &[inf, inf], 0.0),
+        ("copysign", &[inf, -0.0], -inf),
+    ];
+    for (symbol, arguments, expected) in cases {
+        let actual = math64(&mut guest, symbol, arguments);
+        assert_eq!(
+            actual,
+            expected.to_bits(),
+            "{symbol}{arguments:?}: {actual:#018X}"
+        );
+    }
+    // Domain errors return the x86 default NaN.
+    let default_nan = 0xFFF8_0000_0000_0000;
+    let domain: &[(&str, &[f64])] = &[
+        ("acos", &[1.5]),
+        ("asin", &[-inf]),
+        ("cos", &[inf]),
+        ("sin", &[-inf]),
+        ("tan", &[inf]),
+        ("log", &[-1.0]),
+        ("log10", &[-inf]),
+        ("log2", &[-0.5]),
+        ("log1p", &[-2.0]),
+        ("tgamma", &[-1.0]),
+        ("tgamma", &[-inf]),
+        ("pow", &[-8.0, 1.0 / 3.0]),
+        ("fmod", &[inf, 1.0]),
+        ("fmod", &[1.0, 0.0]),
+        ("remainder", &[1.0, 0.0]),
+        ("remainder", &[-inf, 1.0]),
+    ];
+    for (symbol, arguments) in domain {
+        let actual = math64(&mut guest, symbol, arguments);
+        assert_eq!(actual, default_nan, "{symbol}{arguments:?}: {actual:#018X}");
+    }
+    // A NaN argument comes back quieted, payload and sign kept.
+    let signaling = 0x7FF0_0000_0000_0123;
+    for symbol in [
+        "exp", "sin", "log", "floor", "rint", "erf", "tgamma", "atan",
+    ] {
+        let actual = math_call(&mut guest, symbol, &[signaling], &[]) as u64;
+        assert_eq!(actual, 0x7FF8_0000_0000_0123, "{symbol}");
+    }
+    let quiet_negative = 0xFFF8_0000_0000_0456;
+    for symbol in ["pow", "atan2", "fmod", "remainder", "hypot", "fdim", "fmax"] {
+        let actual = math_call(&mut guest, symbol, &[quiet_negative, quiet_negative], &[]) as u64;
+        assert_eq!(actual, quiet_negative, "{symbol}");
+    }
+    // copysign does not quiet: it only moves a bit.
+    let actual = math_call(
+        &mut guest,
+        "copysign",
+        &[signaling, (-1.0f64).to_bits()],
+        &[],
+    ) as u64;
+    assert_eq!(actual, signaling | 1 << 63);
+    // The float forms.
+    let cases32: &[(&str, &[f32], f32)] = &[
+        ("cosf", &[-0.0], 1.0),
+        ("sinf", &[-0.0], -0.0),
+        ("tanf", &[-0.0], -0.0),
+        ("expf", &[-f32::INFINITY], 0.0),
+        ("expf", &[89.0], f32::INFINITY),
+        ("logf", &[0.0], -f32::INFINITY),
+        ("logf", &[1.0], 0.0),
+        ("powf", &[f32::NAN, 0.0], 1.0),
+        ("powf", &[-2.0, 3.0], -8.0),
+        ("ceilf", &[-0.0], -0.0),
+        ("floorf", &[f32::INFINITY], f32::INFINITY),
+        ("roundf", &[-0.0], -0.0),
+        ("fmodf", &[-0.0, 1.0], -0.0),
+    ];
+    for (symbol, arguments, expected) in cases32 {
+        let actual = math32(&mut guest, symbol, arguments);
+        assert_eq!(
+            actual,
+            expected.to_bits(),
+            "{symbol}{arguments:?}: {actual:#010X}"
+        );
+    }
+    // Annex F gives atan2f(-0, -0) = -pi. The macOS host library returns the
+    // float just inside the range, 0xC0490FDA, one ulp from the nearest one.
+    let actual = math32(&mut guest, "atan2f", &[-0.0, -0.0]);
+    assert!(
+        ulps32(actual, (-std::f32::consts::PI).to_bits()) <= 1,
+        "{actual:#010X}"
+    );
+    for (symbol, arguments) in [
+        ("logf", &[-1.0f32][..]),
+        ("fmodf", &[1.0, 0.0]),
+        ("sinf", &[f32::INFINITY]),
+    ] {
+        assert_eq!(
+            math32(&mut guest, symbol, arguments),
+            0xFFC0_0000,
+            "{symbol}"
+        );
+    }
+}
+
+#[test]
+fn crt_math_host_functions_are_within_one_ulp_of_reference() {
+    const HOST64: &[(&str, u64, u64, u64)] = &[
+        (
+            "acos",
+            0x3FD3333333333333,
+            0x0000000000000000,
+            0x3FF441F5ECBEEF59,
+        ), // acos(0.3)
+        (
+            "acos",
+            0xBFE6666666666666,
+            0x0000000000000000,
+            0x4002C501446CD5F1,
+        ), // acos(-0.7)
+        (
+            "acos",
+            0x3FEFAE147AE147AE,
+            0x0000000000000000,
+            0x3FC21DF72882BFD8,
+        ), // acos(0.99)
+        (
+            "asin",
+            0x3FD3333333333333,
+            0x0000000000000000,
+            0x3FD380159E14F6FF,
+        ), // asin(0.3)
+        (
+            "asin",
+            0xBFE0000000000000,
+            0x0000000000000000,
+            0xBFE0C152382D7366,
+        ), // asin(-0.5)
+        (
+            "asin",
+            0x3DDB7CDFD9D7BDBB,
+            0x0000000000000000,
+            0x3DDB7CDFD9D7BDBB,
+        ), // asin(1e-10)
+        (
+            "atan",
+            0x3FE0000000000000,
+            0x0000000000000000,
+            0x3FDDAC670561BB4F,
+        ), // atan(0.5)
+        (
+            "atan",
+            0xC008000000000000,
+            0x0000000000000000,
+            0xBFF3FC176B7A8560,
+        ), // atan(-3.0)
+        (
+            "atan",
+            0x412E848000000000,
+            0x0000000000000000,
+            0x3FF921FA47D4B30D,
+        ), // atan(1000000.0)
+        (
+            "cbrt",
+            0x4000000000000000,
+            0x0000000000000000,
+            0x3FF428A2F98D728B,
+        ), // cbrt(2.0)
+        (
+            "cbrt",
+            0xC03B800000000000,
+            0x0000000000000000,
+            0xC00825B1B6BAC03B,
+        ), // cbrt(-27.5)
+        (
+            "cbrt",
+            0x01A56E1FC2F8F359,
+            0x0000000000000000,
+            0x2B2BFF2EE48E0530,
+        ), // cbrt(1e-300)
+        (
+            "cos",
+            0x3FF0000000000000,
+            0x0000000000000000,
+            0x3FE14A280FB5068C,
+        ), // cos(1.0)
+        (
+            "cos",
+            0x4059000000000000,
+            0x0000000000000000,
+            0x3FEB981DBF665FDF,
+        ), // cos(100.0)
+        (
+            "cos",
+            0x4480F0CF064DD592,
+            0x0000000000000000,
+            0x3FE0BE2CEF01C8F4,
+        ), // cos(1e+22)
+        (
+            "cosh",
+            0x3FE0000000000000,
+            0x0000000000000000,
+            0x3FF20AC1862AE8D0,
+        ), // cosh(0.5)
+        (
+            "cosh",
+            0xC008000000000000,
+            0x0000000000000000,
+            0x402422A497D6185E,
+        ), // cosh(-3.0)
+        (
+            "cosh",
+            0x4085E00000000000,
+            0x0000000000000000,
+            0x7EFD945DF4F8EC8E,
+        ), // cosh(700.0)
+        (
+            "erf",
+            0x3FB999999999999A,
+            0x0000000000000000,
+            0x3FBCCA5EA24FB334,
+        ), // erf(0.1)
+        (
+            "erf",
+            0xBFF8000000000000,
+            0x0000000000000000,
+            0xBFEEEA5557137AE0,
+        ), // erf(-1.5)
+        (
+            "erf",
+            0x4008000000000000,
+            0x0000000000000000,
+            0x3FEFFFD1AC4135F9,
+        ), // erf(3.0)
+        (
+            "exp",
+            0x3FF0000000000000,
+            0x0000000000000000,
+            0x4005BF0A8B145769,
+        ), // exp(1.0)
+        (
+            "exp",
+            0xC024000000000000,
+            0x0000000000000000,
+            0x3F07CD79B5647C9B,
+        ), // exp(-10.0)
+        (
+            "exp",
+            0x4085E00000000000,
+            0x0000000000000000,
+            0x7F0D945DF4F8EC8E,
+        ), // exp(700.0)
+        (
+            "exp2",
+            0x3FE0000000000000,
+            0x0000000000000000,
+            0x3FF6A09E667F3BCD,
+        ), // exp2(0.5)
+        (
+            "exp2",
+            0xC090BA0000000000,
+            0x0000000000000000,
+            0x000000000000000B,
+        ), // exp2(-1070.5)
+        (
+            "exp2",
+            0x402499999999999A,
+            0x0000000000000000,
+            0x4093B2C47BFF832C,
+        ), // exp2(10.3)
+        (
+            "expm1",
+            0x3DDB7CDFD9D7BDBB,
+            0x0000000000000000,
+            0x3DDB7CDFD9DDA4E3,
+        ), // expm1(1e-10)
+        (
+            "expm1",
+            0x3FE0000000000000,
+            0x0000000000000000,
+            0x3FE4C2531C3C0D38,
+        ), // expm1(0.5)
+        (
+            "expm1",
+            0xC000000000000000,
+            0x0000000000000000,
+            0xBFEBAB5557101F8D,
+        ), // expm1(-2.0)
+        (
+            "log",
+            0x4000000000000000,
+            0x0000000000000000,
+            0x3FE62E42FEFA39EF,
+        ), // log(2.0)
+        (
+            "log",
+            0x01A56E1FC2F8F359,
+            0x0000000000000000,
+            0xC085963447F87FB5,
+        ), // log(1e-300)
+        (
+            "log",
+            0x3FEFF7CED916872B,
+            0x0000000000000000,
+            0xBF5064670D979B73,
+        ), // log(0.999)
+        (
+            "log10",
+            0x4000000000000000,
+            0x0000000000000000,
+            0x3FD34413509F79FF,
+        ), // log10(2.0)
+        (
+            "log10",
+            0x3F12599ED7C6FBD2,
+            0x0000000000000000,
+            0xC0109E9E9E90E678,
+        ), // log10(7e-05)
+        (
+            "log10",
+            0x4480F0CF064DD592,
+            0x0000000000000000,
+            0x4036000000000000,
+        ), // log10(1e+22)
+        (
+            "log1p",
+            0x3CD203AF9EE75616,
+            0x0000000000000000,
+            0x3CD203AF9EE75613,
+        ), // log1p(1e-15)
+        (
+            "log1p",
+            0x3FE0000000000000,
+            0x0000000000000000,
+            0x3FD9F323ECBF984C,
+        ), // log1p(0.5)
+        (
+            "log1p",
+            0xBFE0000000000000,
+            0x0000000000000000,
+            0xBFE62E42FEFA39EF,
+        ), // log1p(-0.5)
+        (
+            "log2",
+            0x4008000000000000,
+            0x0000000000000000,
+            0x3FF95C01A39FBD68,
+        ), // log2(3.0)
+        (
+            "log2",
+            0x54B249AD2594C37D,
+            0x0000000000000000,
+            0x4074C315BF6707B1,
+        ), // log2(1e+100)
+        (
+            "log2",
+            0x3FB999999999999A,
+            0x0000000000000000,
+            0xC00A934F0979A371,
+        ), // log2(0.1)
+        (
+            "sin",
+            0x3FE0000000000000,
+            0x0000000000000000,
+            0x3FDEAEE8744B05F0,
+        ), // sin(0.5)
+        (
+            "sin",
+            0x400921FB54442D18,
+            0x0000000000000000,
+            0x3CA1A62633145C07,
+        ), // sin(3.141592653589793)
+        (
+            "sin",
+            0x4480F0CF064DD592,
+            0x0000000000000000,
+            0xBFEB453AB76BF397,
+        ), // sin(1e+22)
+        (
+            "sinh",
+            0x3EE4F8B588E368F1,
+            0x0000000000000000,
+            0x3EE4F8B588E4E940,
+        ), // sinh(1e-05)
+        (
+            "sinh",
+            0x4000000000000000,
+            0x0000000000000000,
+            0x400D03CF63B6E19F,
+        ), // sinh(2.0)
+        (
+            "sinh",
+            0xC085E00000000000,
+            0x0000000000000000,
+            0xFEFD945DF4F8EC8E,
+        ), // sinh(-700.0)
+        (
+            "tan",
+            0x3FF0000000000000,
+            0x0000000000000000,
+            0x3FF8EB245CBEE3A6,
+        ), // tan(1.0)
+        (
+            "tan",
+            0x3FF921FB54442D18,
+            0x0000000000000000,
+            0x434D02967C31CDB5,
+        ), // tan(1.5707963267948966)
+        (
+            "tan",
+            0xBFE0000000000000,
+            0x0000000000000000,
+            0xBFE17B4F5BF3474A,
+        ), // tan(-0.5)
+        (
+            "tanh",
+            0x3FE0000000000000,
+            0x0000000000000000,
+            0x3FDD9353D7568AF3,
+        ), // tanh(0.5)
+        (
+            "tanh",
+            0xC000000000000000,
+            0x0000000000000000,
+            0xBFEED9505E1BC3D4,
+        ), // tanh(-2.0)
+        (
+            "tanh",
+            0x3E45798EE2308C3A,
+            0x0000000000000000,
+            0x3E45798EE2308C3A,
+        ), // tanh(1e-08)
+        (
+            "tgamma",
+            0x3FE0000000000000,
+            0x0000000000000000,
+            0x3FFC5BF891B4EF6B,
+        ), // tgamma(0.5)
+        (
+            "tgamma",
+            0x4016000000000000,
+            0x0000000000000000,
+            0x404A2BE0247739F2,
+        ), // tgamma(5.5)
+        (
+            "tgamma",
+            0xC004000000000000,
+            0x0000000000000000,
+            0xBFEE3FF812E32183,
+        ), // tgamma(-2.5)
+        (
+            "tgamma",
+            0x4065500000000000,
+            0x0000000000000000,
+            0x7F69589F849167A8,
+        ), // tgamma(170.5)
+        (
+            "atan2",
+            0x3FF0000000000000,
+            0x4000000000000000,
+            0x3FDDAC670561BB4F,
+        ), // atan2(1.0, 2.0)
+        (
+            "atan2",
+            0xBFF0000000000000,
+            0xC000000000000000,
+            0xC0056C6E7397F5AE,
+        ), // atan2(-1.0, -2.0)
+        (
+            "atan2",
+            0x3FE0000000000000,
+            0xBF1A36E2EB1C432D,
+            0x3FF922CD0B5B5711,
+        ), // atan2(0.5, -0.0001)
+        (
+            "hypot",
+            0x4008000000000000,
+            0x4010000000000000,
+            0x4014000000000000,
+        ), // hypot(3.0, 4.0)
+        (
+            "hypot",
+            0x7E37E43C8800759C,
+            0x7E37E43C8800759C,
+            0x7E40E4D50F99B211,
+        ), // hypot(1e+300, 1e+300)
+        (
+            "hypot",
+            0x000012688B70E62B,
+            0x000024D116E1CC56,
+            0x0000292991FDAE04,
+        ), // hypot(1e-310, 2e-310)
+        (
+            "pow",
+            0x4000000000000000,
+            0x3FE0000000000000,
+            0x3FF6A09E667F3BCD,
+        ), // pow(2.0, 0.5)
+        (
+            "pow",
+            0x3FF8000000000000,
+            0x4059000000000000,
+            0x43969194F299CDDA,
+        ), // pow(1.5, 100.0)
+        (
+            "pow",
+            0x3FECCCCCCCCCCCCD,
+            0xC08F400000000000,
+            0x497008CAC83EB741,
+        ), // pow(0.9, -1000.0)
+    ];
+    const HOST32: &[(&str, u32, u32, u32)] = &[
+        ("cosf", 0x3F000000, 0x00000000, 0x3F60A940), // cosf(0.5f)
+        ("cosf", 0x42C80000, 0x00000000, 0x3F5CC0EE), // cosf(100.0f)
+        ("expf", 0x3F800000, 0x00000000, 0x402DF854), // expf(1.0f)
+        ("expf", 0xC1A00000, 0x00000000, 0x310DA433), // expf(-20.0f)
+        ("logf", 0x40000000, 0x00000000, 0x3F317218), // logf(2.0f)
+        ("logf", 0x0DA24260, 0x00000000, 0xC28A27B5), // logf(1.0000000031710769e-30f)
+        ("sinf", 0x3F000000, 0x00000000, 0x3EF57744), // sinf(0.5f)
+        ("sinf", 0x501502F9, 0x00000000, 0xBEF99A64), // sinf(10000000000.0f)
+        ("tanf", 0x3F800000, 0x00000000, 0x3FC75923), // tanf(1.0f)
+        ("tanf", 0xBE800000, 0x00000000, 0xBE82BC2D), // tanf(-0.25f)
+        ("atan2f", 0x3F800000, 0x40000000, 0x3EED6338), // atan2f(1.0f, 2.0f)
+        ("atan2f", 0xC0400000, 0x3F000000, 0xBFB3EC43), // atan2f(-3.0f, 0.5f)
+        ("powf", 0x40000000, 0x3F000000, 0x3FB504F3), // powf(2.0f, 0.5f)
+        ("powf", 0x3F8CCCCD, 0x42480000, 0x42EAC82F), // powf(1.100000023841858f, 50.0f)
+    ];
+    let mut guest = Guest::new();
+    for (symbol, x, y, reference) in HOST64 {
+        let actual = math_call(&mut guest, symbol, &[*x, *y], &[]) as u64;
+        let distance = ulps64(actual, *reference);
+        assert!(
+            distance <= 1,
+            "{symbol}({x:#018X}, {y:#018X}) = {actual:#018X}, reference {reference:#018X}"
+        );
+    }
+    for (symbol, x, y, reference) in HOST32 {
+        let actual = math_call(&mut guest, symbol, &[u64::from(*x), u64::from(*y)], &[]) as u32;
+        let distance = ulps32(actual, *reference);
+        assert!(
+            distance <= 1,
+            "{symbol}({x:#010X}, {y:#010X}) = {actual:#010X}, reference {reference:#010X}"
+        );
+    }
+}
+
+#[test]
+fn crt_math_frexp_and_modf_store_through_guest_pointers() {
+    let mut guest = Guest::new();
+    let split = |guest: &mut Guest, symbol: &str, x: f64| {
+        guest.memory.write_bytes(SCRATCH, &[0xAB; 8]).unwrap();
+        let result = math_call(guest, symbol, &[x.to_bits()], &[JUNK_HIGH, SCRATCH]) as u64;
+        let mut stored = [0; 8];
+        guest.memory.read_bytes(SCRATCH, &mut stored).unwrap();
+        (result, stored)
+    };
+    for (x, fraction, exponent) in [
+        (8.0, 0.5, 4),
+        (-0.75, -0.75, 0),
+        (f64::MAX, 1.0 - f64::EPSILON / 2.0, 1024),
+        (f64::from_bits(1), 0.5, -1073),
+        (
+            -f64::from_bits(0x000F_FFFF_FFFF_FFFF),
+            -(1.0 - f64::EPSILON),
+            -1022,
+        ),
+        (-0.0, -0.0, 0),
+        (f64::INFINITY, f64::INFINITY, 0),
+    ] {
+        let (result, stored) = split(&mut guest, "frexp", x);
+        assert_eq!(result, f64::to_bits(fraction), "frexp({x})");
+        assert_eq!(stored[..4], i32::to_le_bytes(exponent), "frexp({x})");
+        assert_eq!(stored[4..], [0xAB; 4], "frexp({x}) wrote past the int");
+    }
+    let (result, stored) = split(&mut guest, "frexp", f64::NAN);
+    assert!(f64::from_bits(result).is_nan());
+    assert_eq!(stored[..4], [0; 4]);
+    for (x, fraction, integral) in [
+        (-3.75, -0.75, -3.0),
+        (-3.0, -0.0, -3.0),
+        (0.25, 0.25, 0.0),
+        (-0.25, -0.25, -0.0),
+        (1e300, 0.0, 1e300),
+        (-f64::INFINITY, -0.0, -f64::INFINITY),
+        (4_503_599_627_370_495.5, 0.5, 4_503_599_627_370_495.0),
+    ] {
+        let (result, stored) = split(&mut guest, "modf", x);
+        assert_eq!(result, f64::to_bits(fraction), "modf({x})");
+        assert_eq!(
+            u64::from_le_bytes(stored),
+            f64::to_bits(integral),
+            "modf({x})"
+        );
+    }
+    let (result, stored) = split(&mut guest, "modf", f64::NAN);
+    assert!(f64::from_bits(result).is_nan());
+    assert!(f64::from_bits(u64::from_le_bytes(stored)).is_nan());
+    // An unwritable pointer is an access violation, not a silent skip.
+    for symbol in ["frexp", "modf"] {
+        guest.xmm[0] = u128::from(2.0f64.to_bits());
+        let (_, exit) = guest.run(symbol, &[0, 0x10]);
+        assert!(
+            matches!(exit, ExitReason::MemoryFault(_)),
+            "{symbol}: {exit:?}"
+        );
+    }
+}
+
+#[test]
+fn crt_math_integer_rounding_covers_the_range_edges() {
+    let mut guest = Guest::new();
+    let integer = |guest: &mut Guest, symbol: &str, x: f64| {
+        guest.xmm[0] = 0xDEAD_BEEF_u128 << 64 | u128::from(x.to_bits());
+        guest.call(symbol, &[JUNK_HIGH])
+    };
+    let long_min = 0x8000_0000;
+    for (x, expected) in [
+        (2.5, 3),
+        (-2.5, (-3i32) as u32),
+        (-0.4, 0),
+        (2_147_483_647.4, 0x7FFF_FFFF),
+        (-2_147_483_648.4, long_min),
+        // Out of range, NaN and infinities: LONG_MIN, as x86 conversion.
+        (2_147_483_647.5, long_min),
+        (-2_147_483_648.5, long_min),
+        (f64::NAN, long_min),
+        (f64::INFINITY, long_min),
+    ] {
+        // A 32-bit `long` comes back in EAX with the upper half clear.
+        assert_eq!(
+            integer(&mut guest, "lround", x),
+            u64::from(expected),
+            "lround({x})"
+        );
+    }
+    let llong_min = 1 << 63;
+    for (x, expected) in [
+        (-0.5, u64::MAX),
+        (4_503_599_627_370_495.5, 4_503_599_627_370_496),
+        (9_223_372_036_854_774_784.0, 9_223_372_036_854_774_784),
+        (-9_223_372_036_854_775_808.0, llong_min),
+        (9_223_372_036_854_775_808.0, llong_min),
+        (-f64::INFINITY, llong_min),
+        (f64::NAN, llong_min),
+    ] {
+        assert_eq!(integer(&mut guest, "llround", x), expected, "llround({x})");
+    }
+}
+
 #[test]
 fn guest_call_through_dbt_preserves_win64_abi_state() {
     use Register::{R8, R9, R12, R13, R14, R15, Rax, Rbp, Rbx, Rcx, Rdi, Rdx, Rsi, Rsp};

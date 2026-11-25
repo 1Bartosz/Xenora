@@ -392,6 +392,448 @@ service ucrtbase.dll fabsf(x: f32) -> f32
     ref math.h fabsf (ISO C, IEC 60559 abs)
     test floating_arguments_and_results_use_xmm_registers
 
+# The rest of math.h (#468). Exact functions are computed in crt_math.rs on
+# exact operations; the others return the host math library's result.
+
+service ucrtbase.dll acos(x: f64) -> f64
+    handler acos
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h acos (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll asin(x: f64) -> f64
+    handler asin
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h asin (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll atan(x: f64) -> f64
+    handler atan
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h atan (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll atan2(x: f64, y: f64) -> f64
+    handler atan2
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h atan2 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll atan2f(x: f32, y: f32) -> f32
+    handler atan2f
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h atan2f (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll cbrt(x: f64) -> f64
+    handler cbrt
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h cbrt (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll ceil(x: f64) -> f64
+    handler ceil
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h ceil (ISO C, IEC 60559 roundToIntegralTowardPositive)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll ceilf(x: f32) -> f32
+    handler ceilf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h ceilf (ISO C, IEC 60559 roundToIntegralTowardPositive)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll copysign(x: f64, y: f64) -> f64
+    handler copysign
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h copysign (ISO C, IEC 60559 copySign)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll cos(x: f64) -> f64
+    handler cos
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h cos (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll cosf(x: f32) -> f32
+    handler cosf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h cosf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll cosh(x: f64) -> f64
+    handler cosh
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h cosh (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll erf(x: f64) -> f64
+    handler erf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h erf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll exp(x: f64) -> f64
+    handler exp
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h exp (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll expf(x: f32) -> f32
+    handler expf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h expf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll exp2(x: f64) -> f64
+    handler exp2
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h exp2 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll expm1(x: f64) -> f64
+    handler expm1
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h expm1 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fdim(x: f64, y: f64) -> f64
+    handler fdim
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a domain error; errno is not set
+    ref math.h fdim (ISO C Annex F)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll floor(x: f64) -> f64
+    handler floor
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h floor (ISO C, IEC 60559 roundToIntegralTowardNegative)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll floorf(x: f32) -> f32
+    handler floorf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h floorf (ISO C, IEC 60559 roundToIntegralTowardNegative)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fmax(x: f64, y: f64) -> f64
+    handler fmax
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h fmax (ISO C, IEC 60559 maxNum)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fmin(x: f64, y: f64) -> f64
+    handler fmin
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h fmin (ISO C, IEC 60559 minNum)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fmod(x: f64, y: f64) -> f64
+    handler fmod
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a domain error; errno is not set
+    ref math.h fmod (ISO C Annex F)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fmodf(x: f32, y: f32) -> f32
+    handler fmodf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a domain error; errno is not set
+    ref math.h fmodf (ISO C Annex F)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll frexp(x: f64, exponent: out<4>) -> f64
+    handler frexp
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails stops the guest with a memory fault when exponent is not writable
+    ref math.h frexp (ISO C, IEC 60559 logB and scaleB)
+    test crt_math_frexp_and_modf_store_through_guest_pointers
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll hypot(x: f64, y: f64) -> f64
+    handler hypot
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h hypot (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll llround(x: f64) -> u64
+    handler llround
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails LLONG_MIN for a NaN or an out-of-range result; errno is not set
+    ref math.h llround (ISO C Annex F)
+    test crt_math_integer_rounding_covers_the_range_edges
+
+service ucrtbase.dll log(x: f64) -> f64
+    handler log
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h log (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll logf(x: f32) -> f32
+    handler logf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h logf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll log10(x: f64) -> f64
+    handler log10
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h log10 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll log1p(x: f64) -> f64
+    handler log1p
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h log1p (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll log2(x: f64) -> f64
+    handler log2
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h log2 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll lround(x: f64) -> i32
+    handler lround
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails LONG_MIN for a NaN or an out-of-range result; errno is not set
+    ref math.h lround (ISO C Annex F)
+    test crt_math_integer_rounding_covers_the_range_edges
+
+service ucrtbase.dll modf(x: f64, integral: out<8>) -> f64
+    handler modf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails stops the guest with a memory fault when integral is not writable
+    ref math.h modf (ISO C Annex F)
+    test crt_math_frexp_and_modf_store_through_guest_pointers
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll nearbyint(x: f64) -> f64
+    handler nearbyint
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails rounds to nearest, ties to even, whatever the guest MXCSR says; errno is not set
+    ref math.h nearbyint (ISO C, IEC 60559 roundToIntegralTiesToEven)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll pow(x: f64, y: f64) -> f64
+    handler pow
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h pow (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll powf(x: f32, y: f32) -> f32
+    handler powf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h powf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll remainder(x: f64, y: f64) -> f64
+    handler remainder
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a domain error; errno is not set
+    ref math.h remainder (ISO C, IEC 60559 remainder)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll rint(x: f64) -> f64
+    handler rint
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails rounds to nearest, ties to even, whatever the guest MXCSR says; errno is not set
+    ref math.h rint (ISO C, IEC 60559 roundToIntegralExact)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll round(x: f64) -> f64
+    handler round
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h round (ISO C, IEC 60559 roundToIntegralTiesToAway)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll roundf(x: f32) -> f32
+    handler roundf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h roundf (ISO C, IEC 60559 roundToIntegralTiesToAway)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll sin(x: f64) -> f64
+    handler sin
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h sin (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll sinf(x: f32) -> f32
+    handler sinf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h sinf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll sinh(x: f64) -> f64
+    handler sinh
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h sinh (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll tan(x: f64) -> f64
+    handler tan
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h tan (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll tanf(x: f32) -> f32
+    handler tanf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h tanf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll tanh(x: f64) -> f64
+    handler tanh
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h tanh (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll tgamma(x: f64) -> f64
+    handler tgamma
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h tgamma (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll trunc(x: f64) -> f64
+    handler trunc
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h trunc (ISO C, IEC 60559 roundToIntegralTowardZero)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
 # What a C program's startup code configures before `main`. Each value is
 # recorded and returned as documented; nothing in the runtime acts on it.
 

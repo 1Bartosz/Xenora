@@ -14,6 +14,7 @@ mod crt_arguments;
 mod crt_callbacks;
 mod crt_files;
 mod crt_format;
+mod crt_math;
 mod crt_startup;
 mod crt_streams;
 mod cxx;
@@ -1319,4 +1320,12 @@ pub(crate) mod handlers {
     // The Universal C runtime services that a C++ guest's runtime imports.
     // Their implementations are in `crt.rs` and `crt_streams.rs`.
     pub use super::crt::{_lock_file, _unlock_file, fputc, localeconv, mbrtowc, strerror, wcrtomb};
+
+    // The rest of math.h (#468); `crt_math.rs` says which are exact.
+    pub use super::crt_math::{
+        acos, asin, atan, atan2, atan2f, cbrt, ceil, ceilf, copysign, cos, cosf, cosh, erf, exp,
+        exp2, expf, expm1, fdim, floor, floorf, fmax, fmin, fmod, fmodf, frexp, hypot, llround,
+        log, log1p, log2, log10, logf, lround, modf, nearbyint, pow, powf, remainder, rint, round,
+        roundf, sin, sinf, sinh, tan, tanf, tanh, tgamma, trunc,
+    };
 }

@@ -54,6 +54,11 @@ fn hosted(name: &str) -> PathBuf {
     build("build-gate-a2.sh", "run-program-a2", &OUT).join(format!("{name}.exe"))
 }
 
+fn crt_math(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-math.sh", "run-program-crt-math", &OUT).join(format!("{name}.exe"))
+}
+
 fn freestanding(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
     build("build-gate-a1.sh", "run-program-a1", &OUT).join(format!("{name}.exe"))
@@ -224,6 +229,27 @@ fn program_arguments_arrive_as_they_were_written() {
         assert_eq!(run.code, Some(0), "{label:?}: {}", run.stderr);
         assert!(run.stdout.ends_with(ALL_PASSED), "{label:?}");
     }
+}
+
+#[test]
+fn a_program_using_math_h_gets_its_results_from_the_runtime() {
+    // crt_math.c checks each of the 49 functions of #468 against values it
+    // carries, and exits with the number of the first check that failed.
+    for name in ["crt-math-O0", "crt-math-O2"] {
+        let run = run_program(&crt_math(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(
+            run.stdout, "crt_math: 110 of 110 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    let run = run_program(&crt_math("crt-math-break"), &[], &[]);
+    assert_eq!(run.code, Some(67), "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "check 67 failed: atan2\r\ncrt_math: 109 of 110 checks passed\r\n"
+    );
 }
 
 #[test]

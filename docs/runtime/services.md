@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 53 |
-| Generated adapters | 53 |
-| Unique handler implementations | 53 |
-| Implemented | 7 |
-| Partial | 44 |
+| Services with a declared ABI | 102 |
+| Generated adapters | 102 |
+| Unique handler implementations | 102 |
+| Implemented | 19 |
+| Partial | 81 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 53 |
-| API-set aliases (not services) | 53 |
+| Conformance-tested through guest dispatch | 102 |
+| API-set aliases (not services) | 102 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -62,6 +62,55 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!sqrtf` | `(x: f32) -> f32` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!fabs` | `(x: f64) -> f64` | implemented | never |
 | `ucrtbase.dll!fabsf` | `(x: f32) -> f32` | implemented | never |
+| `ucrtbase.dll!acos` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!asin` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!atan` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!atan2` | `(x: f64, y: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!atan2f` | `(x: f32, y: f32) -> f32` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!cbrt` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!ceil` | `(x: f64) -> f64` | implemented | never |
+| `ucrtbase.dll!ceilf` | `(x: f32) -> f32` | implemented | never |
+| `ucrtbase.dll!copysign` | `(x: f64, y: f64) -> f64` | implemented | never |
+| `ucrtbase.dll!cos` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!cosf` | `(x: f32) -> f32` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!cosh` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!erf` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!exp` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!expf` | `(x: f32) -> f32` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!exp2` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!expm1` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!fdim` | `(x: f64, y: f64) -> f64` | partial | NaN for a domain error; errno is not set |
+| `ucrtbase.dll!floor` | `(x: f64) -> f64` | implemented | never |
+| `ucrtbase.dll!floorf` | `(x: f32) -> f32` | implemented | never |
+| `ucrtbase.dll!fmax` | `(x: f64, y: f64) -> f64` | implemented | never |
+| `ucrtbase.dll!fmin` | `(x: f64, y: f64) -> f64` | implemented | never |
+| `ucrtbase.dll!fmod` | `(x: f64, y: f64) -> f64` | partial | NaN for a domain error; errno is not set |
+| `ucrtbase.dll!fmodf` | `(x: f32, y: f32) -> f32` | partial | NaN for a domain error; errno is not set |
+| `ucrtbase.dll!frexp` | `(x: f64, exponent: out<4>) -> f64` | implemented | stops the guest with a memory fault when exponent is not writable |
+| `ucrtbase.dll!hypot` | `(x: f64, y: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!llround` | `(x: f64) -> u64` | partial | LLONG_MIN for a NaN or an out-of-range result; errno is not set |
+| `ucrtbase.dll!log` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!logf` | `(x: f32) -> f32` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!log10` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!log1p` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!log2` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!lround` | `(x: f64) -> i32` | partial | LONG_MIN for a NaN or an out-of-range result; errno is not set |
+| `ucrtbase.dll!modf` | `(x: f64, integral: out<8>) -> f64` | implemented | stops the guest with a memory fault when integral is not writable |
+| `ucrtbase.dll!nearbyint` | `(x: f64) -> f64` | partial | rounds to nearest, ties to even, whatever the guest MXCSR says; errno is not set |
+| `ucrtbase.dll!pow` | `(x: f64, y: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!powf` | `(x: f32, y: f32) -> f32` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!remainder` | `(x: f64, y: f64) -> f64` | partial | NaN for a domain error; errno is not set |
+| `ucrtbase.dll!rint` | `(x: f64) -> f64` | partial | rounds to nearest, ties to even, whatever the guest MXCSR says; errno is not set |
+| `ucrtbase.dll!round` | `(x: f64) -> f64` | implemented | never |
+| `ucrtbase.dll!roundf` | `(x: f32) -> f32` | implemented | never |
+| `ucrtbase.dll!sin` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!sinf` | `(x: f32) -> f32` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!sinh` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!tan` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!tanf` | `(x: f32) -> f32` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!tanh` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!tgamma` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
+| `ucrtbase.dll!trunc` | `(x: f64) -> f64` | implemented | never |
 | `ucrtbase.dll!_set_app_type` | `(kind: i32) -> void` | partial | never |
 | `ucrtbase.dll!_set_new_mode` | `(mode: i32) -> i32` | partial | -1 with errno EINVAL for a mode other than 0 or 1 |
 | `ucrtbase.dll!_configthreadlocale` | `(request: i32) -> i32` | partial | -1 with errno EINVAL for a request other than 0, 1 or 2 |
