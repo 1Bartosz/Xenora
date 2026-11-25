@@ -1688,15 +1688,75 @@ store8_crossing_into_unmapped_page_writes_nothing: rdi=U rax=1122334455667788 =>
 movups_load_crossing_into_unmapped: rsi=U => ! PFR U
 ";
 
-const DEFECT_NONCANONICAL_ADDRESS: &str = r"
+const NONCANONICAL_ADDRESS: &str = r"
+@ movzx eax, byte ptr [rsi]
+  !0fb606
+  SDM 1 3.3.7.1; 2A MOVZX
+noncanonical_byte_load_faults: rsi=0000800000000000 => ! GP
+@ mov ax, [rsi]
+  !668b06
+  SDM 1 3.3.7.1; 2A MOV
+noncanonical_word_load_faults: rsi=0000800000000000 => ! GP
+@ mov eax, [rsi]
+  !8b06
+  SDM 1 3.3.7.1; 2A MOV
+noncanonical_dword_load_faults: rsi=0000800000000000 => ! GP
 @ mov rax, [rsi]
   !488b06
-  SDM 1 3.3.7.1; 3A 7.15 Interrupt 13
-noncanonical_load_faults: rsi=100000000000000 => ! GP
-@ mov [rdi], rax
+  SDM 1 3.3.7.1; 2A MOV
+noncanonical_qword_load_faults: rsi=0000800000000000 => ! GP
+@ mov byte ptr [rdi], al
+  !8807
+  SDM 1 3.3.7.1; 2A MOV
+noncanonical_byte_store_faults: rdi=ffff7fffffffffff => ! GP
+@ mov word ptr [rdi], ax
+  !668907
+  SDM 1 3.3.7.1; 2A MOV
+noncanonical_word_store_faults: rdi=ffff7fffffffffff => ! GP
+@ mov dword ptr [rdi], eax
+  !8907
+  SDM 1 3.3.7.1; 2A MOV
+noncanonical_dword_store_faults: rdi=ffff7fffffffffff => ! GP
+@ mov qword ptr [rdi], rax
   !488907
-  SDM 1 3.3.7.1; 3A 7.15 Interrupt 13
-noncanonical_store_faults: rdi=7fffffffffffffff => ! GP
+  SDM 1 3.3.7.1; 2A MOV
+noncanonical_qword_store_faults: rdi=ffff7fffffffffff => ! GP
+@ mov rax, [rsi]
+  !488b06
+  SDM 1 3.3.7.1; 2A MOV
+qword_crossing_into_lower_hole_faults: rsi=00007fffffffffff => ! GP
+qword_ending_at_last_lower_canonical_byte_is_unmapped: rsi=00007ffffffffff8 => ! PFR 00007ffffffffff8
+@ movzx eax, byte ptr [rsi]
+  !0fb606
+  SDM 1 3.3.7.1; 2A MOVZX
+last_lower_canonical_byte_is_unmapped: rsi=00007fffffffffff => ! PFR 00007fffffffffff
+first_upper_canonical_byte_is_unmapped: rsi=ffff800000000000 => ! PFR ffff800000000000
+@ movups xmm0, [rsi]
+  !0f1006
+  SDM 1 3.3.7.1; 2B MOVUPS
+noncanonical_vector_load_faults: rsi=0000800000000000 => ! GP
+vector_crossing_into_lower_hole_faults: rsi=00007fffffffffff => ! GP
+vector_ending_at_last_lower_canonical_byte_is_unmapped: rsi=00007ffffffffff0 => ! PFR 00007ffffffffff0
+@ movups [rdi], xmm0
+  !0f1107
+  SDM 1 3.3.7.1; 2B MOVUPS
+noncanonical_vector_store_faults: rdi=ffff7fffffffffff => ! GP
+vector_store_at_first_upper_canonical_byte_is_unmapped: rdi=ffff800000000000 => ! PFR ffff800000000000
+@ movdqu xmm0, [rsi]
+  !f30f6f06
+  SDM 1 3.3.7.1; 2B MOVDQU
+movdqu_crossing_into_lower_hole_faults: rsi=00007fffffffffff => ! GP
+movdqu_at_first_upper_canonical_byte_is_unmapped: rsi=ffff800000000000 => ! PFR ffff800000000000
+@ movdqu [rdi], xmm0
+  !f30f7f07
+  SDM 1 3.3.7.1; 2B MOVDQU
+movdqu_store_crossing_into_lower_hole_faults: rdi=00007fffffffffff => ! GP
+@ mov rax, gs:[rsi]
+  !65488b06
+  SDM 1 3.3.7.1, 3A 4.2; 2A MOV
+wrapped_segment_address_is_checked: gsbase=0000800000000000 rsi=ffffffffffffffff => ! GP
+noncanonical_segment_base_faults: gsbase=0000800000000000 rsi=0 => ! GP
+canonical_upper_segment_base_is_unmapped: gsbase=ffff800000000000 rsi=0 => ! PFR ffff800000000000
 ";
 
 const PACKED_INTEGER_SSE2: &str = r"
@@ -2817,7 +2877,7 @@ const GROUPS: &[(&str, &str)] = &[
     ("fences", FENCES),
     ("memory_faults", MEMORY_FAULTS),
     ("straddling_fault_address", STRADDLING_FAULT_ADDRESS),
-    ("defect_noncanonical_address", DEFECT_NONCANONICAL_ADDRESS),
+    ("noncanonical_address", NONCANONICAL_ADDRESS),
     ("packed_integer_sse2", PACKED_INTEGER_SSE2),
     ("packed_integer_beyond_sse2", PACKED_INTEGER_BEYOND_SSE2),
     ("fp_rounding", FP_ROUNDING),
@@ -3606,9 +3666,8 @@ fn straddling_fault_address() {
 }
 
 #[test]
-#[ignore = "known defect (#155): a non-canonical address is a memory fault, not #GP"]
-fn defect_noncanonical_address() {
-    check_group(DEFECT_NONCANONICAL_ADDRESS);
+fn noncanonical_address() {
+    check_group(NONCANONICAL_ADDRESS);
 }
 
 #[test]
