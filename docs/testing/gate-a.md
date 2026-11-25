@@ -150,9 +150,12 @@ exits with the program's exit status.
 - **An optional digest.** With `--sha256 <64 hex digits>` the file runs only
   if its SHA-256 is the one given. The file is read once and the bytes that
   were hashed are the bytes that run.
-- **Limits that stay.** The program runs in a separate worker process with a
-  15 second wall deadline and a step limit (`--max-steps`, default 1,000,000,
-  at most 50,000,000). The file's size is not capped: it is read whole, and
+- **Limits.** The program runs in a separate worker process with a wall
+  deadline: 15 seconds, or `--wall-seconds <1..=3600>` (#448). It has no step
+  limit unless `--max-steps <n>` gives one; a limit that is reached is a
+  failure, never an exit. The embedded fixtures keep their own limits: 100
+  steps by default, 10,000 at most, and 15 seconds. The file's size is not
+  capped: it is read whole, and
   the loader refuses an image that maps to more than 256 MiB. The fixture
   draw service is not registered.
 - **Exit codes.** A host exit code has eight bits and a guest status has
@@ -165,7 +168,8 @@ exits with the program's exit status.
   from those by the code alone. Usage errors are 2.
 - **Output.** It is shown when the program ends, standard output first and
   then standard error, so the two are not interleaved as the program wrote
-  them. A program stopped by the wall deadline shows nothing.
+  them. A program stopped by the wall deadline shows what it had written by
+  then, and the command exits with 124.
 - **What this is not.** Xenora is not a hardened runtime (see
   [`SECURITY.md`](../../SECURITY.md)): the guest's code is translated to
   native ARM64 and run in the worker process, and nothing confines that
@@ -185,5 +189,8 @@ It checks the arguments the program echoes, its output and exit status at four
 optimization levels, the three controls (42, 3 and 22), a 32-bit status, the
 digest (wrong, one digit off, and a file changed after it was hashed), a step
 limit that is too small, the trace, a changed fixture, an import nobody
-provides, and files that are not executables. The wall deadline is not tested:
-no Gate A program runs for 15 seconds.
+provides, and files that are not executables. A further build of the Gate A2
+program, `GATE_SPIN`, counts to its first argument or for ever: it shows that a
+program needing more than 1,000,000 steps runs without `--max-steps`, that a
+step limit which is given holds, and that a program which never ends is
+stopped at `--wall-seconds` with what it had printed on standard output.

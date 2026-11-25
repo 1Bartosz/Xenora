@@ -332,17 +332,29 @@ fn the_trace_goes_to_standard_error_and_leaves_the_output_alone() {
     let arguments = ["2026", "xenora"];
     let plain = run_program(&path, &[], &arguments);
     let own = digest(&path);
-    for (options, policy) in [
-        (&["--trace"][..], "any"),
-        (&["--trace", "--sha256", &own], "sha256"),
-    ] {
+    // (options, the policy and the limits the first trace line names)
+    let cases: [(&[&str], &str); 3] = [
+        (
+            &["--trace"],
+            "policy=any entry_step_limit=none wall_limit_ms=15000\n",
+        ),
+        (
+            &["--trace", "--sha256", &own],
+            "policy=sha256 entry_step_limit=none wall_limit_ms=15000\n",
+        ),
+        (
+            &["--trace", "--max-steps", "9000000", "--wall-seconds", "20"],
+            "policy=any entry_step_limit=9000000 wall_limit_ms=20000\n",
+        ),
+    ];
+    for (options, limits) in cases {
         let traced = run_program(&path, options, &arguments);
         assert_eq!(traced.code, Some(0), "{}", traced.stderr);
         assert_eq!(traced.stdout, plain.stdout);
         assert!(
-            traced.stderr.starts_with(&format!(
-                "trace program=gate-a2-O2.exe policy={policy} entry_step_limit=1000000 "
-            )),
+            traced
+                .stderr
+                .starts_with(&format!("trace program=gate-a2-O2.exe {limits}")),
             "{}",
             traced.stderr
         );
@@ -351,6 +363,91 @@ fn the_trace_goes_to_standard_error_and_leaves_the_output_alone() {
             "{}",
             traced.stderr
         );
+    }
+}
+
+/// The entry steps the trace of a run reports.
+fn entry_steps(trace: &str) -> usize {
+    let line = trace
+        .lines()
+        .find(|line| line.starts_with("trace stage=exit "))
+        .unwrap_or_else(|| panic!("no exit line in {trace:?}"));
+    let steps = line.split("entry_steps=").nth(1).unwrap();
+    steps.split(' ').next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn a_program_has_no_step_limit_unless_one_is_given() {
+    // The spin variant counts to its first argument: three guest steps a turn.
+    let path = hosted("gate-a2-spin");
+    let arguments = ["500000", "x"];
+    let printed = format!(
+        "{}gate a2: 500000 turns\r\n",
+        echoed("gate-a2-spin", &arguments)
+    );
+    // More than 1,000,000 steps, the limit a program once had by default.
+    let run = run_program(&path, &["--trace"], &arguments);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(run.stdout.starts_with(&printed), "{:?}", run.stdout);
+    let needed = entry_steps(&run.stderr);
+    assert!(needed > 1_500_000, "{needed}");
+    // A limit that is given holds: half of what the program needs stops it
+    // inside its loop. One more than the count runs (the loader reports the
+    // limit when the count is used up exactly at the exit), and so does the
+    // largest number there is.
+    let short = (needed / 2).to_string();
+    let run = run_program(&path, &["--max-steps", &short], &arguments);
+    assert_eq!(run.code, Some(125), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        format!(
+            "gate a2: counting to 500000\r\nrun failed: the program stopped without exiting \
+             after {short} entry steps: StepLimitExceeded\n"
+        )
+    );
+    assert_eq!(run.stdout, echoed("gate-a2-spin", &arguments));
+    for enough in [(needed + 1).to_string(), usize::MAX.to_string()] {
+        let run = run_program(&path, &["--max-steps", &enough], &arguments);
+        assert_eq!(run.code, Some(0), "{enough}: {}", run.stderr);
+        assert!(run.stdout.starts_with(&printed), "{enough}");
+    }
+}
+
+#[test]
+fn a_program_that_never_ends_is_stopped_at_the_wall_deadline() {
+    // Given 0 the spin variant never ends. What it wrote first, to standard
+    // output and to standard error, is shown.
+    let path = hosted("gate-a2-spin");
+    let arguments = ["0", "for ever"];
+    // (options, whether the trace's lines come first on standard error)
+    for (options, traced) in [
+        (&["--wall-seconds", "1"][..], false),
+        (&["--wall-seconds", "2", "--trace"], true),
+    ] {
+        let seconds: u64 = options[1].parse().unwrap();
+        let started = std::time::Instant::now();
+        let run = run_program(&path, options, &arguments);
+        let took = started.elapsed();
+        assert_eq!(run.code, Some(124), "{options:?}: {}", run.stderr);
+        assert_eq!(
+            run.stdout,
+            echoed("gate-a2-spin", &arguments),
+            "{options:?}"
+        );
+        // The program's own line on standard error, then the runner's.
+        let message = format!(
+            "gate a2: counting to 0\r\nrun failed: the program exceeded the {seconds} second \
+             wall deadline\n"
+        );
+        if traced {
+            assert!(run.stderr.ends_with(&message), "{}", run.stderr);
+            assert!(!run.stderr.contains("stage=exit"), "{}", run.stderr);
+        } else {
+            assert_eq!(run.stderr, message);
+        }
+        // Not before the deadline. That the output is there shows the worker
+        // stopped itself: a worker the supervisor has to stop shows nothing.
+        assert!(took >= std::time::Duration::from_secs(seconds), "{took:?}");
     }
 }
 
@@ -365,7 +462,7 @@ fn bad_command_lines_are_usage_errors() {
     let embedded = fixture("trusted-runner");
     let embedded = embedded.to_str().unwrap();
     // (the command line, what the message names)
-    let cases: [(&[&str], &str); 10] = [
+    let cases: [(&[&str], &str); 15] = [
         (
             &["--pe", path, "--experimental", "--sha256", short],
             "--sha256 needs",
@@ -393,11 +490,33 @@ fn bad_command_lines_are_usage_errors() {
             &["--pe", path, "--experimental", "--program"],
             "unknown or repeated",
         ),
-        // Each kind of run has its own step limit; neither is unbounded. The
+        // A program's step limit has no upper bound; a fixture's has. The
         // fixture is refused here, before it would draw.
         (
-            &["--pe", path, "--experimental", "--max-steps", "50000001"],
-            "--max-steps must be in 1..=50000000",
+            &["--pe", path, "--experimental", "--max-steps", "0"],
+            "--max-steps must be at least 1",
+        ),
+        (
+            &["--pe", path, "--experimental", "--max-steps", "many"],
+            "--max-steps needs a number",
+        ),
+        (
+            &["--pe", path, "--experimental", "--wall-seconds", "0"],
+            "--wall-seconds must be in 1..=3600",
+        ),
+        (
+            &["--pe", path, "--experimental", "--wall-seconds", "3601"],
+            "--wall-seconds must be in 1..=3600",
+        ),
+        (
+            &["--pe", path, "--experimental", "--wall-seconds", "1.5"],
+            "--wall-seconds needs a number",
+        ),
+        // A fixture keeps its own deadline. It is refused here, before it
+        // would draw.
+        (
+            &["--pe", embedded, "--experimental", "--wall-seconds", "5"],
+            "--wall-seconds applies to a program",
         ),
         (
             &["--pe", embedded, "--experimental", "--max-steps", "10001"],

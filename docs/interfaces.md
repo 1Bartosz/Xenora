@@ -889,8 +889,9 @@ which `scripts/build-app.sh` bundles as `Contents/MacOS/xenora-cli` (not
 `xenora`: the default macOS file system ignores case, so that name would be
 the app's own `Xenora`). The Run action passes `run --experimental --pe
 <file>`, then `--trace` when the Metal HUD is on, then `--` and the program
-arguments typed in the window. The worker's separate process, 15-second wall
-deadline and step limit apply exactly as on the command line, and the app
+arguments typed in the window. The worker's separate process and 15-second
+wall deadline apply exactly as on the command line, where a program has no
+step limit unless `--max-steps` gives one (#448), and the app
 adds no execution path of its own. The app shows the worker's exit status
 (the program's own; 124 is the wall deadline, 125 any other runner or guest
 failure, 2 a refused command line), the last `trace stage=` it printed, and
