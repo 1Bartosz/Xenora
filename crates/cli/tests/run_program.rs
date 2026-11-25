@@ -11,9 +11,8 @@
 //! arguments it passed, the variant it chose and the digest it gave. Digests
 //! come from `shasum`, not from the code under test.
 //!
-//! A missing toolchain is a failure, never a skip. No test here needs a GPU:
-//! the embedded fixtures' own path, which draws, is exercised only up to the
-//! point where the command line is refused.
+//! A missing toolchain is a failure, never a skip. The default tests need no GPU.
+//! The opt-in structured report test for an embedded fixture renders on Metal.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -534,4 +533,132 @@ fn bad_command_lines_are_usage_errors() {
         );
         assert!(run.stderr.contains("usage: xenora run"), "{arguments:?}");
     }
+}
+
+fn startup_report(run: &Run) -> &str {
+    let reports: Vec<_> = run
+        .stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("xenora-startup "))
+        .collect();
+    assert_eq!(reports.len(), 1, "{}", run.stderr);
+    reports[0]
+}
+
+#[test]
+fn startup_report_is_ordered_and_preserves_the_guest_status() {
+    let path = freestanding("gate-a1-O2");
+    let plain = run_program(&path, &[], &[]);
+    let run = run_program(&path, &["--startup-report"], &[]);
+    assert_eq!(run.code, plain.code);
+    assert_eq!(run.stdout, plain.stdout);
+    assert!(!plain.stderr.contains("xenora-startup "));
+    let report = startup_report(&run);
+    assert_eq!(
+        report,
+        concat!(
+            r#"{"schema_version":1,"events":[{"stage":"parsed","completed":true},"#,
+            r#"{"stage":"mapped","completed":true},{"stage":"relocated","completed":true},"#,
+            r#"{"stage":"imports_bound","completed":true},{"stage":"tls_completed","completed":true},"#,
+            r#"{"stage":"entry_started","completed":false},{"stage":"entry_returned","completed":true}],"#,
+            r#""last_completed_stage":"entry_returned","protocol":"complete","outcome":"#,
+            r#"{"kind":"guest_exit","guest_status":10592673,"worker_code":161}}"#,
+        ),
+    );
+}
+
+#[test]
+fn startup_report_keeps_import_failure_context_and_the_relocated_stage() {
+    let run = run_program(&fixture("delay-imports"), &["--startup-report"], &[]);
+    assert_eq!(run.code, Some(125));
+    let report = startup_report(&run);
+    assert!(
+        report.contains(r#""last_completed_stage":"relocated""#),
+        "{report}"
+    );
+    assert!(
+        report.contains(r#""kind":"known_failure","phase":"startup""#),
+        "{report}"
+    );
+    assert!(
+        report.contains("fixture-ordinary.dll!OrdinaryByName"),
+        "{report}"
+    );
+    assert!(!report.contains("entry_started"), "{report}");
+}
+
+#[test]
+fn startup_report_preserves_a_real_worker_deadline_and_guest_output() {
+    let arguments = ["0"];
+    let run = run_program(
+        &hosted("gate-a2-spin"),
+        &["--wall-seconds", "1", "--startup-report"],
+        &arguments,
+    );
+    assert_eq!(run.code, Some(124));
+    assert!(
+        run.stdout.starts_with(&echoed("gate-a2-spin", &arguments)),
+        "{}",
+        run.stdout
+    );
+    let report = startup_report(&run);
+    assert!(
+        report.contains(r#"{"stage":"entry_started","completed":false}"#),
+        "{report}"
+    );
+    assert!(
+        report.contains(r#""last_completed_stage":"tls_completed""#),
+        "{report}"
+    );
+    assert!(
+        report.contains(r#""kind":"wall_timeout","worker_code":124"#),
+        "{report}"
+    );
+}
+
+#[test]
+fn startup_report_keeps_the_admission_failure_outside_the_loader_stages() {
+    let run = run_program(
+        &fixture("trusted-runner"),
+        &["--sha256", &"0".repeat(64), "--startup-report"],
+        &[],
+    );
+    assert_eq!(run.code, Some(125));
+    let report = startup_report(&run);
+    assert!(
+        report.contains(r#""events":[],"last_completed_stage":null"#),
+        "{report}"
+    );
+    assert!(
+        report.contains(r#""kind":"known_failure","phase":"admission""#),
+        "{report}"
+    );
+    assert!(report.contains("SHA-256 is not the one given"), "{report}");
+}
+
+#[test]
+#[ignore = "requires native Metal; run with API and shader validation enabled"]
+fn startup_report_ends_in_verified_metal_frame() {
+    let path = fixture("trusted-runner");
+    let run = xenora(&[
+        "--pe",
+        path.to_str().unwrap(),
+        "--experimental",
+        "--startup-report",
+    ]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(run.stdout.contains("verified_pixels=12"), "{}", run.stdout);
+    let report = startup_report(&run);
+    assert!(
+        report.contains(r#"{"stage":"framebuffer_verified","completed":true}"#),
+        "{report}"
+    );
+    assert!(
+        report.contains(r#""last_completed_stage":"framebuffer_verified","protocol":"complete""#),
+        "{report}"
+    );
+    assert!(
+        report.contains(r#""kind":"verified","worker_code":0"#),
+        "{report}"
+    );
 }

@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,10 @@ use xenora_loader::{
 };
 use xenora_metal::NativeCompute;
 use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
+
+#[path = "runner_diagnostics.rs"]
+mod diagnostics;
+use diagnostics::{Collector, FailurePhase, Reporter, Stage, Termination};
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/trusted-runner.exe");
 const SERVICES_FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/runtime-services.exe");
@@ -39,7 +43,7 @@ const DEADLINE_GRACE: Duration = Duration::from_secs(2);
 /// the guest.
 const DEADLINE_CODE: u8 = 124;
 const FAILURE_CODE: u8 = 125;
-const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [-- <program argument>...]
+const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [-- <program argument>...]
        an embedded fixture takes --metal-hud instead of --wall-seconds, and its --max-steps is in 1..=10000";
 
 struct Options {
@@ -51,6 +55,8 @@ struct Options {
     /// as an embedded fixture.
     program: bool,
     trace: bool,
+    startup_report: bool,
+    report_worker: bool,
     hud: bool,
     /// If given, the file runs only when its SHA-256 is this.
     digest: Option<[u8; 32]>,
@@ -85,6 +91,8 @@ impl Options {
         let mut arguments = Vec::new();
         let (mut experimental, mut trace, mut hud, mut worker) = (false, false, false, false);
         let mut program = false;
+        let mut startup_report = false;
+        let mut report_worker = false;
         let mut wall_seconds = None;
         while let Some(arg) = args.next() {
             match arg.to_str() {
@@ -123,6 +131,8 @@ impl Options {
                 }
                 Some("--experimental") if !experimental => experimental = true,
                 Some("--trace") if !trace => trace = true,
+                Some("--startup-report") if !startup_report => startup_report = true,
+                Some("--startup-report-worker") if !report_worker => report_worker = true,
                 Some("--metal-hud") if !hud => hud = true,
                 Some("--worker") if !worker => worker = true,
                 Some("--program") if !program => program = true,
@@ -135,6 +145,9 @@ impl Options {
         if program && !worker {
             return Err("unknown or repeated run argument \"--program\"".into());
         }
+        if (worker && startup_report) || (!worker && report_worker) {
+            return Err("invalid startup report option for this runner".into());
+        }
         Ok(Self {
             path: path.ok_or("missing --pe path")?,
             max_steps,
@@ -142,6 +155,8 @@ impl Options {
             worker,
             program,
             trace,
+            startup_report,
+            report_worker,
             hud,
             digest,
             arguments,
@@ -204,14 +219,30 @@ pub fn command(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let reporter = if options.report_worker {
+        match Reporter::from_stdin() {
+            Ok(reporter) => reporter,
+            Err(error) => {
+                eprintln!("run failed: cannot open startup diagnostic channel: {error}");
+                return if program {
+                    ExitCode::from(FAILURE_CODE)
+                } else {
+                    ExitCode::FAILURE
+                };
+            }
+        }
+    } else {
+        Reporter::default()
+    };
     let result = match (options.worker, program) {
-        (true, true) => run_program(&options, steps, wall),
-        (true, false) => run_worker(&options, steps).map(|()| ExitCode::SUCCESS),
+        (true, true) => run_program(&options, steps, wall, &reporter),
+        (true, false) => run_worker(&options, steps, &reporter).map(|()| ExitCode::SUCCESS),
         (false, _) => launch_worker(&options, program, steps, wall),
     };
     match result {
         Ok(code) => code,
         Err(error) => {
+            reporter.failed(FailurePhase::Worker, &error);
             eprintln!("run failed: {error}");
             if program {
                 ExitCode::from(FAILURE_CODE)
@@ -257,19 +288,55 @@ fn launch_worker(
     } else {
         command.arg("--max-steps").arg(steps.to_string());
     }
+    let collector = if options.startup_report {
+        command.arg("--startup-report-worker");
+        Some(Collector::attach(&mut command)?)
+    } else {
+        command.stdin(Stdio::null());
+        None
+    };
     command.arg("--pe").arg(&options.path);
     if program {
         command.arg("--").args(&options.arguments);
     }
-    let mut child = command.stdin(Stdio::null()).spawn()?;
+
+    let stopped = command
+        .spawn()
+        .and_then(|child| wait_for_worker(child, started, limit));
+    // Emit after the worker's output has ended. The leading newline isolates
+    // this record even when guest stderr ends with an unterminated line.
+    if let Some(collector) = collector {
+        let termination = match &stopped {
+            Ok(Some(status)) => Termination::Exited(*status),
+            Ok(None) => Termination::Deadline,
+            Err(error) => Termination::SupervisorError(error),
+        };
+        eprintln!(
+            "\nxenora-startup {}",
+            collector.report(termination, program).json()
+        );
+    }
+    match stopped? {
+        Some(status) => match status.code() {
+            Some(code) => Ok(ExitCode::from(u8::try_from(code)?)),
+            None => Err(format!("worker terminated: {status}").into()),
+        },
+        None if program => {
+            eprintln!("{}", deadline_message(wall));
+            Ok(ExitCode::from(DEADLINE_CODE))
+        }
+        None => Err("experimental worker exceeded its 15 second wall deadline".into()),
+    }
+}
+
+fn wait_for_worker(
+    mut child: Child,
+    started: Instant,
+    limit: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                return match status.code() {
-                    Some(code) => Ok(ExitCode::from(u8::try_from(code)?)),
-                    None => Err(format!("worker terminated: {status}").into()),
-                };
-            }
+            Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) if started.elapsed() < limit => {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -277,11 +344,7 @@ fn launch_worker(
                 let _ = child.kill();
                 child.wait()?;
                 status?;
-                if program {
-                    eprintln!("{}", deadline_message(wall));
-                    return Ok(ExitCode::from(DEADLINE_CODE));
-                }
-                return Err("experimental worker exceeded its 15 second wall deadline".into());
+                return Ok(None);
             }
         }
     }
@@ -328,7 +391,11 @@ type Finishing = (Arc<ServicesState>, Arc<Mutex<()>>);
 /// Stop the process at the wall deadline. For a program, what it had written
 /// is shown first. The supervisor also enforces the deadline; the worker
 /// keeps its own in case it is invoked directly.
-fn start_deadline(wall: Duration, program: Option<Finishing>) -> std::io::Result<()> {
+fn start_deadline(
+    wall: Duration,
+    program: Option<Finishing>,
+    reporter: Reporter,
+) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("xenora-deadline".into())
         .spawn(move || {
@@ -337,11 +404,14 @@ fn start_deadline(wall: Duration, program: Option<Finishing>) -> std::io::Result
                 // A run that has ended holds this lock while it writes its
                 // own output and exits; then this waits and writes nothing.
                 let _turn = finishing.lock();
+                reporter.deadline();
                 let mut stdout = std::io::stdout().lock();
                 let _ = stdout.write_all(&state.standard_output());
                 let _ = stdout.flush();
                 let _ = std::io::stderr().write_all(&state.standard_error());
                 eprintln!("{}", deadline_message(wall));
+            } else {
+                reporter.deadline();
             }
             std::process::exit(i32::from(DEADLINE_CODE));
         })
@@ -387,11 +457,17 @@ fn run_program(
     options: &Options,
     steps: usize,
     wall: Duration,
+    reporter: &Reporter,
 ) -> Result<ExitCode, Box<dyn Error>> {
     let state = Arc::new(ServicesState::new(Arc::new(SystemClock)));
     let finishing = Arc::new(Mutex::new(()));
-    start_deadline(wall, Some((Arc::clone(&state), Arc::clone(&finishing))))?;
-    let bytes = read_program(&options.path, options.digest)?;
+    start_deadline(
+        wall,
+        Some((Arc::clone(&state), Arc::clone(&finishing))),
+        reporter.clone(),
+    )?;
+    let bytes = read_program(&options.path, options.digest)
+        .inspect_err(|error| reporter.failed(FailurePhase::Admission, error))?;
     let name = options
         .path
         .file_name()
@@ -426,6 +502,7 @@ fn run_program(
         imports,
         steps,
         |event| {
+            reporter.observed(&event);
             if options.trace {
                 eprintln!("{}", startup_line(&event));
             }
@@ -434,6 +511,10 @@ fn run_program(
     // Whatever the program wrote is shown, however the run ended. From here
     // the deadline no longer writes it.
     let _turn = finishing.lock();
+    let startup = startup.inspect_err(|error| reporter.failed(FailurePhase::Startup, error));
+    if startup.is_ok() {
+        reporter.stage(Stage::EntryReturned);
+    }
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&state.standard_output())?;
     stdout.flush()?;
@@ -451,19 +532,24 @@ fn run_program(
             if u32::from(code) != status {
                 eprintln!("guest exit status {status} ({status:#x}); host exit code {code}");
             }
+            reporter.guest_exit(status);
             Ok(ExitCode::from(code))
         }
-        other => Err(format!(
-            "the program stopped without exiting after {} entry steps: {other:?}",
-            execution.instructions_executed
-        )
-        .into()),
+        other => {
+            let message = format!(
+                "the program stopped without exiting after {} entry steps: {other:?}",
+                execution.instructions_executed
+            );
+            reporter.failed(FailurePhase::Execution, &message);
+            Err(message.into())
+        }
     }
 }
 
-fn run_worker(options: &Options, steps: usize) -> Result<(), Box<dyn Error>> {
-    start_deadline(WALL_LIMIT, None)?;
-    let fixture = verify_fixture(&options.path)?;
+fn run_worker(options: &Options, steps: usize, reporter: &Reporter) -> Result<(), Box<dyn Error>> {
+    start_deadline(WALL_LIMIT, None, reporter.clone())?;
+    let fixture = verify_fixture(&options.path)
+        .inspect_err(|error| reporter.failed(FailurePhase::Admission, error))?;
     let (name, ticket, bound_imports) = if fixture == SERVICES_FIXTURE {
         ("runtime-services", 23, 3)
     } else {
@@ -528,11 +614,14 @@ fn run_worker(options: &Options, steps: usize) -> Result<(), Box<dyn Error>> {
         imports,
         steps,
         |event| {
+            reporter.observed(&event);
             if options.trace {
                 trace_startup(event);
             }
         },
-    )?;
+    )
+    .inspect_err(|error| reporter.failed(FailurePhase::Startup, error))?;
+    reporter.stage(Stage::EntryReturned);
     let host_ms = started.elapsed().as_secs_f64() * 1000.0;
     let result = capture
         .lock()
@@ -547,9 +636,12 @@ fn run_worker(options: &Options, steps: usize) -> Result<(), Box<dyn Error>> {
         );
     }
     if let Some(Err(error)) = &result {
-        return Err(format!("fixture draw failed: {error}").into());
+        let message = format!("fixture draw failed: {error}");
+        reporter.failed(FailurePhase::Verification, &message);
+        return Err(message.into());
     }
     if exit != ExitReason::Halt {
+        reporter.failed(FailurePhase::Execution, exit);
         return Err(exit.into());
     }
     if startup.relocations.applied_dir64 != 4
@@ -557,9 +649,14 @@ fn run_worker(options: &Options, steps: usize) -> Result<(), Box<dyn Error>> {
         || startup.tls_callbacks != 1
         || rax != DRAW_RESULT
     {
-        return Err("trusted fixture startup or result differs from the expected values".into());
+        let message = "trusted fixture startup or result differs from the expected values";
+        reporter.failed(FailurePhase::Verification, message);
+        return Err(message.into());
     }
-    let frame = result.ok_or("guest halted without a draw")??;
+    let frame = result
+        .ok_or("guest halted without a draw")
+        .inspect_err(|error| reporter.failed(FailurePhase::Verification, error))??;
+    reporter.stage(Stage::FramebufferVerified);
     if options.trace {
         println!(
             "trace stage=framebuffer extent={}x{} verified_pixels={}",
@@ -594,6 +691,7 @@ fn run_worker(options: &Options, steps: usize) -> Result<(), Box<dyn Error>> {
         );
     }
     println!("Trusted fixture completed one verified offscreen Metal draw.");
+    reporter.verified();
     Ok(())
 }
 
