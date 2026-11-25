@@ -248,21 +248,50 @@ and [virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf
 
 ### Stubs a hosted C program binds
 
-`VirtualProtect`, `VirtualQuery` and `__C_specific_handler` are declared
-`stub` in the typed registry (`docs/runtime/services.md`). A C program built
-with the mingw-w64 runtime imports all three and does not call them on a
-normal run: the first two serve its runtime pseudo-relocations, and the third
-is the language handler Windows calls while dispatching a structured
-exception. They exist so that such a program's imports bind.
+`VirtualProtect` and `VirtualQuery` are declared `stub` in the typed
+registry (`docs/runtime/services.md`). A C program built with the mingw-w64
+runtime imports both and does not call them on a normal run: they serve its
+runtime pseudo-relocations. They exist so that such a program's imports bind.
 
-A call to any of them stops the guest with the runtime-limit fault
+A call to either stops the guest with the runtime-limit fault
 (`IllegalInstruction(0xFE)`). The service writes nothing: no output buffer, no
 result and no last-error value. It does not return a made-up success or a
 failure code Windows would not give, so a program that needs one of them
-stops at that call. Nothing here changes a page protection, describes a
-region or dispatches an exception; each needs work the runtime does not have
-yet (regions that can be split, translated-code invalidation for executable
-pages, recorded allocation bases, exception dispatch).
+stops at that call. Neither changes a page protection nor describes a region;
+each needs work the runtime does not have yet (regions that can be split,
+translated-code invalidation for executable pages, recorded allocation
+bases).
+
+### Structured exceptions and CPU faults
+
+`__C_specific_handler` (`ucrtbase.dll`, and the CRT private API set) is the
+language handler of MSVC-style C structured exception handling (`__try`,
+`__except`, `__finally`) and of the mingw-w64 C runtime's startup frames
+(#453). It reads the function's scope table, calls `__except` filters in the
+search phase and `__finally` termination handlers in the unwind phase as
+guest code, and starts the unwind to an accepting `__except` body with the
+exception code in EAX. The scope-table layout is derived from compiled
+programs, not from a public specification; `docs/research/exception-handling.md`
+records it.
+
+A fault raised by a guest instruction becomes an exception the guest can
+catch when the process has an exception directory:
+
+| CPU fault (`ExitReason`) | Exception |
+| --- | --- |
+| `DivideError` | `STATUS_INTEGER_DIVIDE_BY_ZERO` (`0xC0000094`), also for a quotient overflow |
+| `MemoryFault` with an address | `STATUS_ACCESS_VIOLATION` (`0xC0000005`), parameters 0 read / 1 write / 8 instruction fetch, then the address |
+| `IllegalInstruction` at UD2 | `STATUS_ILLEGAL_INSTRUCTION` (`0xC000001D`) |
+
+Every other fault still stops the guest: `GeneralProtection`, `SimdException`,
+`IllegalInstruction` at any other opcode (it may be a valid instruction Xenora
+does not implement) including the runtime-limit marker `0xFE`, faults inside
+host services, and faults whose stack has no room for the dispatcher. A fault
+no filter accepts stops the guest with the original reason at the faulting
+instruction; a raised exception no frame accepts stops it with
+`ExitReason::UnhandledException(code)`. The filter stored by
+`SetUnhandledExceptionFilter` is not called. Nothing here was compared with
+Windows or with an Xbox console.
 
 ### CRT strings and byte memory
 

@@ -195,7 +195,7 @@ fn trampoline_address(index: usize) -> u64 {
     IMPORT_TRAMPOLINE_BASE_VA + index as u64 * IMPORT_TRAMPOLINE_STRIDE
 }
 
-const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
+pub(crate) const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
 /// Return address placed under a process entry point. Reaching it ends the
 /// process with EAX as its exit status.
 pub const ENTRY_RETURN: u64 = CALLBACK_RETURN - IMPORT_TRAMPOLINE_STRIDE;
@@ -679,6 +679,7 @@ impl ImportRegistry {
         rip == CALLBACK_RETURN
             || rip == ENTRY_RETURN
             || rip == crate::exceptions::EXCEPTION_RETURN
+            || rip == crate::exceptions::SCOPE_RETURN
             || self.trampoline_to_service.contains_key(&rip)
             || self.dynamic_trampolines.get(rip).is_some()
     }
@@ -708,6 +709,9 @@ impl ImportRegistry {
         }
         if rip == crate::exceptions::EXCEPTION_RETURN {
             return crate::exceptions::resume(cpu, memory);
+        }
+        if rip == crate::exceptions::SCOPE_RETURN {
+            return crate::exceptions::scope_resume(cpu, memory);
         }
         if rip == CALLBACK_RETURN {
             let key = (cpu.gs_base, cpu.get(Register::Rsp));

@@ -94,17 +94,29 @@ fn a_cpp_program_throws_catches_and_unwinds_at_every_optimisation_level() {
 }
 
 /// Nothing catches the exception, so the search reaches the C runtime's
-/// startup frame. Its handler is `__C_specific_handler`, which is a stub that
-/// stops the guest: the program neither exits nor prints past the throw.
+/// startup frame. Its handler is `__C_specific_handler`, whose scope there
+/// has the filter `_gnu_exception_handler`. Read from the mingw-w64 14.0.0
+/// startup code this fixture links (#453), that filter continues execution
+/// for a continuable GCC exception (code `0x20474343` under the mask
+/// `0x20ffffff`), so `RaiseException` returns to GCC's unwinder, which
+/// reports the end of the stack. The C++ runtime then calls `std::terminate`,
+/// whose default handler in libstdc++ prints the exception's type and
+/// `what()` to `stderr` (the libstdc++ manual, "Verbose Terminate Handler")
+/// and calls `abort`, which ends the process with exit code 3 (Microsoft
+/// Learn, `abort`).
 #[test]
-fn an_uncaught_exception_stops_at_the_startup_frame_handler_stub() {
+fn an_uncaught_exception_terminates_through_the_startup_frame_filter() {
     let (result, state) = run(
         "guest-cpp-exceptions-O1",
         &["guest-cpp-exceptions.exe", "uncaught"],
     );
-    assert_eq!(
-        result.execution.exit_reason,
-        ExitReason::IllegalInstruction(0xFE)
-    );
+    assert_eq!(result.execution.exit_reason, ExitReason::ProcessExit(3));
     assert_eq!(output(&state), "guest cpp exceptions: throwing\r\n");
+    assert_eq!(
+        String::from_utf8(state.standard_error()).expect("ASCII output"),
+        concat!(
+            "terminate called after throwing an instance of 'std::runtime_error'\r\n",
+            "  what():  nobody catches this\r\n",
+        )
+    );
 }

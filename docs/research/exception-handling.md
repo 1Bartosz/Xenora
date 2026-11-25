@@ -2,7 +2,7 @@
 
 This page maps the public Windows x64 exception-handling and unwinding ABI to what Xenora's guest runtime would need in order to run compiled C and C++ programs that raise, catch or unwind through exceptions. It records what exists on main `d362e17`, what two original probe programs do there today, the pieces that are missing in dependency order, the unknowns, a fixture plan, and ranked follow-ups (#441).
 
-It was written as research. Since then #447 implemented follow-ups 1, 2 and 4 for statically linked mingw-w64 C++ programs: the exception directory, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlCaptureContext`, `RaiseException` and `RtlUnwindEx` (`crates/loader/src/exceptions.rs`, tested by `crates/loader/tests/guest_cpp_exceptions.rs`). The tables below describe main at `d362e17`, before that work. `__C_specific_handler`, CPU faults as exceptions and the unhandled-exception filter remain open. Nothing here describes Xbox console behaviour, which is unknown. Commercial game execution remains unsupported.
+It was written as research. Since then #447 implemented follow-ups 1, 2 and 4 for statically linked mingw-w64 C++ programs: the exception directory, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlCaptureContext`, `RaiseException` and `RtlUnwindEx` (`crates/loader/src/exceptions.rs`, tested by `crates/loader/tests/guest_cpp_exceptions.rs`). #453 then implemented follow-up 3: guest CPU faults as exceptions and `__C_specific_handler` (`crates/loader/src/exceptions/faults.rs` and `scope.rs`, tested by `crates/loader/tests/guest_c_seh.rs`); see [Implemented fault policy](#implemented-fault-policy-453) and [Derived scope-table format](#derived-scope-table-format-453). The tables below describe main at `d362e17`, before that work. The unhandled-exception filter (follow-up 5) remains open. Nothing here describes Xbox console behaviour, which is unknown. Commercial game execution remains unsupported.
 
 ## Sources
 
@@ -135,11 +135,43 @@ The static C++ case therefore needs only the OS-level surface. GCC's own unwinde
 7. **Services.** `RtlCaptureContext`, `RtlLookupFunctionEntry` and `RtlVirtualUnwind` on top of 2–4; `RaiseException` and `RtlUnwindEx` on top of 6; `__C_specific_handler` on top of 6 and the scope-table format (see unknowns).
 8. **Unhandled exceptions.** Call the filter stored by `SetUnhandledExceptionFilter`, then the default action. The exit status of an unhandled exception is not documented on the pages read, so it is a policy decision to record.
 
+## Implemented fault policy (#453)
+
+A fault raised by a guest instruction, while it was fetched, decoded or run, becomes an `EXCEPTION_RECORD` with `ExceptionAddress` at that instruction and starts the same search as `RaiseException`. The search-phase handlers receive the CONTEXT of the fault, and continuing execution resumes from that CONTEXT, so a handler's edits apply. The x64 page states both: `ContextRecord` "points to the exception context at the time the exception was raised" for an exception handler, and a handled status continues "by using the original context record".
+
+| `ExitReason` | Becomes | Why |
+| --- | --- | --- |
+| `DivideError` | `STATUS_INTEGER_DIVIDE_BY_ZERO`, no parameters | Xenora's #DE does not separate a zero divisor from a quotient overflow, so an overflow gets the same code. Which code Windows reports for an overflow was not checked |
+| `MemoryFault(UnmappedAddress)`, `MemoryFault(PermissionViolation)` | `STATUS_ACCESS_VIOLATION`, parameters: 0 read, 1 write, 8 instruction fetch; then the address | 0, 1 and 8 are the documented values. 8 is documented for a DEP violation; using it for a fetch from unmapped memory is Xenora's choice, as the pages read do not say what Windows reports there. For a read-modify-write instruction the read happens first, so it is reported as a read; what Windows reports is unknown |
+| `IllegalInstruction` at UD2 (`0F 0B`) | `STATUS_ILLEGAL_INSTRUCTION`, no parameters | UD2 is defined to be invalid. Any other refused opcode may be a valid instruction Xenora does not implement, which a guest handler must not hide, so it still stops the guest |
+| `IllegalInstruction(0xFE)`, the runtime-limit marker | Still stops the guest | A Xenora limit, not a guest fault |
+| `GeneralProtection`, `SimdException` | Still stop the guest | The reasons do not carry the detail a record needs (which #GP cause, which MXCSR flag), and their Windows codes are not on the pages read |
+| `MemoryFault(Overflow)` and other faults without an address | Still stop the guest | No address for the record |
+
+Faults inside host services, in a process with no exception directory, or with too little writable stack below RSP for the dispatcher also still stop the guest. A fault no frame accepts stops the guest with the original `ExitReason` at the faulting instruction, after every filter ran; a raised exception no frame accepts stops it with `ExitReason::UnhandledException(code)`. The search ends at the return address of the entry point, of a thread's start routine and of a guest callback made by a host service. The unhandled-exception filter is not called (follow-up 5). Exceptions raised inside a filter are not flagged as nested.
+
+## Derived scope-table format (#453)
+
+No page read describes the handler data of `__C_specific_handler`. The layout Xenora implements was derived from the unwind data and disassembly of original programs: `tests/compat_fixtures/guest_c_seh.c` built by clang 23.1.6 (`--target=x86_64-pc-windows-msvc -fasync-exceptions`, `-O0`, `-O1`, `-O2`), and the `mainCRTStartup` and `WinMainCRTStartup` frames of the mingw-w64 14.0.0 C runtime linked into `guest_cpp_exceptions.cpp`. It is a derived format, not a documented one.
+
+| Field | Size | Meaning |
+| --- | --- | --- |
+| `Count` | 4 | Number of records that follow |
+| `Begin` | 4 | Image-relative start of the guarded code |
+| `End` | 4 | Image-relative end (exclusive) |
+| `Handler` | 4 | `__except`: the filter, or the literal 1 for the constant `EXCEPTION_EXECUTE_HANDLER`. `__finally`: the termination handler |
+| `Target` | 4 | `__except`: the image-relative start of the handler body. `__finally`: 0 |
+
+- Records are ordered innermost scope first. A `__finally` and the `__except` around it can share one range, and one scope can need several records.
+- A filter is called as `filter(EXCEPTION_POINTERS *, EstablisherFrame)` and a termination handler as `handler(abnormal, EstablisherFrame)`; both reach the parent's locals through the establisher frame. The `__except` body reads the exception code from EAX, so the unwind's `ReturnValue` is the code.
+- The mingw-w64 startup scope's filter is the C runtime's `_gnu_exception_handler`. Read from its disassembly: for a code that equals `0x20474343` under the mask `0x20ffffff` (GCC's C++ exceptions) without `EXCEPTION_NONCONTINUABLE` it returns `EXCEPTION_CONTINUE_EXECUTION`, so an uncaught C++ exception returns from `RaiseException` and the C++ runtime calls `std::terminate`.
+- `__C_specific_handler` resumes at `DISPATCHER_CONTEXT.ScopeIndex` (offset 0x48, after `HistoryTable`) and stores the next index there before calling a termination handler. In the unwind phase it stops at the `__except` record whose body is the unwind target, in the target frame.
+
 ## Unknowns and inconsistencies
 
 - The prolog and epilog page returned 404. The required prolog shape and the `lea rsp` epilog rule are therefore unverified; only the `RtlVirtualUnwind` list of epilog markers was read.
 - Unwind version 2 and its epilog codes, and operation values 6, 7 and 11–15, are not described on the pages read. The x64 page links an "Unwind V3 Preview" for APX, which was not read.
-- The scope table that `__C_specific_handler` reads from the language-specific data is not described on any page read. Implementing that handler needs a public description of the format, or a format derived from original compiled fixtures and recorded as such.
+- The scope table that `__C_specific_handler` reads from the language-specific data is not described on any page read. #453 derived it from original compiled fixtures (above); MSVC's own output was not examined, and how Windows handles collided unwinds through it is unknown.
 - The x64 `CONTEXT` layout was not on the pages read: `RtlCaptureContext` links an ARM64 `CONTEXT` page. The x64 definition of `UNWIND_HISTORY_TABLE` was not in the fetched content either.
 - Which registers `RtlCaptureContext` captures is not stated on its page.
 - The exit status and messages of an unhandled exception are not documented on the pages read.
@@ -154,7 +186,7 @@ All fixtures are original programs built by repository scripts with the tools ab
 
 | Fixture | Expected result | Exercises |
 | --- | --- | --- |
-| C divide by zero in `__try`/`__except`, filter accepts `0xC0000094` | Exit 42 | Lookup, unwind, fault mapping, search phase, `__C_specific_handler` |
+| C divide by zero in `__try`/`__except`, filter accepts `0xC0000094` (implemented by #453, like the next three) | Exit 42 | Lookup, unwind, fault mapping, search phase, `__C_specific_handler` |
 | The same with the filter returning `EXCEPTION_CONTINUE_SEARCH` | The unhandled-exception outcome Xenora defines | Search to the outermost frame, unhandled path |
 | C write to an unmapped address, filter inspects `ExceptionInformation` | Exit code encodes element 0 = 1 and the address | Access-violation record parameters |
 | C `__try`/`__finally` around a `RaiseException` caught one frame up | The termination handler runs once, before the outer handler body | Unwind phase, `UNW_FLAG_UHANDLER`, `EXCEPTION_UNWINDING` |
@@ -169,7 +201,7 @@ To be filed as separate issues after review of this page:
 
 1. **Exception directory and function lookup** (pieces 1–2). Loader and probe parsing with negative fixtures, and the probe reporting `.pdata` presence. Small and self-contained, and everything else depends on it.
 2. **Virtual unwinder, `RtlCaptureContext`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`** (pieces 3–4, 7). Known-answer tests on compiled prologs at several optimisation levels.
-3. **CPU-fault dispatch and `__C_specific_handler`** (pieces 5–7), after the scope-table format is settled. It makes the C `__try`/`__except` fixtures pass.
+3. **CPU-fault dispatch and `__C_specific_handler`** (pieces 5–7), after the scope-table format is settled. It makes the C `__try`/`__except` fixtures pass. Done in #453, with the scope-table format derived from fixtures.
 4. **`RaiseException` and `RtlUnwindEx`** (pieces 6–7). It makes the static mingw-w64 C++ fixture pass, together with the unrelated unresolved imports that fixture needs (`FormatMessageA`, `LocalFree`, the CRT functions and the `libwinpthread-1.dll` functions).
 5. **Unhandled-exception policy** (piece 8). Filter call, default action and the recorded exit status.
 
