@@ -662,3 +662,21 @@ fn startup_report_ends_in_verified_metal_frame() {
         "{report}"
     );
 }
+
+#[test]
+fn startup_report_preserves_a_guest_exit_from_tls_before_entry() {
+    let path = freestanding("gate-a1-tls-exit");
+    let run = run_program(&path, &["--startup-report"], &[]);
+    assert_eq!(run.code, Some(73), "{}", run.stderr);
+    assert!(run.stdout.is_empty());
+    assert_eq!(
+        startup_report(&run),
+        concat!(
+            r#"{"schema_version":1,"events":[{"stage":"parsed","completed":true},"#,
+            r#"{"stage":"mapped","completed":true},{"stage":"relocated","completed":true},"#,
+            r#"{"stage":"imports_bound","completed":true},{"stage":"tls_completed","completed":true}],"#,
+            r#""last_completed_stage":"tls_completed","protocol":"complete","outcome":"#,
+            r#"{"kind":"guest_exit","guest_status":73,"worker_code":73}}"#,
+        ),
+    );
+}

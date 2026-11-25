@@ -296,7 +296,9 @@ impl Report {
             (VERIFIED, []) if !program && last == Some(Stage::FramebufferVerified) => {
                 Outcome::Verified
             }
-            (GUEST_EXIT, [a, b, c, d]) if program && last == Some(Stage::EntryReturned) => {
+            (GUEST_EXIT, [a, b, c, d])
+                if program && matches!(last, Some(Stage::TlsCompleted | Stage::EntryReturned)) =>
+            {
                 Outcome::GuestExit(u32::from_le_bytes([*a, *b, *c, *d]))
             }
             (FAILURE, [phase, truncated @ (0 | 1), message @ ..]) => {
@@ -500,6 +502,25 @@ mod tests {
             assert_eq!(report.stages, [Stage::Parsed]);
             assert!(matches!(report.outcome, Outcome::Unknown));
         }
+    }
+
+    #[test]
+    fn guest_exit_after_tls_needs_no_entry_event() {
+        let mut wire = vec![];
+        for stage in &STAGES[..=Stage::TlsCompleted as usize] {
+            wire.extend([STAGE, 1, 0, *stage as u8]);
+        }
+
+        let guest = [GUEST_EXIT, 4, 0, 73, 0, 0, 0];
+        let mut premature = wire[..wire.len() - 4].to_vec();
+        premature.extend(guest);
+        assert_eq!(Report::decode(&premature, true).protocol, "malformed");
+
+        wire.extend(guest);
+        let report = Report::decode(&wire, true);
+        assert_eq!(report.stages.last(), Some(&Stage::TlsCompleted));
+        assert_eq!(report.protocol, "complete");
+        assert!(matches!(report.outcome, Outcome::GuestExit(73)));
     }
 
     #[test]

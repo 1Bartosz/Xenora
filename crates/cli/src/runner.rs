@@ -492,6 +492,7 @@ fn run_program(
     state.set_program_arguments(&arguments)?;
     let mut imports = ImportRegistry::new();
     register_standard_services(&mut imports, Arc::clone(&state));
+    let mut entered = false;
     let startup = run_synthetic_startup_with_observer(
         &bytes,
         StartupLayout {
@@ -502,6 +503,7 @@ fn run_program(
         imports,
         steps,
         |event| {
+            entered |= matches!(event, StartupEvent::Entering { .. });
             reporter.observed(&event);
             if options.trace {
                 eprintln!("{}", startup_line(&event));
@@ -512,7 +514,7 @@ fn run_program(
     // the deadline no longer writes it.
     let _turn = finishing.lock();
     let startup = startup.inspect_err(|error| reporter.failed(FailurePhase::Startup, error));
-    if startup.is_ok() {
+    if startup.is_ok() && entered {
         reporter.stage(Stage::EntryReturned);
     }
     let mut stdout = std::io::stdout().lock();
@@ -604,6 +606,7 @@ fn run_worker(options: &Options, steps: usize, reporter: &Reporter) -> Result<()
 
     let started = Instant::now();
     // Use only the embedded snapshot. The file is solely an exact-byte gate.
+    let mut entered = false;
     let startup = run_synthetic_startup_with_observer(
         fixture,
         StartupLayout {
@@ -614,6 +617,7 @@ fn run_worker(options: &Options, steps: usize, reporter: &Reporter) -> Result<()
         imports,
         steps,
         |event| {
+            entered |= matches!(event, StartupEvent::Entering { .. });
             reporter.observed(&event);
             if options.trace {
                 trace_startup(event);
@@ -621,7 +625,9 @@ fn run_worker(options: &Options, steps: usize, reporter: &Reporter) -> Result<()
         },
     )
     .inspect_err(|error| reporter.failed(FailurePhase::Startup, error))?;
-    reporter.stage(Stage::EntryReturned);
+    if entered {
+        reporter.stage(Stage::EntryReturned);
+    }
     let host_ms = started.elapsed().as_secs_f64() * 1000.0;
     let result = capture
         .lock()

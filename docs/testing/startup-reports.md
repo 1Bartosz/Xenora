@@ -16,8 +16,10 @@ they are `parsed`, `mapped`, `relocated`, `imports_bound`,
 embedded draw) `framebuffer_verified`. `entry_started` marks the
 transition into guest code, so a timeout during entry can still show
 `tls_completed` as the last completed stage. `entry_returned` says the
-CPU engine returned, including faults or step-limit exhaustion. The
-record reflects this run's observations. Static PE findings are reported
+CPU engine returned, including faults or step-limit exhaustion. If a
+thread-local storage callback exits the process, the last completed stage
+is `tls_completed` and the report has no entry events. The record reflects
+this run's observations. Static PE findings are reported
 by the probe.
 
 Outcome kinds are `verified` for an embedded fixture with a verified
