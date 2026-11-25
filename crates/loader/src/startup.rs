@@ -478,6 +478,55 @@ mod tests {
     #[test]
     #[ignore = "manual CPU startup profile; run in release mode on an idle host"]
     fn synthetic_startup_profile() {
+        const TICKET_ADDRESS: u64 = 0x1_5000_3000;
+        profile_startup(
+            "runtime-services",
+            include_bytes!("../../../fixtures/pe/runtime-services.exe"),
+            0x1_5000_0000,
+            |imports| {
+                imports.register("xenora.dll", "fixture_draw", |args, _, memory| {
+                    let ticket_address = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+                    assert_eq!(ticket_address, TICKET_ADDRESS);
+                    assert_eq!(memory.read_u64(ticket_address), Ok(23));
+                    Ok(0x42)
+                });
+            },
+            |result| {
+                assert_eq!(result.bound_imports, 3);
+                assert_eq!(result.tls_callbacks, 1);
+                assert_eq!(result.relocations.applied_dir64, 4);
+                assert_eq!(result.execution.final_state.get(crate::Register::Rax), 0x42);
+            },
+        );
+        // Run the original two-section fixture at its preferred base. Its
+        // CPU-only submission service ends the frame loop after three frames.
+        profile_startup(
+            "frame-loop",
+            include_bytes!("../../../fixtures/pe/frame-loop.exe"),
+            0x1_4000_0000,
+            |imports| {
+                imports.register("xenora.dll", "frame_submit", |args, _, _| {
+                    assert!(args.rcx <= 2);
+                    Ok(u64::from(args.rcx < 2))
+                });
+            },
+            |result| {
+                assert_eq!(result.bound_imports, 1);
+                assert_eq!(result.tls_callbacks, 0);
+                assert_eq!(result.relocations.applied_dir64, 0);
+                assert_eq!(result.execution.final_state.get(crate::Register::Rbx), 3);
+                assert_eq!(result.execution.final_state.get(crate::Register::Rax), 0);
+            },
+        );
+    }
+
+    fn profile_startup(
+        fixture: &str,
+        bytes: &[u8],
+        image_base: u64,
+        register_fixture: impl Fn(&mut ImportRegistry),
+        check: impl Fn(&StartupResult),
+    ) {
         use crate::services::{ServicesState, SystemClock, register_standard_services};
         use std::{hint::black_box, sync::Arc, time::Instant};
 
@@ -496,9 +545,6 @@ mod tests {
             "run_tls",
             "run_entry",
         ];
-        const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/runtime-services.exe");
-        const TICKET_ADDRESS: u64 = 0x1_5000_3000;
-
         let mut measurements: [Vec<f64>; STAGES.len()] =
             std::array::from_fn(|_| Vec::with_capacity(SAMPLES));
         for sample in 0..WARMUP + SAMPLES {
@@ -509,17 +555,12 @@ mod tests {
                     &mut imports,
                     Arc::new(ServicesState::new(Arc::new(SystemClock))),
                 );
-                imports.register("xenora.dll", "fixture_draw", |args, _, memory| {
-                    let ticket_address = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
-                    assert_eq!(ticket_address, TICKET_ADDRESS);
-                    assert_eq!(memory.read_u64(ticket_address), Ok(23));
-                    Ok(0x42)
-                });
+                register_fixture(&mut imports);
                 let mut previous = Instant::now();
                 let result = run_startup_with(
-                    black_box(FIXTURE),
+                    black_box(bytes),
                     StartupLayout {
-                        image_base: 0x1_5000_0000,
+                        image_base,
                         stack_top: 0x2_0001_0000,
                         tls_base: 0x3_0000_0000,
                     },
@@ -533,11 +574,8 @@ mod tests {
                     },
                     |engine, memory, entry, budget| engine.run(&mut entry.clone(), memory, budget),
                 )
-                .expect("runtime-services synthetic startup");
-                assert_eq!(result.bound_imports, 3);
-                assert_eq!(result.tls_callbacks, 1);
-                assert_eq!(result.relocations.applied_dir64, 4);
-                assert_eq!(result.execution.final_state.get(crate::Register::Rax), 0x42);
+                .unwrap_or_else(|error| panic!("{fixture} synthetic startup: {error}"));
+                check(&result);
                 assert_eq!(result.execution.exit_reason, ExitReason::Halt);
                 black_box(result);
             }
@@ -556,7 +594,7 @@ mod tests {
                 .sum::<f64>()
                 / (SAMPLES - 1) as f64;
             println!(
-                "{stage}: n={SAMPLES} batch={BATCH} median_ns={:.1} sample_variance_ns2={variance:.1}",
+                "{fixture}/{stage}: n={SAMPLES} batch={BATCH} median_ns={:.1} sample_variance_ns2={variance:.1}",
                 measurements[SAMPLES / 2],
             );
         }
