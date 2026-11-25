@@ -29,6 +29,19 @@ limitations = "Synthetic memory contract, statically resolved forward control fl
 test = "scripts/demo.sh"
 
 [[feature]]
+id = "guest-graphics-path"
+implementation = "implemented"
+correctness = "guest-frame-readback-passed"
+hardware_verification = "verified"
+hardware_target = "Apple M4"
+claims = ["CLAIM-GUEST-GRAPHICS-METAL"]
+architecture = "arm64 macOS"
+semantics = "Guest programs author graphics commands that render through the translated gfx1030 vertex and pixel stages"
+metal_mapping = "Native Metal offscreen rendering behind the guest graphics service boundary"
+limitations = "One triangle per draw, one instance, a float4 vertex layout, R8G8B8A8 render targets of at most 64 by 64 pixels, synchronous execution and no guest-visible fence. Descriptor heaps, root signatures, shader resource views and samplers are not yet exposed to the guest."
+test = "cargo test --locked -p xenora-loader --test guest_graphics_path --features gpu-tests"
+
+[[feature]]
 id = "xbox-execution"
 implementation = "unsupported"
 correctness = "untested"

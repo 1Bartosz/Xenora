@@ -19,6 +19,7 @@ mod crt_streams;
 mod events;
 mod files;
 mod gdk_queue;
+mod graphics;
 mod heap;
 mod modules;
 mod platform_fixture;
@@ -540,6 +541,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     synch::register(registry, &state);
     sysinfo::register(registry, &state);
     files::register(registry, &state);
+    graphics::register(registry, &state);
     crt::register(registry);
     crt::register_heap(registry);
     crt::register_errno(registry);
