@@ -3074,7 +3074,6 @@ const UNSUPPORTED: &[(&str, usize)] = &[
     ("insertps_zero_mask", 0),
     ("jecxz_tests_low_32_bits", 1),
     ("lea64_addr32_truncates_effective_address", 0),
-    ("lock_btc_memory", 0),
     ("lodsd_zero_extends", 1),
     ("lodsd_zero_extends_df_clear", 0),
     ("lodsw_preserves_upper48", 1),

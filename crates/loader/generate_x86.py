@@ -28,7 +28,7 @@ TOP_KEYS = {"schema", "architecture", "documents", "operation", "alu", "form", "
 OPERATION_KEYS = {"reads", "writes", "undefined", "conditional", "terminator", "faults", "ref"}
 FORM_KEYS = {"op", "map", "prefix", "opcode", "count", "digit", "enc", "size", "imm", "src",
              "memory_only", "register_only", "rm", "no_rex_b", "unaligned", "lock"}
-GROUP_KEYS = {"map", "opcodes", "digits"}
+GROUP_KEYS = {"map", "opcodes", "digits", "lock"}
 FLAGS = ["cf", "zf", "sf", "of", "pf", "af"]
 MAPS = {"1": "ONE_BYTE", "0f": "TWO_BYTE"}
 # Two-byte opcode table per mandatory prefix.
@@ -103,6 +103,12 @@ def flag_set(where, text):
     return set(names)
 
 
+def check_lock(where, group, operations):
+    for op in group.get("lock", ()):
+        if op not in operations:
+            fail(f"{where}: lock names {op}, which is not in the group")
+
+
 def load(text):
     """Parse and validate the registry text, returning (operations, forms)."""
     data = tomllib.loads(text)
@@ -145,10 +151,12 @@ def load(text):
                           "size": size, "imm": imm, "lock": op != "cmp"})
     for group in data["group"]:
         check_keys("group", group, GROUP_KEYS)
+        check_lock("group", group, group["digits"].values())
         for opcode, size, imm, enc in group["opcodes"]:
             for digit, op in sorted(group["digits"].items()):
                 forms.append({"op": op, "map": group.get("map", "1"), "opcode": opcode,
-                              "digit": int(digit), "enc": enc, "size": size, "imm": imm})
+                              "digit": int(digit), "enc": enc, "size": size, "imm": imm,
+                              "lock": op in group.get("lock", ())})
 
     claimed = {}
     used = set()

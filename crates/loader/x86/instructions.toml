@@ -13,8 +13,10 @@
 # enc = "string" is a string instruction: its source is [RSI], which FS or GS
 # may override, its destination is [RDI], and it accepts the REP prefix (F3).
 #
-# lock = true accepts the LOCK prefix (F0) when the ModRM operand is memory.
-# Every other use of LOCK is rejected, as the architecture's #UD.
+# lock = true accepts the LOCK prefix (F0) when the ModRM operand is memory. A
+# group names the operations it accepts LOCK on, and the generator accepts it on
+# every ALU operation but CMP. Every other use of LOCK is rejected, as the
+# architecture's #UD.
 #
 # rm = N requires the ModRM r/m field to be N. It needs register_only, so the
 # form matches exactly one ModRM byte. At most one form per opcode and digit.
@@ -419,12 +421,14 @@ op = "xchg"
 opcode = 0x86
 enc = "rm_reg"
 size = "b"
+lock = true
 
 [[form]]
 op = "xchg"
 opcode = 0x87
 enc = "rm_reg"
 size = "v"
+lock = true
 
 # The accumulator with the register in the opcode. Opcode 0x90 is NOP; with
 # REX.B the decoder reads it as 0x91 with register 0, which is then r8. A row
@@ -918,14 +922,17 @@ lock = true
 map = "0f"
 opcodes = [[0xBA, "v", "ib", "rm_imm"]]
 digits = { 4 = "bt", 5 = "bts", 6 = "btr", 7 = "btc" }
+lock = ["bts", "btr", "btc"]
 
 [[group]]
 opcodes = [[0xF6, "b", "", "rm"], [0xF7, "v", "", "rm"]]
 digits = { 2 = "not", 3 = "neg", 4 = "mul", 5 = "imul", 6 = "div", 7 = "idiv" }
+lock = ["not", "neg"]
 
 [[group]]
 opcodes = [[0xFE, "b", "", "rm"], [0xFF, "v", "", "rm"]]
 digits = { 0 = "inc", 1 = "dec" }
+lock = ["inc", "dec"]
 
 [[group]]
 opcodes = [[0xC0, "b", "ib", "rm_imm"], [0xC1, "v", "ib", "rm_imm"], [0xD0, "b", "", "rm_one"], [0xD1, "v", "", "rm_one"], [0xD2, "b", "", "rm_cl"], [0xD3, "v", "", "rm_cl"]]

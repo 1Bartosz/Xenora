@@ -107,18 +107,22 @@ class GenerateX86(unittest.TestCase):
         lockable = [form for form in forms if form.get("lock")]
         operations = {form["op"] for form in lockable}
         self.assertLessEqual(operations, sdm)
-        # The ones the registry marks today (#198, #447). A change that adds
-        # more of the SDM's list extends this set.
-        self.assertEqual(operations, {"xadd", "cmpxchg", "add", "or", "adc", "sbb", "and", "sub", "xor"})
+        # The ones the registry marks today (#198, #447, #451): all but
+        # CMPXCHG8B and CMPXCHG16B.
+        self.assertEqual(operations, sdm - {"cmpxchg8b", "cmpxchg16b"})
         # A form whose destination is a register, or the accumulator, cannot
         # lock, and neither can a form that only takes a register.
-        self.assertEqual({form["enc"] for form in lockable}, {"rm_reg", "rm_imm"})
+        self.assertEqual({form["enc"] for form in lockable}, {"rm_reg", "rm_imm", "rm"})
         self.assertFalse(any(form.get("register_only") for form in lockable))
         self.assertFalse(any(form.get("lock") for form in forms if form["op"] == "cmp"))
         for operation in ("add", "or", "adc", "sbb", "and", "sub", "xor"):
             encodings = {form["enc"]: bool(form.get("lock")) for form in forms if form["op"] == operation}
             self.assertEqual(encodings, {"rm_reg": True, "rm_imm": True, "reg_rm": False, "acc_imm": False},
                              operation)
+
+    def test_a_group_locks_only_its_own_operations(self):
+        self.rejects(REGISTRY.replace('lock = ["inc", "dec"]', 'lock = ["inc", "mul"]'), "not in the group")
+        self.rejects(REGISTRY.replace('lock = ["bts", "btr", "btc"]', 'lock = ["bts", "shl"]'), "not in the group")
 
     def test_string_forms_are_movs_and_stos_without_operands(self):
         _, forms = generate_x86.load(REGISTRY)

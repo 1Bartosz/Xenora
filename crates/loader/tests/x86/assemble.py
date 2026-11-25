@@ -103,6 +103,18 @@ def cases():
                     f"{op} {mem(bits)}, {reg(2, bits)}", f"lock {op} {mem(bits)}, {reg(2, bits)}",
                     f"lock {op} {mem(bits)}, {reg(0, bits)}"]
         out += [f"{op} ah, bl", f"{op} cl, dh", f"{op} {mem(8)}, ch"]
+    for bits in (8, 16, 32, 64):
+        imm = {8: "0x7f", 16: "0x1234", 32: "0x12345678", 64: "0x12345678"}[bits]
+        for op in "add or adc sbb and sub xor".split():
+            out += [f"lock {op} {mem(bits)}, {reg(2, bits)}", f"lock {op} {mem(bits)}, {reg(12, bits)}",
+                    f"lock {op} {mem(bits)}, {imm}", f"lock {op} {mem(bits)}, -3"]
+        for op in "inc dec neg not".split():
+            out.append(f"lock {op} {mem(bits)}")
+        out.append(f"lock xchg {mem(bits)}, {reg(2, bits)}")
+        if bits != 8:
+            for op in "bts btr btc".split():
+                out += [f"lock {op} {mem(bits)}, {bits - 1}", f"lock {op} {mem(bits)}, 3"]
+    out += [f"lock add {mem(8)}, ch", f"lock xchg {mem(8)}, ah"]
     out += ["mov ah, bl", "mov dl, ch", "mov bh, 0x21", "xchg ah, bl", "mov sil, dil",
             "movabs r15, 0x8877665544332211", "mov rcx, -2", "bswap ebx", "bswap r9",
             "cbw", "cwde", "cdqe", "cwd", "cdq", "cqo", "clc", "stc", "cmc", "lahf", "sahf",
