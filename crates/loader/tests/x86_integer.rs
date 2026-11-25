@@ -274,7 +274,8 @@ struct Undefined {
     of: bool,
     pf: bool,
     af: bool,
-    /// The destination itself is undefined (BSF/BSR of zero).
+    /// The destination itself is undefined (BSF/BSR of zero, or a 16-bit
+    /// SHLD/SHRD count above 16).
     destination: bool,
 }
 
@@ -446,6 +447,53 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                     set_result(&mut m.flags, value, bits);
                     undefined.af = true;
                     undefined.cf = name != "sar" && count >= bits;
+                }
+            }
+            Outcome::Done(undefined)
+        }
+        "shld" | "shrd" => {
+            // Intel SDM Vol. 2B, SHLD and SHRD: the count is masked to 5 bits
+            // (6 for 64-bit operands); a count above the operand size leaves
+            // the destination and the flags undefined.
+            let count = read(m, places[2], 8) as u32 % if bits == 64 { 64 } else { 32 };
+            let start = read(m, places[0], bits);
+            let mut fill = read(m, places[1], bits);
+            if count > bits {
+                return Outcome::Done(Undefined {
+                    cf: true,
+                    zf: true,
+                    sf: true,
+                    of: true,
+                    pf: true,
+                    af: true,
+                    destination: true,
+                });
+            }
+            let mut value = start;
+            let mut carry = m.flags.cf;
+            for _ in 0..count {
+                // One bit at a time: the bit leaving the destination goes to
+                // CF and the next bit of the source enters from the other end.
+                if name == "shld" {
+                    carry = bit(value, bits - 1);
+                    value = truncate(value * 2, bits) + u128::from(bit(fill, bits - 1));
+                    fill = truncate(fill * 2, bits);
+                } else {
+                    carry = bit(value, 0);
+                    value = value / 2 + if bit(fill, 0) { 1u128 << (bits - 1) } else { 0 };
+                    fill /= 2;
+                }
+            }
+            write(m, places[0], value);
+            let mut undefined = none;
+            if count != 0 {
+                m.flags.cf = carry;
+                set_result(&mut m.flags, value, bits);
+                undefined.af = true;
+                if count == 1 {
+                    m.flags.of = bit(value, bits - 1) != bit(start, bits - 1);
+                } else {
+                    undefined.of = true;
                 }
             }
             Outcome::Done(undefined)
@@ -637,7 +685,8 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                 ..none
             })
         }
-        "mov" | "movabs" => {
+        // MOVNTI stores like MOV; the non-temporal hint changes no result.
+        "mov" | "movabs" | "movnti" => {
             let value = read(m, places[1], bits);
             write(m, places[0], value);
             Outcome::Done(none)
@@ -738,7 +787,8 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             m.flags.cf = !m.flags.cf;
             Outcome::Done(none)
         }
-        "nop" | "pause" => Outcome::Done(none),
+        // The fences order memory accesses and compute nothing.
+        "nop" | "pause" | "lfence" | "mfence" | "sfence" => Outcome::Done(none),
         "cpuid" => {
             // Xenora's guest CPUID contract, restated: the vendor "Xenora guest"
             // and the four features whose every instruction exists, CMOV and
@@ -936,12 +986,12 @@ fn every_fixture_instruction_matches_the_reference_in_both_engines() {
             assert_eq!(state.rip, ENTRY + case.code.len() as u64, "{text}");
             if !undefined.destination {
                 assert_eq!(state.gpr, expected.gpr, "{text} from {cpu:x?}");
+                assert_eq!(
+                    memory.read_u64(OPERAND).unwrap(),
+                    expected.operand,
+                    "{text} from {cpu:x?}"
+                );
             }
-            assert_eq!(
-                memory.read_u64(OPERAND).unwrap(),
-                expected.operand,
-                "{text} from {cpu:x?}"
-            );
             assert_eq!(
                 memory.read_u64(STACK_TOP - 8).unwrap(),
                 expected.pushed,
@@ -1234,6 +1284,10 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0x66, 0x63, 0xC1],       // 16-bit movsxd
         &[0xF3, 0x41, 0x90],       // F3 on xchg r8, rax
         &[0x8D, 0xC0],             // lea with a register operand
+        &[0x0F, 0xAE, 0x2E],       // 0F AE /5 with a memory operand
+        &[0x0F, 0xAE, 0x36],       // 0F AE /6 with a memory operand
+        &[0x0F, 0xC3, 0xC1],       // movnti with a register destination
+        &[0x66, 0x0F, 0xC3, 0x06], // 66 with movnti
         &[0x0F, 0xA3, 0x06],       // bt [rsi], eax
         &[0xC6, 0xC8, 0x01],       // C6 /1
         &[0xFF, 0xF8],             // FF /7
