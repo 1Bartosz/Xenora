@@ -46,7 +46,7 @@ IMPORT int XenoraCreateCommandAllocator(u64 device, u32 listType, u64 *ppAllocat
 IMPORT int XenoraCreateCommandList(u64 device, u64 allocator, u32 listType, u64 *ppList);
 IMPORT int XenoraCreateBuffer(u64 device, u64 guestAddr, u64 byteLength, u64 *ppResource);
 IMPORT int XenoraCreateRenderTarget(u64 device, u32 width, u32 height, u64 *ppResource);
-IMPORT int XenoraSetVertexBuffer(u64 list, u32 slot, u64 resource, u64 offset);
+IMPORT int XenoraSetVertexBuffer(u64 list, u32 slot, u64 resource, u64 offset, u64 stride);
 IMPORT int XenoraSetRenderTarget(u64 list, u64 resource, u32 clearColor);
 IMPORT int XenoraSetViewport(u64 list, u32 width, u32 height);
 IMPORT int XenoraDraw(u64 list, u32 vertexCount, u32 instanceCount, u32 startVertex);
@@ -75,6 +75,9 @@ IMPORT void XenoraNoSuchService(void);
 #define LIST_DIRECT 0
 
 // The size of the render target and of the framebuffer read back from it.
+// The stride of one vertex record: a float4 position. A flat draw reads
+// three consecutive positions, so no texture coordinate is bound.
+#define VERTEX_STRIDE_FLAT 16
 #define FRAME_WIDTH 8
 #define FRAME_HEIGHT 8
 #define FRAME_BYTES (FRAME_WIDTH * FRAME_HEIGHT * 4)
@@ -190,7 +193,8 @@ static void run_frame(struct frame_outcome *out, float *scene, u32 clear_color,
 #endif
     (void)use_bad_viewport;
     out->set_viewport = XenoraSetViewport(out->list, FRAME_WIDTH, FRAME_HEIGHT);
-    out->set_vertex_buffer = XenoraSetVertexBuffer(out->list, 0, out->vertex_buffer, 0);
+    out->set_vertex_buffer = XenoraSetVertexBuffer(out->list, 0, out->vertex_buffer, 0,
+                                                    VERTEX_STRIDE_FLAT);
     out->draw = XenoraDraw(out->list, VERTEX_COUNT, 1, 0);
     out->close_list = XenoraCloseCommandList(out->list);
     out->execute = XenoraExecuteCommandLists(queue_handle, out->list);
