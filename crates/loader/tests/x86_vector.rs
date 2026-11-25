@@ -85,6 +85,7 @@ impl Random {
             xmm,
             operand: self.vector(),
             mxcsr: (self.next() & 0xFFFF) as u32,
+            flags: FLAGS,
         }
     }
 }
@@ -95,7 +96,18 @@ struct Machine {
     xmm: [Bytes; 16],
     operand: Bytes,
     mxcsr: u32,
+    /// Flags after the instruction. Every instruction starts from the same.
+    flags: RFlags,
 }
+
+const FLAGS: RFlags = RFlags {
+    cf: true,
+    zf: false,
+    sf: true,
+    of: false,
+    pf: true,
+    af: false,
+};
 
 // --- reference -------------------------------------------------------------
 
@@ -225,6 +237,54 @@ fn packed(name: &str, a: &Bytes, b: &Bytes) -> Bytes {
         "pmaxub" => zip(a, b, 1, |x, y| if x > y { x } else { y }),
         "pminsw" => zip_signed(a, b, 2, |x, y| if x < y { x } else { y }),
         "pmaxsw" => zip_signed(a, b, 2, |x, y| if x > y { x } else { y }),
+        "pminuw" | "pminud" => zip(a, b, width, |x, y| if x < y { x } else { y }),
+        "pmaxuw" | "pmaxud" => zip(a, b, width, |x, y| if x > y { x } else { y }),
+        "pminsb" | "pminsd" => zip_signed(a, b, width, |x, y| if x < y { x } else { y }),
+        "pmaxsb" | "pmaxsd" => zip_signed(a, b, width, |x, y| if x > y { x } else { y }),
+        "pmulld" => zip(a, b, 4, |x, y| x * y),
+        "pcmpeqq" => zip(a, b, 8, |x, y| truth(x == y)),
+        "pmuldq" => {
+            let (x, y) = (split(a, 4), split(b, 4));
+            join(
+                &[0, 2].map(|i| negative_form(x[i], 4) * negative_form(y[i], 4)),
+                8,
+            )
+        }
+        "packusdw" => {
+            let lanes: Vec<i128> = [split(a, 4), split(b, 4)]
+                .concat()
+                .into_iter()
+                .map(|lane| clamp(negative_form(lane, 4), 0, 65535))
+                .collect();
+            join(&lanes, 2)
+        }
+        "phminposuw" => {
+            let words = split(b, 2);
+            let mut best = 0;
+            for at in 1..8 {
+                if words[at] < words[best] {
+                    best = at;
+                }
+            }
+            join(&[words[best], best as i128, 0, 0, 0, 0, 0, 0], 2)
+        }
+        _ if name.starts_with("pmovsx") || name.starts_with("pmovzx") => {
+            let size = |letter: u8| match letter {
+                b'b' => 1,
+                b'w' => 2,
+                b'd' => 4,
+                _ => 8,
+            };
+            let (from, to) = (size(name.as_bytes()[6]), size(name.as_bytes()[7]));
+            let lanes: Vec<i128> = split(&b[..16 / to * from], from)
+                .into_iter()
+                .map(|lane| match name.starts_with("pmovsx") {
+                    true => negative_form(lane, from),
+                    false => lane,
+                })
+                .collect();
+            join(&lanes, to)
+        }
         "pavgb" | "pavgw" => zip(a, b, width, |x, y| (x + y + 1) / 2),
         "pmullw" => zip(a, b, 2, |x, y| x * y),
         "pmulhw" => zip_signed(a, b, 2, |x, y| (x * y).div_euclid(65536)),
@@ -328,7 +388,7 @@ fn packed(name: &str, a: &Bytes, b: &Bytes) -> Bytes {
             shifted(name, a, split(&b[..8], 8)[0])
         }
         // Full-width loads.
-        "movaps" | "movapd" | "movups" | "movupd" | "movdqa" | "movdqu" => *b,
+        "movaps" | "movapd" | "movups" | "movupd" | "movdqa" | "movdqu" | "movntdqa" => *b,
         other => panic!("no reference for {other}"),
     }
 }
@@ -343,6 +403,8 @@ fn general(text: &str) -> Option<(usize, usize)> {
     Some(match text {
         "eax" => (0, 4),
         "ebx" => (3, 4),
+        "ebp" => (5, 4),
+        "rbx" => (3, 8),
         "r9d" => (9, 4),
         "r10d" => (10, 4),
         "r9" => (9, 8),
@@ -358,6 +420,7 @@ fn reference(m: &mut Machine, text: &str) {
         "qword" => 8,
         "dword" => 4,
         "word" => 2,
+        "byte" => 1,
         other => panic!("width {other}"),
     };
     if name == "stmxcsr" {
@@ -368,8 +431,15 @@ fn reference(m: &mut Machine, text: &str) {
     if destination.contains(" ptr ") {
         // Stores write exactly their operand width.
         let source = m.xmm[register(parts[1]).unwrap()];
-        let start = if name.starts_with("movh") { 8 } else { 0 };
         let bytes = width(destination);
+        let start = match name {
+            _ if name.starts_with("movh") => 8,
+            // The lane number wraps at the number of lanes.
+            _ if name.starts_with("pextr") => {
+                parts[2].parse::<usize>().unwrap() % (16 / bytes) * bytes
+            }
+            _ => 0,
+        };
         m.operand[..bytes].copy_from_slice(&source[start..start + bytes]);
         return;
     }
@@ -389,7 +459,10 @@ fn reference(m: &mut Machine, text: &str) {
             "movmskps" => lanes(4),
             "movmskpd" => lanes(8),
             "pmovmskb" => lanes(1),
-            "pextrw" => split(&source, 2)[parts[2].parse::<usize>().unwrap()] as u64,
+            _ if name.starts_with("pextr") => {
+                let lanes = split(&source, suffix(name));
+                lanes[parts[2].parse::<usize>().unwrap() % lanes.len()] as u64
+            }
             _ => split(&source, bytes)[0] as u64,
         };
         return;
@@ -398,9 +471,10 @@ fn reference(m: &mut Machine, text: &str) {
     let old = m.xmm[target];
     if let Some((index, bytes)) = general(source_text) {
         let value = m.gpr[index].to_le_bytes();
-        if name == "pinsrw" {
-            let at = 2 * parts[2].parse::<usize>().unwrap();
-            m.xmm[target][at..at + 2].copy_from_slice(&value[..2]);
+        if name.starts_with("pinsr") {
+            let wide = suffix(name);
+            let at = parts[2].parse::<usize>().unwrap() % (16 / wide) * wide;
+            m.xmm[target][at..at + wide].copy_from_slice(&value[..wide]);
         } else {
             let mut out = [0; 16];
             out[..bytes].copy_from_slice(&value[..bytes]);
@@ -429,7 +503,17 @@ fn reference(m: &mut Machine, text: &str) {
     } else {
         m.xmm[register(source_text).unwrap()]
     };
-    let imm = parts.get(2).map(|text| text.parse::<usize>().unwrap());
+    let imm = parts.get(2).and_then(|text| text.parse::<usize>().ok());
+    if name == "ptest" {
+        // ZF: no common set bit. CF: no bit of the source outside the target.
+        let pairs = || old.iter().zip(&source);
+        m.flags = RFlags {
+            zf: pairs().all(|(a, b)| a & b == 0),
+            cf: pairs().all(|(a, b)| b & (255 - a) == 0),
+            ..RFlags::default()
+        };
+        return;
+    }
     let mut out = old;
     match name {
         "movss" | "movsd" | "movq" => {
@@ -450,9 +534,40 @@ fn reference(m: &mut Machine, text: &str) {
             out = [0; 16];
             out[..4].copy_from_slice(&source[..4]);
         }
-        "pinsrw" => {
-            let at = 2 * imm.unwrap();
-            out[at..at + 2].copy_from_slice(&source[..2]);
+        "pinsrb" | "pinsrw" | "pinsrd" | "pinsrq" => {
+            let wide = suffix(name);
+            let at = imm.unwrap() % (16 / wide) * wide;
+            out[at..at + wide].copy_from_slice(&source[..wide]);
+        }
+        "pblendvb" => {
+            for (at, byte) in out.iter_mut().enumerate() {
+                if m.xmm[0][at] >= 128 {
+                    *byte = source[at];
+                }
+            }
+        }
+        "pblendw" => {
+            for word in 0..8 {
+                if imm.unwrap() / 2usize.pow(word) % 2 == 1 {
+                    let at = 2 * word as usize;
+                    out[at..at + 2].copy_from_slice(&source[at..at + 2]);
+                }
+            }
+        }
+        "mpsadbw" => {
+            let block = imm.unwrap() % 4 * 4;
+            let first = imm.unwrap() / 4 % 2 * 4;
+            let sums: Vec<i128> = (0..8)
+                .map(|word| {
+                    (0..4)
+                        .map(|at| {
+                            let a = i128::from(old[first + word + at]);
+                            (a - i128::from(source[block + at])).abs()
+                        })
+                        .sum()
+                })
+                .collect();
+            out = join(&sums, 2);
         }
         "pshufd" | "shufps" => {
             for lane in 0..4 {
@@ -507,14 +622,7 @@ fn load(machine: &Machine, code: &[u8], permissions: MemoryPermissions) -> (CpuS
     cpu.gpr = machine.gpr;
     cpu.xmm = machine.xmm.map(u128::from_le_bytes);
     cpu.mxcsr = Mxcsr(machine.mxcsr);
-    cpu.flags = RFlags {
-        cf: true,
-        zf: false,
-        sf: true,
-        of: false,
-        pf: true,
-        af: false,
-    };
+    cpu.flags = machine.flags;
     (cpu, memory)
 }
 
@@ -649,14 +757,33 @@ fn faulting_vector_accesses_change_nothing() {
 
 #[test]
 fn only_the_operand_width_is_accessed_at_the_end_of_a_region() {
-    for (code, width) in [
-        (&[0xF3u8, 0x0F, 0x10, 0x03][..], 4), // movss xmm0, [rbx]
-        (&[0xF2, 0x0F, 0x10, 0x03], 8),       // movsd xmm0, [rbx]
-        (&[0xF3, 0x0F, 0x7E, 0x03], 8),       // movq xmm0, [rbx]
-        (&[0x66, 0x0F, 0xC4, 0x03, 0x01], 2), // pinsrw xmm0, [rbx], 1
-        (&[0x0F, 0x10, 0x03], 16),            // movups xmm0, [rbx]
-        (&[0x0F, 0x11, 0x03], 16),            // movups [rbx], xmm0
-    ] {
+    // pmovsx and pmovzx, by opcode: bw, bd, bq, wd, wq and dq from [rbx].
+    let widening: Vec<([u8; 5], u64)> = [0x20, 0x30]
+        .into_iter()
+        .flat_map(|base| {
+            [8, 4, 2, 8, 4, 8]
+                .into_iter()
+                .zip(base..)
+                .map(|(width, opcode)| ([0x66, 0x0F, 0x38, opcode, 0x03], width))
+        })
+        .collect();
+    let fixed = [
+        (&[0xF3u8, 0x0F, 0x10, 0x03][..], 4),       // movss xmm0, [rbx]
+        (&[0xF2, 0x0F, 0x10, 0x03], 8),             // movsd xmm0, [rbx]
+        (&[0xF3, 0x0F, 0x7E, 0x03], 8),             // movq xmm0, [rbx]
+        (&[0x66, 0x0F, 0xC4, 0x03, 0x01], 2),       // pinsrw xmm0, [rbx], 1
+        (&[0x66, 0x0F, 0x3A, 0x20, 0x03, 0x01], 1), // pinsrb xmm0, [rbx], 1
+        (&[0x66, 0x0F, 0x3A, 0x22, 0x03, 0x01], 4), // pinsrd xmm0, [rbx], 1
+        (&[0x66, 0x48, 0x0F, 0x3A, 0x22, 0x03, 0x01], 8), // pinsrq xmm0, [rbx], 1
+        (&[0x66, 0x0F, 0x3A, 0x14, 0x03, 0x01], 1), // pextrb [rbx], xmm0, 1
+        (&[0x66, 0x0F, 0x3A, 0x15, 0x03, 0x01], 2), // pextrw [rbx], xmm0, 1
+        (&[0x66, 0x0F, 0x3A, 0x16, 0x03, 0x01], 4), // pextrd [rbx], xmm0, 1
+        (&[0x66, 0x48, 0x0F, 0x3A, 0x16, 0x03, 0x01], 8), // pextrq [rbx], xmm0, 1
+        (&[0x0F, 0x10, 0x03], 16),                  // movups xmm0, [rbx]
+        (&[0x0F, 0x11, 0x03], 16),                  // movups [rbx], xmm0
+    ];
+    let all = widening.iter().map(|(code, width)| (&code[..], *width));
+    for (code, width) in all.chain(fixed) {
         let end = DATA + 0x100;
         for (address, ok) in [(end - width, true), (end - width + 1, false)] {
             let mut machine = Random(0x99).machine();
@@ -686,6 +813,11 @@ fn register_store_encodings_write_the_rm_operand() {
         ("movss xmm3, xmm9", &[0xF3, 0x44, 0x0F, 0x11, 0xCB]),
         ("movsd xmm3, xmm9", &[0xF2, 0x44, 0x0F, 0x11, 0xCB]),
         ("movq xmm3, xmm9", &[0x66, 0x44, 0x0F, 0xD6, 0xCB]),
+        (
+            "pextrw ebx, xmm9, 5",
+            &[0x66, 0x44, 0x0F, 0x3A, 0x15, 0xCB, 5],
+        ),
+        ("pextrw ebp, xmm1, 10", &[0x66, 0x0F, 0x3A, 0x15, 0xCD, 10]),
     ];
     let mut random = Random(0x1234);
     for (text, code) in cases {
@@ -701,6 +833,7 @@ fn register_store_encodings_write_the_rm_operand() {
                     expected.xmm.map(u128::from_le_bytes),
                     "{text}"
                 );
+                assert_eq!(result.final_state.gpr, expected.gpr, "{text}");
             }
         }
     }
@@ -751,7 +884,13 @@ fn unsupported_vector_encodings_are_rejected() {
         &[0x66, 0xF3, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], // the same in 0F 3A
         &[0xF0, 0x66, 0x0F, 0x38, 0x00, 0x06],       // LOCK
         &[0x66, 0x0F, 0x38, 0x0C, 0xC1],             // unassigned without VEX
-        &[0x66, 0x0F, 0x38, 0x40, 0xC1],             // pmulld (SSE4.1)
+        &[0x66, 0x0F, 0x38, 0x2A, 0xC1],             // movntdqa with a register
+        &[0x66, 0x0F, 0x38, 0x14, 0xC1],             // blendvps (floating point)
+        &[0x66, 0x0F, 0x38, 0x37, 0xC1],             // pcmpgtq (SSE4.2)
+        &[0x66, 0x0F, 0x3A, 0x08, 0xC1, 0x00],       // roundps (floating point)
+        &[0x66, 0x0F, 0x3A, 0x17, 0xC1, 0x00],       // extractps (floating point)
+        &[0x66, 0x0F, 0x3A, 0x21, 0xC1, 0x00],       // insertps (floating point)
+        &[0x66, 0x0F, 0x3A, 0x62, 0xC1, 0x00],       // pcmpistrm (SSE4.2)
         &[0x66, 0x0F, 0x38, 0xDC, 0xC1],             // aesenc
         &[0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x00],       // pclmulqdq
         &[0x66, 0x0F, 0x3A, 0x00, 0xC1, 0x00],       // unassigned without VEX
@@ -851,6 +990,105 @@ fn a_rip_relative_operand_counts_the_immediate() {
         let result = run(native, &cpu, &mut memory, 1);
         assert_eq!(result.exit_reason, ExitReason::StepLimitExceeded);
         assert_eq!(result.final_state.xmm[1], u128::from_le_bytes(wanted));
+    }
+}
+
+/// SDM, PTEST: ZF is set when the AND is zero, CF when the AND of the source
+/// with the complement of the destination is, and the other four are cleared.
+#[test]
+fn ptest_sets_zero_and_carry_and_clears_the_rest() {
+    let top = 1u128 << 127;
+    for (target, source, zf, cf) in [
+        (0, 0, true, true),
+        (1, 0, true, true),
+        (0, 1, true, false),
+        (u128::MAX, u128::MAX, false, true),
+        (u128::MAX, top, false, true),
+        (top - 1, top, true, false),
+        (top, u128::MAX, false, false),
+        (1 << 64, 1 << 64, false, true),
+        (0xF0, 0x3C, false, false),
+    ] {
+        let mut machine = Random(0x99).machine();
+        machine.xmm[1] = target.to_le_bytes();
+        machine.xmm[2] = source.to_le_bytes();
+        for start in [
+            RFlags::default(),
+            RFlags {
+                cf: true,
+                zf: true,
+                sf: true,
+                of: true,
+                pf: true,
+                af: true,
+            },
+        ] {
+            machine.flags = start;
+            let code = [0x66, 0x0F, 0x38, 0x17, 0xCA]; // ptest xmm1, xmm2
+            for native in [false, true] {
+                let (cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+                let result = run(native, &cpu, &mut memory, 1);
+                let wanted = RFlags {
+                    zf,
+                    cf,
+                    ..RFlags::default()
+                };
+                assert_eq!(result.final_state.flags, wanted, "{target:x} {source:x}");
+                assert_eq!(result.final_state.xmm, cpu.xmm);
+            }
+        }
+    }
+}
+
+#[test]
+fn flags_survive_a_ptest_that_faults() {
+    // add eax, ecx; ptest xmm1, [rbx]
+    let code = [0x01, 0xC8, 0x66, 0x0F, 0x38, 0x17, 0x0B];
+    let mut machine = Random(0x9A).machine();
+    (machine.gpr[0], machine.gpr[1]) = (0xFFFF_FFFF, 1);
+    for (address, misaligned) in [(0x9000, false), (DATA + 8, true)] {
+        machine.gpr[3] = address;
+        for native in [false, true] {
+            let (cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+            let result = run(native, &cpu, &mut memory, 2);
+            if misaligned {
+                assert_eq!(result.exit_reason, ExitReason::GeneralProtection);
+            } else {
+                assert!(matches!(result.exit_reason, ExitReason::MemoryFault(_)));
+            }
+            // FFFFFFFF + 1 carries out of every position and leaves zero.
+            let wanted = RFlags {
+                cf: true,
+                zf: true,
+                sf: false,
+                of: false,
+                pf: true,
+                af: true,
+            };
+            assert_eq!(result.final_state.flags, wanted);
+            assert_eq!(result.final_state.rip, ENTRY + 2);
+        }
+    }
+}
+
+/// A byte or word lane moves through a 32-bit register: without REX, register
+/// field 4 to 7 is RSP to RDI and never AH to BH.
+#[test]
+fn lanes_do_not_use_the_legacy_high_byte_registers() {
+    let mut machine = Random(0x9B).machine();
+    machine.gpr[0] = 0xAAAA_AAAA_AAAA_AAAA;
+    machine.gpr[4] = 0x1111_1111_1111_1144;
+    machine.xmm[1] = [0x77; 16];
+    // pinsrb xmm1, esp, 0, then pextrb esp, xmm1, 0
+    let code = [
+        0x66, 0x0F, 0x3A, 0x20, 0xCC, 0x00, 0x66, 0x0F, 0x3A, 0x14, 0xCC, 0x00,
+    ];
+    for native in [false, true] {
+        let (cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+        let result = run(native, &cpu, &mut memory, 2);
+        assert_eq!(result.final_state.xmm[1].to_le_bytes()[..2], [0x44, 0x77]);
+        assert_eq!(result.final_state.gpr[4], 0x44);
+        assert_eq!(result.final_state.gpr[0], machine.gpr[0]);
     }
 }
 
