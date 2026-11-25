@@ -1109,6 +1109,8 @@ if CommandLine.arguments.contains("--smoke-inspection-order") {
         exit(failures.isEmpty ? 0 : 1)
     }
     dispatchMain()
+}
+
 // `--smoke-import-result` checks how a file-importer result reaches the inspector:
 // a cancelled picker shows nothing, a failure is shown, and a new selection clears it.
 // No file is opened or read.
