@@ -29,7 +29,6 @@ in this checkout uses original fixtures and public specifications.
 | [ttpf-viewer `bafe9af`](https://github.com/paryzius/ttpf-viewer/tree/bafe9af) | Rust texture and panorama tooling. | MIT at repository level. No guest execution evidence. | Test strict original texture metadata bounds before considering public container contracts. | Later, textures |
 | [rpf9 `3d8d4fb`](https://github.com/zeozeozeo/rpf9/tree/3d8d4fb) | Rust archive-header and scanning library. | Unlicense at repository level. No guest execution evidence. | No archive fixture required for the current resource slice. | Deferred, textures |
 | [6to5m `786d8cb`](https://github.com/DesignWithTommy/6to5m/tree/786d8cb) | Rust dispatch and FiveM asset conversion. | GPL-3. Vendored material requires provenance review. | No process startup fixture justified. | Deferred, research |
-| [awesome-gta6-reverse-engineering `3936443`](https://github.com/Ahmet-Dedeler/awesome-gta6-reverse-engineering/tree/3936443) | Curated links. | CC0 index. Linked code and data have separate terms. | Discovery only. | Deferred, research |
 | [RageForge `733580d`](https://github.com/zsy-miao/RageForge/tree/733580d) | Windows .NET archive and texture tool. | LGPL-3.0-only. File-level provenance unreviewed. | Exercise original mip metadata bounds. | Later, textures |
 | [PercyScarlett `5903e0b`](https://github.com/rpatty-dev/PercyScarlett/tree/5903e0b) | Rust shims and synthetic PE test in `tests/e2e_bringup.rs`. | Custom non-commercial license despite the audited project description. Synthetic execution reported in README. | Compile and inspect a distinct original import fixture. | Immediate, CPU |
 | [FEX `727948a`](https://github.com/FEX-Emu/FEX/tree/727948a) | Linux x86-64-to-ARM64 translation, intermediate representation and JIT. | MIT at repository level. Different host ABI and memory model. | Preserve interpreter known answers before evaluating any native translation. | Later, CPU |
@@ -63,7 +62,7 @@ in this checkout uses original fixtures and public specifications.
   services, hardware queues, formats and memory initialization need their
   own sources and tests. [Xbox GPU evidence](../research/xbox-gpu.md) ·
   [PE format](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)
-- GTA VI startup and execution remain unsupported. No authorized retail
+- Commercial game startup and execution remain unsupported. No authorized retail
   executable was loaded. Actual title imports, startup ordering, resource
   bindings and pipeline behavior remain unverified. Relocation, thread-local
   storage, process and thread services, dynamic shader execution and
