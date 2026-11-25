@@ -25,6 +25,7 @@ remains unsupported.
 
 ### Changed
 
+- Removed the references to one specific commercial game from the research notes `docs/research/synthetic-integration.md` and `docs/research/phase02-collaboration.md`, including a link to a reverse-engineering index for it. The notes now say in general terms that commercial game startup and execution remain unsupported.
 - Native CI runs the QA and release-tooling tests and checks both agent shell launchers for syntax errors (#545).
 - The native fixture viewer reuses its frame readback buffer and republishes the image only when the fixture frame ID changes. Paused loops use a 250 ms polling interval, and Pause, Resume and Stop refresh native status immediately (#405).
 - The decoder accepts `LOCK` on the memory-destination forms of ADD, OR, ADC, SBB, AND, SUB and XOR, as Intel SDM Vol. 2 lists them, not only on XADD and CMPXCHG (#447). libstdc++ uses `lock add` and `lock sub` for reference counts. `LOCK` on CMP, on a register destination and on XCHG is still refused. Locked instructions now always run on the shared semantics rather than native ARM64 code, so atomicity has one place to live once guest threads run concurrently; today they run one at a time, so a locked read-modify-write is already indivisible.
