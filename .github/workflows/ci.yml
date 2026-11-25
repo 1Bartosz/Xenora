@@ -69,6 +69,8 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/semantics_generator
           PYTHONPATH=scripts python3 -m unittest discover -s tests/semantic_coverage
+      - name: Test x86 table generator
+        run: python3 -m unittest discover -s tests/x86_generator
       - name: Check formatting and lint
         run: |
           cargo fmt --all -- --check

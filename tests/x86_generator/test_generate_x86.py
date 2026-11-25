@@ -98,9 +98,27 @@ class GenerateX86(unittest.TestCase):
         x87 = [f["op"] for f in forms if f["map"] == "1" and 0xD8 <= f["opcode"] <= 0xDF]
         self.assertEqual(x87, ["fninit"])
 
-    def test_only_xadd_and_cmpxchg_are_lockable(self):
+    def test_the_lockable_forms_are_ones_the_sdm_allows_to_lock(self):
+        # Intel SDM Vol. 2, LOCK: the prefix is allowed on these instructions,
+        # and only when the destination is memory. CMP is not among them.
+        sdm = {"add", "adc", "and", "btc", "btr", "bts", "cmpxchg", "cmpxchg8b", "cmpxchg16b",
+               "dec", "inc", "neg", "not", "or", "sbb", "sub", "xor", "xadd", "xchg"}
         _, forms = generate_x86.load(REGISTRY)
-        self.assertEqual({form["op"] for form in forms if form.get("lock")}, {"cmpxchg", "xadd"})
+        lockable = [form for form in forms if form.get("lock")]
+        operations = {form["op"] for form in lockable}
+        self.assertLessEqual(operations, sdm)
+        # The ones the registry marks today (#198, #447). A change that adds
+        # more of the SDM's list extends this set.
+        self.assertEqual(operations, {"xadd", "cmpxchg", "add", "or", "adc", "sbb", "and", "sub", "xor"})
+        # A form whose destination is a register, or the accumulator, cannot
+        # lock, and neither can a form that only takes a register.
+        self.assertEqual({form["enc"] for form in lockable}, {"rm_reg", "rm_imm"})
+        self.assertFalse(any(form.get("register_only") for form in lockable))
+        self.assertFalse(any(form.get("lock") for form in forms if form["op"] == "cmp"))
+        for operation in ("add", "or", "adc", "sbb", "and", "sub", "xor"):
+            encodings = {form["enc"]: bool(form.get("lock")) for form in forms if form["op"] == operation}
+            self.assertEqual(encodings, {"rm_reg": True, "rm_imm": True, "reg_rm": False, "acc_imm": False},
+                             operation)
 
     def test_string_forms_are_movs_and_stos_without_operands(self):
         _, forms = generate_x86.load(REGISTRY)
