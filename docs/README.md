@@ -35,6 +35,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Guest experiment guide](../experiments/x1/README.md) — Bounded x86-64 execution, executable loading, experimental services, native compute, and offscreen rendering.
 - [x86-64 instruction registry](cpu/instruction-registry.md) — Shared decoder, generated tables, semantics, native lowering and how to add a verified instruction form.
 - [Runtime service registry](runtime/registry.md) and [generated coverage](runtime/services.md) — Import resolution, typed Win64 adapters and how to add a tested service.
+- [Guest threads](runtime/threads.md) — Deterministic scheduler, thread services, limits and tests.
 - [Guest CPU research](research/cpu-boundary.md) — Public specifications and unresolved console requirements.
 - [Synthetic import fixtures](../tests/compat_fixtures/README.md) — Reproducible PE32+ builds and expected service behavior.
 
@@ -47,6 +48,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Test inventory comparison](testing/test-inventory.md) — Detect missing or newly ignored Cargo tests across commits.
 - [Persistent resource and translated rendering acceptance](testing/x9-acceptance.md) — Pinned upstream tests, native ARM64 results and unsupported cases.
 - [Baseline acceptance](testing/phase-02-baseline.md), [Phase 01 assurance](testing/phase01-assurance.md), and [independent reviews](testing/review-log.md) — Candidate-specific results and release findings.
+- [Gate A: a compiled C program](testing/gate-a.md) — The two milestones, what the A1 test checks and what it does not show.
 - [Mutation testing](testing/mutation.md) and [benchmark protocol](testing/benchmarks.md) — Test sensitivity, benchmark inputs, and timing requirements.
 
 ## Research and engineering decisions
