@@ -11,7 +11,7 @@
 //! but the interpreter and the DBT must still agree on the complete state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use xenora_loader::cpu::{CpuState, ExitReason, Interpreter, RFlags};
+use xenora_loader::cpu::{CpuState, ExitReason, Interpreter, RFlags, X87State};
 use xenora_loader::dbt::{DbtEngine, is_native};
 use xenora_loader::memory::{GuestMemory, MemoryError, MemoryPermissions};
 use xenora_loader::x86_decode::decode;
@@ -20,7 +20,8 @@ use xenora_loader::x86_table::{FORMS, Op};
 const FIXTURE: &str = include_str!("x86/integer.txt");
 const ENTRY: u64 = 0x1000;
 const DATA: u64 = 0x2000;
-/// Address of `[rsi + 4*rdi + 16]` with RSI = DATA and RDI = 4.
+/// Address of `[rsi + 4*rdi + 16]` with RSI = DATA and RDI = 4, and the
+/// absolute address of the `movabs` accumulator forms.
 const OPERAND: u64 = DATA + 32;
 const STACK: u64 = 0x3000;
 const STACK_TOP: u64 = STACK + 0x80;
@@ -67,6 +68,8 @@ struct Machine {
     /// Stack qwords at STACK_TOP - 8 and STACK_TOP.
     pushed: u64,
     top: u64,
+    /// x87 control, status and tag words.
+    x87: [u16; 3],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -274,7 +277,8 @@ struct Undefined {
     of: bool,
     pf: bool,
     af: bool,
-    /// The destination itself is undefined (BSF/BSR of zero).
+    /// The destination itself is undefined (BSF/BSR of zero, or a 16-bit
+    /// SHLD/SHRD count above 16).
     destination: bool,
 }
 
@@ -327,6 +331,11 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
         index: RDX,
         bits,
         high: false,
+    };
+    let ah = Place::Reg {
+        index: RAX,
+        bits: 8,
+        high: true,
     };
 
     if let Some(code) = name.strip_prefix("cmov") {
@@ -446,6 +455,53 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                     set_result(&mut m.flags, value, bits);
                     undefined.af = true;
                     undefined.cf = name != "sar" && count >= bits;
+                }
+            }
+            Outcome::Done(undefined)
+        }
+        "shld" | "shrd" => {
+            // Intel SDM Vol. 2B, SHLD and SHRD: the count is masked to 5 bits
+            // (6 for 64-bit operands); a count above the operand size leaves
+            // the destination and the flags undefined.
+            let count = read(m, places[2], 8) as u32 % if bits == 64 { 64 } else { 32 };
+            let start = read(m, places[0], bits);
+            let mut fill = read(m, places[1], bits);
+            if count > bits {
+                return Outcome::Done(Undefined {
+                    cf: true,
+                    zf: true,
+                    sf: true,
+                    of: true,
+                    pf: true,
+                    af: true,
+                    destination: true,
+                });
+            }
+            let mut value = start;
+            let mut carry = m.flags.cf;
+            for _ in 0..count {
+                // One bit at a time: the bit leaving the destination goes to
+                // CF and the next bit of the source enters from the other end.
+                if name == "shld" {
+                    carry = bit(value, bits - 1);
+                    value = truncate(value * 2, bits) + u128::from(bit(fill, bits - 1));
+                    fill = truncate(fill * 2, bits);
+                } else {
+                    carry = bit(value, 0);
+                    value = value / 2 + if bit(fill, 0) { 1u128 << (bits - 1) } else { 0 };
+                    fill /= 2;
+                }
+            }
+            write(m, places[0], value);
+            let mut undefined = none;
+            if count != 0 {
+                m.flags.cf = carry;
+                set_result(&mut m.flags, value, bits);
+                undefined.af = true;
+                if count == 1 {
+                    m.flags.of = bit(value, bits - 1) != bit(start, bits - 1);
+                } else {
+                    undefined.of = true;
                 }
             }
             Outcome::Done(undefined)
@@ -571,6 +627,27 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                 af: true,
                 destination: false,
             })
+        }
+        "crc32" => {
+            // The definition: reflect both, append 32 zeros, divide modulo 2 by
+            // the polynomial, and reflect the remainder.
+            let reflect = |value: u128, bits: u32| -> u128 {
+                (0..bits)
+                    .filter(|index| bit(value, *index))
+                    .map(|index| 1u128 << (bits - 1 - index))
+                    .sum()
+            };
+            let source_bits = bits_of(places[1]);
+            let source = read(m, places[1], source_bits);
+            let initial = read(m, places[0], bits) % (1 << 32);
+            let mut rest = reflect(source, source_bits) << 32 ^ reflect(initial, 32) << source_bits;
+            for position in (32..32 + 64).rev() {
+                if bit(rest, position) {
+                    rest ^= 0x1_1EDC_6F41u128 << (position - 32);
+                }
+            }
+            write(m, places[0], reflect(rest, 32));
+            Outcome::Done(none)
         }
         "bsf" | "bsr" | "tzcnt" | "lzcnt" | "popcnt" => {
             let value = read(m, places[1], bits);
@@ -739,18 +816,46 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
             m.flags.cf = !m.flags.cf;
             Outcome::Done(none)
         }
+        // AH bits 7 to 0 are SF, ZF, 0, AF, 0, PF, 1 and CF; OF has no bit.
+        "lahf" => {
+            let f = m.flags;
+            let bits = [f.cf, true, f.pf, false, f.af, false, f.zf, f.sf];
+            let value = (0..8)
+                .filter(|&index| bits[index])
+                .map(|index| 1u128 << index)
+                .sum();
+            write(m, ah, value);
+            Outcome::Done(none)
+        }
+        "sahf" => {
+            let value = read(m, ah, 8);
+            m.flags.cf = bit(value, 0);
+            m.flags.pf = bit(value, 2);
+            m.flags.af = bit(value, 4);
+            m.flags.zf = bit(value, 6);
+            m.flags.sf = bit(value, 7);
+            Outcome::Done(none)
+        }
         // The fences order memory accesses and compute nothing.
         "nop" | "pause" | "lfence" | "mfence" | "sfence" => Outcome::Done(none),
+        "fninit" => {
+            // Intel SDM Vol. 2A, "FINIT/FNINIT", Operation: FPUControlWord :=
+            // 037FH, FPUStatusWord := 0, FPUTagWord := FFFFH. Nothing else here
+            // is x87 state.
+            m.x87 = [0x037F, 0, 0xFFFF];
+            Outcome::Done(none)
+        }
         "cpuid" => {
             // Xenora's guest CPUID contract, restated: the vendor "Xenora guest"
-            // and the four features whose every instruction exists, CMOV and
-            // POPCNT in leaf 1, LZCNT and long mode in leaf 0x8000_0001.
+            // and the five features whose every instruction exists, CMOV and
+            // POPCNT in leaf 1, LAHF/SAHF, LZCNT and long mode in leaf
+            // 0x8000_0001.
             let word = |text: &[u8; 4]| u32::from_le_bytes(*text);
             let values = match m.gpr[RAX] as u32 {
                 0 => [1, word(b"Xeno"), word(b"uest"), word(b"ra g")],
                 1 => [0, 0, 1 << 23, 1 << 15],
                 0x8000_0000 => [0x8000_0001, 0, 0, 0],
-                0x8000_0001 => [0, 0, 1 << 5, 1 << 29],
+                0x8000_0001 => [0, 0, 1 | 1 << 5, 1 << 29],
                 _ => [0; 4],
             };
             // EAX, EBX, ECX and EDX, each zero-extended.
@@ -850,6 +955,8 @@ impl Random {
             operand: self.value(),
             pushed: self.next(),
             top: self.value(),
+            // Any bit pattern: nothing interprets these words.
+            x87: [self.next() as u16, self.next() as u16, self.next() as u16],
         }
     }
 }
@@ -877,6 +984,12 @@ fn load(machine: &Machine, code: &[u8]) -> (CpuState, GuestMemory) {
         of: f.of,
         pf: f.pf,
         af: f.af,
+    };
+    let [control, status, tag] = machine.x87;
+    cpu.x87 = X87State {
+        control,
+        status,
+        tag,
     };
     (cpu, memory)
 }
@@ -936,14 +1049,21 @@ fn every_fixture_instruction_matches_the_reference_in_both_engines() {
                 "{text}"
             );
             assert_eq!(state.rip, ENTRY + case.code.len() as u64, "{text}");
+            let x87 = state.x87;
+            assert_eq!(
+                [x87.control, x87.status, x87.tag],
+                expected.x87,
+                "{text}: x87 words from {:04x?}",
+                machine.x87
+            );
             if !undefined.destination {
                 assert_eq!(state.gpr, expected.gpr, "{text} from {cpu:x?}");
+                assert_eq!(
+                    memory.read_u64(OPERAND).unwrap(),
+                    expected.operand,
+                    "{text} from {cpu:x?}"
+                );
             }
-            assert_eq!(
-                memory.read_u64(OPERAND).unwrap(),
-                expected.operand,
-                "{text} from {cpu:x?}"
-            );
             assert_eq!(
                 memory.read_u64(STACK_TOP - 8).unwrap(),
                 expected.pushed,
@@ -977,7 +1097,10 @@ fn every_declared_form_is_executed_by_a_fixture() {
     let mut seen = BTreeSet::new();
     let vector = include_str!("x86/vector.txt");
     let float = include_str!("x86/float.txt");
-    for line in FIXTURE.lines().chain(vector.lines()).chain(float.lines()) {
+    let avx = include_str!("x86/avx.txt");
+    let forms = include_str!("x86/avx_forms.txt");
+    let lines = FIXTURE.lines().chain(vector.lines()).chain(float.lines());
+    for line in lines.chain(avx.lines()).chain(forms.lines()) {
         let (hex, _) = line.split_once(" | ").unwrap();
         let code: Vec<u8> = hex
             .split(' ')
@@ -995,6 +1118,10 @@ fn every_declared_form_is_executed_by_a_fixture() {
     let separate = [
         Op::Ldmxcsr,
         Op::Jcc,
+        Op::Loop,
+        Op::Loope,
+        Op::Loopne,
+        Op::Jrcxz,
         Op::Jmp,
         Op::Call,
         Op::Ret,
@@ -1223,12 +1350,13 @@ fn faulting_read_modify_write_changes_nothing() {
 #[test]
 fn undeclared_and_ambiguous_encodings_are_rejected() {
     let rejected: &[&[u8]] = &[
-        &[0xF0, 0x01, 0x0E],       // lock add [rsi], ecx
+        &[0xF0, 0x39, 0x0E],       // lock cmp [rsi], ecx: CMP writes nothing
         &[0xF2, 0x90],             // repne nop
         &[0xF3, 0xC3],             // rep ret
         &[0xF2, 0xA4],             // repne movsb
         &[0xF3, 0xA6],             // repe cmpsb
         &[0x67, 0x8B, 0x06],       // address-size override
+        &[0x67, 0xA1, 0, 0, 0, 0], // mov eax, [moffs32]
         &[0x64, 0x2E, 0x8B, 0x06], // CS after FS
         &[0x66, 0x50],             // push ax
         &[0x66, 0xE8, 0, 0],       // call rel16
@@ -1241,6 +1369,12 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0x0F, 0xC3, 0xC1],       // movnti with a register destination
         &[0x66, 0x0F, 0xC3, 0x06], // 66 with movnti
         &[0x0F, 0xA3, 0x06],       // bt [rsi], eax
+        &[0x9B],                   // fwait
+        &[0x9B, 0xDB, 0xE3],       // finit: fwait, then fninit
+        &[0x66, 0xDB, 0xE3],       // 66 with fninit
+        &[0xF3, 0xDB, 0xE3],       // F3 with fninit
+        &[0xF2, 0xDB, 0xE3],       // F2 with fninit
+        &[0xF0, 0xDB, 0xE3],       // lock fninit
         &[0xC6, 0xC8, 0x01],       // C6 /1
         &[0xFF, 0xF8],             // FF /7
         &[0xFE, 0xD0],             // FE /2
@@ -1270,6 +1404,81 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
             );
             assert_eq!(result.final_state, before, "{code:02X?}");
         }
+    }
+}
+
+/// FNINIT (DB E3) is the only x87 instruction. Every other ModRM byte under the
+/// eight x87 escape opcodes, D8 to DF, stops both engines and changes nothing.
+/// That includes FNINIT's neighbours of the same digit, such as FNCLEX (DB E2),
+/// and the memory forms of that digit.
+#[test]
+fn fninit_is_the_only_x87_encoding_accepted() {
+    let machine = Random(7).machine();
+    assert_ne!(
+        machine.x87,
+        [0x037F, 0, 0xFFFF],
+        "the reset must be visible"
+    );
+    let mut accepted = Vec::new();
+    for opcode in 0xD8..=0xDF_u8 {
+        for modrm in 0..=0xFF_u8 {
+            // The padding is a SIB byte and displacement for the memory forms.
+            let code = [opcode, modrm, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90];
+            for native in [false, true] {
+                let (mut cpu, mut memory) = load(&machine, &code);
+                let before = cpu.clone();
+                let data = bytes(&memory);
+                let result = if native {
+                    DbtEngine::new(16 * 1024)
+                        .unwrap()
+                        .run(&mut cpu, &mut memory, 1)
+                } else {
+                    Interpreter::new(cpu, &mut memory, 1).run()
+                };
+                let what = format!("{opcode:02X} {modrm:02X}, native {native}");
+                assert_eq!(bytes(&memory), data, "{what}");
+                if matches!(result.exit_reason, ExitReason::IllegalInstruction(_)) {
+                    assert_eq!(result.final_state, before, "{what}");
+                    continue;
+                }
+                accepted.push((opcode, modrm, native));
+                assert_eq!(result.exit_reason, ExitReason::StepLimitExceeded, "{what}");
+                // Only RIP and the three x87 words may differ.
+                let mut wanted = before;
+                wanted.rip = ENTRY + 2;
+                wanted.x87 = X87State {
+                    control: 0x037F,
+                    status: 0,
+                    tag: 0xFFFF,
+                };
+                assert_eq!(result.final_state, wanted, "{what}");
+            }
+        }
+    }
+    assert_eq!(accepted, [(0xDB, 0xE3, false), (0xDB, 0xE3, true)]);
+}
+
+/// A local rule, pinned so it cannot change unnoticed: a segment override or a
+/// REX prefix before FNINIT is accepted and has no effect, as the decoder
+/// treats them before any form without operands. It is not derived from a
+/// manual statement. The prefixes that are refused are in
+/// `undeclared_and_ambiguous_encodings_are_rejected`.
+#[test]
+fn prefixes_accepted_before_fninit_have_no_effect() {
+    let machine = Random(11).machine();
+    for prefix in [0x2E_u8, 0x64, 0x65, 0x40, 0x41, 0x48, 0x4F] {
+        let code = [prefix, 0xDB, 0xE3, 0x90];
+        let (cpu, _) = load(&machine, &code);
+        let mut wanted = cpu;
+        wanted.rip = ENTRY + 3;
+        wanted.x87 = X87State {
+            control: 0x037F,
+            status: 0,
+            tag: 0xFFFF,
+        };
+        let (state, exit, _) = run_both(&machine, &code, 1);
+        assert_eq!(exit, ExitReason::StepLimitExceeded, "{prefix:02X}");
+        assert_eq!(state, wanted, "{prefix:02X}");
     }
 }
 
@@ -1399,6 +1608,7 @@ fn bit_scans_and_bit_tests_follow_the_architecture() {
             operand: 0,
             pushed: 0,
             top: STACK_TOP,
+            x87: [0x037F, 0, 0xFFFF],
         }
     }
 
@@ -1511,6 +1721,104 @@ fn flags_survive_when_the_next_flag_writer_is_never_reached() {
 }
 
 #[test]
+fn crc32_reads_exactly_its_source_and_changes_only_its_destination() {
+    let end = DATA + 0x100;
+    let forms: [(&[u8], u64); 7] = [
+        (&[0xF2, 0x0F, 0x38, 0xF0, 0x03], 1), // crc32 eax, byte ptr [rbx]
+        (&[0x66, 0xF2, 0x0F, 0x38, 0xF0, 0x03], 1), // 66 has no effect on a byte source
+        (&[0xF2, 0x48, 0x0F, 0x38, 0xF0, 0x03], 1), // crc32 rax, byte ptr [rbx]
+        (&[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0x03], 2), // crc32 eax, word ptr [rbx]
+        (&[0xF2, 0x0F, 0x38, 0xF1, 0x03], 4), // crc32 eax, dword ptr [rbx]
+        (&[0xF2, 0x48, 0x0F, 0x38, 0xF1, 0x03], 8), // crc32 rax, qword ptr [rbx]
+        (&[0xF2, 0x66, 0x48, 0x0F, 0x38, 0xF1, 0x03], 8), // REX.W over 66
+    ];
+    for (code, width) in forms {
+        let mut machine = Random(0xC3C).machine();
+        machine.gpr[0] = 0xAAAA_AAAA_0000_0000;
+        machine.flags = Flags {
+            cf: true,
+            of: true,
+            af: true,
+            ..Flags::default()
+        };
+        // The bytes 00 to 07 at the end of the region.
+        let image = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        for native in [false, true] {
+            let run = |rbx: u64, gs: u64, code: &[u8]| {
+                let (mut cpu, mut memory) = load(&machine, code);
+                memory.write_bytes(end - 8, &image).unwrap();
+                cpu.gpr[3] = rbx;
+                cpu.gs_base = gs;
+                let before = cpu.clone();
+                let result = if native {
+                    DbtEngine::new(16 * 1024)
+                        .unwrap()
+                        .run(&mut cpu, &mut memory, 1)
+                } else {
+                    Interpreter::new(cpu, &mut memory, 1).run()
+                };
+                (before, result)
+            };
+            // An independent bitwise CRC of the bytes that should be read.
+            let mut crc = 0u32;
+            for byte in &image[8 - width as usize..] {
+                for index in 0..8 {
+                    let top = (crc ^ u32::from(byte >> index)) & 1;
+                    crc = (crc / 2) ^ (top * 0x82F6_3B78);
+                }
+            }
+            let (mut wanted, result) = run(end - width, 0, code);
+            wanted.gpr[0] = u64::from(crc);
+            wanted.rip += code.len() as u64;
+            assert_eq!(result.exit_reason, ExitReason::StepLimitExceeded);
+            assert_eq!(result.final_state, wanted, "{code:02X?}");
+
+            let prefixed = [&[0x65][..], code].concat();
+            let (_, result) = run(end - width - 0x777, 0x777, &prefixed);
+            assert_eq!(result.final_state.gpr[0], u64::from(crc), "{code:02X?}");
+
+            let (before, result) = run(end - width + 1, 0, code);
+            let fault = MemoryError::UnmappedAddress(end);
+            assert_eq!(result.exit_reason, ExitReason::MemoryFault(fault));
+            assert_eq!(result.final_state, before, "{code:02X?}");
+
+            const LIMIT: u64 = 0x0000_8000_0000_0000;
+            for address in [LIMIT, LIMIT - width + 1, 1 << 63] {
+                let (before, result) = run(address, 0, code);
+                if address < LIMIT && width == 1 {
+                    continue;
+                }
+                assert_eq!(result.exit_reason, ExitReason::GeneralProtection);
+                assert_eq!(result.final_state, before, "{code:02X?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn crc32_neighbours_are_rejected() {
+    let rejected: &[&[u8]] = &[
+        &[0x0F, 0x38, 0xF0, 0x03],             // movbe eax, [rbx]
+        &[0x66, 0x0F, 0x38, 0xF1, 0x03],       // movbe [rbx], ax
+        &[0xF3, 0x0F, 0x38, 0xF1, 0xC1],       // F3 selects no such form
+        &[0xF2, 0xF3, 0x0F, 0x38, 0xF1, 0xC1], // both repeat prefixes
+        &[0xF0, 0xF2, 0x0F, 0x38, 0xF1, 0x03], // LOCK
+        &[0xF2, 0x0F, 0x38, 0xF2, 0xC1],       // unassigned
+        &[0xF2, 0x0F, 0x3A, 0xF1, 0xC1, 0x00], // the other escape
+    ];
+    for code in rejected {
+        let machine = Random(0xC4C).machine();
+        let padded = [code, &[0x90; 8][..]].concat();
+        let (state, exit, _) = run_both(&machine, &padded, 1);
+        assert!(
+            matches!(exit, ExitReason::IllegalInstruction(_)),
+            "{code:02X?}: {exit:?}"
+        );
+        assert_eq!(state.rip, ENTRY, "{code:02X?}");
+    }
+}
+
+#[test]
 fn segment_bases_apply_to_every_addressing_form_in_both_engines() {
     const FS: u64 = 0x1_0000;
     const GS: u64 = 0x2_0000;
@@ -1548,10 +1856,17 @@ fn segment_bases_apply_to_every_addressing_form_in_both_engines() {
         (&[0x64, 0x65, 0x48, 0x8B, 0x03], GS + 0x3000),     // FS then GS
         (&[0x65, 0x64, 0x48, 0x8B, 0x03], GS + 0x3000),     // GS then FS
         (&[0x64, 0x65, 0x64, 0x48, 0x8B, 0x03], GS + 0x3000),
+        (&[0x64, 0x48, 0xA1, 0x40, 0, 0, 0, 0, 0, 0, 0], FS + 0x40), // movabs rax, fs:[0x40]
+        (
+            &[
+                0x65, 0x48, 0xA3, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            ],
+            GS - 0x10,
+        ), // movabs gs:[-0x10], rax
     ];
     for &(code, address) in cases {
         let opcode = code[code.iter().position(|byte| *byte == 0x48).unwrap() + 1];
-        let store = opcode == 0x89;
+        let store = matches!(opcode, 0x89 | 0xA3);
         for native in [false, true] {
             for mapped in [true, false] {
                 let mut memory = GuestMemory::new();

@@ -10,19 +10,38 @@
 //! - Xbox physical memory: `XMemAlloc`, `XMemFree`
 
 mod crt;
+mod crt_arguments;
 mod crt_callbacks;
+mod crt_files;
+mod crt_format;
+mod crt_math;
+mod crt_startup;
+mod crt_streams;
+mod cxx;
+mod environment;
+mod errors;
 mod events;
+mod file_mapping;
 mod files;
 mod gdk_queue;
+mod graphics;
 mod heap;
 mod modules;
 mod platform_fixture;
+mod process;
+mod registry;
+mod startup_info;
+mod static_cxx;
 mod synch;
 pub mod sysinfo;
 mod task_fixture;
+pub(crate) mod threads;
 mod winsock;
 
 use crate::runtime::HResult;
+pub use crt_arguments::{MAX_PROGRAM_ARGUMENT_BYTES, ProgramArgumentsError};
+pub use crt_streams::MAX_CAPTURED_OUTPUT;
+pub use startup_info::{ProcessStartupInfo, StartupInfoError};
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -92,8 +111,14 @@ impl MockClock {
         }
     }
 
+    /// Move both readings forward by `intervals` 100-nanosecond ticks. Each
+    /// stops at its maximum, so neither ever runs backwards.
     pub fn advance(&self, intervals: u64) {
-        self.current.fetch_add(intervals, Ordering::SeqCst);
+        self.current
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.saturating_add(intervals))
+            })
+            .expect("clock update always returns a value");
         self.performance_count
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 Some(count.saturating_add(intervals).min(MAX_PERFORMANCE_COUNT))
@@ -145,6 +170,9 @@ enum GuestObject {
         state: Arc<Mutex<events::Waitable>>,
         access: u32,
     },
+    FileMapping {
+        size: u64,
+    },
 }
 
 #[derive(Default)]
@@ -154,6 +182,7 @@ struct ObjectState {
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
     directories: BTreeSet<String>,
+    next_temp: u32,
 }
 
 impl ObjectState {
@@ -192,9 +221,22 @@ pub struct ServicesState {
     pub guest_profile: sysinfo::GuestSystemProfile,
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
+    error_mode: Mutex<u32>,
+    crt_arguments: Mutex<crt_arguments::CrtArguments>,
+    startup: Mutex<startup_info::StartupState>,
     synch: Mutex<synch::Synch>,
+    crt_streams: Mutex<crt_streams::StandardStreams>,
+    pub(crate) threads: Mutex<threads::ThreadTable>,
+    pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
     atexit: Mutex<Vec<u64>>,
+    /// Emulated thread-local storage: the block each guest thread owns for
+    /// each thread-local variable, keyed by the guest thread and then by the
+    /// address of the variable's descriptor.
+    pub(crate) emutls: Mutex<BTreeMap<u64, BTreeMap<u64, u64>>>,
+    /// The status the guest process exited with. Set once.
+    exit_status: Mutex<Option<u32>>,
+    crt_startup: Mutex<crt_startup::CrtStartup>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -216,8 +258,17 @@ impl ServicesState {
             guest_profile: sysinfo::GuestSystemProfile::default(),
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
+            error_mode: Mutex::new(0),
+            crt_arguments: Mutex::default(),
+            startup: Mutex::default(),
             synch: Mutex::default(),
+            crt_streams: Mutex::default(),
+            threads: Mutex::default(),
+            hooks: Arc::default(),
             atexit: Mutex::default(),
+            emutls: Mutex::default(),
+            exit_status: Mutex::default(),
+            crt_startup: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -228,6 +279,41 @@ impl ServicesState {
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),
         }
     }
+    /// Give a hosted C program the arguments its `main` receives in `argv`,
+    /// program name first. Call it before running the guest: the C runtime's
+    /// startup code builds `argv` once, and a call after that, or after the
+    /// guest has read its command line, is refused.
+    ///
+    /// The strings reach the guest as their bytes; no code page is applied.
+    /// A host that never calls this gives the program one argument, the empty
+    /// string. An empty slice gives it none.
+    /// Give a hosted C program the bytes it reads from `stdin`, before the
+    /// run. Text mode is applied when they are stored: CR LF pairs become
+    /// one line feed. Calling it after the guest started has no effect on
+    /// what it already read, so hosts should call it before running.
+    pub fn set_standard_input(&self, bytes: &[u8]) {
+        self.crt_streams().set_input(bytes);
+    }
+
+    pub fn set_program_arguments(&self, arguments: &[&str]) -> Result<(), ProgramArgumentsError> {
+        self.crt_arguments().supply(arguments)
+    }
+
+    fn crt_arguments(&self) -> std::sync::MutexGuard<'_, crt_arguments::CrtArguments> {
+        self.crt_arguments.lock().expect("program arguments")
+    }
+
+    /// Exchange the process error mode, returning the previous one. The
+    /// mode controls error dialogs that do not exist here; it is stored so
+    /// programs that propagate it - a parent passing it to children, say -
+    /// behave coherently.
+    pub(crate) fn exchange_error_mode(&self, mode: u32) -> u32 {
+        let mut guard = self.error_mode.lock().expect("error mode");
+        let previous = *guard;
+        *guard = mode;
+        previous
+    }
+
     fn uptime_millis(&self) -> u64 {
         let ticks = self
             .clock
@@ -239,6 +325,93 @@ impl ServicesState {
     /// The scheduling policy recorded for the synthetic process.
     pub fn priority_boost_disabled(&self) -> bool {
         self.priority_boost_disabled.load(Ordering::SeqCst)
+    }
+
+    /// The status the guest process exited with, once it has exited.
+    pub fn exit_status(&self) -> Option<u32> {
+        *self.exit_status.lock().expect("guest exit status")
+    }
+
+    /// How many guest handles are open: kernel objects, sockets and task
+    /// queues, which are kept in three separate tables.
+    pub fn open_handle_count(&self) -> usize {
+        let objects = self
+            .objects
+            .lock()
+            .expect("guest object state")
+            .handles
+            .len();
+        let sockets = self
+            .winsock
+            .lock()
+            .expect("guest Winsock state")
+            .open_count();
+        let queues = self
+            .gdk_queues
+            .lock()
+            .expect("GDK queue handle table")
+            .open_count();
+        objects + sockets + queues
+    }
+
+    /// A file on the synthetic `C:` drive, named as the guest names it.
+    pub fn file_contents(&self, path: &str) -> Option<Vec<u8>> {
+        let path = path.replace('/', "\\").to_ascii_lowercase();
+        let name = path.strip_prefix("c:\\").unwrap_or(&path);
+        self.objects
+            .lock()
+            .expect("guest object state")
+            .files
+            .get(name)
+            .cloned()
+    }
+
+    /// End the guest process. The first exit decides the status; a later one
+    /// reports it again and changes nothing.
+    ///
+    /// Every guest handle is closed: kernel objects, sockets and task queues.
+    /// Files stay on the synthetic drive, guest memory stays mapped for the
+    /// host to inspect, and `atexit` functions are not run.
+    fn exit_process(&self, status: u32) -> u32 {
+        let mut exited = self.exit_status.lock().expect("guest exit status");
+        if let Some(first) = *exited {
+            return first;
+        }
+        *exited = Some(status);
+        // The three table locks are taken one at a time, never nested.
+        self.objects
+            .lock()
+            .expect("guest object state")
+            .handles
+            .clear();
+        self.winsock
+            .lock()
+            .expect("guest Winsock state")
+            .close_all();
+        self.winsock_changed.notify_all();
+        self.gdk_queues
+            .lock()
+            .expect("GDK queue handle table")
+            .close_all();
+        self.gdk_queue_changed.notify_all();
+        status
+    }
+
+    /// Everything the guest has written to `stdout`, as the bytes a text-mode
+    /// stream hands the operating system: each line feed the program wrote is
+    /// a carriage return and a line feed here.
+    pub fn standard_output(&self) -> Vec<u8> {
+        self.crt_streams().output().to_vec()
+    }
+
+    /// Everything the guest has written to `stderr`, in the same form as
+    /// [`Self::standard_output`].
+    pub fn standard_error(&self) -> Vec<u8> {
+        self.crt_streams().error().to_vec()
+    }
+
+    fn crt_streams(&self) -> std::sync::MutexGuard<'_, crt_streams::StandardStreams> {
+        self.crt_streams.lock().expect("standard streams")
     }
 
     /// Read the last-error value for a guest thread's TEB.
@@ -275,6 +448,22 @@ impl ServicesState {
         }
     }
 
+    fn crt_startup(&self) -> std::sync::MutexGuard<'_, crt_startup::CrtStartup> {
+        self.crt_startup.lock().expect("C runtime startup state")
+    }
+
+    /// The application type the guest passed to `_set_app_type`, zero until it
+    /// does. Nothing in the runtime depends on it.
+    pub fn crt_app_type(&self) -> i32 {
+        self.crt_startup().app_type()
+    }
+
+    /// The guest function passed to `__setusermatherr`, zero until one is. It
+    /// is never called.
+    pub fn crt_user_math_error(&self) -> u64 {
+        self.crt_startup().user_math_error()
+    }
+
     /// Record a guest error and return the documented failure value.
     fn fail<T>(&self, teb: u64, error: u32, value: T) -> Result<T, ExitReason> {
         self.set_last_error(teb, error);
@@ -294,11 +483,28 @@ impl ServicesState {
 /// hand-written fixture services.
 pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<ServicesState>) {
     crate::runtime_table::register(registry, &state);
+    registry.hooks = Some(Arc::clone(&state.hooks));
+    threads::register(registry, &state);
+    static_cxx::register(registry);
+    crate::exceptions::register(registry);
 
     let s = state.clone();
     registry.register(KERNEL32, "GetThreadId", move |args, cpu, mem| {
         let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        if handle == CURRENT_THREAD {
+            return Ok(u64::from(s.thread_id_of(cpu.gs_base)));
+        }
         let thread = s.objects.lock().expect("guest object state");
+        if let Some(GuestObject::Waitable { state, access }) = thread.handles.get(&handle)
+            && let events::Waitable::Thread { id, .. } =
+                &*state.lock().expect("guest waitable state")
+        {
+            return if access & THREAD_QUERY_RIGHTS == 0 {
+                s.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0)
+            } else {
+                Ok(u64::from(*id))
+            };
+        }
         if let Err(error) = thread.check_access(handle, THREAD_QUERY_RIGHTS) {
             return s.fail(cpu.gs_base, error, 0);
         }
@@ -324,8 +530,12 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         if inherit != 0 || options & !DUPLICATE_SAME_ACCESS != 0 || source == CURRENT_PROCESS {
             return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
         }
+        let worker = s.current_worker(cpu.gs_base);
         let mut thread = s.objects.lock().expect("guest object state");
-        let (granted, mut object) = if source == CURRENT_THREAD {
+        let (granted, mut object) = if let (CURRENT_THREAD, Some(state)) = (source, worker) {
+            let access = threads::THREAD_ALL_ACCESS;
+            (access, GuestObject::Waitable { state, access })
+        } else if source == CURRENT_THREAD {
             (
                 THREAD_SUPPORTED_RIGHTS,
                 GuestObject::Thread(THREAD_SUPPORTED_RIGHTS),
@@ -341,7 +551,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                     },
                 ),
                 Some(GuestObject::File(file)) => (file.access, GuestObject::File(file.clone())),
-                Some(GuestObject::Search(_)) => return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0),
+                Some(GuestObject::Search(_) | GuestObject::FileMapping { .. }) => {
+                    return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+                }
                 None => return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
             }
         };
@@ -363,7 +575,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                 *rights = access
             }
             GuestObject::File(file) => file.access = access,
-            GuestObject::Search(_) => unreachable!("search handles cannot be duplicated"),
+            GuestObject::Search(_) | GuestObject::FileMapping { .. } => {
+                unreachable!("these handles cannot be duplicated")
+            }
         }
         thread.insert_handle(handle, object);
         Ok(1)
@@ -375,12 +589,19 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     synch::register(registry, &state);
     sysinfo::register(registry, &state);
     files::register(registry, &state);
+    graphics::register(registry, &state);
     crt::register(registry);
     crt::register_heap(registry);
     crt::register_errno(registry);
     crt::register_conversions(registry);
+    crt::register_utilities(registry);
     crt_callbacks::register(registry, &state);
+    environment::register(registry, &state);
+    errors::register(registry, &state);
+    registry::register(registry, &state);
+    file_mapping::register(registry, &state);
     heap::register(registry, &state);
+    cxx::register(registry, &state);
 
     let s = state.clone();
     registry.register(
@@ -439,20 +660,24 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             return Ok(0);
         }
 
-        let page_size = 4096;
-        let aligned_size = (size + page_size - 1) & !(page_size - 1);
+        let page_size = 4096usize;
+        // Huge or overflowing sizes fail closed. Unbounded map_region would
+        // try to malloc multi-gigabyte host buffers (libFuzzer OOM on
+        // ~3.7 GiB); route through the virtual budget instead.
+        let Some(aligned_size) = size
+            .checked_add(page_size - 1)
+            .map(|rounded| rounded & !(page_size - 1))
+            .filter(|&aligned| aligned != 0)
+        else {
+            return Ok(0);
+        };
         let alloc_addr = s
             .next_alloc_addr
             .fetch_add(aligned_size as u64, Ordering::SeqCst);
 
-        if mem
-            .map_region(alloc_addr, aligned_size, MemoryPermissions::READ_WRITE)
-            .is_err()
-        {
-            return Ok(0);
-        }
-
-        Ok(alloc_addr)
+        Ok(mem
+            .map_virtual_allocation(alloc_addr, aligned_size, MemoryPermissions::READ_WRITE)
+            .unwrap_or(0))
     };
     registry.register("xmem.dll", "XMemAlloc", handler);
     registry.set_status("xmem.dll", "XMemAlloc", ServiceStatus::Partial);
@@ -601,6 +826,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     task_fixture::register(registry, &state);
     platform_fixture::register(registry, &state);
     gdk_queue::register(registry, &state);
+    startup_info::register(registry, &state);
+    process::register(registry, &state);
+    // Last: the module catalog lists every service registered before it.
     modules::register(registry, &state);
 }
 
@@ -612,6 +840,9 @@ pub(crate) mod handlers {
     use crate::softfloat::{Control, F32, F64, square_root};
 
     type Outcome<T> = Result<T, ExitReason>;
+
+    /// The exit for a request the runtime does not model.
+    const RUNTIME_LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);
 
     pub fn set_process_priority_boost(
         context: &mut ServiceContext<'_>,
@@ -664,7 +895,7 @@ pub(crate) mod handlers {
     }
 
     pub fn get_current_thread_id(context: &mut ServiceContext<'_>) -> Outcome<u32> {
-        Ok(context.state.thread_id)
+        Ok(context.state.thread_id_of(context.teb))
     }
 
     pub fn open_thread(
@@ -674,21 +905,41 @@ pub(crate) mod handlers {
         id: u32,
     ) -> Outcome<u64> {
         let state = context.state;
-        if id != state.thread_id {
+        let worker = state.worker_object(id);
+        let main = id == state.thread_id && state.main_thread_alive();
+        if !main && worker.is_none() {
             return state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
         }
-        if inherit || access & !THREAD_SUPPORTED_RIGHTS != 0 {
+        let supported = THREAD_SUPPORTED_RIGHTS
+            | if worker.is_some() {
+                threads::WORKER_RIGHTS
+            } else {
+                0
+            };
+        if inherit || access & !supported != 0 {
             return state.fail(context.teb, ERROR_NOT_SUPPORTED, 0);
         }
         let mut thread = state.objects.lock().expect("guest object state");
         let Some(handle) = thread.next_handle() else {
             return state.fail(context.teb, ERROR_NOT_ENOUGH_MEMORY, 0);
         };
-        thread.insert_handle(handle, GuestObject::Thread(access));
+        let object = match worker {
+            Some(state) => GuestObject::Waitable { state, access },
+            None => GuestObject::Thread(access),
+        };
+        thread.insert_handle(handle, object);
         Ok(handle)
     }
 
     pub fn get_thread_priority(context: &mut ServiceContext<'_>, handle: u64) -> Outcome<i32> {
+        // Only the main thread has a priority; a worker must not change it.
+        if handle == CURRENT_THREAD && context.state.current_worker(context.teb).is_some() {
+            return context.state.fail(
+                context.teb,
+                ERROR_NOT_SUPPORTED,
+                THREAD_PRIORITY_ERROR_RETURN as i32,
+            );
+        }
         let thread = context.state.objects.lock().expect("guest object state");
         if let Err(error) = thread.check_access(handle, THREAD_QUERY_RIGHTS) {
             return context
@@ -703,6 +954,10 @@ pub(crate) mod handlers {
         handle: u64,
         priority: i32,
     ) -> Outcome<bool> {
+        // Only the main thread has a priority; a worker must not change it.
+        if handle == CURRENT_THREAD && context.state.current_worker(context.teb).is_some() {
+            return context.state.fail(context.teb, ERROR_NOT_SUPPORTED, false);
+        }
         let state = context.state;
         let mut thread = state.objects.lock().expect("guest object state");
         if let Err(error) = thread.check_access(handle, THREAD_SET_RIGHTS) {
@@ -741,6 +996,298 @@ pub(crate) mod handlers {
             .map_err(ExitReason::MemoryFault)
     }
 
+    // Streams, files and formatted output (#400, #402). `crt_streams.rs` and
+    // `crt_files.rs` hold the rules; a failure that has an errno value sets it
+    // here. The stream state is always locked before the object state.
+
+    fn or_errno<T>(
+        context: &mut ServiceContext<'_>,
+        outcome: crt_streams::Outcome<T>,
+    ) -> Outcome<T> {
+        match outcome? {
+            Ok(value) => Ok(value),
+            Err(crt_streams::Failed(value, errno)) => {
+                crt::set_errno(context.memory, context.teb, errno)?;
+                Ok(value)
+            }
+        }
+    }
+
+    pub fn standard_stream(context: &mut ServiceContext<'_>, index: u32) -> Outcome<u64> {
+        context.state.crt_streams().file(context.memory, index)
+    }
+
+    pub fn vfprintf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        stream: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.print(
+                context.memory,
+                &mut drive,
+                options,
+                stream,
+                format,
+                locale,
+                arguments,
+            )
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fwrite(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        size: u64,
+        count: u64,
+        stream: u64,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.write_items(context.memory, &mut drive, buffer, size, count, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    // The buffer forms of printf, and the secure forms (#466). They share the
+    // formatter through `crt_streams`; the stream state only serves `putchar`
+    // and `vfprintf_s`.
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn vsprintf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        buffer: u64,
+        count: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = crt_streams::print_to_buffer(
+            context.memory,
+            options,
+            buffer,
+            count,
+            format,
+            locale,
+            arguments,
+        );
+        or_errno(context, outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn vsprintf_s(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        buffer: u64,
+        count: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = crt_streams::print_to_buffer_secure(
+            context.memory,
+            options,
+            buffer,
+            count,
+            format,
+            locale,
+            arguments,
+        );
+        or_errno(context, outcome)
+    }
+
+    pub fn vfprintf_s(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        stream: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        // The secure stream form validates what the plain one validates, and
+        // `%n` is invalid in both, so they are the same here.
+        vfprintf(context, options, stream, format, locale, arguments)
+    }
+
+    pub fn putchar(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.put_character_stdout(&mut drive, character)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fputs(context: &mut ServiceContext<'_>, text: u64, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.put_string(context.memory, &mut drive, text, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    /// `puts`: the string and a newline to stdout. Returns a nonnegative
+    /// value, or `EOF` with `errno` set.
+    pub fn puts(context: &mut ServiceContext<'_>, text: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.put_line_stdout(context.memory, &mut drive, text)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn getchar(context: &mut ServiceContext<'_>) -> Outcome<i32> {
+        Ok(context.state.crt_streams().character_stdin())
+    }
+
+    pub fn feof(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().end_of_file(stream);
+        or_errno(context, outcome)
+    }
+
+    pub fn fflush(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        context.state.crt_streams().flush(stream)
+    }
+
+    pub fn setvbuf(
+        context: &mut ServiceContext<'_>,
+        stream: u64,
+        _buffer: u64,
+        mode: i32,
+        size: u64,
+    ) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().set_buffer(stream, mode, size);
+        or_errno(context, outcome)
+    }
+
+    pub fn fopen(context: &mut ServiceContext<'_>, name: u64, mode: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.open(context.memory, &mut drive, name, mode)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fclose(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.close(context.memory, &mut drive, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn tmpfile(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.open_temporary(context.memory, &mut drive)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn tmpnam(context: &mut ServiceContext<'_>, buffer: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.temporary_name(context.memory, &drive, buffer)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fgets(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        count: i32,
+        stream: u64,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.get_line(context.memory, &drive, buffer, count, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _ftelli64(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<u64> {
+        let outcome = context.state.crt_streams().tell(stream);
+        or_errno(context, outcome).map(|position| position as u64)
+    }
+
+    pub fn _fseeki64(
+        context: &mut ServiceContext<'_>,
+        stream: u64,
+        offset: u64,
+        origin: i32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.seek(&drive, stream, offset as i64, origin as u32)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fgetpos(context: &mut ServiceContext<'_>, stream: u64, position: u64) -> Outcome<i32> {
+        let outcome = context
+            .state
+            .crt_streams()
+            .get_position(context.memory, stream, position);
+        or_errno(context, outcome)
+    }
+
+    pub fn fsetpos(context: &mut ServiceContext<'_>, stream: u64, position: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.set_position(context.memory, &drive, stream, position)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn remove(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.remove_file(context.memory, &mut drive, name)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn rename(context: &mut ServiceContext<'_>, from: u64, to: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.rename_file(context.memory, &mut drive, from, to)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn perror(context: &mut ServiceContext<'_>, message: u64) -> Outcome<()> {
+        let address = context
+            .memory
+            .crt_errno_address(context.teb)
+            .map_err(ExitReason::MemoryFault)?;
+        let errno = context
+            .memory
+            .read_u32(address)
+            .map_err(ExitReason::MemoryFault)?;
+        let mut streams = context.state.crt_streams();
+        let mut drive = context.state.objects.lock().expect("guest object state");
+        streams.report(context.memory, &mut drive, message, errno)
+    }
+
     pub fn get_last_error(context: &mut ServiceContext<'_>) -> Outcome<u32> {
         Ok(context.state.last_error(context.teb))
     }
@@ -748,6 +1295,38 @@ pub(crate) mod handlers {
     pub fn set_last_error(context: &mut ServiceContext<'_>, code: u32) -> Outcome<()> {
         context.state.set_last_error(context.teb, code);
         Ok(())
+    }
+
+    // What a hosted C program's startup code hands to `main` (#392).
+    // `crt_arguments.rs` says what is documented, inferred and Xenora's choice.
+
+    pub fn argc_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        let mut arguments = context.state.crt_arguments();
+        arguments.address(context.memory, crt_arguments::Variable::Argc)
+    }
+
+    pub fn argv_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        let mut arguments = context.state.crt_arguments();
+        arguments.address(context.memory, crt_arguments::Variable::Argv)
+    }
+
+    pub fn environ_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        let mut arguments = context.state.crt_arguments();
+        arguments.address(context.memory, crt_arguments::Variable::Environ)
+    }
+
+    pub fn configure_narrow_argv(context: &mut ServiceContext<'_>, mode: i32) -> Outcome<i32> {
+        context
+            .state
+            .crt_arguments()
+            .configure(context.memory, mode)
+    }
+
+    pub fn initialize_narrow_environment(context: &mut ServiceContext<'_>) -> Outcome<i32> {
+        context
+            .state
+            .crt_arguments()
+            .initialize_environment(context.memory)
     }
 
     pub fn virtual_alloc(
@@ -813,6 +1392,32 @@ pub(crate) mod handlers {
         Ok(true)
     }
 
+    // Stubs (#388). A program built with the mingw-w64 runtime imports these
+    // three and does not call them on a normal run: the first two serve its
+    // runtime pseudo-relocations and the third is the language handler Windows
+    // calls while dispatching a structured exception. None is modelled, so a
+    // call stops the guest with the runtime-limit fault. Returning a made-up
+    // result would let the program run on with wrong state.
+
+    pub fn virtual_protect(
+        _: &mut ServiceContext<'_>,
+        _address: u64,
+        _size: u64,
+        _protect: u32,
+        _old: OutPtr<4>,
+    ) -> Outcome<bool> {
+        Err(RUNTIME_LIMIT)
+    }
+
+    pub fn virtual_query(
+        _: &mut ServiceContext<'_>,
+        _address: u64,
+        _information: OutPtr<48>,
+        _length: u64,
+    ) -> Outcome<u64> {
+        Err(RUNTIME_LIMIT)
+    }
+
     /// The guest MXCSR is not visible to a service, so results use the default
     /// rounding and raise no guest flags; the registry marks them partial.
     const DEFAULT_MXCSR: u32 = crate::cpu::Mxcsr::RESET;
@@ -835,4 +1440,97 @@ pub(crate) mod handlers {
     pub fn fabsf(_: &mut ServiceContext<'_>, x: Float32) -> Outcome<Float32> {
         Ok(Float32(x.0 & !(1 << 31)))
     }
+
+    // What a C program's startup code configures (#382). Each value is
+    // recorded and returned; `crt_startup.rs` says what does not act on it.
+
+    pub fn set_app_type(context: &mut ServiceContext<'_>, kind: i32) -> Outcome<()> {
+        context.state.crt_startup().set_app_type(kind);
+        Ok(())
+    }
+
+    pub fn set_new_mode(context: &mut ServiceContext<'_>, mode: i32) -> Outcome<i32> {
+        let previous = context.state.crt_startup().set_new_mode(mode);
+        match previous {
+            Some(previous) => Ok(previous),
+            None => {
+                crt::set_errno(context.memory, context.teb, crt::EINVAL)?;
+                Ok(-1)
+            }
+        }
+    }
+
+    pub fn configure_thread_locale(context: &mut ServiceContext<'_>, request: i32) -> Outcome<i32> {
+        let previous = context.state.crt_startup().configure_thread_locale(request);
+        match previous {
+            Some(previous) => Ok(previous),
+            None => {
+                crt::set_errno(context.memory, context.teb, crt::EINVAL)?;
+                Ok(-1)
+            }
+        }
+    }
+
+    pub fn set_user_math_error(context: &mut ServiceContext<'_>, handler: u64) -> Outcome<()> {
+        context.state.crt_startup().set_user_math_error(handler);
+        Ok(())
+    }
+
+    pub fn set_invalid_parameter_handler(
+        context: &mut ServiceContext<'_>,
+        handler: u64,
+    ) -> Outcome<u64> {
+        Ok(context
+            .state
+            .crt_startup()
+            .set_invalid_parameter_handler(handler))
+    }
+
+    pub fn file_mode_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        context
+            .state
+            .crt_startup()
+            .file_mode_address(context.memory, 0)
+    }
+
+    pub fn commit_mode_pointer(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        context
+            .state
+            .crt_startup()
+            .file_mode_address(context.memory, 1)
+    }
+
+    pub fn signal(context: &mut ServiceContext<'_>, signal: i32, handler: u64) -> Outcome<u64> {
+        let previous = context.state.crt_startup().signal(signal, handler);
+        match previous {
+            Some(previous) => Ok(previous),
+            None => {
+                crt::set_errno(context.memory, context.teb, crt::EINVAL)?;
+                // SIG_ERR is (void (*)(int))-1.
+                Ok(u64::MAX)
+            }
+        }
+    }
+
+    pub fn set_unhandled_exception_filter(
+        context: &mut ServiceContext<'_>,
+        filter: u64,
+    ) -> Outcome<u64> {
+        Ok(context
+            .state
+            .crt_startup()
+            .set_unhandled_exception_filter(filter))
+    }
+
+    // The Universal C runtime services that a C++ guest's runtime imports.
+    // Their implementations are in `crt.rs` and `crt_streams.rs`.
+    pub use super::crt::{_lock_file, _unlock_file, fputc, localeconv, mbrtowc, strerror, wcrtomb};
+
+    // The rest of math.h (#468); `crt_math.rs` says which are exact.
+    pub use super::crt_math::{
+        acos, asin, atan, atan2, atan2f, cbrt, ceil, ceilf, copysign, cos, cosf, cosh, erf, exp,
+        exp2, expf, expm1, fdim, floor, floorf, fmax, fmin, fmod, fmodf, frexp, hypot, llround,
+        log, log1p, log2, log10, logf, lround, modf, nearbyint, pow, powf, remainder, rint, round,
+        roundf, sin, sinf, sinh, tan, tanf, tanh, tgamma, trunc,
+    };
 }

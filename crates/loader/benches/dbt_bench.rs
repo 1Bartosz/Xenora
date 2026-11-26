@@ -980,6 +980,7 @@ mod tests {
 
         let metrics = DbtMetrics {
             blocks_compiled: 626,
+            blocks_invalidated: 0,
             cache_hits: 0,
             cache_misses: 626,
             native_bytes_emitted: 245_168,

@@ -195,8 +195,25 @@ fn trampoline_address(index: usize) -> u64 {
     IMPORT_TRAMPOLINE_BASE_VA + index as u64 * IMPORT_TRAMPOLINE_STRIDE
 }
 
-const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
+pub(crate) const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
+/// Return address placed under a process entry point. Reaching it ends the
+/// process with EAX as its exit status.
+pub const ENTRY_RETURN: u64 = CALLBACK_RETURN - IMPORT_TRAMPOLINE_STRIDE;
+/// The 4 KiB page that holds [`ENTRY_RETURN`] and the callback return
+/// address. The engine intercepts those two addresses before it executes
+/// anything there, so startup reserves the page: guest code mapped over it
+/// would never run.
+pub const RETURN_SENTINEL_PAGE: u64 = ENTRY_RETURN & !0xFFF;
+const _: () = assert!(CALLBACK_RETURN & !0xFFF == RETURN_SENTINEL_PAGE);
+/// Nested guest callbacks allowed in one guest thread.
 const MAX_CALLBACK_DEPTH: usize = 32;
+
+fn callback_depth(memory: &GuestMemory, teb: u64) -> usize {
+    memory
+        .callback_frames
+        .range((teb, 0)..=(teb, u64::MAX))
+        .count()
+}
 
 pub(crate) struct GuestCallback {
     pub(crate) entry: u64,
@@ -264,11 +281,16 @@ pub(crate) struct CallbackFrame {
 
 /// Registry for resolving and binding import symbols to guest trampoline VAs.
 pub struct ImportRegistry {
+    /// Set by the standard services so a call can end the caller's turn.
+    pub(crate) hooks: Option<Arc<crate::services::threads::SchedulerHooks>>,
     // (lower-case module, name) -> service index. Symbol names keep their case.
     services: HashMap<(String, ImportName), usize>,
     handlers: Vec<ServiceDescriptor>,
     callback_dispatchers: HashMap<usize, CallbackDispatch>,
     callback_tasks: HashMap<usize, TaskStart>,
+    /// Services that set the whole CPU state themselves, such as exception
+    /// dispatch entering a guest handler or installing an unwind target.
+    context_services: std::collections::HashSet<usize>,
     dynamic_trampolines: DynamicTrampolines,
     trampoline_to_service: HashMap<u64, usize>, // Trampoline VA -> service_index
 }
@@ -282,10 +304,12 @@ impl Default for ImportRegistry {
 impl ImportRegistry {
     pub fn new() -> Self {
         Self {
+            hooks: None,
             services: HashMap::new(),
             handlers: Vec::new(),
             callback_dispatchers: HashMap::new(),
             callback_tasks: HashMap::new(),
+            context_services: Default::default(),
             trampoline_to_service: HashMap::new(),
             dynamic_trampolines: DynamicTrampolines::default(),
         }
@@ -310,6 +334,22 @@ impl ImportRegistry {
 
     pub(crate) fn service_index(&self, module: &str, symbol: &str) -> Option<usize> {
         self.index(module, &ImportName::Name(symbol.to_owned()))
+    }
+
+    /// Named aliases that `module` holds for services of other modules.
+    pub(crate) fn aliased_exports(
+        &self,
+        module: &str,
+    ) -> impl Iterator<Item = (&ImportName, usize)> {
+        self.services
+            .iter()
+            .filter_map(move |((key, name), &index)| {
+                let descriptor = &self.handlers[index];
+                (key == module
+                    && descriptor.module != *key
+                    && descriptor.status != ServiceStatus::Stub)
+                    .then_some((name, index))
+            })
     }
 
     pub(crate) fn canonical_exports(
@@ -599,6 +639,24 @@ impl ImportRegistry {
         self.callback_tasks.insert(index, Box::new(start));
     }
 
+    /// Register a service that leaves the CPU in the state it chooses: the
+    /// dispatcher neither returns to the caller nor checks preserved registers.
+    pub(crate) fn register_context_service(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        status: ServiceStatus,
+        handler: fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<(), ExitReason>,
+    ) {
+        self.register_with_status(module, symbol, status, move |args, cpu, memory| {
+            handler(args, cpu, memory).map(|()| 0)
+        });
+        let index = self
+            .service_index(module, symbol)
+            .expect("registered context service");
+        self.context_services.insert(index);
+    }
+
     /// Enter a guest callback from the task frame whose return slot is `slot`.
     fn enter_task_callback(
         cpu: &mut CpuState,
@@ -609,7 +667,7 @@ impl ImportRegistry {
         args: [u64; 4],
     ) -> Result<(), ExitReason> {
         let key = (cpu.gs_base, slot + 8);
-        if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
+        if callback_depth(memory, cpu.gs_base) >= MAX_CALLBACK_DEPTH
             || memory.callback_frames.contains_key(&key)
         {
             return Err(ExitReason::ServiceAbiViolation);
@@ -635,6 +693,9 @@ impl ImportRegistry {
     /// Check if target RIP matches a synthetic service trampoline.
     pub fn is_service_trampoline(&self, rip: u64) -> bool {
         rip == CALLBACK_RETURN
+            || rip == ENTRY_RETURN
+            || rip == crate::exceptions::EXCEPTION_RETURN
+            || rip == crate::exceptions::SCOPE_RETURN
             || self.trampoline_to_service.contains_key(&rip)
             || self.dynamic_trampolines.get(rip).is_some()
     }
@@ -646,6 +707,28 @@ impl ImportRegistry {
         cpu: &mut CpuState,
         memory: &mut GuestMemory,
     ) -> Result<(), ExitReason> {
+        if rip == ENTRY_RETURN {
+            // The entry point returned. Its result is the exit status, and it
+            // goes through ExitProcess when that is registered so both ways of
+            // ending do the same cleanup.
+            let status = cpu.get(Register::Rax) as u32;
+            let exit = ExitReason::ProcessExit(status);
+            let Some(index) = self.index("kernel32.dll", &ImportName::Name("ExitProcess".into()))
+            else {
+                return Err(exit);
+            };
+            let mut args = Win64Args::new(cpu);
+            args.rcx = u64::from(status);
+            return Err((self.handlers[index].handler)(&args, cpu, memory)
+                .err()
+                .unwrap_or(exit));
+        }
+        if rip == crate::exceptions::EXCEPTION_RETURN {
+            return crate::exceptions::resume(cpu, memory);
+        }
+        if rip == crate::exceptions::SCOPE_RETURN {
+            return crate::exceptions::scope_resume(cpu, memory);
+        }
         if rip == CALLBACK_RETURN {
             let key = (cpu.gs_base, cpu.get(Register::Rsp));
             let frame = memory
@@ -674,7 +757,7 @@ impl ImportRegistry {
                     cpu.set(Register::Rax, value);
                     cpu.set(Register::Rsp, frame.after);
                     cpu.rip = frame.resume;
-                    Ok(())
+                    self.end_call()
                 }
             };
         }
@@ -695,6 +778,9 @@ impl ImportRegistry {
             .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
 
         let args = Win64Args::new(cpu);
+        if self.context_services.contains(&service_idx) {
+            return (descriptor.handler)(&args, cpu, memory).map(|_| ());
+        }
         let preserved = Nonvolatile::of(cpu);
         if let Some(start) = self.callback_tasks.get(&service_idx) {
             let slot = after
@@ -708,6 +794,7 @@ impl ImportRegistry {
                     cpu.set(Register::Rax, value);
                     cpu.set(Register::Rsp, after);
                     cpu.rip = ret_addr;
+                    return self.end_call();
                 }
                 CallbackStart::Call { task, entry, args } => {
                     let mut preserved = preserved;
@@ -725,7 +812,7 @@ impl ImportRegistry {
         }
         if let Some(dispatcher) = self.callback_dispatchers.get(&service_idx) {
             let key = (cpu.gs_base, after);
-            if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
+            if callback_depth(memory, cpu.gs_base) >= MAX_CALLBACK_DEPTH
                 || memory.callback_frames.contains_key(&key)
             {
                 return Err(ExitReason::ServiceAbiViolation);
@@ -766,6 +853,14 @@ impl ImportRegistry {
         cpu.set(Register::Rax, value);
         cpu.set(Register::Rsp, after);
         cpu.rip = ret_addr;
+        self.end_call()
+    }
+
+    /// Stop a guest thread whose completed call asked the scheduler for a turn.
+    fn end_call(&self) -> Result<(), ExitReason> {
+        if self.hooks.as_ref().is_some_and(|h| h.switch_requested()) {
+            return Err(ExitReason::GuestYield);
+        }
         Ok(())
     }
 }
